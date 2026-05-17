@@ -1,0 +1,17 @@
+.venv/
+.env
+pipeline_logs.json
+pipeline_logs.json.localbackup
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Local uploads / artifacts
+uploads/
+generated_code/*.zip
+generated_code/**/__pycache__/
+
+# OS / tooling
+.DS_Store

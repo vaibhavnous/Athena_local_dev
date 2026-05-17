@@ -1,0 +1,76 @@
+{
+  "generated_at": "2026-05-15T07:08:18.922753",
+  "script_count": 7,
+  "scripts": [
+    {
+      "table": "policy_transactions",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_policy_transactions",
+      "target_table": "silver.silver_policy_transactions",
+      "column_count": 37,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\silver\\silver_transform_policy_transactions.py"
+    },
+    {
+      "table": "claim_payment_expenses",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_claim_payment_expenses",
+      "target_table": "silver.silver_claim_payment_expenses",
+      "column_count": 23,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\silver\\silver_transform_claim_payment_expenses.py"
+    },
+    {
+      "table": "policy_cover_level_transactions",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_policy_cover_level_transactions",
+      "target_table": "silver.silver_policy_cover_level_transactions",
+      "column_count": 12,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\silver\\silver_transform_policy_cover_level_transactions.py"
+    },
+    {
+      "table": "expenses_outstanding_estimates",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_expenses_outstanding_estimates",
+      "target_table": "silver.silver_expenses_outstanding_estimates",
+      "column_count": 4,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\silver\\silver_transform_expenses_outstanding_estimates.py"
+    },
+    {
+      "table": "claim_information",
+      "database_name": "unknown",
+      "schema_name": "unknown",
+      "source_table": "bronze.bronze_claim_information",
+      "target_table": "silver.silver_claim_information",
+      "column_count": 0,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\silver\\silver_transform_claim_information.py"
+    },
+    {
+      "table": "claim_payment_indemnity",
+      "database_name": "unknown",
+      "schema_name": "unknown",
+      "source_table": "bronze.bronze_claim_payment_indemnity",
+      "target_table": "silver.silver_claim_payment_indemnity",
+      "column_count": 0,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\silver\\silver_transform_claim_payment_indemnity.py"
+    },
+    {
+      "table": "indemnity_outstanding_estimates",
+      "database_name": "unknown",
+      "schema_name": "unknown",
+      "source_table": "bronze.bronze_indemnity_outstanding_estimates",
+      "target_table": "silver.silver_indemnity_outstanding_estimates",
+      "column_count": 0,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\silver\\silver_transform_indemnity_outstanding_estimates.py"
+    }
+  ]
+}

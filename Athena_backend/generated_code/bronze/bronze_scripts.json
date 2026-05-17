@@ -1,0 +1,47 @@
+{
+  "generated_at": "2026-05-15T07:08:18.872902",
+  "source_database": "insurance",
+  "script_count": 4,
+  "scripts": [
+    {
+      "table": "policy_transactions",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "status": "APPROVED",
+      "cast_rule_count": 9,
+      "llm_enhanced": false,
+      "llm_enhancement_error": null,
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\bronze\\bronze_ingest_policy_transactions.py"
+    },
+    {
+      "table": "claim_payment_expenses",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "status": "APPROVED",
+      "cast_rule_count": 5,
+      "llm_enhanced": false,
+      "llm_enhancement_error": null,
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\bronze\\bronze_ingest_claim_payment_expenses.py"
+    },
+    {
+      "table": "expenses_outstanding_estimates",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "status": "APPROVED",
+      "cast_rule_count": 4,
+      "llm_enhanced": false,
+      "llm_enhancement_error": null,
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\bronze\\bronze_ingest_expenses_outstanding_estimates.py"
+    },
+    {
+      "table": "policy_cover_level_transactions",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "status": "APPROVED",
+      "cast_rule_count": 6,
+      "llm_enhanced": false,
+      "llm_enhancement_error": null,
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena_backend\\generated_code\\bronze\\bronze_ingest_policy_cover_level_transactions.py"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+# Frontend
+frontend/node_modules/
+frontend/build/
+frontend/.pnp
+frontend/.pnp.js
+frontend/coverage/
+frontend/.git_disabled/
+
+# Git internals / leftovers
+.gitdir/
+.git_bad/
+.git_denied2/
+
+# Backend
+Athena_backend/.venv/
+Athena_backend/.env
+Athena_backend/__pycache__/
+Athena_backend/**/*.py[cod]
+Athena_backend/pipeline_logs.json
+Athena_backend/pipeline_logs.json.localbackup
+Athena_backend/uploads/
+Athena_backend/generated_code/*.zip
+Athena_backend/generated_code/**/__pycache__/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Misc
+*.bak
