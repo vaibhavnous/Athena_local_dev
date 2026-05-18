@@ -26,7 +26,14 @@ config = {
         "driver": os.getenv("AZURE_SQL_DRIVER", "ODBC Driver 18 for SQL Server"),
         "encrypt": os.getenv("AZURE_SQL_ENCRYPT", "yes"),
         "trust_server_certificate": os.getenv("AZURE_SQL_TRUST_SERVER_CERTIFICATE", "no"),
-        "connection_timeout": int(os.getenv("AZURE_SQL_CONNECTION_TIMEOUT", "30")),
+        # Keep connection attempts short so UI endpoints fail fast when SQL is unreachable.
+        # Override via AZURE_SQL_CONNECTION_TIMEOUT / ATHENA_SQL_CONNECTION_TIMEOUT_SECONDS.
+        "connection_timeout": int(
+            os.getenv(
+                "AZURE_SQL_CONNECTION_TIMEOUT",
+                os.getenv("ATHENA_SQL_CONNECTION_TIMEOUT_SECONDS", "5"),
+            )
+        ),
 
         # 🔥 PIPELINE DB (YOUR SYSTEM DB)
         "pipeline_database": os.getenv("AZURE_SQL_PIPELINE_DATABASE", "AdventureWorks2019"),
