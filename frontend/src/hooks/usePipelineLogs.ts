@@ -3,6 +3,7 @@ import {
   getPipelineLogs,
   getPipelineLogsSince,
 } from '../api/athenaApi'
+import useAthenaStore from '../store/useAthenaStore'
 
 export interface PipelineLog {
   log_id: string
@@ -21,6 +22,7 @@ export function usePipelineLogs(
   runId: string | null | undefined,
   isActive = true,
 ) {
+  const serverOnline = useAthenaStore((s) => s.serverOnline)
   const logIdsRef = useRef(new Set<string>())
   const isFetchingRef = useRef(false)
 
@@ -80,12 +82,13 @@ export function usePipelineLogs(
   }, [])
 
   const startLogsPolling = useCallback(
-    (targetRunId: string, since?: string | null, initialLoad = false) => {
-      fetchLogs(targetRunId, since, initialLoad)
-        .then(mergeLogs)
-        .catch((err: any) => {
-          setLogsError(`Failed to fetch logs: ${err?.message}`)
-        })
+    async (targetRunId: string, since?: string | null, initialLoad = false) => {
+      try {
+        const incoming = await fetchLogs(targetRunId, since, initialLoad)
+        mergeLogs(incoming)
+      } catch (err: any) {
+        setLogsError(`Failed to fetch logs: ${err?.message}`)
+      }
     },
     [fetchLogs, mergeLogs]
   )
@@ -93,7 +96,7 @@ export function usePipelineLogs(
   const stopLogsPolling = useCallback(() => {}, [])
 
   const initiateDiscovery = useCallback(async () => {
-    if (!runId || !isActive) return
+    if (!runId || !isActive || !serverOnline) return
 
     setIsDiscovering(true)
     setDiscoveryError(null)
@@ -106,7 +109,7 @@ export function usePipelineLogs(
     } finally {
       setIsDiscovering(false)
     }
-  }, [runId, isActive, startLogsPolling])
+  }, [runId, isActive, serverOnline, startLogsPolling])
 
   useEffect(() => {
     logIdsRef.current = new Set<string>()
@@ -118,18 +121,37 @@ export function usePipelineLogs(
   }, [runId])
 
   useEffect(() => {
-    if (!runId || !isActive) return
+    if (!runId || !isActive || !serverOnline) return
 
     initiateDiscovery()
-  }, [runId, isActive, initiateDiscovery])
+  }, [runId, isActive, serverOnline, initiateDiscovery])
 
   useEffect(() => {
-    if (!discoveredRunId || !isActive) return
-    const interval = window.setInterval(() => {
-      startLogsPolling(discoveredRunId, lastLogTimestamp, false)
-    }, 750)
-    return () => window.clearInterval(interval)
-  }, [discoveredRunId, isActive, lastLogTimestamp, startLogsPolling])
+    if (!discoveredRunId || !isActive || !serverOnline) return
+
+    let cancelled = false
+    let timer: number | null = null
+
+    const poll = async () => {
+      if (cancelled || isFetchingRef.current) {
+        if (!cancelled) {
+          timer = window.setTimeout(poll, 2000)
+        }
+        return
+      }
+
+      await startLogsPolling(discoveredRunId, lastLogTimestamp, false)
+      if (!cancelled) {
+        timer = window.setTimeout(poll, 2000)
+      }
+    }
+
+    timer = window.setTimeout(poll, 2000)
+    return () => {
+      cancelled = true
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [discoveredRunId, isActive, lastLogTimestamp, serverOnline, startLogsPolling])
 
   return {
     runId,

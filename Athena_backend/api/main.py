@@ -26,7 +26,9 @@ from services.pipeline_runtime import (
     BACKGROUND_EXECUTOR,
     BACKGROUND_JOBS,
     BACKGROUND_JOB_LOCK,
+    build_pipeline_steps,
     fetch_json_artifact,
+    fetch_run_summary,
     get_run_context,
     list_runs,
     load_checkpoint_state,
@@ -410,6 +412,7 @@ def _ui_stages(context: Dict[str, Any], run_id: str) -> List[Dict[str, Any]]:
     for index, step in enumerate(context.get("pipeline_steps", [])):
         key = step["key"]
         bucket = metrics.get(key, {})
+        raw_state = str(step.get("state") or "").upper()
         duration_seconds = bucket.get("duration_seconds")
         if duration_seconds is None and bucket.get("started_at") and bucket.get("completed_at"):
             try:
@@ -426,11 +429,11 @@ def _ui_stages(context: Dict[str, Any], run_id: str) -> List[Dict[str, Any]]:
                 "name": step["label"],
                 "status": (
                     "COMPLETED"
-                    if step["state"] == "complete"
+                    if raw_state in {"COMPLETE", "COMPLETED"}
                     else "FAILED"
-                    if step["state"] == "failed"
+                    if raw_state == "FAILED"
                     else "RUNNING"
-                    if step["state"] == "running"
+                    if raw_state in {"RUNNING", "IN_PROGRESS"}
                     else "PENDING"
                 ),
                 "tokens": bucket.get("tokens", 0),
@@ -439,12 +442,272 @@ def _ui_stages(context: Dict[str, Any], run_id: str) -> List[Dict[str, Any]]:
                 "duration_seconds": duration_seconds,
                 "started_at": bucket.get("started_at"),
                 "completed_at": bucket.get("completed_at"),
-                "error": context.get("checkpoint", {}).get("error") if step["state"] == "failed" else None,
+                "error": context.get("checkpoint", {}).get("error") if raw_state == "FAILED" else None,
                 "prompt_metadata": bucket.get("prompt_metadata") if bucket.get("prompt_metadata", {}).get("artifacts") else None,
             }
         )
 
     return stages
+
+
+def _stage_metrics_from_summary(summary: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    metrics: Dict[str, Dict[str, Any]] = {}
+
+    for row in summary:
+        key = _stage_key(row.get("stage")) or _stage_key(row.get("artifact_type"))
+        if not key:
+            continue
+        bucket = metrics.setdefault(
+            key,
+            {
+                "tokens": 0,
+                "cost": 0.0,
+                "attempts": 0,
+                "started_at": None,
+                "completed_at": None,
+            },
+        )
+        bucket["tokens"] += int(row.get("token_count") or 0)
+        bucket["cost"] += float(row.get("cost_usd") or 0)
+        bucket["attempts"] += int(row.get("retry_count") or 0)
+        stored_at = _iso_or_none(row.get("stored_at"))
+        if stored_at and (not bucket["started_at"] or stored_at < bucket["started_at"]):
+            bucket["started_at"] = stored_at
+        if stored_at and (not bucket["completed_at"] or stored_at > bucket["completed_at"]):
+            bucket["completed_at"] = stored_at
+
+    return metrics
+
+
+def _checkpoint_enriched_payload(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    payload = checkpoint.get("enriched_metadata") or checkpoint.get("enrichment_review_artifact") or {}
+    if isinstance(payload, dict) and isinstance(payload.get("enrichment_artifact"), dict):
+        return payload.get("enrichment_artifact") or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _summary_stage_list(
+    *,
+    checkpoint: Dict[str, Any],
+    summary: List[Dict[str, Any]],
+    pipeline_steps: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    metrics = _stage_metrics_from_summary(summary)
+    stages: List[Dict[str, Any]] = []
+
+    for index, step in enumerate(pipeline_steps):
+        key = step["key"]
+        bucket = metrics.get(key, {})
+        duration_seconds = None
+        if bucket.get("started_at") and bucket.get("completed_at"):
+            try:
+                start = datetime.fromisoformat(str(bucket["started_at"]).replace("Z", "+00:00"))
+                end = datetime.fromisoformat(str(bucket["completed_at"]).replace("Z", "+00:00"))
+                duration_seconds = max(0.0, (end - start).total_seconds())
+            except Exception:
+                duration_seconds = None
+
+        raw_state = str(step.get("state") or "").upper()
+        stages.append(
+            {
+                "id": f"stage_{index + 1:02d}",
+                "key": key,
+                "name": step["label"],
+                "status": (
+                    "COMPLETED"
+                    if raw_state in {"COMPLETE", "COMPLETED"}
+                    else "FAILED"
+                    if raw_state == "FAILED"
+                    else "RUNNING"
+                    if raw_state in {"RUNNING", "IN_PROGRESS"}
+                    else "PENDING"
+                ),
+                "tokens": bucket.get("tokens", 0),
+                "cost": bucket.get("cost", 0.0),
+                "attempts": bucket.get("attempts", 0),
+                "duration_seconds": duration_seconds,
+                "started_at": bucket.get("started_at"),
+                "completed_at": bucket.get("completed_at"),
+                "error": checkpoint.get("error") if raw_state == "FAILED" else None,
+                "prompt_metadata": None,
+            }
+        )
+
+    return stages
+
+
+def _summary_next_gate(
+    *,
+    checkpoint: Dict[str, Any],
+    nominated_tables: List[Dict[str, Any]],
+    certified_tables: List[Dict[str, Any]],
+    enriched_payload: Dict[str, Any],
+    gate3_approved: bool,
+) -> Optional[int]:
+    if nominated_tables and not certified_tables:
+        return 2
+    if enriched_payload and not gate3_approved:
+        return 3
+    checkpoint_status = str(checkpoint.get("status") or "").upper()
+    if checkpoint_status == "HITL_WAIT":
+        return 1
+    return None
+
+
+def _summary_resume_message(
+    *,
+    next_gate: Optional[int],
+    checkpoint: Dict[str, Any],
+    nominated_tables: List[Dict[str, Any]],
+    certified_tables: List[Dict[str, Any]],
+    enriched_payload: Dict[str, Any],
+    gate3_approved: bool,
+    summary: List[Dict[str, Any]],
+) -> Optional[str]:
+    if next_gate == 1:
+        return "Gate 1 is pending. Review the KPI items below."
+    if next_gate == 2:
+        return "Gate 2 is pending. Review and certify nominated tables below."
+    if next_gate == 3:
+        return "Gate 3 is pending. Review enrichment details below."
+    if gate3_approved:
+        return "Gate 3 is complete."
+    if certified_tables and not enriched_payload:
+        return "Gate 2 is certified. Downstream metadata/profiling/enrichment has not completed yet."
+    if checkpoint.get("human_decision") == "COMPLETED" and not nominated_tables:
+        return "Gate 1 is certified. Table nomination has not completed yet."
+    if not summary and not checkpoint:
+        return "No stored state was found for this run ID."
+    return None
+
+
+def _summary_status(
+    *,
+    checkpoint: Dict[str, Any],
+    next_gate: Optional[int],
+    bronze_generation_completed: bool,
+    silver_generation_completed: bool,
+    gold_generation_completed: bool,
+) -> str:
+    if checkpoint.get("background_stage"):
+        return "RUNNING"
+    if next_gate in {1, 2, 3}:
+        return "HITL_WAIT"
+
+    status = str(
+        checkpoint.get("status")
+        or checkpoint.get("table_nomination_status")
+        or checkpoint.get("enrichment_review_status")
+        or "UNKNOWN"
+    ).upper()
+
+    if status in {"UNKNOWN", "NOT_FOUND"}:
+        return "NOT_FOUND"
+    if status == "ABORTED":
+        return "ABORTED"
+    if status == "FAILED":
+        return "FAILED"
+    if status in {"PIPELINE_COMPLETED", "COMPLETED"}:
+        return "SUCCESS"
+    if bronze_generation_completed or silver_generation_completed or gold_generation_completed:
+        return "SUCCESS"
+    if status in {"HITL_WAIT", "PAUSED_FOR_HITL"}:
+        return "HITL_WAIT"
+    if status in {"RUNNING", "PROCESSING", "PENDING", "GATE1_COMPLETE", "GATE2_COMPLETE", "GATE3_COMPLETE"}:
+        return "RUNNING"
+    return status
+
+
+def _ui_run_summary(run_id: str) -> Dict[str, Any]:
+    checkpoint = load_checkpoint_state(run_id) or {}
+    summary = fetch_run_summary(run_id)
+    nominated_tables = checkpoint.get("nominated_tables") or []
+    certified_tables = checkpoint.get("certified_tables") or []
+    enriched_payload = _checkpoint_enriched_payload(checkpoint)
+    gate3_approved = bool(
+        checkpoint.get("gate3_approved")
+        or checkpoint.get("enrichment_review_status") == "COMPLETED"
+        or checkpoint.get("enrichment_review_decision") == "APPROVED"
+    )
+    bronze_generation_completed = bool(
+        any(
+            row.get("artifact_type") in {"BRONZE_GENERATION", "BRONZE_SCRIPTS"}
+            or str(row.get("stage", "")).lower().startswith("bronze")
+            for row in summary
+        )
+        or checkpoint.get("bronze_generation_status") == "COMPLETED"
+    )
+    silver_generation_completed = bool(
+        any(
+            row.get("artifact_type") in {"SILVER_GENERATION", "SILVER_SCRIPTS"}
+            or str(row.get("stage", "")).lower().startswith("silver")
+            for row in summary
+        )
+        or checkpoint.get("silver_generation_status") == "COMPLETED"
+    )
+    gold_generation_completed = bool(
+        any(
+            row.get("artifact_type") in {"GOLD_GENERATION", "GOLD_SCRIPTS"}
+            or str(row.get("stage", "")).lower().startswith("gold")
+            for row in summary
+        )
+        or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
+    )
+    pipeline_steps = build_pipeline_steps(
+        checkpoint=checkpoint,
+        summary=summary,
+        pending_gate1=[],
+        completed_gate1=checkpoint.get("certified_kpis") or [],
+        nominated_tables=nominated_tables,
+        certified_tables=certified_tables,
+        enriched_payload=enriched_payload,
+        gate3_payload=checkpoint.get("enrichment_review_artifact") or {},
+        bronze_generation_completed=bronze_generation_completed,
+        silver_generation_completed=silver_generation_completed,
+        gold_generation_completed=gold_generation_completed,
+    )
+    next_gate = _summary_next_gate(
+        checkpoint=checkpoint,
+        nominated_tables=nominated_tables,
+        certified_tables=certified_tables,
+        enriched_payload=enriched_payload,
+        gate3_approved=gate3_approved,
+    )
+    status = _summary_status(
+        checkpoint=checkpoint,
+        next_gate=next_gate,
+        bronze_generation_completed=bronze_generation_completed,
+        silver_generation_completed=silver_generation_completed,
+        gold_generation_completed=gold_generation_completed,
+    )
+
+    return {
+        "id": run_id,
+        "run_id": run_id,
+        "brd_filename": checkpoint.get("brd_filename") or "athena_brd.txt",
+        "status": status,
+        "provider": checkpoint.get("provider") or "azure_openai",
+        "deployment": checkpoint.get("deployment"),
+        "started_at": summary[0].get("stored_at") if summary else None,
+        "completed_at": summary[-1].get("stored_at") if status == "SUCCESS" and summary else None,
+        "cache_hit": "L1_EXACT" if checkpoint.get("memory_layer1") else "L2_SEMANTIC" if checkpoint.get("memory_layer2") else "NONE",
+        "cache_score": checkpoint.get("semantic_score") or 0,
+        "extraction_path": checkpoint.get("extraction_path") or checkpoint.get("kpi_source") or "ATHENA_GRAPH",
+        "total_tokens": sum(int(row.get("token_count") or 0) for row in summary),
+        "total_cost": sum(float(row.get("cost_usd") or 0) for row in summary),
+        "stages": _summary_stage_list(checkpoint=checkpoint, summary=summary, pipeline_steps=pipeline_steps),
+        "next_gate": next_gate,
+        "resume_message": _summary_resume_message(
+            next_gate=next_gate,
+            checkpoint=checkpoint,
+            nominated_tables=nominated_tables,
+            certified_tables=certified_tables,
+            enriched_payload=enriched_payload,
+            gate3_approved=gate3_approved,
+            summary=summary,
+        ),
+        "script_counts": {"bronze": 0, "silver": 0, "gold": 0},
+    }
 
 
 def _hitl_decisions(run_id: str, context: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -727,7 +990,7 @@ def runs() -> List[Dict[str, Any]]:
         timeout_seconds = max(1, int(os.getenv("ATHENA_RUNS_ENDPOINT_TIMEOUT_SECONDS", "5")))
         future = BACKGROUND_EXECUTOR.submit(list_runs)
         rows = future.result(timeout=timeout_seconds)
-        return [_ui_run(row["run_id"]) for row in rows]
+        return [_ui_run_summary(row["run_id"]) for row in rows]
     except FutureTimeoutError:
         # Prevent the UI from hanging when the underlying Azure SQL query is slow/unreachable.
         logger.warning("GET /runs timed out while listing runs; returning empty list")

@@ -20,16 +20,21 @@ function RunDetail() {
   const getRunById = useAthenaStore((s) => s.getRunById)
   const updateRun = useAthenaStore((s) => s.updateRun)
   const addNotification = useAthenaStore((s) => s.addNotification)
+  const serverOnline = useAthenaStore((s) => s.serverOnline)
   const storeRun = getRunById(runId)
   const [backendRun, setBackendRun] = useState(null)
   const [activeTab, setActiveTab] = useState('Overview')
   const run = backendRun || storeRun
 
   useEffect(() => {
-    if (!runId) return
+    if (!runId || !serverOnline) return
     let cancelled = false
+    let timer: number | null = null
+    let inFlight = false
 
     const loadRun = async () => {
+      if (cancelled || inFlight) return
+      inFlight = true
       try {
         const data = await getRun(runId)
         if (cancelled) return
@@ -38,16 +43,20 @@ function RunDetail() {
       } catch (error) {
         if (cancelled) return
         console.warn('[RunDetail] Failed to load backend run detail', error)
+      } finally {
+        inFlight = false
+        if (!cancelled) {
+          timer = window.setTimeout(loadRun, 5000)
+        }
       }
     }
 
     loadRun()
-    const timer = window.setInterval(loadRun, 5000)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      if (timer !== null) window.clearTimeout(timer)
     }
-  }, [runId, updateRun])
+  }, [runId, serverOnline, updateRun])
 
   if (!run) {
     return (

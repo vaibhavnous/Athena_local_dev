@@ -27,6 +27,7 @@ function AppShell() {
   usePipelineSocket()
 
   const lastOnlineRef = useRef<boolean | null>(null)
+  const runsRequestInFlightRef = useRef(false)
 
   useEffect(() => {
     if (lastOnlineRef.current === serverOnline) return
@@ -44,10 +45,22 @@ function AppShell() {
 
   useEffect(() => {
     let cancelled = false
+    let timer: number | null = null
+
+    const scheduleNext = () => {
+      if (!cancelled) {
+        timer = window.setTimeout(loadRuns, 5000)
+      }
+    }
 
     const loadRuns = async () => {
+      if (!serverOnline || runsRequestInFlightRef.current) {
+        scheduleNext()
+        return
+      }
+
+      runsRequestInFlightRef.current = true
       try {
-        if (!serverOnline) return
         const backendRuns = await getRuns()
         if (cancelled || !Array.isArray(backendRuns) || backendRuns.length === 0) return
         setRuns(backendRuns)
@@ -59,14 +72,16 @@ function AppShell() {
         if (!cancelled) {
           console.warn('[AppShell] Failed to hydrate backend runs', error)
         }
+      } finally {
+        runsRequestInFlightRef.current = false
+        scheduleNext()
       }
     }
 
     loadRuns()
-    const timer = window.setInterval(loadRuns, 5000)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      if (timer !== null) window.clearTimeout(timer)
     }
   }, [activeRunId, serverOnline, setRuns, setActiveRun])
 
