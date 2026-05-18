@@ -242,7 +242,7 @@ def _table_key(item: Dict[str, Any]) -> str:
     return f"{item.get('database_name', '')}.{item.get('schema_name', '')}.{item.get('table_name', '')}"
 
 
-def load_bronze_scripts() -> Dict[str, Any]:
+def load_bronze_scripts(run_id: str) -> Dict[str, Any]:
     bundle_path = Path(os.getcwd()) / "generated_code" / "bronze" / "bronze_scripts.json"
     if not bundle_path.exists():
         return {"generated_at": None, "scripts": []}
@@ -250,6 +250,9 @@ def load_bronze_scripts() -> Dict[str, Any]:
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
+        # Filter scripts by run_id to prevent mixing runs
+        if item.get("run_id") != run_id:
+            continue
         script_path = Path(item.get("script_path", ""))
         script_body = ""
         if script_path.exists():
@@ -267,7 +270,7 @@ def load_bronze_scripts() -> Dict[str, Any]:
     }
 
 
-def load_silver_scripts() -> Dict[str, Any]:
+def load_silver_scripts(run_id: str) -> Dict[str, Any]:
     bundle_path = Path(os.getcwd()) / "generated_code" / "silver" / "silver_scripts.json"
     if not bundle_path.exists():
         return {"generated_at": None, "scripts": []}
@@ -275,6 +278,9 @@ def load_silver_scripts() -> Dict[str, Any]:
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
+        # Filter scripts by run_id to prevent mixing runs
+        if item.get("run_id") != run_id:
+            continue
         script_path = Path(item.get("script_path", ""))
         script_body = ""
         if script_path.exists():
@@ -292,7 +298,7 @@ def load_silver_scripts() -> Dict[str, Any]:
     }
 
 
-def load_gold_scripts() -> Dict[str, Any]:
+def load_gold_scripts(run_id: str) -> Dict[str, Any]:
     bundle_path = Path(os.getcwd()) / "generated_code" / "gold" / "gold_scripts.json"
     if not bundle_path.exists():
         return {"generated_at": None, "scripts": []}
@@ -300,6 +306,9 @@ def load_gold_scripts() -> Dict[str, Any]:
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
+        # Filter scripts by run_id to prevent mixing runs
+        if item.get("run_id") != run_id:
+            continue
         script_path_value = item.get("script_path") or ""
         script_path = Path(script_path_value) if script_path_value else None
         script_body = ""
@@ -449,21 +458,28 @@ def build_pipeline_steps(
         if index <= last_complete_index:
             step["complete"] = True
 
+    # Assign states: COMPLETE, RUNNING (first incomplete), or PENDING
     first_incomplete_seen = False
     for step in steps:
         if step["complete"]:
-            step["state"] = "complete"
+            step["state"] = "COMPLETED"
         elif not first_incomplete_seen:
-            step["state"] = "running"
+            step["state"] = "RUNNING"
             first_incomplete_seen = True
         else:
-            step["state"] = "pending"
+            step["state"] = "PENDING"
 
+    # If pipeline failed, mark the failed step
     if checkpoint.get("status") == "FAILED":
         for step in steps:
-            if step["state"] == "running":
-                step["state"] = "failed"
+            if step["state"] == "RUNNING":
+                step["state"] = "FAILED"
                 break
+    # If all steps are complete, ensure at least one shows as completed
+    elif all(step["complete"] for step in steps):
+        for step in reversed(steps):
+            if step["state"] != "COMPLETED":
+                step["state"] = "COMPLETED"
 
     return steps
 
@@ -502,9 +518,9 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         or str(row.get("stage", "")).lower().startswith("gold")
         for row in summary
     ) or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
-    bronze = load_bronze_scripts() if gate3_payload or bronze_generation_completed else {"generated_at": None, "scripts": []}
-    silver = load_silver_scripts() if silver_generation_completed else {"generated_at": None, "scripts": []}
-    gold = load_gold_scripts() if gold_generation_completed else {"generated_at": None, "scripts": []}
+    bronze = load_bronze_scripts(run_id) if gate3_payload or bronze_generation_completed else {"generated_at": None, "scripts": []}
+    silver = load_silver_scripts(run_id) if silver_generation_completed else {"generated_at": None, "scripts": []}
+    gold = load_gold_scripts(run_id) if gold_generation_completed else {"generated_at": None, "scripts": []}
 
     enriched_columns = enriched_payload.get("columns", []) if isinstance(enriched_payload, dict) else []
     enriched_joins = enriched_payload.get("joins", []) if isinstance(enriched_payload, dict) else []
@@ -764,7 +780,8 @@ def submit_gate3_review(run_id: str, approve: bool) -> Dict[str, Any]:
         "join_key_annotations_reviewed": approve,
         "enrichment_review_decision": "APPROVED" if approve else "REJECTED",
     }
-    result = enrichment_node(state)
+    with timed_stage("gate3_hitl_certification", run_id=run_id, node="api"):
+        result = enrichment_node(state)
     if result.get("enrichment_review_status") != "COMPLETED":
         return result
 
@@ -786,7 +803,8 @@ def submit_gate3_review(run_id: str, approve: bool) -> Dict[str, Any]:
         "bronze_catalog": os.getenv("BRONZE_CATALOG", "main"),
         "bronze_schema": os.getenv("BRONZE_SCHEMA", "bronze"),
     }
-    bronze_result = bronze_code_generation_node(bronze_state)
+    with timed_stage("bronze_code_generation", run_id=run_id, node="api"):
+        bronze_result = bronze_code_generation_node(bronze_state)
     silver_state = {
         **checkpoint_state,
         **result,
@@ -796,7 +814,8 @@ def submit_gate3_review(run_id: str, approve: bool) -> Dict[str, Any]:
         "silver_catalog": os.getenv("SILVER_CATALOG", os.getenv("BRONZE_CATALOG", "main")),
         "silver_schema": os.getenv("SILVER_SCHEMA", "silver"),
     }
-    silver_result = silver_code_generation_node(silver_state)
+    with timed_stage("silver_code_generation", run_id=run_id, node="api"):
+        silver_result = silver_code_generation_node(silver_state)
     gold_state = {
         **checkpoint_state,
         **result,
@@ -805,7 +824,8 @@ def submit_gate3_review(run_id: str, approve: bool) -> Dict[str, Any]:
         "run_id": run_id,
         "gold_schema": os.getenv("GOLD_SCHEMA", "gold"),
     }
-    gold_result = gold_code_generation_node(gold_state)
+    with timed_stage("gold_code_generation", run_id=run_id, node="api"):
+        gold_result = gold_code_generation_node(gold_state)
     final_state = {
         **checkpoint_state,
         **result,

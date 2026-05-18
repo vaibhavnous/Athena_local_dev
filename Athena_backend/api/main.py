@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from utilis.db import config, get_connection, get_pending_items, update_hitl_item
-from utilis.logger import logger
+from utilis.logger import PIPELINE_LOG_PATH, logger
 from services.pipeline_runtime import (
     BACKGROUND_EXECUTOR,
     BACKGROUND_JOBS,
@@ -273,7 +274,10 @@ def _fetch_hitl_rows(run_id: str, status: Optional[str] = None) -> List[Dict[str
 
 
 def _status_from_context(context: Dict[str, Any]) -> str:
-    if context.get("pending_gate1"):
+    checkpoint = context.get("checkpoint") or {}
+    if checkpoint.get("background_stage"):
+        return "RUNNING"
+    if context.get("pending_gate1") or context.get("next_gate") in {1, 2, 3}:
         return "HITL_WAIT"
     status = str(context.get("status") or "UNKNOWN")
     if status in {"UNKNOWN", "NOT_FOUND"}:
@@ -291,31 +295,206 @@ def _status_from_context(context: Dict[str, Any]) -> str:
     return status
 
 
-def _ui_stages(context: Dict[str, Any]) -> List[Dict[str, Any]]:
-    now = datetime.now(timezone.utc).isoformat()
-    return [
-        {
-            "id": f"stage_{index + 1:02d}",
-            "name": step["label"],
-            "status": (
-                "COMPLETED"
-                if step["state"] == "complete"
-                else "FAILED"
-                if step["state"] == "failed"
-                else "RUNNING"
-                if step["state"] == "running"
-                else "PENDING"
-            ),
-            "tokens": 0,
-            "cost": 0,
-            "attempts": 0,
-            "started_at": now if step["state"] in {"complete", "running", "failed"} else None,
-            "completed_at": now if step["state"] == "complete" else None,
-            "error": context.get("checkpoint", {}).get("error") if step["state"] == "failed" else None,
-            "prompt_metadata": None,
-        }
-        for index, step in enumerate(context.get("pipeline_steps", []))
-    ]
+def _iso_or_none(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _stage_key(value: Any) -> Optional[str]:
+    text = str(value or "").lower().replace("_", " ")
+    if not text:
+        return None
+    if "ingestion" in text:
+        return "ingestion"
+    if "memory" in text:
+        return "memory"
+    if "requirement" in text or "req extract" in text:
+        return "requirements"
+    if "gate1" in text or "gate 1" in text or text == "hitl certification":
+        return "gate1"
+    if "kpi" in text and "hitl" not in text:
+        return "kpis"
+    if "nomination" in text or "table nomination" in text:
+        return "nomination"
+    if "gate2" in text or "gate 2" in text or "hitl table" in text:
+        return "gate2"
+    if "metadata discovery" in text:
+        return "discovery"
+    if "column profiling" in text:
+        return "profiling"
+    if "semantic enrichment" in text:
+        return "enrichment"
+    if "gate3" in text or "gate 3" in text or "enrichment certification" in text:
+        return "gate3"
+    if "bronze" in text:
+        return "bronze"
+    if "silver" in text:
+        return "silver"
+    if "gold" in text:
+        return "gold"
+    return None
+
+
+def _ui_stages(context: Dict[str, Any], run_id: str) -> List[Dict[str, Any]]:
+    summary = context.get("summary") or []
+    metrics: Dict[str, Dict[str, Any]] = {}
+
+    for row in summary:
+        key = _stage_key(row.get("stage")) or _stage_key(row.get("artifact_type"))
+        if not key:
+            continue
+        bucket = metrics.setdefault(
+            key,
+            {
+                "tokens": 0,
+                "cost": 0.0,
+                "attempts": 0,
+                "started_at": None,
+                "completed_at": None,
+                "prompt_metadata": {"artifacts": []},
+            },
+        )
+        bucket["tokens"] += int(row.get("token_count") or 0)
+        bucket["cost"] += float(row.get("cost_usd") or 0)
+        bucket["attempts"] += int(row.get("retry_count") or 0)
+        stored_at = _iso_or_none(row.get("stored_at"))
+        if stored_at and (not bucket["started_at"] or stored_at < bucket["started_at"]):
+            bucket["started_at"] = stored_at
+        if stored_at and (not bucket["completed_at"] or stored_at > bucket["completed_at"]):
+            bucket["completed_at"] = stored_at
+        bucket["prompt_metadata"]["artifacts"].append(
+            {
+                "stage": row.get("stage"),
+                "artifact_type": row.get("artifact_type"),
+                "faithfulness_status": row.get("faithfulness_status"),
+                "retry_count": row.get("retry_count"),
+                "input_tokens": row.get("input_tokens"),
+                "output_tokens": row.get("output_tokens"),
+                "token_count": row.get("token_count"),
+                "cost_usd": row.get("cost_usd"),
+                "stored_at": stored_at,
+            }
+        )
+
+    for log in _read_logs(run_id, limit=5000):
+        key = _stage_key(log.get("stage")) or _stage_key(log.get("message"))
+        if not key:
+            continue
+        bucket = metrics.setdefault(
+            key,
+            {
+                "tokens": 0,
+                "cost": 0.0,
+                "attempts": 0,
+                "started_at": None,
+                "completed_at": None,
+                "prompt_metadata": {"artifacts": []},
+            },
+        )
+        logged_at = log.get("logged_at")
+        if logged_at and (not bucket["started_at"] or logged_at < bucket["started_at"]):
+            bucket["started_at"] = logged_at
+        if logged_at and (not bucket["completed_at"] or logged_at > bucket["completed_at"]):
+            bucket["completed_at"] = logged_at
+        if log.get("event_type") == "stage_end" and log.get("duration_seconds") is not None:
+            bucket["duration_seconds"] = max(
+                float(bucket.get("duration_seconds") or 0),
+                float(log.get("duration_seconds") or 0),
+            )
+
+    stages = []
+    for index, step in enumerate(context.get("pipeline_steps", [])):
+        key = step["key"]
+        bucket = metrics.get(key, {})
+        duration_seconds = bucket.get("duration_seconds")
+        if duration_seconds is None and bucket.get("started_at") and bucket.get("completed_at"):
+            try:
+                start = datetime.fromisoformat(str(bucket["started_at"]).replace("Z", "+00:00"))
+                end = datetime.fromisoformat(str(bucket["completed_at"]).replace("Z", "+00:00"))
+                duration_seconds = max(0.0, (end - start).total_seconds())
+            except Exception:
+                duration_seconds = None
+
+        stages.append(
+            {
+                "id": f"stage_{index + 1:02d}",
+                "key": key,
+                "name": step["label"],
+                "status": (
+                    "COMPLETED"
+                    if step["state"] == "complete"
+                    else "FAILED"
+                    if step["state"] == "failed"
+                    else "RUNNING"
+                    if step["state"] == "running"
+                    else "PENDING"
+                ),
+                "tokens": bucket.get("tokens", 0),
+                "cost": bucket.get("cost", 0.0),
+                "attempts": bucket.get("attempts", 0),
+                "duration_seconds": duration_seconds,
+                "started_at": bucket.get("started_at"),
+                "completed_at": bucket.get("completed_at"),
+                "error": context.get("checkpoint", {}).get("error") if step["state"] == "failed" else None,
+                "prompt_metadata": bucket.get("prompt_metadata") if bucket.get("prompt_metadata", {}).get("artifacts") else None,
+            }
+        )
+
+    return stages
+
+
+def _hitl_decisions(run_id: str, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    decisions: List[Dict[str, Any]] = []
+    for row in _fetch_hitl_rows(run_id):
+        if not row.get("decision"):
+            continue
+        decisions.append(
+            {
+                "id": row.get("id"),
+                "gate": "Gate 1",
+                "type": "KPI",
+                "name": row.get("name"),
+                "definition": row.get("definition"),
+                "decision": row.get("decision"),
+                "rejection_reason": row.get("rejection_reason"),
+                "reviewed_at": row.get("decided_at"),
+            }
+        )
+
+    certified_tables = context.get("certified_tables") or []
+    if certified_tables:
+        decisions.append(
+            {
+                "id": f"{run_id}:gate2",
+                "gate": "Gate 2",
+                "type": "Tables",
+                "name": f"{len(certified_tables)} table(s) certified",
+                "definition": ", ".join(
+                    ".".join(str(table.get(part) or "") for part in ("database_name", "schema_name", "table_name")).strip(".")
+                    for table in certified_tables[:5]
+                ),
+                "decision": "APPROVED",
+                "reviewed_at": None,
+            }
+        )
+
+    if context.get("gate3_approved"):
+        decisions.append(
+            {
+                "id": f"{run_id}:gate3",
+                "gate": "Gate 3",
+                "type": "Enrichment",
+                "name": "Semantic enrichment approved",
+                "definition": "Semantic tags, PII classifications, and join annotations approved.",
+                "decision": "APPROVED",
+                "reviewed_at": None,
+            }
+        )
+
+    return decisions
 
 
 def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
@@ -326,7 +505,8 @@ def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
     total_cost = sum(float(row.get("cost_usd") or 0) for row in summary)
     requirements = fetch_json_artifact(run_id, "REQUIREMENTS") or _requirements_from_checkpoint(checkpoint)
     raw_kpis = _artifact_kpis(run_id) or _kpis_from_checkpoint(checkpoint)
-    kpis = [_map_kpi(kpi, run_id=run_id) for kpi in raw_kpis]
+    hitl_rows = _fetch_hitl_rows(run_id)
+    kpis = hitl_rows or [_map_kpi(kpi, run_id=run_id) for kpi in raw_kpis]
     status = _status_from_context(context)
     payload = {
         "id": run_id,
@@ -342,9 +522,10 @@ def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
         "extraction_path": checkpoint.get("extraction_path") or "ATHENA_GRAPH",
         "total_tokens": total_tokens,
         "total_cost": total_cost,
-        "stages": _ui_stages(context),
+        "stages": _ui_stages(context, run_id),
         "requirements": requirements,
         "kpis": kpis,
+        "hitl_decisions": _hitl_decisions(run_id, context),
         "nominated_tables": context.get("nominated_tables") or [],
         "certified_tables": context.get("certified_tables") or [],
         "enriched_metadata": context.get("enriched_metadata") or {},
@@ -411,18 +592,14 @@ def _tail_lines(path: Path, limit: int) -> List[str]:
 
 
 def _read_logs(run_id: str, limit: int = 1000, since: Optional[str] = None) -> List[Dict[str, Any]]:
-    log_path = ROOT_DIR / "pipeline_logs.json"
+    log_path = PIPELINE_LOG_PATH
     if not log_path.exists():
         return []
 
-    raw_lines = (
-        log_path.read_text(encoding="utf-8").splitlines()
-        if since
-        else _tail_lines(log_path, max(limit * 10, 200))
-    )
+    raw_lines = _tail_lines(log_path, max(limit * 20, 1000))
 
     logs: List[Dict[str, Any]] = []
-    for line in raw_lines:
+    for line_number, line in enumerate(raw_lines):
         try:
             item = json.loads(line)
         except Exception:
@@ -432,16 +609,33 @@ def _read_logs(run_id: str, limit: int = 1000, since: Optional[str] = None) -> L
         logged_at = item.get("timestamp") or item.get("logged_at")
         if since and logged_at and logged_at <= since:
             continue
+        message = item.get("message", "")
+        event_type = item.get("event_type")
+        if not event_type:
+            normalized_message = str(message).strip().upper()
+            if normalized_message.startswith("START"):
+                event_type = "stage_start"
+            elif normalized_message.startswith("END"):
+                event_type = "stage_end"
+        duration_seconds = item.get("duration_seconds")
+        if duration_seconds is None:
+            duration_match = re.search(r"duration_seconds=([0-9.]+)", str(message))
+            if duration_match:
+                duration_seconds = float(duration_match.group(1))
+
+        stage = item.get("stage") or item.get("node") or item.get("module")
+        step_name = item.get("step_name") or item.get("funcName")
         logs.append(
             {
-                "log_id": f"{run_id}:{len(logs)}:{logged_at}",
+                "log_id": f"{run_id}:{logged_at}:{line_number}:{item.get('level', 'INFO')}",
                 "run_id": run_id,
                 "notebook_name": item.get("node") or item.get("module"),
-                "stage": item.get("node") or item.get("stage"),
-                "step_name": item.get("funcName"),
+                "stage": stage,
+                "step_name": step_name,
                 "log_level": item.get("level", "INFO"),
-                "message": item.get("message", ""),
-                "duration_seconds": item.get("duration_seconds"),
+                "message": message,
+                "duration_seconds": duration_seconds,
+                "event_type": event_type,
                 "logged_at": logged_at,
             }
         )
@@ -458,30 +652,37 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
     if not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
     run_id = str(uuid.uuid4())
-    try:
-        save_checkpoint_state(
-            run_id,
-            {
-                "run_id": run_id,
-                "status": "RUNNING",
-                "brd_text": payload.brd_text,
-                "brd_filename": payload.brd_filename,
-                "provider": payload.provider,
-                "deployment": payload.deployment,
-                "source_databases": payload.source_databases
-                or ([payload.database_name] if payload.database_name else None),
-            },
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Athena could not connect to the pipeline Azure SQL database. "
-                "Check Azure SQL firewall access, ODBC driver, and credentials. "
-                f"Original error: {exc}"
-            ),
-        ) from exc
+
+    # Keep this endpoint fast and deterministic: enqueue the run first, and then
+    # persist the checkpoint state in the background. If SQL is unreachable, the
+    # background worker will mark the run FAILED and the UI can show that error.
     _submit_pipeline_start(run_id, payload)
+
+    def _persist_initial_checkpoint() -> None:
+        try:
+            save_checkpoint_state(
+                run_id,
+                {
+                    "run_id": run_id,
+                    "status": "RUNNING",
+                    "brd_text": payload.brd_text,
+                    "brd_filename": payload.brd_filename,
+                    "provider": payload.provider,
+                    "deployment": payload.deployment,
+                    "source_databases": payload.source_databases
+                    or ([payload.database_name] if payload.database_name else None),
+                },
+            )
+        except Exception as exc:
+            logger.exception("Initial checkpoint save failed for run_id=%s", run_id)
+            try:
+                save_checkpoint_state(run_id, {"run_id": run_id, "status": "FAILED", "error": str(exc)})
+            except Exception:
+                # If SQL is entirely unavailable, there's nothing else to do here.
+                pass
+
+    BACKGROUND_EXECUTOR.submit(_persist_initial_checkpoint)
+    # Keep backward-compatible semantics for the UI: a submitted run is effectively running.
     return {"run_id": run_id, "status": "RUNNING"}
 
 
@@ -521,17 +722,26 @@ def abort_run(run_id: str) -> Dict[str, Any]:
 
 @app.get("/runs")
 def runs() -> List[Dict[str, Any]]:
-    return [_ui_run(row["run_id"]) for row in list_runs()]
+    try:
+        return [_ui_run(row["run_id"]) for row in list_runs()]
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/runs/{run_id}")
 def run_detail(run_id: str) -> Dict[str, Any]:
-    return _ui_run(run_id, include_scripts=True)
+    try:
+        return _ui_run(run_id, include_scripts=True)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/table-reviews/{run_id}")
 def table_reviews(run_id: str) -> Dict[str, Any]:
-    run = _ui_run(run_id)
+    try:
+        run = _ui_run(run_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "run_id": run_id,
         "next_gate": run.get("next_gate"),
@@ -553,7 +763,10 @@ def submit_table_reviews(run_id: str, payload: Gate2DecisionPayload) -> Dict[str
 
 @app.get("/enrichment-reviews/{run_id}")
 def enrichment_reviews(run_id: str) -> Dict[str, Any]:
-    run = _ui_run(run_id)
+    try:
+        run = _ui_run(run_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "run_id": run_id,
         "next_gate": run.get("next_gate"),
@@ -577,7 +790,10 @@ def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict
 
 @app.get("/kpi-reviews/{run_id}")
 def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
-    rows = _fetch_hitl_rows(run_id, status=status)
+    try:
+        rows = _fetch_hitl_rows(run_id, status=status)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not rows:
         rows = [_map_kpi(kpi, run_id=run_id) for kpi in _artifact_kpis(run_id)]
     return {"runId": run_id, "run_id": run_id, "kpis": rows}

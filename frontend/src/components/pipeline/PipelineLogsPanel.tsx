@@ -14,6 +14,18 @@ function levelBadgeClass(level: string) {
   }
 }
 
+function eventBadgeClass(eventType?: string | null) {
+  if (eventType === 'stage_start') return 'bg-emerald-500/15 text-emerald-300'
+  if (eventType === 'stage_end') return 'bg-cyan-500/15 text-cyan-300'
+  return 'bg-gray-500/15 text-gray-300'
+}
+
+function eventLabel(eventType?: string | null) {
+  if (eventType === 'stage_start') return 'START'
+  if (eventType === 'stage_end') return 'END'
+  return null
+}
+
 interface Props {
   runId?: string | null
   isActive?: boolean
@@ -47,7 +59,8 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
     if (
       searchQuery &&
       !log.message?.toLowerCase().includes(searchQuery.toLowerCase()) &&
-      !log.step_name?.toLowerCase().includes(searchQuery.toLowerCase())
+      !log.step_name?.toLowerCase().includes(searchQuery.toLowerCase()) &&
+      !log.stage?.toLowerCase().includes(searchQuery.toLowerCase())
     ) {
       return false
     }
@@ -190,30 +203,33 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
 
                 {filteredLogs.length > 0 && (
                   <div className="divide-y divide-bg-border/30">
-                    <AnimatePresence mode="popLayout">
-                      {filteredLogs.map((log, idx) => (
-                        <motion.div
-                          key={log.log_id || idx}
-                          initial={{ opacity: 0, x: -20 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          exit={{ opacity: 0, x: -20 }}
-                          onClick={() => setSelectedLog(log)}
-                          className="px-4 py-2.5 hover:bg-bg-border/10 cursor-pointer transition-colors border-l-2 border-transparent hover:border-l-blue-500/50"
-                        >
-                          <div className="flex items-center gap-2 text-xs">
-                            <span className="text-gray-500 font-mono flex-shrink-0">
-                              {new Date(log.logged_at).toLocaleTimeString()}
+                    {filteredLogs.map((log, idx) => (
+                      <div
+                        key={log.log_id || idx}
+                        onClick={() => setSelectedLog(log)}
+                        className="px-4 py-2.5 hover:bg-bg-border/10 cursor-pointer transition-colors border-l-2 border-transparent hover:border-l-blue-500/50"
+                      >
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-gray-500 font-mono flex-shrink-0">
+                            {new Date(log.logged_at).toLocaleTimeString()}
+                          </span>
+                          <span className={`px-2 py-0.5 rounded text-xs font-semibold flex-shrink-0 ${levelBadgeClass(log.log_level)}`}>
+                            {log.log_level || 'INFO'}
+                          </span>
+                          {eventLabel(log.event_type) && (
+                            <span className={`px-2 py-0.5 rounded text-xs font-semibold flex-shrink-0 ${eventBadgeClass(log.event_type)}`}>
+                              {eventLabel(log.event_type)}
                             </span>
-                            <span className={`px-2 py-0.5 rounded text-xs font-semibold flex-shrink-0 ${levelBadgeClass(log.log_level)}`}>
-                              {log.log_level || 'INFO'}
-                            </span>
-                            {log.stage && <span className="text-gray-300">{log.stage}</span>}
-                            <span className="text-gray-500">-</span>
-                            <span className="text-gray-300 truncate">{log.message}</span>
-                          </div>
-                        </motion.div>
-                      ))}
-                    </AnimatePresence>
+                          )}
+                          {log.stage && <span className="text-gray-300">{log.stage}</span>}
+                          {log.duration_seconds != null && (
+                            <span className="text-gray-500 font-mono">{log.duration_seconds.toFixed(2)}s</span>
+                          )}
+                          <span className="text-gray-500">-</span>
+                          <span className="text-gray-300 truncate">{log.message}</span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -273,6 +289,14 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
                 {selectedLog.step_name && (
                   <DetailRow label="Step">
                     <span className="text-sm text-gray-200 font-mono">{selectedLog.step_name}</span>
+                  </DetailRow>
+                )}
+
+                {eventLabel(selectedLog.event_type) && (
+                  <DetailRow label="Event">
+                    <span className={`inline-block px-3 py-1 rounded text-sm font-semibold ${eventBadgeClass(selectedLog.event_type)}`}>
+                      {eventLabel(selectedLog.event_type)}
+                    </span>
                   </DetailRow>
                 )}
 

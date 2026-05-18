@@ -7,10 +7,10 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from contextlib import redirect_stderr, redirect_stdout
+from typing import Optional
 
 import docx
 import tiktoken
-from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pinecone import Pinecone
@@ -19,10 +19,11 @@ from pydantic import ValidationError
 from schema import BRDSchema
 from state import Stage01State
 from utilis.db import config, get_pipeline_connection
+from utilis.env import load_backend_env
 from utilis.logger import logger
 from utilis.db import execute_source_sql
 
-load_dotenv()
+load_backend_env()
 DEV_MODE = os.getenv("DEV_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -48,30 +49,46 @@ except Exception as e:
 
 
 try:
+    # Do not initialize embeddings at import-time. Some environments have restricted
+    # outbound network (HF downloads) and we still want the backend to import cleanly.
+    _embedding_model = None
+except Exception as e:
+    # Keep a conservative fallback. Errors here should not block module import.
+    logger.warning("Embedding model bootstrap skipped: %s", e, extra={"node": "ingestion_bootstrap"})
+    _embedding_model = None
+
+
+def _get_embedding_model(*, log_context: dict) -> Optional[HuggingFaceEmbeddings]:
+    global _embedding_model
+    if _embedding_model is not None:
+        return _embedding_model
+
+    try:
         logger.info("Initializing local embedding model", extra={"node": "ingestion_bootstrap"})
-        # Suppress BERT warnings
         os.environ["TRANSFORMERS_NO_ADVISE"] = "1"
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        
+
         if DEV_MODE:
             _embedding_model = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2",
                 model_kwargs={"local_files_only": False, "trust_remote_code": False},
-                encode_kwargs={"normalize_embeddings": False}
+                encode_kwargs={"normalize_embeddings": False},
             )
-            test_vec = _embedding_model.embed_query("hello world")
+            _embedding_model.embed_query("hello world")
         else:
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 _embedding_model = HuggingFaceEmbeddings(
                     model_name="sentence-transformers/all-MiniLM-L6-v2",
                     model_kwargs={"local_files_only": False, "trust_remote_code": False},
-                    encode_kwargs={"normalize_embeddings": False}
+                    encode_kwargs={"normalize_embeddings": False},
                 )
-                test_vec = _embedding_model.embed_query("hello world")
-        logger.info("Embedding model ready (vector length=%d)", len(test_vec), extra={"node": "ingestion_bootstrap"})
-except Exception as e:
-    logger.warning("Embedding model failed to initialize: %s", e, extra={"node": "ingestion_bootstrap"})
-    _embedding_model = None
+                _embedding_model.embed_query("hello world")
+
+        return _embedding_model
+    except Exception as exc:
+        logger.warning("Embedding model unavailable: %s", exc, extra=log_context)
+        _embedding_model = None
+        return None
 
 
 db_conf = config["azure_sql"]
@@ -405,8 +422,9 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
             logger.warning("Skipping embedding due to FAILED status", extra=log_context)
             return new_state
 
-        if _embedding_model is None:
-            raise Exception("Embedding model not initialized")
+        model = _get_embedding_model(log_context=log_context)
+        if model is None:
+            raise Exception("Embedding model not available")
 
         if pinecone_index is None:
             raise Exception("Pinecone not initialized")
@@ -440,7 +458,7 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
 
         texts = [doc.page_content for doc in docs]
         logger.info("Generating embeddings...", extra=log_context)
-        vectors = _embedding_model.embed_documents(texts)
+        vectors = model.embed_documents(texts)
 
         index_name = pinecone_conf.get("index_name", pinecone_index_name)
         namespace = "global"
@@ -499,8 +517,9 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
         if new_state.get("status") == "FAILED":
             return new_state
 
-        if _embedding_model is None:
-            raise Exception("Embedding model not initialized")
+        model = _get_embedding_model(log_context=log_context)
+        if model is None:
+            raise Exception("Embedding model not available")
 
         source_databases = new_state.get("source_databases", [])
         if not source_databases:
@@ -508,11 +527,14 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
             return new_state
 
         pc = Pinecone(api_key=pinecone_conf.get("api_key") or os.getenv("PINECONE_API_KEY"))
-        index = pc.Index("metadata")   # 🔥 your schema index
+        schema_index_name = os.getenv("PINECONE_SCHEMA_INDEX_NAME") or pinecone_conf.get("schema_index_name") or "metadata"
+        index = pc.Index(schema_index_name)
 
         namespace = "schema"
 
         all_vectors = []
+
+        source_schema = os.getenv("AZURE_SQL_SOURCE_SCHEMA") or db_conf.get("source_schema") or "dbo"
 
         for db in source_databases:
             logger.info(f"Fetching schema from DB: {db}", extra=log_context)
@@ -520,9 +542,17 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
             query = """
                 SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
                 FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = ?
             """
 
-            rows = execute_source_sql(db, query)
+            rows = execute_source_sql(db, query, (source_schema,))
+            if not rows:
+                logger.warning(
+                    "No columns returned for %s.%s (check AZURE_SQL_SOURCE_* creds/permissions/schema)",
+                    db,
+                    source_schema,
+                    extra=log_context,
+                )
 
             texts = []
             metadata_list = []
@@ -548,9 +578,9 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
             if not texts:
                 continue
 
-            logger.info(f"Embedding {len(texts)} columns from {db}", extra=log_context)
+            logger.info(f"Embedding {len(texts)} columns from {db}.{source_schema}", extra=log_context)
 
-            vectors = _embedding_model.embed_documents(texts)
+            vectors = model.embed_documents(texts)
 
             for i in range(len(vectors)):
                 vec_id = f"{db}_{metadata_list[i]['table_name']}_{metadata_list[i]['column_name']}"

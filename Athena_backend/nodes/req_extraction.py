@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
-from dotenv import load_dotenv
+from utilis.env import load_backend_env
 
 # MUST be called before any LangChain or OpenAI imports
-load_dotenv()
+load_backend_env()
 
 import json
 from typing import Any, Callable, Dict, List, Optional
@@ -54,7 +54,11 @@ _LLM_PRICING: Dict[str, Dict[str, float]] = {
     "_default": {"input": 0.001, "output": 0.002},
 }
 
-_ACTIVE_MODEL: str = "gpt-4o-mini"
+_ACTIVE_MODEL: str = (
+    os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    or os.getenv("AZURE_OPENAI_MODEL")
+    or "gpt-4o-mini"
+)
 
 
 def set_active_model(model_name: str) -> None:
@@ -74,9 +78,9 @@ def get_llm(provider: str = "azure_openai", model: str | None = None, temperatur
     if provider == "azure_openai":
         from langchain_openai import AzureChatOpenAI
         return AzureChatOpenAI(
-            azure_deployment=_model, 
-            temperature=temperature, 
-            api_version="2024-02-15-preview",
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT") or _model,
+            temperature=temperature,
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview"),
             **kwargs
         )
 

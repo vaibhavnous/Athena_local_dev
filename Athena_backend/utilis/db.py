@@ -8,6 +8,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from utilis.logger import logger
+from utilis.env import load_backend_env
+
+# Ensure env vars from Athena_backend/.env are available even when the API
+# server starts without a pre-loaded environment.
+load_backend_env()
 
 # ─────────────────────────────────────────────────────────────
 # CONFIGURATION
@@ -19,6 +24,9 @@ config = {
         "host": os.getenv("AZURE_SQL_HOST", "dataedge.database.windows.net"),
         "port": int(os.getenv("AZURE_SQL_PORT", "1433")),
         "driver": os.getenv("AZURE_SQL_DRIVER", "ODBC Driver 18 for SQL Server"),
+        "encrypt": os.getenv("AZURE_SQL_ENCRYPT", "yes"),
+        "trust_server_certificate": os.getenv("AZURE_SQL_TRUST_SERVER_CERTIFICATE", "no"),
+        "connection_timeout": int(os.getenv("AZURE_SQL_CONNECTION_TIMEOUT", "30")),
 
         # 🔥 PIPELINE DB (YOUR SYSTEM DB)
         "pipeline_database": os.getenv("AZURE_SQL_PIPELINE_DATABASE", "AdventureWorks2019"),
@@ -30,13 +38,13 @@ config = {
         "source_schema": os.getenv("AZURE_SQL_SOURCE_SCHEMA", "dbo"),  # ✅ CLIENT SCHEMA
 
         # 🔹 AUTH
-        "username": os.getenv("AZURE_SQL_USERNAME", "sqladmin"),
-        "password": os.getenv("AZURE_SQL_PASSWORD", "Dataedge@213"),
+        "username": os.getenv("AZURE_SQL_USERNAME", ""),
+        "password": os.getenv("AZURE_SQL_PASSWORD", ""),
 
         # 🔹 SOURCE DB HOST (FIXED)
         "source_host": os.getenv("AZURE_SQL_SOURCE_HOST", "dataedge.database.windows.net"),
-        "source_username": os.getenv("AZURE_SQL_SOURCE_USERNAME", "sqladmin"),
-        "source_password": os.getenv("AZURE_SQL_SOURCE_PASSWORD", "Dataedge@213"),
+        "source_username": os.getenv("AZURE_SQL_SOURCE_USERNAME", ""),
+        "source_password": os.getenv("AZURE_SQL_SOURCE_PASSWORD", ""),
     }
 }
 
@@ -65,15 +73,18 @@ def _normalize_source_db(database_name: Optional[str]) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def _build_connection_string(host, port, database_name, username, password, driver):
+    encrypt = str(config["azure_sql"].get("encrypt") or "yes")
+    trust_server_certificate = str(config["azure_sql"].get("trust_server_certificate") or "no")
+    connection_timeout = int(config["azure_sql"].get("connection_timeout") or 30)
     return (
         f"DRIVER={{{driver}}};"
         f"SERVER=tcp:{host},{port};"
         f"DATABASE={database_name};"
         f"UID={username};"
         f"PWD={password};"
-        "Encrypt=yes;"
-        "TrustServerCertificate=no;"
-        "Connection Timeout=30;"
+        f"Encrypt={encrypt};"
+        f"TrustServerCertificate={trust_server_certificate};"
+        f"Connection Timeout={connection_timeout};"
     )
 
 
@@ -124,6 +135,22 @@ def build_source_jdbc_url(database_name: Optional[str] = None) -> str:
 
 def get_pipeline_connection() -> pyodbc.Connection:
     db_conf = config["azure_sql"]
+    missing = [
+        env_name
+        for env_name, value in (
+            ("AZURE_SQL_HOST", db_conf.get("host")),
+            ("AZURE_SQL_PIPELINE_DATABASE", db_conf.get("pipeline_database")),
+            ("AZURE_SQL_USERNAME", db_conf.get("username")),
+            ("AZURE_SQL_PASSWORD", db_conf.get("password")),
+        )
+        if not str(value or "").strip()
+    ]
+    if missing:
+        raise RuntimeError(
+            "Missing Azure SQL pipeline DB configuration. Set "
+            + ", ".join(missing)
+            + " in Athena_backend/.env."
+        )
 
     conn_str = _build_connection_string(
         db_conf["host"],
@@ -143,6 +170,21 @@ def get_pipeline_connection() -> pyodbc.Connection:
 
 def get_client_connection(database_name: Optional[str] = None) -> pyodbc.Connection:
     db_conf = config["azure_sql"]
+    missing = [
+        env_name
+        for env_name, value in (
+            ("AZURE_SQL_SOURCE_HOST", db_conf.get("source_host")),
+            ("AZURE_SQL_SOURCE_USERNAME", db_conf.get("source_username")),
+            ("AZURE_SQL_SOURCE_PASSWORD", db_conf.get("source_password")),
+        )
+        if not str(value or "").strip()
+    ]
+    if missing:
+        raise RuntimeError(
+            "Missing Azure SQL source DB configuration. Set "
+            + ", ".join(missing)
+            + " in Athena_backend/.env."
+        )
 
     db = _normalize_source_db(database_name)
 
@@ -161,12 +203,32 @@ def get_client_connection(database_name: Optional[str] = None) -> pyodbc.Connect
 @contextmanager
 def timed_stage(stage_name: str, **log_context):
     started = time.perf_counter()
-    logger.info("START %s", stage_name, extra=log_context)
+    logger.info(
+        "START %s",
+        stage_name,
+        extra={
+            **log_context,
+            "stage": stage_name,
+            "step_name": stage_name,
+            "event_type": "stage_start",
+        },
+    )
     try:
         yield
     finally:
         elapsed = time.perf_counter() - started
-        logger.info("END %s duration_seconds=%.3f", stage_name, elapsed, extra=log_context)
+        logger.info(
+            "END %s duration_seconds=%.3f",
+            stage_name,
+            elapsed,
+            extra={
+                **log_context,
+                "stage": stage_name,
+                "step_name": stage_name,
+                "event_type": "stage_end",
+                "duration_seconds": round(elapsed, 3),
+            },
+        )
 
 
 # ─────────────────────────────────────────────────────────────

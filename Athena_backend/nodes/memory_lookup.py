@@ -4,28 +4,48 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 from contextlib import redirect_stderr, redirect_stdout
 
-from dotenv import load_dotenv
 from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
 
 from nodes.ingestion import _chunk_and_embed, finalize_ingestion_after_memory
 from state import Stage01State
 from utilis.db import artifact_storage_fingerprint, config, get_pipeline_connection
+from utilis.env import load_backend_env
 from utilis.logger import logger
 
 
-load_dotenv()
+load_backend_env()
 DEV_MODE = os.getenv("DEV_MODE", "").strip().lower() in {"1", "true", "yes", "on", "dev"}
 
 db_conf = config.get("azure_sql", {})
 db_schema = db_conf.get("schema_name", "dbo")
 pinecone_conf = config.get("pinecone", {})
 
-if DEV_MODE:
-    emb_model = SentenceTransformer("all-MiniLM-L6-v2")
-else:
-    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-        emb_model = SentenceTransformer("all-MiniLM-L6-v2")
+_EMB_MODEL: Optional[SentenceTransformer] = None
+
+
+def _get_embedding_model(*, log_context: dict) -> Optional[SentenceTransformer]:
+    """
+    Lazily initialize the local embedding model.
+
+    Importing this module should not require network access (HF downloads).
+    If the model isn't available locally and can't be downloaded, we skip
+    semantic memory lookup gracefully.
+    """
+    global _EMB_MODEL
+    if _EMB_MODEL is not None:
+        return _EMB_MODEL
+    try:
+        if DEV_MODE:
+            _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        else:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        return _EMB_MODEL
+    except Exception as exc:
+        logger.warning("Embedding model unavailable; skipping semantic lookup: %s", exc, extra=log_context)
+        _EMB_MODEL = None
+        return None
 
 
 def _copy_state(state: Stage01State) -> Stage01State:
@@ -181,6 +201,11 @@ def _run_semantic_lookup(state: Stage01State, log_context: dict) -> Stage01State
     logger.info("START: semantic lookup", extra=log_context)
 
     try:
+        model = _get_embedding_model(log_context=log_context)
+        if model is None:
+            new_state["memory_layer2"] = False
+            return new_state
+
         pinecone_api_key = pinecone_conf.get("api_key") or os.getenv("PINECONE_API_KEY")
         if not pinecone_api_key:
             logger.warning("No Pinecone API key", extra=log_context)
@@ -196,7 +221,7 @@ def _run_semantic_lookup(state: Stage01State, log_context: dict) -> Stage01State
             new_state["memory_layer2"] = False
             return new_state
 
-        emb = emb_model.encode(text).tolist()
+        emb = model.encode(text).tolist()
         namespace = "global"
 
         res = pinecone_index.query(

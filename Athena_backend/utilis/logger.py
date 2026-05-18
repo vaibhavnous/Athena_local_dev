@@ -3,8 +3,16 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from logtail import LogtailHandler
+
+PIPELINE_LOG_PATH = Path(
+    os.environ.get(
+        "ATHENA_PIPELINE_LOG_FILE",
+        Path(__file__).resolve().parents[1] / "pipeline_logs.json",
+    )
+).resolve()
 
 
 class AthenaJsonFormatter(logging.Formatter):
@@ -69,7 +77,7 @@ def get_athena_logger():
     if not logger.handlers:
         logger.setLevel(logging.INFO)
 
-        logtail_token = os.environ.get("LOGTAIL_TOKEN", "zDgMieaAtegpukJDifiCiRkQ")
+        logtail_token = os.environ.get("LOGTAIL_TOKEN", "").strip()
         if logtail_token:
             logtail_handler = LogtailHandler(source_token=logtail_token)
             logger.addHandler(logtail_handler)
@@ -80,7 +88,8 @@ def get_athena_logger():
             console_handler.setFormatter(ConsoleContextFormatter())
             logger.addHandler(console_handler)
 
-        json_handler = logging.FileHandler("pipeline_logs.json", encoding="utf-8")
+        PIPELINE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        json_handler = logging.FileHandler(PIPELINE_LOG_PATH, encoding="utf-8")
         json_handler.setFormatter(AthenaJsonFormatter())
         logger.addHandler(json_handler)
 

@@ -138,8 +138,8 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
 
   // Build Gantt data
   const ganttData = (run.stages || []).map((s) => {
-    let duration = 0;
-    if (s.started_at) {
+    let duration = Number(s.duration_seconds || 0);
+    if (!duration && s.started_at) {
       const start = new Date(s.started_at).getTime()
       const end = s.completed_at ? new Date(s.completed_at).getTime() : Date.now()
       duration = Math.max(0, Math.round((end - start) / 1000))
@@ -747,27 +747,42 @@ function ScriptsTab({ run }) {
 
 /** HITL Decisions tab */
 function HitlDecisionsTab({ run }) {
-  const kpis = (run.kpis || []).filter((k) => k.decision)
+  const decisions = run.hitl_decisions || (run.kpis || []).filter((k) => k.decision)
 
-  if (kpis.length === 0) {
+  if (decisions.length === 0) {
     return <EmptyState message="No HITL decisions recorded for this run." />
   }
 
   return (
     <div className="space-y-3 max-w-3xl">
-      {kpis.map((kpi) => (
-        <div key={kpi.id} className="card p-4">
+      {decisions.map((decision) => (
+        <div key={decision.id} className="card p-4">
           <div className="flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-gray-200 mb-1">{kpi.name}</p>
-              <p className="text-xs text-gray-400 leading-relaxed">{kpi.definition}</p>
+              <div className="flex items-center gap-2 mb-1">
+                {decision.gate && (
+                  <span className="text-[10px] uppercase tracking-wider text-accent-blue font-semibold">
+                    {decision.gate}
+                  </span>
+                )}
+                {decision.type && (
+                  <span className="text-[10px] uppercase tracking-wider text-gray-500">
+                    {decision.type}
+                  </span>
+                )}
+              </div>
+              <p className="text-sm font-semibold text-gray-200 mb-1">{decision.name}</p>
+              <p className="text-xs text-gray-400 leading-relaxed">{decision.definition}</p>
+              {decision.rejection_reason && (
+                <p className="text-xs text-accent-red mt-2">{decision.rejection_reason}</p>
+              )}
             </div>
-            <StatusBadge status={kpi.decision} size="sm" />
+            <StatusBadge status={decision.decision} size="sm" />
           </div>
           <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
-            <span>Reviewer: <span className="text-gray-300">{kpi.reviewer || '—'}</span></span>
-            {kpi.reviewed_at && (
-              <span>{new Date(kpi.reviewed_at).toLocaleString()}</span>
+            <span>Reviewer: <span className="text-gray-300">{decision.reviewer || 'Athena reviewer'}</span></span>
+            {decision.reviewed_at && (
+              <span>{new Date(decision.reviewed_at).toLocaleString()}</span>
             )}
           </div>
         </div>
@@ -795,7 +810,9 @@ function CostLogTab({ run }) {
           </thead>
           <tbody>
             {stages.map((s) => {
-              const dur = s.started_at && s.completed_at
+              const dur = s.duration_seconds != null
+                ? `${Number(s.duration_seconds).toFixed(1)}s`
+                : s.started_at && s.completed_at
                 ? ((new Date(s.completed_at) - new Date(s.started_at)) / 1000).toFixed(1) + 's'
                 : '—'
               return (

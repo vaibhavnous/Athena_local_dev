@@ -120,11 +120,12 @@ function VerticalPipelineDag({ stages = [], onStageClick, compact = false }) {
  * HorizontalBubbleNode — a circular bubble representing a single pipeline stage.
  */
 function HorizontalBubbleNode({ stage, index, onClick, compact = false }) {
-  const isRunning = stage.status === 'RUNNING'
-  const isHitlWait = stage.status === 'HITL_WAIT' || stage.status === 'PAUSED_FOR_HITL'
-  const isFailed = stage.status === 'FAILED'
-  const isCompleted = stage.status === 'COMPLETED' || stage.status === 'SUCCESS'
-  const isPending = stage.status === 'PENDING'
+  const status = String(stage.status || stage.state || '').toUpperCase()
+  const isRunning = status === 'RUNNING' || status === 'SUBMITTED'
+  const isHitlWait = status === 'HITL_WAIT' || status === 'PAUSED_FOR_HITL'
+  const isFailed = status === 'FAILED'
+  const isCompleted = status === 'COMPLETED' || status === 'SUCCESS'
+  const isPending = status === 'PENDING'
 
   let bubbleClass = 'border-2 border-bg-border bg-bg-card'
   let iconColor = 'text-text-tertiary'
@@ -208,8 +209,9 @@ function HorizontalBubbleNode({ stage, index, onClick, compact = false }) {
  * HorizontalConnector — horizontal line connecting two stage bubbles.
  */
 function HorizontalConnector({ upstream, downstream, compact }) {
-  const isRunning = upstream.status === 'RUNNING'
-  const isActive = upstream.status === 'COMPLETED' || upstream.status === 'RUNNING'
+  const upstreamStatus = String(upstream.status || '').toUpperCase()
+  const isRunning = upstreamStatus === 'RUNNING'
+  const isActive = upstreamStatus === 'COMPLETED' || upstreamStatus === 'RUNNING'
 
   return (
     <div 
@@ -246,8 +248,9 @@ function HorizontalConnector({ upstream, downstream, compact }) {
  * VerticalConnector — vertical line connecting two stage bubbles in vertical layout.
  */
 function VerticalConnector({ upstream, downstream }) {
-  const isRunning = upstream.status === 'RUNNING'
-  const isActive = upstream.status === 'COMPLETED' || upstream.status === 'RUNNING'
+  const upstreamStatus = String(upstream.status || '').toUpperCase()
+  const isRunning = upstreamStatus === 'RUNNING'
+  const isActive = upstreamStatus === 'COMPLETED' || upstreamStatus === 'RUNNING'
 
   return (
     <div 

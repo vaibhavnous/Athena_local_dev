@@ -13,6 +13,7 @@ export interface PipelineLog {
   log_level: string
   message: string
   duration_seconds: number | null
+  event_type?: string | null
   logged_at: string
 }
 
@@ -21,6 +22,7 @@ export function usePipelineLogs(
   isActive = true,
 ) {
   const logIdsRef = useRef(new Set<string>())
+  const isFetchingRef = useRef(false)
 
   const [discoveredRunId, setDiscoveredRunId] = useState<string | null>(null)
   const [isDiscovering, setIsDiscovering] = useState(false)
@@ -28,16 +30,26 @@ export function usePipelineLogs(
 
   const [logs, setLogs] = useState<PipelineLog[]>([])
   const [isLoadingLogs, setIsLoadingLogs] = useState(false)
+  const [isRefreshingLogs, setIsRefreshingLogs] = useState(false)
   const [logsError, setLogsError] = useState<string | null>(null)
   const [lastLogTimestamp, setLastLogTimestamp] = useState<string | null>(null)
   const [terminalLogs] = useState<{ message: string; timestamp: string }[]>([])
 
   const fetchLogs = useCallback(
-    async (targetRunId: string, since?: string | null): Promise<PipelineLog[]> => {
-      if (!targetRunId) return []
+    async (
+      targetRunId: string,
+      since?: string | null,
+      initialLoad = false,
+    ): Promise<PipelineLog[]> => {
+      if (!targetRunId || isFetchingRef.current) return []
 
-      setIsLoadingLogs(true)
-      setLogsError(null)
+      isFetchingRef.current = true
+      if (initialLoad) {
+        setIsLoadingLogs(true)
+        setLogsError(null)
+      } else {
+        setIsRefreshingLogs(true)
+      }
 
       try {
         const data: any = since
@@ -48,7 +60,12 @@ export function usePipelineLogs(
         setLogsError(error?.message ?? 'Fetch error')
         return []
       } finally {
-        setIsLoadingLogs(false)
+        isFetchingRef.current = false
+        if (initialLoad) {
+          setIsLoadingLogs(false)
+        } else {
+          setIsRefreshingLogs(false)
+        }
       }
     },
     []
@@ -62,11 +79,16 @@ export function usePipelineLogs(
     setLastLogTimestamp(unique[unique.length - 1].logged_at)
   }, [])
 
-  const startLogsPolling = useCallback((targetRunId: string, since?: string | null) => {
-    fetchLogs(targetRunId, since).then(mergeLogs).catch((err: any) => {
-      setLogsError(`Failed to fetch logs: ${err?.message}`)
-    })
-  }, [fetchLogs, mergeLogs])
+  const startLogsPolling = useCallback(
+    (targetRunId: string, since?: string | null, initialLoad = false) => {
+      fetchLogs(targetRunId, since, initialLoad)
+        .then(mergeLogs)
+        .catch((err: any) => {
+          setLogsError(`Failed to fetch logs: ${err?.message}`)
+        })
+    },
+    [fetchLogs, mergeLogs]
+  )
 
   const stopLogsPolling = useCallback(() => {}, [])
 
@@ -78,7 +100,7 @@ export function usePipelineLogs(
 
     try {
       setDiscoveredRunId(runId)
-      await startLogsPolling(runId, null)
+      await startLogsPolling(runId, null, true)
     } catch (error: any) {
       setDiscoveryError(error?.message ?? 'Failed to load logs')
     } finally {
@@ -104,10 +126,10 @@ export function usePipelineLogs(
   useEffect(() => {
     if (!discoveredRunId || !isActive) return
     const interval = window.setInterval(() => {
-      fetchLogs(discoveredRunId, lastLogTimestamp).then(mergeLogs)
-    }, 3000)
+      startLogsPolling(discoveredRunId, lastLogTimestamp, false)
+    }, 750)
     return () => window.clearInterval(interval)
-  }, [discoveredRunId, fetchLogs, isActive, lastLogTimestamp, mergeLogs])
+  }, [discoveredRunId, isActive, lastLogTimestamp, startLogsPolling])
 
   return {
     runId,

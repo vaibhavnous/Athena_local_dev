@@ -25,7 +25,7 @@ function RunCard({ run, isActive, onClick, compact = false }) {
 
   // Live elapsed timer for running runs
   useEffect(() => {
-    if (run.status !== 'RUNNING') {
+    if (run.status !== 'RUNNING' && run.status !== 'SUBMITTED') {
       if (run.started_at && run.completed_at) {
         const ms = new Date(run.completed_at) - new Date(run.started_at)
         setElapsed(formatDuration(ms))
@@ -150,7 +150,7 @@ function RunCard({ run, isActive, onClick, compact = false }) {
             View Detail
           </button>
 
-          {(run.status === 'RUNNING' || run.status === 'HITL_WAIT') && (
+          {(run.status === 'RUNNING' || run.status === 'SUBMITTED' || run.status === 'HITL_WAIT') && (
             <button
               onClick={handleAbort}
               disabled={aborting}
