@@ -203,16 +203,16 @@ def build_kpi_extraction_node(
             return state
 
         handoff_validator("KPI Extraction", state, [
-            "run_id", "brd_text", "fingerprint",
+            "run_id", "context_text", "fingerprint",
             "req_business_objective", "req_data_domains",
         ])
 
         run_id = state["run_id"]
         fingerprint = state["fingerprint"]
-        brd_text = state["brd_text"]
+        context_text = state["context_text"]
         requirements = _build_requirements(state)
         source_databases = _resolve_source_databases(state)
-        relevant_schema = _fetch_relevant_schema(brd_text, source_databases, top_k=10)
+        relevant_schema = _fetch_relevant_schema(context_text, source_databases, top_k=10)
         schema_context = _format_schema_context(relevant_schema)
 
         if state.get("memory_layer1", False) and state.get("prior_kpis"):
@@ -255,7 +255,7 @@ Extract KPIs ONLY based on available data schema:"""
 
                     kpis_final = _remove_duplicates_and_rejected(kpis_parsed, rejected_kpis)
                     kpis_final = kpis_final[:10]
-                    kpis_final = _grounding_check(kpis_final, requirements, brd_text)
+                    kpis_final = _grounding_check(kpis_final, requirements, context_text)
 
                     if len(kpis_final) == 0 and attempt == max_retries:
                         obj_name = requirements["business_objective"] or "Default Primary Objective"
@@ -344,34 +344,18 @@ Extract KPIs ONLY based on available data schema:"""
         new_state["extracted_kpis"] = kpis.copy()
         new_state["human_decision"] = "PENDING"
 
-        # Checkpoint full state to Azure SQL DB (KPI stage only)
-        conn = get_pipeline_connection()
+        # Checkpoint full state to Azure SQL DB (KPI stage only).
+        # Merge with existing checkpoint so startup metadata like source/brd_filename
+        # is not lost when this node persists its partial state.
         try:
-            from utilis.db import config as db_config
+            from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
 
-            db_schema = (
-                db_config.get("azure_sql", {}).get("pipeline_schema")
-                or db_config.get("azure_sql", {}).get("schema_name")
-                or "dbo"
-            )
-            cursor = conn.cursor()
-            state_json = json.dumps(new_state, default=str)
-            cursor.execute(                f"""
-                MERGE [{db_schema}].[kpi_checkpoints] AS target
-                USING (VALUES (?)) AS source (run_id)
-                ON target.run_id = source.run_id
-                WHEN MATCHED THEN UPDATE SET full_state_json = ?, checkpoint_at = GETUTCDATE()
-                WHEN NOT MATCHED THEN INSERT (run_id, full_state_json, checkpoint_at) VALUES (?, ?, GETUTCDATE());
-                """,
-                (new_state["run_id"], state_json, new_state["run_id"], state_json)
-            )
-            conn.commit()
-            logger.info("✅ KPI checkpoint saved to DB for run_id=%s", new_state["run_id"], extra=log_context)
+            existing_checkpoint = load_checkpoint_state(new_state["run_id"]) or {"run_id": new_state["run_id"]}
+            save_checkpoint_state(new_state["run_id"], {**existing_checkpoint, **new_state, "run_id": new_state["run_id"]})
+            logger.info("KPI checkpoint saved to DB for run_id=%s", new_state["run_id"], extra=log_context)
         except Exception as e:
             logger.warning("Checkpoint save failed (non-critical): %s", e, extra=log_context)
-        finally:
-            conn.close()
-        
+
         return new_state
 
     return kpi_extraction_node

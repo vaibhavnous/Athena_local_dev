@@ -54,3 +54,6 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 paramiko>=3.4.0
+pandas>=2.2.0
+azure-identity>=1.16.0
+azure-storage-file-datalake>=12.16.0

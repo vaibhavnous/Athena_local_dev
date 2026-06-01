@@ -26,12 +26,21 @@ def _gold_output_dir() -> str:
     return os.path.join(os.getcwd(), "generated_code", "gold")
 
 
+def _run_slug(run_id: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", str(run_id or "run")).strip("_")
+    return cleaned[:48] or "run"
+
+
 def _contract_path() -> str:
     return os.path.join(_gold_output_dir(), "gold_generation_contract.json")
 
 
 def _bundle_path() -> str:
     return os.path.join(_gold_output_dir(), "gold_scripts.json")
+
+
+def _run_bundle_path(run_id: Any) -> str:
+    return os.path.join(_gold_output_dir(), f"{_run_slug(str(run_id or 'run'))}_gold_scripts.json")
 
 
 def _readme_path() -> str:
@@ -577,6 +586,7 @@ def _generate_one_mapping(
 
     if not _usable_mapping(mapping):
         return {
+            "run_id": run_id,
             "kpi_name": kpi_name,
             "status": "BLOCKED",
             "reason": "Gold contract mapping is incomplete or requires formula certification.",
@@ -610,14 +620,15 @@ def _generate_one_mapping(
     _validate_python(dimension_code)
 
     os.makedirs(_gold_output_dir(), exist_ok=True)
-    script_path = os.path.join(_gold_output_dir(), f"gold_kpi_{kpi_id}.py")
+    script_path = os.path.join(_gold_output_dir(), f"gold_kpi_{_run_slug(run_id)}_{kpi_id}.py")
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
-    dimension_script_path = os.path.join(_gold_output_dir(), f"gold_dim_{kpi_id}.py")
+    dimension_script_path = os.path.join(_gold_output_dir(), f"gold_dim_{_run_slug(run_id)}_{kpi_id}.py")
     with open(dimension_script_path, "w", encoding="utf-8") as f:
         f.write(dimension_code)
 
     return {
+        "run_id": run_id,
         "kpi_name": kpi_name,
         "status": "APPROVED",
         "source_table": mapping.get("source_silver_table"),
@@ -635,6 +646,7 @@ def _generate_one_mapping(
 
 def _write_bundle(*, generated_at: str, results: List[Dict[str, Any]], contract: Dict[str, Any]) -> str:
     bundle = {
+        "run_id": contract.get("run_id"),
         "generated_at": generated_at,
         "script_count": sum(1 for item in results if item.get("script_path")),
         "dimension_script_count": sum(1 for item in results if item.get("dimension_script_path")),
@@ -646,6 +658,9 @@ def _write_bundle(*, generated_at: str, results: List[Dict[str, Any]], contract:
     os.makedirs(_gold_output_dir(), exist_ok=True)
     path = _bundle_path()
     with open(path, "w", encoding="utf-8") as f:
+        json.dump(bundle, f, indent=2)
+    run_path = _run_bundle_path(contract.get("run_id"))
+    with open(run_path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
     return path
 

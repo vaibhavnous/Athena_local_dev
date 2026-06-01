@@ -16,6 +16,23 @@ class Stage01State(TypedDict, total=False):
     status: str
     error: Optional[str]
 
+    # Source ingestion MVP
+    source: Optional[str]
+    source_label: Optional[str]
+    sftp_entity: Optional[str]
+    sftp_files: Optional[List[str]]
+    file_path: Optional[str]
+    vendor: Optional[str]
+    data: Any
+    source_ingestion_status: Optional[str]
+    source_row_count: Optional[int]
+    source_columns: Optional[List[str]]
+    context_text: Optional[str]
+    candidate_feed: Optional[Dict[str, Any]]
+    candidate_feeds: Optional[List[Dict[str, Any]]]
+    gate1: Optional[Dict[str, Any]]
+    gate2: Optional[Dict[str, Any]]
+
     # ── Embedding / Vectorization Flags (NEW) ──────────────
     brd_embedded: Optional[bool]          # BRD stored in ai-store-index
     schema_embedded: Optional[bool]       # schema stored in metadata index

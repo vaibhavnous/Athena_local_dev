@@ -155,9 +155,9 @@ def build_req_extraction_node(
         if state.get("status") == "FAILED":
             logger.warning("Skipping req_extraction: status=FAILED", extra=log_context)
             return state
-        handoff_validator("Requirement Extraction", state, ["run_id", "brd_text", "fingerprint"])
+        handoff_validator("Requirement Extraction", state, ["run_id", "context_text", "fingerprint"])
 
-        brd_text = state["brd_text"]
+        context_text = state["context_text"]
         run_id = state["run_id"]
         fingerprint = state["fingerprint"]
 
@@ -205,7 +205,7 @@ def build_req_extraction_node(
         last_error: Optional[str] = None
 
         for attempt in range(max_retries + 1):
-            prompt_text = PROMPT_REQ_V1.format(brd_text=brd_text[:12_000])
+            prompt_text = PROMPT_REQ_V1.format(brd_text=context_text[:12_000])
             if attempt > 0 and last_error:
                 prompt_text += f"\n\n--- PREVIOUS ATTEMPT FAILED ---\nError: {last_error}\nFix this specific issue and return valid JSON."
 
@@ -221,7 +221,7 @@ def build_req_extraction_node(
                 parsed = json.loads(raw)
                 result = RequirementsSchema(**parsed)
 
-                ungrounded = check_faithfulness(result.constraints, brd_text)
+                ungrounded = check_faithfulness(result.constraints, context_text)
 
                 if ungrounded and attempt < max_retries:
                     last_error = f"These constraints are NOT in the BRD: {ungrounded}. Only include constraints explicitly stated in the BRD."

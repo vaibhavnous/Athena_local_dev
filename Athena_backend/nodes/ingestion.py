@@ -1,4 +1,4 @@
-
+﻿
 import hashlib
 import json
 import os
@@ -117,12 +117,43 @@ def _mark_failed(state: Stage01State, error: str) -> Stage01State:
     return state
 
 
+def _build_context_text_from_data(data: object) -> str:
+    columns = getattr(data, "columns", None)
+    if columns is None:
+        return ""
+
+    column_names = [str(column).strip() for column in columns if str(column).strip()]
+    if not column_names:
+        return ""
+
+    return (
+        "Dataset contains columns: "
+        + ", ".join(column_names)
+        + ". This structured dataset should be analyzed to infer business requirements, "
+        + "reporting intent, and candidate KPIs from the available schema."
+    )
+
+
 def _parse_input(state: Stage01State) -> Stage01State:
     new_state = _copy_state(state)
     log_context = _context(new_state, "parse_input", "pending_generation")
     logger.info("START: _parse_input", extra=log_context)
 
     try:
+        if state.get("data") is not None:
+            context_text = _build_context_text_from_data(state.get("data"))
+            if not context_text:
+                logger.warning("Structured input did not expose usable columns", extra=log_context)
+                return new_state
+
+            log_context["context_length"] = len(context_text)
+            logger.info("Built context_text from structured data", extra=log_context)
+            new_state["context_text"] = context_text
+            # Keep legacy helpers working without changing graph structure.
+            new_state["brd_text"] = context_text
+            logger.info("END: _parse_input", extra=log_context)
+            return new_state
+
         input_value = state.get("brd_text", "").strip()
 
         if not input_value:
@@ -161,6 +192,7 @@ def _parse_input(state: Stage01State) -> Stage01State:
 
         log_context["parsed_length"] = len(parsed_text)
         logger.info("Successfully parsed text", extra=log_context)
+        new_state["context_text"] = parsed_text
         new_state["brd_text"] = parsed_text
 
         logger.info("END: _parse_input", extra=log_context)
@@ -180,20 +212,21 @@ def _acquire_and_validate_brd(state: Stage01State) -> Stage01State:
     logger.info("START: _acquire_and_validate_brd", extra=log_context)
 
     try:
-        brd_text = new_state.get("brd_text", "").strip()
-        log_context["brd_length"] = len(brd_text)
-        logger.info("Checking BRD length", extra=log_context)
+        context_text = (new_state.get("context_text") or new_state.get("brd_text") or "").strip()
+        log_context["context_length"] = len(context_text)
+        logger.info("Checking input context length", extra=log_context)
 
-        if not brd_text:
-            logger.error("Validation failed: BRD is empty", extra=log_context)
-            return _mark_failed(new_state, "Validation Failed: BRD is empty.")
+        if not context_text:
+            logger.error("Validation failed: input context is empty", extra=log_context)
+            return _mark_failed(new_state, "Validation Failed: input context is empty.")
 
-        if len(brd_text) < 200:
+        if new_state.get("data") is None and len(context_text) < 200:
             logger.error("Validation failed: BRD is too short (< 200 chars)", extra=log_context)
             return _mark_failed(new_state, "Validation Failed: BRD is too short (< 200 chars).")
 
         new_state.update({
-            "brd_text": brd_text,
+            "context_text": context_text,
+            "brd_text": context_text,
             "status": "IN_PROGRESS",
             "error": None,
         })
@@ -311,10 +344,16 @@ def _validate_schema(state: Stage01State) -> Stage01State:
             return new_state
 
         try:
-            BRDSchema(content=new_state.get("brd_text", ""))
-            new_state["is_schema_valid"] = True
-            logger.info("Schema validation successful", extra=log_context)
-        except ValidationError as e:
+            if new_state.get("data") is not None:
+                if not (new_state.get("context_text") or "").strip():
+                    raise ValueError("Structured data context is empty")
+                new_state["is_schema_valid"] = True
+                logger.info("Structured-data context validation successful", extra=log_context)
+            else:
+                BRDSchema(content=new_state.get("context_text") or new_state.get("brd_text", ""))
+                new_state["is_schema_valid"] = True
+                logger.info("Schema validation successful", extra=log_context)
+        except (ValidationError, ValueError) as e:
             log_context["error"] = str(e)
             logger.error("Schema validation failed", extra=log_context)
             new_state.update({
@@ -495,11 +534,12 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
         return new_state
 
     except Exception as e:
-        logger.error("ERROR in _chunk_and_embed", extra=log_context)
-        logger.error(traceback.format_exc(), extra=log_context)
+        # Best-effort: embedding failures should not block the rest of the pipeline
+        # (especially for structured/SFTP runs where we still want KPI extraction).
+        logger.warning("Embedding skipped (BRD vectors not written): %s", e, extra=log_context)
+        logger.warning(traceback.format_exc(), extra=log_context)
         new_state.update({
-            "status": "FAILED",
-            "error": f"Pinecone operation failed: {str(e)}",
+            "brd_embedded": False,
         })
         return new_state
 def _embed_schema_metadata(state: Stage01State) -> Stage01State:
@@ -523,7 +563,7 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
 
         source_databases = new_state.get("source_databases", [])
         if not source_databases:
-            logger.warning("No source_databases found → skipping schema embedding", extra=log_context)
+            logger.warning("No source_databases found â†’ skipping schema embedding", extra=log_context)
             return new_state
 
         pc = Pinecone(api_key=pinecone_conf.get("api_key") or os.getenv("PINECONE_API_KEY"))
@@ -562,7 +602,7 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
                 table = row.TABLE_NAME
                 column = row.COLUMN_NAME
 
-                # 🔥 semantic-friendly sentence
+                # ðŸ”¥ semantic-friendly sentence
                 text = f"Table {table} contains column {column}"
 
                 texts.append(text)
@@ -609,70 +649,59 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
         return new_state
 
     except Exception as e:
-        logger.error("ERROR in _embed_schema_metadata", extra=log_context)
-        logger.error(traceback.format_exc(), extra=log_context)
-
+        # Best-effort: schema embedding is helpful but not required to keep the run moving.
+        logger.warning("Schema embedding skipped: %s", e, extra=log_context)
+        logger.warning(traceback.format_exc(), extra=log_context)
         new_state.update({
-            "status": "FAILED",
-            "error": f"Schema embedding failed: {str(e)}",
+            "schema_embedded": False,
         })
         return new_state
 
 def ingestion_node(state: Stage01State) -> Stage01State:
     new_state = _copy_state(state)
+    source = str(new_state.get("source") or "").lower()
 
     log_context = {
         "run_id": new_state.get("run_id", "unknown"),
         "node": "ingestion_node",
+        "source": source or "database",
     }
 
     logger.info("START ingestion_node", extra=log_context)
 
     try:
-        # -----------------------------
-        # 1. Parse input
-        # -----------------------------
         new_state = _parse_input(new_state)
 
-        # -----------------------------
-        # 2. Validate BRD
-        # -----------------------------
         new_state = _acquire_and_validate_brd(new_state)
         if new_state.get("status") == "FAILED":
             logger.warning("Stopped at validation", extra=log_context)
             return new_state
 
-        # -----------------------------
-        # 3. Token estimation + fingerprint
-        # -----------------------------
         new_state = _estimate_and_fingerprint(new_state)
         if new_state.get("status") == "FAILED":
             logger.warning("Stopped at fingerprint", extra=log_context)
             return new_state
 
-        # -----------------------------
-        # 4. Budget check
-        # -----------------------------
         new_state = _validate_budget(new_state)
         if new_state.get("status") == "FAILED":
             logger.warning("Stopped at budget check", extra=log_context)
             return new_state
 
-        # -----------------------------
-        # 5. BRD Embeddings → ai-store-index
-        # -----------------------------
-        new_state = _chunk_and_embed(new_state)
-        if new_state.get("status") == "FAILED":
-            logger.warning("Stopped at BRD embedding", extra=log_context)
-            return new_state
+        # Skip embedding for SFTP MVP, keep implementation for future reuse.
+        if source == "sftp":
+            new_state["brd_embedded"] = False
+            new_state["schema_embedded"] = False
+            logger.info("Skipping chunk/schema embedding for SFTP source", extra=log_context)
+        else:
+            new_state = _chunk_and_embed(new_state)
+            if new_state.get("status") == "FAILED":
+                logger.warning("Stopped at BRD embedding", extra=log_context)
+                return new_state
 
-        # -----------------------------
-        # 6. Schema Embeddings → metadata index
-        # -----------------------------
-        new_state = _embed_schema_metadata(new_state)
-        if new_state.get("status") == "FAILED":
-            logger.warning("Stopped at schema embedding", extra=log_context)
-            return new_state
+            new_state = _embed_schema_metadata(new_state)
+            if new_state.get("status") == "FAILED":
+                logger.warning("Stopped at schema embedding", extra=log_context)
+                return new_state
 
         logger.info("END ingestion_node", extra=log_context)
         return new_state

@@ -102,13 +102,27 @@ const useAthenaStore = create<AthenaState>((set, get) => ({
   userRole: 'Data Engineer',
 
   setRuns: (runs) =>
-    set((state) => ({
-      runs,
-      activeRunId:
-        state.activeRunId && runs.some((run) => run.id === state.activeRunId)
-          ? state.activeRunId
-          : runs[0]?.id || null,
-    })),
+    set((state) => {
+      const backendRuns = Array.isArray(runs) ? runs : []
+      const activeRunId = state.activeRunId
+      const activeExisting =
+        activeRunId ? state.runs.find((run) => run.id === activeRunId) || null : null
+      const activePresentInBackend =
+        !!activeRunId && backendRuns.some((run) => run.id === activeRunId)
+
+      const mergedRuns =
+        activeExisting && !activePresentInBackend
+          ? [activeExisting, ...backendRuns.filter((run) => run.id !== activeExisting.id)]
+          : backendRuns
+
+      return {
+        runs: mergedRuns,
+        activeRunId:
+          activeRunId && mergedRuns.some((run) => run.id === activeRunId)
+            ? activeRunId
+            : mergedRuns[0]?.id || null,
+      }
+    }),
 
   addRun: (run) =>
     set((state) => ({

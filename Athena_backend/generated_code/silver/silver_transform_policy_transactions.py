@@ -24,17 +24,17 @@ try:
 except Exception:
     print("Could not create schema 'silver' in the current catalog")
 
-RUN_ID = "8c8b190c-56e9-41f6-8329-de7690bc58a8"
+RUN_ID = "c1f9bd4c-b92a-49fe-bdbf-86cf4eca4489"
 SOURCE_TABLE = "bronze.bronze_policy_transactions"
 TARGET_TABLE = "silver.silver_policy_transactions"
 TEMP_VIEW = "silver_src_policy_transactions"
 
-EXPECTED_COLUMNS = ['reference_id', 'policy_id', 'begin_date', 'end_date', 'policy_issued_date', 'policy_transaction_id', 'policy_transaction_type', 'branch_office_id', 'branch_office_name', 'client_full_name', 'product_id', 'product_name', 'product_group_name', 'segment_name', 'business_division_name', 'agent_id', 'agent_name', 'agent_category_id', 'agen_t_category_name', 'agent_sub_category_name', 'channel_id', 'channel_name', 'channel_group_id', 'channel_group_name', 'segment_division_name', 'mode_of_issuance_id', 'mode_of_issuance_name', 'is_aadhaar_attached', 'is_pan_attached', 'premium', 'commission', 'expenses', 'service_tax', 'stamp_duty', 'risk_sum_insured', 'no_of_employees', 'no_o_lives']
-STRING_COLUMNS = ['policy_id', 'policy_transaction_id', 'policy_transaction_type', 'branch_office_id', 'client_full_name', 'product_name', 'product_group_name', 'segment_name', 'business_division_name', 'agent_name', 'agent_category_id', 'agen_t_category_name', 'agent_sub_category_name', 'channel_name', 'channel_group_name', 'segment_division_name', 'mode_of_issuance_id', 'mode_of_issuance_name', 'is_aadhaar_attached', 'is_pan_attached', 'premium', 'commission', 'expenses', 'service_tax', 'stamp_duty', 'risk_sum_insured', 'no_of_employees', 'no_o_lives']
-PII_COLUMNS = ['is_aadhaar_attached', 'is_pan_attached']
-KEY_COLUMNS = ['reference_id', 'policy_id', 'policy_transaction_id', 'branch_office_id', 'product_id', 'agent_id', 'agent_category_id', 'channel_id', 'channel_group_id', 'mode_of_issuance_id']
-CAST_RULES = {'reference_id': 'int', 'begin_date': 'timestamp', 'end_date': 'timestamp', 'policy_issued_date': 'timestamp', 'branch_office_name': 'int', 'product_id': 'int', 'agent_id': 'double', 'channel_id': 'int', 'channel_group_id': 'int'}
-COLUMN_ALIASES = {'rererence_id': 'reference_id'}
+EXPECTED_COLUMNS = []
+STRING_COLUMNS = []
+PII_COLUMNS = []
+KEY_COLUMNS = []
+CAST_RULES = {}
+COLUMN_ALIASES = {}
 
 if not spark.catalog.tableExists(SOURCE_TABLE):
     raise ValueError(f"Missing bronze source table: {SOURCE_TABLE}")

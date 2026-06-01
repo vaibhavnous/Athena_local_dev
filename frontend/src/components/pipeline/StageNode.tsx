@@ -31,13 +31,13 @@ const ICON_MAP = {
  * }} props
  */
 function StageNode({ stage, onClick, compact = false }) {
-  console.log("Stage ::: ", stage);
   const Icon = ICON_MAP[stage.icon] || FileText
-  const isRunning = stage.status === 'RUNNING'
-  const isHitlWait = stage.status === 'HITL_WAIT' || stage.status === 'PAUSED_FOR_HITL'
-  const isFailed = stage.status === 'FAILED'
-  const isCompleted = stage.status === 'COMPLETED' || stage.status === 'SUCCESS'
-  const isPending = stage.status === 'PENDING'
+  const status = String(stage.status || stage.state || '').toUpperCase()
+  const isRunning = status === 'RUNNING'
+  const isHitlWait = status === 'HITL_WAIT' || status === 'PAUSED_FOR_HITL'
+  const isFailed = status === 'FAILED'
+  const isCompleted = status === 'COMPLETED' || status === 'SUCCESS'
+  const isPending = status === 'PENDING'
 
   let borderClass = 'border-bg-border'
   let bgClass = 'bg-bg-card'
@@ -126,7 +126,7 @@ function StageNode({ stage, onClick, compact = false }) {
             <span className={`font-medium leading-tight ${compact ? 'text-xs' : 'text-sm'} ${isPending ? 'text-gray-600' : 'text-gray-200'}`}>
               {stage.name}
             </span>
-            <StatusBadge status={stage.status} size="sm" />
+            <StatusBadge status={stage.status || stage.state} size="sm" />
           </div>
 
           {/* Metrics for completed stages */}

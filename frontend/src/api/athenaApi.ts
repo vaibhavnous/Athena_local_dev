@@ -31,8 +31,13 @@ api.interceptors.response.use(
 )
 
 export const startRun = (payload: {
-  brd_text: string
+  brd_text?: string
+  source?: string
+  sftp_entity?: string
   provider: string
+  brd_filename?: string
+  database_type?: string
+  database_name?: string
   deployment?: string
   budget?: number
   maxKpis?: number
@@ -152,7 +157,7 @@ export const getPipelineLogs = (runId: string, limit = 1000) =>
 /**
  * Fetch logs written after sinceTimestamp (for incremental polling).
  */
-export const getPipelineLogsSince = (runId: string, sinceTimestamp: string) =>
-  api.get(`/logs/${runId}/since/${encodeURIComponent(sinceTimestamp)}`)
+export const getPipelineLogsSinceWithLimit = (runId: string, sinceTimestamp: string, limit = 300) =>
+  api.get(`/logs/${runId}/since/${encodeURIComponent(sinceTimestamp)}`, { params: { limit } })
 
 export default api

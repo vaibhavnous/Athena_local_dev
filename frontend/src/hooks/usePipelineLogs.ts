@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   getPipelineLogs,
-  getPipelineLogsSince,
+  getPipelineLogsSinceWithLimit,
 } from '../api/athenaApi'
 import useAthenaStore from '../store/useAthenaStore'
 
@@ -55,7 +55,7 @@ export function usePipelineLogs(
 
       try {
         const data: any = since
-          ? await getPipelineLogsSince(targetRunId, since)
+          ? await getPipelineLogsSinceWithLimit(targetRunId, since, 300)
           : await getPipelineLogs(targetRunId, 300)
         return Array.isArray(data?.logs) ? (data.logs as PipelineLog[]) : []
       } catch (error: any) {

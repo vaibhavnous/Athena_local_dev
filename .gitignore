@@ -1,6 +1,7 @@
 # Frontend
 frontend/node_modules/
 frontend/build/
+frontend/.env
 frontend/.pnp
 frontend/.pnp.js
 frontend/coverage/
@@ -30,3 +31,4 @@ Thumbs.db
 
 # Misc
 *.bak
+paramiko_debug.log

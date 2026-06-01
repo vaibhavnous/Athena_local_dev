@@ -29,12 +29,14 @@ function HitlQueue() {
     setHitlSourceRunId
   } = useAthenaStore()
 
-  const reviewRuns = useMemo(() => runs.filter((run) =>
-    run.status === 'HITL_WAIT' ||
-    run.status === 'PAUSED_FOR_HITL' ||
-    run.next_gate === 2 ||
-    run.next_gate === 3
-  ), [runs])
+  const reviewRuns = useMemo(
+    () =>
+      runs.filter((run) => {
+        const gate = Number(run?.next_gate || 0)
+        return gate === 1 || gate === 2 || gate === 3
+      }),
+    [runs]
+  )
 
   const [selectedRunId, setSelectedRunId] = useState(reviewRuns[0]?.id || null)
   const [statusFilter, setStatusFilter] = useState('All')
@@ -51,11 +53,11 @@ function HitlQueue() {
 
   const REVIEWER_ID = 'reviewer@nousinfo.com'
   const currentRun = runs.find((run) => run.id === selectedRunId)
-  const currentStatus = (currentRun?.status || '').toUpperCase()
-  const isReviewableRun = currentStatus === 'HITL_WAIT' || currentStatus === 'PAUSED_FOR_HITL'
-  const gateToReview = currentRun?.next_gate || 1
+  const gateToReview = Number(currentRun?.next_gate || 0)
+  const isReviewableRun = gateToReview === 1 || gateToReview === 2 || gateToReview === 3
   const isGate2 = gateToReview === 2
   const isGate3 = gateToReview === 3
+  const isSftpRun = currentRun?.source === 'sftp' || currentRun?.source === 'adls_gen2'
   const queue = useMemo(
     () => hitlQueues[selectedRunId] || (currentRun?.kpis || []),
     [currentRun?.kpis, hitlQueues, selectedRunId]
@@ -63,7 +65,7 @@ function HitlQueue() {
 
   useEffect(() => {
     const selectedStillExists = selectedRunId && runs.some((run) => run.id === selectedRunId)
-    const selectedNeedsReview = currentRun && isReviewableRun && (currentRun.next_gate === 2 || currentRun.next_gate === 3)
+    const selectedNeedsReview = currentRun && isReviewableRun
 
     if (selectedStillExists && selectedNeedsReview) return
 
@@ -82,6 +84,12 @@ function HitlQueue() {
       setLocalDecisions({})
     }
   }, [runs, reviewRuns, selectedRunId, currentRun, isReviewableRun])
+
+  useEffect(() => {
+    setTableReview(null)
+    setEnrichmentReview(null)
+    setSelectedTables({})
+  }, [selectedRunId, currentRun?.source, gateToReview])
 
   useEffect(() => {
     if (!selectedRunId) return
@@ -116,8 +124,9 @@ function HitlQueue() {
           setTableReview(review)
           setSelectedTables((prev) => {
             const next = { ...prev }
-            for (const table of review.nominated_tables || []) {
-              const key = tableReviewKey(table)
+            const items = isSftpRun ? getSftpFeeds(review) : (review.nominated_tables || [])
+            for (const table of items) {
+              const key = isSftpRun ? sftpFeedKey(table) : tableReviewKey(table)
               if (!(key in next)) next[key] = true
             }
             return next
@@ -125,6 +134,8 @@ function HitlQueue() {
           updateRun(selectedRunId, {
             nominated_tables: review.nominated_tables || [],
             certified_tables: review.certified_tables || [],
+            candidate_feed: review.candidate_feed || null,
+            candidate_feeds: review.candidate_feeds || [],
             next_gate: review.next_gate,
             resume_message: review.resume_message
           })
@@ -163,7 +174,7 @@ function HitlQueue() {
     return () => {
       cancelled = true
     }
-  }, [selectedRunId, isGate2, isGate3, setHitlQueue, setHitlSourceRunId, updateRun, addNotification])
+  }, [selectedRunId, isGate2, isGate3, setHitlQueue, setHitlSourceRunId, updateRun, addNotification, currentRun?.source])
 
   const filteredQueue = useMemo(() => {
     if (statusFilter === 'All') return queue
@@ -183,6 +194,9 @@ function HitlQueue() {
   }), [queue, localDecisions])
 
   const selectedTableCount = (tableReview?.nominated_tables || []).filter((table) => selectedTables[tableReviewKey(table)]).length
+  const availableSftpFeeds = getSftpFeeds(tableReview)
+  const selectedFeedCount = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length
+  const totalFeedCount = availableSftpFeeds.length
   const someDecided = Object.keys(localDecisions).length > 0
 
   const handleApprove = (kpiId) => {
@@ -228,19 +242,41 @@ function HitlQueue() {
     setSelectedTables(next)
   }
 
+  const handleSelectAllFeeds = () => {
+    const next = {}
+    for (const feed of availableSftpFeeds) {
+      next[sftpFeedKey(feed)] = true
+    }
+    setSelectedTables(next)
+  }
+
   const handleSubmit = async () => {
     if (isGate2) {
-      const approvedTables = (tableReview?.nominated_tables || [])
-        .map((table) => tableReviewKey(table))
-        .filter((key) => selectedTables[key])
+      if (isSftpRun) {
+        const approvedFeeds = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)])
 
-      if (!approvedTables.length) {
-        addNotification({ type: 'amber', title: 'No Tables Selected', message: 'Select at least one table before submitting Gate 2.', duration: 3000 })
-        return
+        if (!approvedFeeds.length) {
+          addNotification({ type: 'amber', title: 'No Feeds Selected', message: 'Select at least one discovered feed before submitting Gate 2.', duration: 3000 })
+          return
+        }
+      } else {
+        const approvedTables = (tableReview?.nominated_tables || [])
+          .map((table) => tableReviewKey(table))
+          .filter((key) => selectedTables[key])
+
+        if (!approvedTables.length) {
+          addNotification({ type: 'amber', title: 'No Tables Selected', message: 'Select at least one table before submitting Gate 2.', duration: 3000 })
+          return
+        }
       }
 
       setSubmitting(true)
       try {
+        const approvedTables = isSftpRun
+          ? ['sftp-feed-approved']
+          : (tableReview?.nominated_tables || [])
+              .map((table) => tableReviewKey(table))
+              .filter((key) => selectedTables[key])
         await submitTableReviews(selectedRunId, approvedTables)
         const refreshed = await getRun(selectedRunId)
         updateRun(selectedRunId, refreshed)
@@ -249,7 +285,9 @@ function HitlQueue() {
         addNotification({
           type: 'success',
           title: 'Gate 2 Submitted',
-          message: 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
+          message: isSftpRun
+            ? 'Approved feeds were submitted for SFTP Gate 2.'
+            : 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
           duration: 5000
         })
       } catch (error) {
@@ -371,13 +409,13 @@ function HitlQueue() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-lg font-bold text-white">
-            {isGate3 ? 'Gate 3 - Enrichment Review' : isGate2 ? 'Gate 2 - Table Review' : 'Gate 1 - KPI Review'}
+            {isGate3 ? 'Gate 3 - Enrichment Review' : isGate2 ? (isSftpRun ? 'Gate 2 - SFTP Feed Review' : 'Gate 2 - Table Review') : 'Gate 1 - KPI Review'}
           </h1>
           <p className="text-sm text-gray-500 mt-0.5">
             {isGate3
               ? (enrichmentReview?.resume_message || 'Review semantic enrichment before the pipeline continues')
               : isGate2
-              ? (tableReview?.resume_message || 'Review and certify nominated tables before the pipeline continues')
+              ? (tableReview?.resume_message || (isSftpRun ? 'Review discovered SFTP feeds before the pipeline continues.' : 'Review and certify nominated tables before the pipeline continues'))
               : 'Review and approve extracted KPIs before the pipeline continues'}
           </p>
         </div>
@@ -471,44 +509,61 @@ function HitlQueue() {
               </div>
             </div>
             ) : isGate2 ? (
-            (tableReview?.nominated_tables || []).length === 0 ? (
+            (isSftpRun
+              ? (availableSftpFeeds.length === 0)
+              : (tableReview?.nominated_tables || []).length === 0) ? (
               <div className="flex items-center justify-center h-40 text-gray-600 text-sm">
-                No nominated tables found for this run.
+                {isSftpRun ? 'No discovered feeds found for this run.' : 'No nominated tables found for this run.'}
               </div>
             ) : (
-              (tableReview?.nominated_tables || []).map((table) => {
-                const key = tableReviewKey(table)
-                return (
-                  <label key={key} className="card p-5 flex items-start gap-3 cursor-pointer border border-bg-border hover:border-gray-600 transition-colors">
-                    <input
-                      type="checkbox"
-                      checked={!!selectedTables[key]}
-                      onChange={() => setSelectedTables((prev) => ({ ...prev, [key]: !prev[key] }))}
-                      className="mt-1 accent-accent-blue"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <Table2 size={15} className="text-text-tertiary" />
-                        <h3 className="text-base font-bold text-text-primary break-all">{key}</h3>
-                      </div>
-                      <div className="flex items-center gap-2 text-xs text-text-tertiary flex-wrap mt-2">
-                        <span>Confidence {Number(table.confidence_score || 0).toFixed(3)}</span>
-                        <span className="opacity-40">-</span>
-                        <span>Coverage {Number(table.coverage_ratio || 0).toFixed(3)}</span>
-                        {(table.matched_keywords || []).length > 0 && (
-                          <>
+              isSftpRun
+                ? (availableSftpFeeds.map((feed) => {
+                    const key = sftpFeedKey(feed)
+                    return (
+                      <label key={key} className="card p-5 flex items-start gap-3 cursor-pointer border border-bg-border hover:border-gray-600 transition-colors">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedTables[key]}
+                          onChange={() => setSelectedTables((prev) => ({ ...prev, [key]: !prev[key] }))}
+                          className="mt-1 accent-accent-blue"
+                        />
+                        <SftpFeedReviewBody feed={feed} />
+                      </label>
+                    )
+                  }))
+                : ((tableReview?.nominated_tables || []).map((table) => {
+                    const key = tableReviewKey(table)
+                    return (
+                      <label key={key} className="card p-5 flex items-start gap-3 cursor-pointer border border-bg-border hover:border-gray-600 transition-colors">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedTables[key]}
+                          onChange={() => setSelectedTables((prev) => ({ ...prev, [key]: !prev[key] }))}
+                          className="mt-1 accent-accent-blue"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Table2 size={15} className="text-text-tertiary" />
+                            <h3 className="text-base font-bold text-text-primary break-all">{key}</h3>
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-text-tertiary flex-wrap mt-2">
+                            <span>Confidence {Number(table.confidence_score || 0).toFixed(3)}</span>
                             <span className="opacity-40">-</span>
-                            <span>{(table.matched_keywords || []).join(', ')}</span>
-                          </>
-                        )}
-                      </div>
-                      {table.nomination_reason && (
-                        <p className="text-sm text-text-secondary leading-relaxed mt-2">{table.nomination_reason}</p>
-                      )}
-                    </div>
-                  </label>
-                )
-              })
+                            <span>Coverage {Number(table.coverage_ratio || 0).toFixed(3)}</span>
+                            {(table.matched_keywords || []).length > 0 && (
+                              <>
+                                <span className="opacity-40">-</span>
+                                <span>{(table.matched_keywords || []).join(', ')}</span>
+                              </>
+                            )}
+                          </div>
+                          {table.nomination_reason && (
+                            <p className="text-sm text-text-secondary leading-relaxed mt-2">{table.nomination_reason}</p>
+                          )}
+                        </div>
+                      </label>
+                    )
+                  }))
             )
             ) : filteredQueue.length === 0 ? (
             <div className="flex items-center justify-center h-40 text-gray-600 text-sm">
@@ -544,9 +599,9 @@ function HitlQueue() {
               {selectedRunId && isReviewableRun ? (
                 isGate2 ? (
                 <>
-                  <CountRow label="Total Tables" value={(tableReview?.nominated_tables || []).length} color="text-gray-300" />
-                  <CountRow label="Selected" value={selectedTableCount} color="text-accent-green" pulse={selectedTableCount > 0} />
-                  <CountRow label="Unselected" value={Math.max(0, (tableReview?.nominated_tables || []).length - selectedTableCount)} color="text-accent-amber" />
+                  <CountRow label={isSftpRun ? 'Total Feeds' : 'Total Tables'} value={isSftpRun ? totalFeedCount : (tableReview?.nominated_tables || []).length} color="text-gray-300" />
+                  <CountRow label="Selected" value={isSftpRun ? selectedFeedCount : selectedTableCount} color="text-accent-green" pulse={(isSftpRun ? selectedFeedCount : selectedTableCount) > 0} />
+                  <CountRow label="Unselected" value={Math.max(0, (isSftpRun ? (totalFeedCount - selectedFeedCount) : ((tableReview?.nominated_tables || []).length - selectedTableCount)))} color="text-accent-amber" />
                 </>
                 ) : isGate3 ? (
                 <>
@@ -576,7 +631,9 @@ function HitlQueue() {
                     width: `${isGate3
                       ? 100
                       : isGate2
-                      ? ((tableReview?.nominated_tables || []).length > 0 ? (selectedTableCount / (tableReview?.nominated_tables || []).length) * 100 : 0)
+                      ? (isSftpRun
+                          ? (totalFeedCount > 0 ? (selectedFeedCount / totalFeedCount) * 100 : 0)
+                          : ((tableReview?.nominated_tables || []).length > 0 ? (selectedTableCount / (tableReview?.nominated_tables || []).length) * 100 : 0))
                       : (kpiCounts.total > 0 ? ((kpiCounts.approved + kpiCounts.edited + kpiCounts.rejected) / kpiCounts.total) * 100 : 0)}%`
                   }}
                 />
@@ -594,11 +651,11 @@ function HitlQueue() {
           </div>
 
           <button
-            onClick={isGate3 ? () => setGate3Decision('APPROVED') : isGate2 ? handleSelectAllTables : handleAutoApproveAll}
+            onClick={isGate3 ? () => setGate3Decision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleSelectAllTables) : handleAutoApproveAll}
             className="flex items-center justify-center gap-2 px-4 py-3 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/25 text-accent-green text-sm font-semibold rounded-xl transition-colors"
           >
             <CheckCircle size={15} />
-            {isGate3 ? 'Set Approve' : isGate2 ? 'Select All Tables' : 'Auto-approve All'}
+            {isGate3 ? 'Set Approve' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
           </button>
 
           <div className="p-3 bg-bg-card border border-bg-border rounded-xl">
@@ -606,7 +663,9 @@ function HitlQueue() {
               <Shield size={12} className="text-gray-600 mt-0.5 flex-shrink-0" />
               <p className="text-[10px] text-gray-600 leading-relaxed">
                 {isGate2
-                  ? 'Certified tables become the source set for metadata discovery, profiling, and enrichment.'
+                  ? (isSftpRun
+                    ? 'Gate 2 validates the discovered SFTP feeds. Review entity, source file, sample rows, columns, keys, and measures before approving the feed set.'
+                    : 'Certified tables become the source set for metadata discovery, profiling, and enrichment.')
                   : isGate3
                   ? 'Approving Gate 3 starts bronze, silver, and gold code generation. Rejecting keeps the run paused for rework.'
                   : 'Approvals are final once submitted. Rejected KPIs will be excluded from the final export.'}
@@ -616,7 +675,7 @@ function HitlQueue() {
         </div>
       </div>
 
-      {((isGate2 ? (tableReview?.nominated_tables || []).length > 0 : isGate3 ? true : someDecided)) && (
+      {((isGate2 ? (isSftpRun ? (totalFeedCount > 0) : (tableReview?.nominated_tables || []).length > 0) : isGate3 ? true : someDecided)) && (
         <motion.div
           initial={{ y: 80, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
@@ -634,8 +693,8 @@ function HitlQueue() {
               </>
             ) : isGate2 ? (
               <>
-                <span className="text-accent-green font-semibold">{selectedTableCount} selected</span>
-                <span className="text-gray-500">{Math.max(0, (tableReview?.nominated_tables || []).length - selectedTableCount)} unselected</span>
+                <span className="text-accent-green font-semibold">{isSftpRun ? selectedFeedCount : selectedTableCount} selected</span>
+                <span className="text-gray-500">{Math.max(0, (isSftpRun ? (totalFeedCount - selectedFeedCount) : ((tableReview?.nominated_tables || []).length - selectedTableCount)))} unselected</span>
               </>
             ) : (
               <>
@@ -719,6 +778,87 @@ function StatTile({ label, value }) {
 
 function tableReviewKey(table) {
   return [table.database_name, table.schema_name, table.table_name].filter(Boolean).join('.')
+}
+
+function sftpFeedKey(feed) {
+  return [feed.vendor, feed.entity, feed.file_name || feed.feed_id].filter(Boolean).join('.')
+}
+
+function getSftpFeeds(review) {
+  if (!review) return []
+  if (Array.isArray(review.candidate_feeds) && review.candidate_feeds.length > 0) {
+    return review.candidate_feeds
+  }
+  return review.candidate_feed ? [review.candidate_feed] : []
+}
+
+function SftpFeedReviewBody({ feed }) {
+  const columns = Array.isArray(feed?.columns) ? feed.columns : []
+  const primaryKeys = Array.isArray(feed?.primary_keys) ? feed.primary_keys : []
+  const measures = Array.isArray(feed?.measures) ? feed.measures : []
+  const entities = Array.isArray(feed?.entities) ? feed.entities : []
+
+  return (
+    <div className="min-w-0 flex-1">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Table2 size={15} className="text-text-tertiary" />
+        <h3 className="text-base font-bold text-text-primary break-all">
+          {feed.vendor || 'Vendor'}.{feed.entity || feed.semantic_type || 'feed'}
+        </h3>
+        {feed.semantic_type && (
+          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-accent-blue/10 text-accent-blue border border-accent-blue/20">
+            {feed.semantic_type}
+          </span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 mt-3 text-xs text-text-tertiary">
+        <div><span className="text-gray-500">File:</span> {feed.file_name || 'n/a'}</div>
+        <div><span className="text-gray-500">Format:</span> {feed.format || 'unknown'}</div>
+        <div><span className="text-gray-500">Rows:</span> {Number(feed.sample_row_count || 0)}</div>
+        <div><span className="text-gray-500">Columns:</span> {columns.length}</div>
+      </div>
+
+      {entities.length > 0 && (
+        <p className="text-xs text-text-secondary mt-2">
+          Feed set entities: {entities.join(', ')}
+        </p>
+      )}
+
+      {feed.file_path && (
+        <p className="text-xs text-text-secondary mt-2 break-all">
+          Path: {feed.file_path}
+        </p>
+      )}
+
+      {primaryKeys.length > 0 && (
+        <p className="text-xs text-text-secondary mt-2">
+          Primary keys: {primaryKeys.join(', ')}
+        </p>
+      )}
+
+      {measures.length > 0 && (
+        <p className="text-xs text-text-secondary mt-1">
+          Measures: {measures.join(', ')}
+        </p>
+      )}
+
+      {columns.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-3">
+          {columns.slice(0, 8).map((column) => (
+            <span key={column} className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-bg-base border border-bg-border text-text-secondary">
+              {column}
+            </span>
+          ))}
+          {columns.length > 8 && (
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-bg-base border border-bg-border text-text-secondary">
+              +{columns.length - 8} more
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default HitlQueue

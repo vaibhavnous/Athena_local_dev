@@ -3,7 +3,7 @@
 AUTO-GENERATED GOLD DIMENSION SCRIPT
 
 KPI context: Total Premium Collected Amount
-Source table: silver.silver_policy_transactions
+Source table: silver.silver_claim_payment_expenses
 Expected runtime: Spark / Databricks with Delta support
 
 DO NOT EDIT MANUALLY
@@ -20,8 +20,8 @@ try:
 except Exception:
     print("Could not create schema 'gold' in the current catalog")
 
-SOURCE_TABLE = 'silver.silver_policy_transactions'
-DIMENSIONS = [{'entity': 'policy', 'source_table': 'silver.silver_policy_transactions', 'logical_table': 'policy_transactions', 'columns': ['POLICY_TRANSACTION_TYPE', 'SEGMENT_NAME']}, {'entity': 'product', 'source_table': 'silver.silver_policy_transactions', 'logical_table': 'policy_transactions', 'columns': ['PRODUCT_NAME', 'PRODUCT_GROUP_NAME']}]
+SOURCE_TABLE = 'silver.silver_claim_payment_expenses'
+DIMENSIONS = [{'entity': 'claim', 'source_table': 'silver.silver_claim_payment_expenses', 'logical_table': 'claim_payment_expenses', 'columns': ['UpdateNum', 'ServiceTax', 'PayeeID', 'PayeeName', 'PayeeType', 'ServiceProviderID', 'ServiceProviderName', 'ServiceProviderTypeName', 'PaymentModeID', 'PaymentModeName', 'SurveyType']}]
 
 if not SOURCE_TABLE or not spark.catalog.tableExists(SOURCE_TABLE):
     raise ValueError(f"Missing dimension source table: {SOURCE_TABLE}")

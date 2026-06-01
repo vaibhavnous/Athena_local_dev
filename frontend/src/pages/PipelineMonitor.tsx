@@ -26,6 +26,15 @@ function PipelineMonitor() {
     setSelectedStage(stage)
   }
 
+  const describeRun = (run) => {
+    if (!run) return 'Unknown run'
+    if (run.source === 'sftp' || run.source === 'adls_gen2') {
+      const rows = run.source_row_count ? ` · ${run.source_row_count} rows` : ''
+      return `${run.brd_filename}${rows}`
+    }
+    return run.brd_filename || 'athena_brd.txt'
+  }
+
   return (
     <div className="flex flex-col gap-4 h-full">
       <div className="flex gap-4 flex-1 min-h-0">
@@ -35,7 +44,7 @@ function PipelineMonitor() {
               <div className="flex items-center justify-between mb-1">
                 <div className="min-w-0">
                   <h2 className="text-xs uppercase tracking-widest text-gray-500 font-medium">
-                    Pipeline - {activeRun.brd_filename}
+                    Pipeline - {describeRun(activeRun)}
                   </h2>
                   <div className="mt-2 max-w-[420px]">
                     <select
@@ -45,7 +54,7 @@ function PipelineMonitor() {
                     >
                       {runs.map((run) => (
                         <option key={run.id} value={run.id}>
-                          {run.id} | {run.brd_filename || 'athena_brd.txt'} | {run.status}
+                          {run.id} | {describeRun(run)} | {run.status}
                         </option>
                       ))}
                     </select>

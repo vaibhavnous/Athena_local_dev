@@ -1,0 +1,84 @@
+{
+  "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+  "generated_at": "2026-05-19T19:45:57.774512",
+  "script_count": 7,
+  "scripts": [
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "table": "expenses_outstanding_estimates",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_expenses_outstanding_estimates",
+      "target_table": "silver.silver_expenses_outstanding_estimates",
+      "column_count": 4,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\silver\\silver_transform_3d8b1e79_22a2_436e_ac3f_937e63e85a73_expenses_outstanding_estimates.py"
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "table": "policy_transactions",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_policy_transactions",
+      "target_table": "silver.silver_policy_transactions",
+      "column_count": 37,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\silver\\silver_transform_3d8b1e79_22a2_436e_ac3f_937e63e85a73_policy_transactions.py"
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "table": "indemnity_outstanding_estimates",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_indemnity_outstanding_estimates",
+      "target_table": "silver.silver_indemnity_outstanding_estimates",
+      "column_count": 4,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\silver\\silver_transform_3d8b1e79_22a2_436e_ac3f_937e63e85a73_indemnity_outstanding_estimates.py"
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "table": "claim_information",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_claim_information",
+      "target_table": "silver.silver_claim_information",
+      "column_count": 15,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\silver\\silver_transform_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_information.py"
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "table": "claim_payment_expenses",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_claim_payment_expenses",
+      "target_table": "silver.silver_claim_payment_expenses",
+      "column_count": 23,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\silver\\silver_transform_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_payment_expenses.py"
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "table": "claim_payment_indemnity",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_claim_payment_indemnity",
+      "target_table": "silver.silver_claim_payment_indemnity",
+      "column_count": 23,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\silver\\silver_transform_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_payment_indemnity.py"
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "table": "policy_cover_level_transactions",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "source_table": "bronze.bronze_policy_cover_level_transactions",
+      "target_table": "silver.silver_policy_cover_level_transactions",
+      "column_count": 12,
+      "status": "APPROVED",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\silver\\silver_transform_3d8b1e79_22a2_436e_ac3f_937e63e85a73_policy_cover_level_transactions.py"
+    }
+  ]
+}

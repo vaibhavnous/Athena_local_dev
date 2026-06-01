@@ -37,6 +37,10 @@ def _silver_output_dir() -> str:
     return os.path.join(os.getcwd(), "generated_code", "silver")
 
 
+def _run_slug(run_id: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_]+", "_", str(run_id or "run")).strip("_")[:48] or "run"
+
+
 def _gold_output_dir() -> str:
     return os.path.join(os.getcwd(), "generated_code", "gold")
 
@@ -401,11 +405,12 @@ def _generate_one_table(
 
     output_dir = _silver_output_dir()
     os.makedirs(output_dir, exist_ok=True)
-    script_path = os.path.join(output_dir, f"silver_transform_{table_name}.py")
+    script_path = os.path.join(output_dir, f"silver_transform_{_run_slug(run_id)}_{table_name}.py")
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
 
     return {
+        "run_id": run_id,
         "table": table_name,
         "database_name": table_ref["database_name"],
         "schema_name": table_ref["schema_name"],
@@ -840,14 +845,18 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
 
     generated_at = datetime.utcnow().isoformat()
     bundle = {
+        "run_id": run_id,
         "generated_at": generated_at,
         "script_count": len(results),
         "scripts": results,
     }
 
     os.makedirs(_silver_output_dir(), exist_ok=True)
-    bundle_path = os.path.join(_silver_output_dir(), "silver_scripts.json")
+    bundle_path = os.path.join(_silver_output_dir(), f"{_run_slug(run_id)}_silver_scripts.json")
+    latest_bundle_path = os.path.join(_silver_output_dir(), "silver_scripts.json")
     with open(bundle_path, "w", encoding="utf-8") as f:
+        json.dump(bundle, f, indent=2)
+    with open(latest_bundle_path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
 
     readme_path = _write_silver_readme(results=results, generated_at=generated_at)

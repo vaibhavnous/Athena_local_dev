@@ -86,7 +86,7 @@ function AppShell() {
         )
 
         setRuns(backendRuns)
-        if (!activeRunId || !backendRuns.some((run) => run.id === activeRunId)) {
+        if (!activeRunId) {
           const resumable = backendRuns.find((run) => run.next_gate === 2 || run.next_gate === 3)
           setActiveRun((resumable || backendRuns[0]).id)
         }

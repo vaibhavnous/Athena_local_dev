@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useCallback, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FileText, Loader2, Play, Upload, X } from 'lucide-react'
+import { Database, FileText, FolderOpen, Loader2, Play, Upload, X } from 'lucide-react'
 import * as mammoth from 'mammoth'
 import { startRun, uploadBrd } from '../../api/athenaApi'
 import useAthenaStore from '../../store/useAthenaStore'
@@ -9,12 +9,60 @@ import useAthenaStore from '../../store/useAthenaStore'
 const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024
 
 const DEFAULT_FORM = {
+  source: 'database',
+  sftpEntity: 'transactions',
   brdText: '',
   fileName: '',
   provider: 'azure_openai',
   deployment: '',
   databaseType: 'azure_sql',
   databaseName: 'insurance',
+}
+
+const SOURCE_OPTIONS = [
+  { id: 'database', label: 'Database', icon: Database },
+  { id: 'sftp', label: 'SFTP', icon: FolderOpen },
+  { id: 'adls_gen2', label: 'ADLS Gen2', icon: FolderOpen },
+]
+
+const SFTP_OPTIONS = [
+  {
+    id: 'transactions',
+    name: 'Vendor1 transactions',
+    host: 'localhost:2222',
+    path: '/cash-project/Vendor1/transactions/',
+  },
+  {
+    id: 'employee',
+    name: 'Vendor1 employee',
+    host: 'localhost:2222',
+    path: '/cash-project/Vendor1/employee/',
+  },
+  {
+    id: 'both',
+    name: 'Vendor1 both feeds',
+    host: 'localhost:2222',
+    path: '/cash-project/Vendor1/{transactions,employee}/',
+  },
+]
+
+function buildSftpRunLabel(entity) {
+  if (entity === 'both') return 'sftp:Vendor1:employee+transactions'
+  return `sftp:Vendor1:${entity || 'transactions'}`
+}
+
+function buildAdlsRunLabel(entity) {
+  if (entity === 'both') return 'adls:Vendor1:employee+transactions'
+  return `adls:Vendor1:${entity || 'transactions'}`
+}
+
+function isFileSource(source) {
+  return source === 'sftp' || source === 'adls_gen2'
+}
+
+function buildFileRunLabel(source, entity) {
+  if (source === 'adls_gen2') return buildAdlsRunLabel(entity)
+  return buildSftpRunLabel(entity)
 }
 
 const DATABASE_OPTIONS = {
@@ -132,7 +180,7 @@ function NewRunModal({ isOpen, onClose }) {
 
   const handleSubmit = async (event) => {
     event.preventDefault()
-    if (!form.brdText.trim()) {
+    if (!isFileSource(form.source) && form.source === 'database' && !form.brdText.trim()) {
       setError('Please provide BRD text or upload a file.')
       return
     }
@@ -146,8 +194,14 @@ function NewRunModal({ isOpen, onClose }) {
       }
 
       const run = await startRun({
+        source: form.source,
+        sftp_entity: form.sftpEntity,
         brd_text: form.brdText,
-        brd_filename: form.fileName || 'pasted_brd.txt',
+        brd_filename:
+          form.fileName ||
+          (isFileSource(form.source)
+            ? buildFileRunLabel(form.source, form.sftpEntity)
+            : 'pasted_brd.txt'),
         provider: form.provider,
         deployment: form.deployment || undefined,
         database_type: form.databaseType,
@@ -160,8 +214,14 @@ function NewRunModal({ isOpen, onClose }) {
       addRun({
         id: run.run_id,
         run_id: run.run_id,
-        brd_filename: form.fileName || 'pasted_brd.txt',
+        brd_filename:
+          form.fileName ||
+          (isFileSource(form.source)
+            ? buildFileRunLabel(form.source, form.sftpEntity)
+            : 'pasted_brd.txt'),
         status: run.status || 'RUNNING',
+        source: form.source,
+        sftp_entity: form.sftpEntity,
         provider: form.provider,
         deployment: form.deployment || null,
         started_at: new Date().toISOString(),
@@ -172,14 +232,18 @@ function NewRunModal({ isOpen, onClose }) {
       addNotification({
         type: 'success',
         title: 'Run Started',
-        message: `Pipeline submitted for ${form.fileName || 'pasted_brd.txt'}.`,
+        message: isFileSource(form.source)
+          ? `Pipeline submitted for the ${form.source === 'adls_gen2' ? 'ADLS Gen2' : 'SFTP'} source.`
+          : `Pipeline submitted for ${form.fileName || 'pasted_brd.txt'}.`,
         duration: 4000,
       })
 
       handleClose()
     } catch (submitError) {
       console.error('[NewRunModal] Failed to start run', submitError)
-      setError(submitError.message || 'Failed to start the pipeline run.')
+      const message =
+        submitError?.data?.message || submitError?.message || 'Failed to start the pipeline run.'
+      setError(message)
     } finally {
       setLoading(false)
     }
@@ -208,7 +272,7 @@ function NewRunModal({ isOpen, onClose }) {
               <div>
                 <h2 className="text-lg font-bold text-text-primary">New Pipeline Run</h2>
                 <p className="mt-0.5 text-xs text-text-tertiary">
-                  Submit a BRD to the FastAPI pipeline.
+                  Submit a BRD or choose a configured source for the FastAPI pipeline.
                 </p>
               </div>
               <button
@@ -222,8 +286,114 @@ function NewRunModal({ isOpen, onClose }) {
 
             <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto">
               <div className="space-y-5 p-6">
+                <div className="space-y-3 rounded-lg border border-bg-border bg-bg-base p-4">
+                  <div>
+                    <label className="label">Source Type</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {SOURCE_OPTIONS.map((option) => {
+                        const Icon = option.icon
+                        const active = form.source === option.id
+                        return (
+                          <button
+                            key={option.id}
+                            type="button"
+                            onClick={() =>
+                              setForm((current) => ({
+                                ...current,
+                                source: option.id,
+                              }))
+                            }
+                            className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-3 text-sm font-medium transition-colors ${
+                              active
+                                ? 'border-accent-blue bg-accent-blue/10 text-accent-blue'
+                                : 'border-bg-border text-text-secondary hover:border-gray-600'
+                            }`}
+                          >
+                            <Icon size={15} />
+                            {option.label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                  {isFileSource(form.source) ? (
+                    <>
+                      <div>
+                        <label className="label">
+                          {form.source === 'adls_gen2' ? 'Configured ADLS Gen2 Source' : 'Configured SFTP Source'}
+                        </label>
+                        <select
+                          className="input-field appearance-none"
+                          value={form.sftpEntity}
+                          onChange={(event) =>
+                            setForm((current) => ({ ...current, sftpEntity: event.target.value }))
+                          }
+                        >
+                          {SFTP_OPTIONS.map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      {form.source === 'adls_gen2' ? (
+                        <div className="rounded-lg border border-accent-blue/20 bg-accent-blue/5 p-3 text-xs text-text-secondary">
+                          <div className="font-semibold text-text-primary">Connection Details</div>
+                          <div className="mt-1">Account: https://atheastorage.dfs.core.windows.net</div>
+                          <div className="mt-1 text-text-tertiary">File system: (backend env `ADLS_FILE_SYSTEM`)</div>
+                          <div className="mt-1 text-text-tertiary">Root: cash-project/Vendor1/{form.sftpEntity}/</div>
+                        </div>
+                      ) : (
+                        <div className="rounded-lg border border-accent-blue/20 bg-accent-blue/5 p-3 text-xs text-text-secondary">
+                          <div className="font-semibold text-text-primary">Connection Details</div>
+                          <div className="mt-1">{SFTP_OPTIONS.find((option) => option.id === form.sftpEntity)?.host || SFTP_OPTIONS[0].host}</div>
+                          <div className="mt-1 text-text-tertiary">{SFTP_OPTIONS.find((option) => option.id === form.sftpEntity)?.path || SFTP_OPTIONS[0].path}</div>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="label">Database Type</label>
+                        <select
+                          className="input-field appearance-none"
+                          value={form.databaseType}
+                          onChange={(event) => {
+                            const databaseType = event.target.value
+                            setForm((current) => ({
+                              ...current,
+                              databaseType,
+                              databaseName: DATABASE_OPTIONS[databaseType]?.[0]?.id || '',
+                            }))
+                          }}
+                        >
+                          <option value="azure_sql">Azure SQL</option>
+                          <option value="postgresql">PostgreSQL</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="label">Database Name</label>
+                        <select
+                          className="input-field appearance-none"
+                          value={form.databaseName}
+                          onChange={(event) =>
+                            setForm((current) => ({ ...current, databaseName: event.target.value }))
+                          }
+                        >
+                          {DATABASE_OPTIONS[form.databaseType]?.map((database) => (
+                            <option key={database.id} value={database.id}>
+                              {database.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </>
+                  )}
+                </div>
+
                 <div>
-                  <label className="label">BRD Document</label>
+                  <label className="label">{isFileSource(form.source) ? 'Optional BRD Document' : 'BRD Document'}</label>
                   <div
                     onDragOver={(event) => {
                       event.preventDefault()
@@ -271,53 +441,16 @@ function NewRunModal({ isOpen, onClose }) {
                 </div>
 
                 <div>
-                  <label className="label">BRD Text</label>
+                  <label className="label">{isFileSource(form.source) ? 'Optional BRD Text' : 'BRD Text'}</label>
                   <textarea
                     className="input-field resize-none"
                     rows={8}
-                    placeholder="Paste the business requirements document here..."
+                    placeholder={isFileSource(form.source) ? 'Optional additional business context...' : 'Paste the business requirements document here...'}
                     value={form.brdText}
                     onChange={(event) =>
                       setForm((current) => ({ ...current, brdText: event.target.value }))
                     }
                   />
-                </div>
-
-                <div className="space-y-3 rounded-lg border border-bg-border bg-bg-base p-4">
-                  <div>
-                    <label className="label">Database Type</label>
-                    <select
-                      className="input-field appearance-none"
-                      value={form.databaseType}
-                      onChange={(event) => {
-                        const databaseType = event.target.value
-                        setForm((current) => ({
-                          ...current,
-                          databaseType,
-                          databaseName: DATABASE_OPTIONS[databaseType]?.[0]?.id || '',
-                        }))
-                      }}
-                    >
-                      <option value="azure_sql">Azure SQL</option>
-                      <option value="postgresql">PostgreSQL</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="label">Database Name</label>
-                    <select
-                      className="input-field appearance-none"
-                      value={form.databaseName}
-                      onChange={(event) =>
-                        setForm((current) => ({ ...current, databaseName: event.target.value }))
-                      }
-                    >
-                      {DATABASE_OPTIONS[form.databaseType]?.map((database) => (
-                        <option key={database.id} value={database.id}>
-                          {database.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
                 </div>
 
                 {error && (
@@ -339,7 +472,7 @@ function NewRunModal({ isOpen, onClose }) {
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={loading || !form.brdText.trim()}
+                disabled={loading || (form.source === 'database' && !form.brdText.trim())}
                 className="btn-primary flex flex-1 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {loading ? (

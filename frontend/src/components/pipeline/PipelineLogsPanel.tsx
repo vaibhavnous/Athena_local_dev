@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AlertCircle, X } from 'lucide-react'
 import { usePipelineLogs, PipelineLog } from '../../hooks/usePipelineLogs'
+import useAthenaStore from '../../store/useAthenaStore'
 
 const LOG_LEVELS = ['ALL', 'INFO', 'WARNING', 'ERROR', 'DEBUG'] as const
 
@@ -26,12 +27,25 @@ function eventLabel(eventType?: string | null) {
   return null
 }
 
+function formatStageLabel(stage?: string | null) {
+  const value = String(stage || '').trim()
+  if (!value) return 'General'
+  const normalized = value.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+  if (normalized === 'Sftp Source Ingestion') return 'SFTP Source Ingestion'
+  if (normalized === 'Sftp Feed Discovery') return 'SFTP Feed Discovery'
+  if (normalized === 'Sftp Gate1') return 'SFTP Gate 1'
+  if (normalized === 'Sftp Gate2') return 'SFTP Gate 2'
+  return normalized
+}
+
 interface Props {
   runId?: string | null
   isActive?: boolean
 }
 
 export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
+  const getRunById = useAthenaStore((s) => s.getRunById)
+  const run = getRunById(runId || '')
   const { discoveredRunId, isDiscovering, discoveryError, logs, isLoadingLogs, logsError } =
     usePipelineLogs(runId, isActive)
 
@@ -50,17 +64,17 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
   }, [logs, discoveredRunId])
 
   // Derived data
-  const stageSet = new Set(logs.map((l) => l.stage).filter(Boolean))
+  const stageSet = new Set(logs.map((l) => formatStageLabel(l.stage)).filter(Boolean))
   const uniqueStages = ['ALL', ...Array.from(stageSet as Set<string>)]
 
   const filteredLogs = logs.filter((log) => {
     if (filterLevel !== 'ALL' && log.log_level !== filterLevel) return false
-    if (filterStage !== 'ALL' && log.stage !== filterStage) return false
+    if (filterStage !== 'ALL' && formatStageLabel(log.stage) !== filterStage) return false
     if (
       searchQuery &&
       !log.message?.toLowerCase().includes(searchQuery.toLowerCase()) &&
       !log.step_name?.toLowerCase().includes(searchQuery.toLowerCase()) &&
-      !log.stage?.toLowerCase().includes(searchQuery.toLowerCase())
+      !formatStageLabel(log.stage).toLowerCase().includes(searchQuery.toLowerCase())
     ) {
       return false
     }
@@ -83,7 +97,11 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
         <div className="px-4 py-3 border-b border-bg-border flex items-center justify-between bg-gradient-to-r from-bg-card to-bg-card/50">
           <div className="flex flex-col gap-1">
             <h4 className="text-sm font-semibold text-gray-100">Execution Logs</h4>
-            <p className="text-xs text-gray-500">Real-time pipeline execution monitoring</p>
+            <p className="text-xs text-gray-500">
+              {run?.source === 'sftp' || run?.source === 'adls_gen2'
+                ? `Live file execution for ${run?.brd_filename || runId}`
+                : 'Real-time pipeline execution monitoring'}
+            </p>
           </div>
           <div className="flex items-center gap-2">
             {isDiscovering && (
@@ -221,7 +239,7 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
                               {eventLabel(log.event_type)}
                             </span>
                           )}
-                          {log.stage && <span className="text-gray-300">{log.stage}</span>}
+                          {log.stage && <span className="text-gray-300">{formatStageLabel(log.stage)}</span>}
                           {log.duration_seconds != null && (
                             <span className="text-gray-500 font-mono">{log.duration_seconds.toFixed(2)}s</span>
                           )}
@@ -282,7 +300,7 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
 
                 {selectedLog.stage && (
                   <DetailRow label="Stage">
-                    <span className="text-sm text-gray-200">{selectedLog.stage}</span>
+                    <span className="text-sm text-gray-200">{formatStageLabel(selectedLog.stage)}</span>
                   </DetailRow>
                 )}
 

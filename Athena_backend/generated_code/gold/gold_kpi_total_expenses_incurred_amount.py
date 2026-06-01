@@ -20,7 +20,7 @@ try:
 except Exception:
     print("Could not create schema 'gold' in the current catalog")
 
-RUN_ID = '8c8b190c-56e9-41f6-8329-de7690bc58a8'
+RUN_ID = 'c1f9bd4c-b92a-49fe-bdbf-86cf4eca4489'
 KPI_NAME = 'Total Expenses Incurred Amount'
 SOURCE_TABLE = 'silver.silver_claim_payment_expenses'
 TARGET_TABLE = 'gold.fact_total_expenses_incurred_amount'
@@ -33,7 +33,7 @@ DIMENSION_COLUMNS = ['UpdateNum', 'PaidDate', 'ServiceTax', 'PayeeID', 'PayeeNam
 DIMENSION_SPECS = [{'entity': 'claim', 'source_table': 'silver.silver_claim_payment_expenses', 'logical_table': 'claim_payment_expenses', 'columns': ['UpdateNum', 'ServiceTax', 'PayeeID', 'PayeeName', 'PayeeType', 'ServiceProviderID', 'ServiceProviderName', 'ServiceProviderTypeName', 'PaymentModeID', 'PaymentModeName', 'SurveyType']}]
 TIME_COLUMN = 'PaidDate'
 TIME_GRAIN = 'month'
-BUSINESS_FILTERS = ['Consistent identifiers across systems.', 'No transformations at bronze layer.', 'Data quality handled downstream.']
+BUSINESS_FILTERS = ['Consistent identifiers across systems', 'No transformations at bronze layer', 'Data quality handled downstream']
 JOIN_PATHS = []
 
 if not spark.catalog.tableExists(SOURCE_TABLE):

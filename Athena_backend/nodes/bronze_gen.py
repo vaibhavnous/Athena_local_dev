@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, TypedDict
@@ -105,6 +106,10 @@ def _metadata_for_table(state: Stage01State, table_name: str) -> Dict[str, Any]:
 
 def _bronze_output_dir() -> str:
     return os.path.join(os.getcwd(), "generated_code", "bronze")
+
+
+def _run_slug(run_id: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_]+", "_", str(run_id or "run")).strip("_")[:48] or "run"
 
 
 def _bronze_readme_path() -> str:
@@ -539,6 +544,7 @@ def generate_bronze_script(
     table: str,
     schema: str = "dbo",
     database: str = "insurance",
+    run_id: str = "BRONZE_RUN",
     bronze_catalog: str = "main",
     bronze_schema: str = "bronze",
     source_jdbc_url: str | None = None,
@@ -574,7 +580,7 @@ try:
 except Exception:
     print("Could not create schema '{bronze_schema}' in the current catalog")
 
-RUN_ID = "BRONZE_POC_RUN_001"
+RUN_ID = {run_id!r}
 SOURCE_JDBC_URL = "{source_jdbc_url}"
 
 TARGET_TABLE = "{bronze_schema}.bronze_{table}"
@@ -678,6 +684,7 @@ print(f"SUCCESS: Bronze ingestion completed for {{TARGET_TABLE}}")
 def _generate_one_table(
     table_ref: BronzeTableRef,
     *,
+    run_id: str,
     source_jdbc_url: str | None = None,
     bronze_catalog: str = "main",
     bronze_schema: str = "bronze",
@@ -693,6 +700,7 @@ def _generate_one_table(
         table=table_name,
         schema=schema_name,
         database=database_name,
+        run_id=run_id,
         bronze_catalog=bronze_catalog,
         bronze_schema=bronze_schema,
         source_jdbc_url=resolved_source_jdbc_url,
@@ -713,12 +721,13 @@ def _generate_one_table(
     output_dir = _bronze_output_dir()
     os.makedirs(output_dir, exist_ok=True)
 
-    script_path = os.path.join(output_dir, f"bronze_ingest_{table_name}.py")
+    script_path = os.path.join(output_dir, f"bronze_ingest_{_run_slug(run_id)}_{table_name}.py")
 
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
 
     return {
+        "run_id": run_id,
         "table": table_name,
         "database_name": database_name,
         "schema_name": schema_name,
@@ -740,6 +749,7 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
     new_state = state.copy()
 
     results: List[Dict[str, object]] = []
+    run_id = str(state.get("run_id") or "BRONZE_RUN")
     bronze_catalog = state.get("bronze_catalog") or "main"
     bronze_schema = state.get("bronze_schema") or "bronze"
 
@@ -756,6 +766,7 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
             executor.submit(
                 _generate_one_table,
                 table_ref,
+                run_id=run_id,
                 source_jdbc_url=source_jdbc_url,
                 bronze_catalog=bronze_catalog,
                 bronze_schema=bronze_schema,
@@ -770,14 +781,18 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
 
     # Write bundle summary
     bundle = {
+        "run_id": run_id,
         "generated_at": datetime.utcnow().isoformat(),
         "source_database": table_refs[0]["database_name"],
         "script_count": len(results),
         "scripts": results,
     }
 
-    bundle_path = os.path.join(_bronze_output_dir(), "bronze_scripts.json")
+    bundle_path = os.path.join(_bronze_output_dir(), f"{_run_slug(run_id)}_bronze_scripts.json")
+    latest_bundle_path = os.path.join(_bronze_output_dir(), "bronze_scripts.json")
     with open(bundle_path, "w", encoding="utf-8") as f:
+        json.dump(bundle, f, indent=2)
+    with open(latest_bundle_path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
 
     readme_path = _write_bronze_readme(

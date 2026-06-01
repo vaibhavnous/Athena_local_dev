@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -279,21 +280,98 @@ def _table_key(item: Dict[str, Any]) -> str:
     return f"{item.get('database_name', '')}.{item.get('schema_name', '')}.{item.get('table_name', '')}"
 
 
-def load_bronze_scripts(run_id: str) -> Dict[str, Any]:
-    bundle_path = Path(os.getcwd()) / "generated_code" / "bronze" / "bronze_scripts.json"
+def _run_slug(run_id: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_]+", "_", str(run_id or "run")).strip("_")[:48] or "run"
+
+
+def _script_bundle_path(layer: str, run_id: str) -> Path:
+    output_dir = Path(os.getcwd()) / "generated_code" / layer
+    run_scoped = output_dir / f"{_run_slug(run_id)}_{layer}_scripts.json"
+    return run_scoped if run_scoped.exists() else output_dir / f"{layer}_scripts.json"
+
+
+def _script_matches_run(
+    *,
+    item: Dict[str, Any],
+    bundle_run_id: Any,
+    requested_run_id: str,
+    script_bodies: List[str],
+) -> bool:
+    item_run_id = item.get("run_id")
+    if item_run_id:
+        return str(item_run_id) == requested_run_id
+    if bundle_run_id:
+        return str(bundle_run_id) == requested_run_id
+    return any(requested_run_id in body for body in script_bodies if body)
+
+
+def _read_script_body(script_path_value: Any) -> str:
+    script_path = Path(str(script_path_value or "")) if script_path_value else None
+    if script_path and script_path.exists() and script_path.is_file():
+        return script_path.read_text(encoding="utf-8")
+    return ""
+
+
+def _dedupe_scripts(scripts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for script in scripts:
+        key = (
+            script.get("script_path"),
+            script.get("dimension_script_path"),
+            script.get("target_table"),
+            script.get("source_table"),
+            script.get("table"),
+            script.get("kpi_name"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(script)
+    return deduped
+
+
+def _scripts_from_checkpoint(
+    checkpoint: Dict[str, Any],
+    result_key: str,
+    generated_at_key: str,
+) -> Dict[str, Any]:
+    scripts: List[Dict[str, Any]] = []
+    for item in checkpoint.get(result_key) or []:
+        script_body = _read_script_body(item.get("script_path"))
+        dimension_script_body = _read_script_body(item.get("dimension_script_path"))
+        row = {
+            **item,
+            "run_id": item.get("run_id") or checkpoint.get("run_id"),
+            "script_body": script_body,
+        }
+        if dimension_script_body:
+            row["dimension_script_body"] = dimension_script_body
+        scripts.append(row)
+    return {
+        "run_id": checkpoint.get("run_id"),
+        "generated_at": checkpoint.get(generated_at_key),
+        "scripts": _dedupe_scripts(scripts),
+    }
+
+
+def load_bronze_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    bundle_path = _script_bundle_path("bronze", run_id)
     if not bundle_path.exists():
-        return {"generated_at": None, "scripts": []}
+        return _scripts_from_checkpoint(checkpoint or {}, "bronze_generation_results", "bronze_generated_at")
 
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle_run_id = bundle.get("run_id")
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
-        # Filter scripts by run_id to prevent mixing runs
-        if item.get("run_id") != run_id:
+        script_body = _read_script_body(item.get("script_path"))
+        if not _script_matches_run(
+            item=item,
+            bundle_run_id=bundle_run_id,
+            requested_run_id=run_id,
+            script_bodies=[script_body],
+        ):
             continue
-        script_path = Path(item.get("script_path", ""))
-        script_body = ""
-        if script_path.exists():
-            script_body = script_path.read_text(encoding="utf-8")
         scripts.append(
             {
                 **item,
@@ -301,27 +379,33 @@ def load_bronze_scripts(run_id: str) -> Dict[str, Any]:
             }
         )
 
+    if not scripts and checkpoint:
+        return _scripts_from_checkpoint(checkpoint, "bronze_generation_results", "bronze_generated_at")
+
     return {
+        "run_id": bundle_run_id,
         "generated_at": bundle.get("generated_at"),
-        "scripts": scripts,
+        "scripts": _dedupe_scripts(scripts),
     }
 
 
-def load_silver_scripts(run_id: str) -> Dict[str, Any]:
-    bundle_path = Path(os.getcwd()) / "generated_code" / "silver" / "silver_scripts.json"
+def load_silver_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    bundle_path = _script_bundle_path("silver", run_id)
     if not bundle_path.exists():
-        return {"generated_at": None, "scripts": []}
+        return _scripts_from_checkpoint(checkpoint or {}, "silver_generation_results", "silver_generated_at")
 
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle_run_id = bundle.get("run_id")
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
-        # Filter scripts by run_id to prevent mixing runs
-        if item.get("run_id") != run_id:
+        script_body = _read_script_body(item.get("script_path"))
+        if not _script_matches_run(
+            item=item,
+            bundle_run_id=bundle_run_id,
+            requested_run_id=run_id,
+            script_bodies=[script_body],
+        ):
             continue
-        script_path = Path(item.get("script_path", ""))
-        script_body = ""
-        if script_path.exists():
-            script_body = script_path.read_text(encoding="utf-8")
         scripts.append(
             {
                 **item,
@@ -329,33 +413,34 @@ def load_silver_scripts(run_id: str) -> Dict[str, Any]:
             }
         )
 
+    if not scripts and checkpoint:
+        return _scripts_from_checkpoint(checkpoint, "silver_generation_results", "silver_generated_at")
+
     return {
+        "run_id": bundle_run_id,
         "generated_at": bundle.get("generated_at"),
-        "scripts": scripts,
+        "scripts": _dedupe_scripts(scripts),
     }
 
 
-def load_gold_scripts(run_id: str) -> Dict[str, Any]:
-    bundle_path = Path(os.getcwd()) / "generated_code" / "gold" / "gold_scripts.json"
+def load_gold_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    bundle_path = _script_bundle_path("gold", run_id)
     if not bundle_path.exists():
-        return {"generated_at": None, "scripts": []}
+        return _scripts_from_checkpoint(checkpoint or {}, "gold_generation_results", "gold_generated_at")
 
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle_run_id = bundle.get("run_id")
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
-        # Filter scripts by run_id to prevent mixing runs
-        if item.get("run_id") != run_id:
+        script_body = _read_script_body(item.get("script_path"))
+        dimension_script_body = _read_script_body(item.get("dimension_script_path"))
+        if not _script_matches_run(
+            item=item,
+            bundle_run_id=bundle_run_id,
+            requested_run_id=run_id,
+            script_bodies=[script_body, dimension_script_body],
+        ):
             continue
-        script_path_value = item.get("script_path") or ""
-        script_path = Path(script_path_value) if script_path_value else None
-        script_body = ""
-        if script_path and script_path.exists() and script_path.is_file():
-            script_body = script_path.read_text(encoding="utf-8")
-        dimension_script_path_value = item.get("dimension_script_path") or ""
-        dimension_script_path = Path(dimension_script_path_value) if dimension_script_path_value else None
-        dimension_script_body = ""
-        if dimension_script_path and dimension_script_path.exists() and dimension_script_path.is_file():
-            dimension_script_body = dimension_script_path.read_text(encoding="utf-8")
         scripts.append(
             {
                 **item,
@@ -364,14 +449,19 @@ def load_gold_scripts(run_id: str) -> Dict[str, Any]:
             }
         )
 
+    if not scripts and checkpoint:
+        return _scripts_from_checkpoint(checkpoint, "gold_generation_results", "gold_generated_at")
+
     return {
+        "run_id": bundle_run_id,
         "generated_at": bundle.get("generated_at"),
-        "scripts": scripts,
+        "scripts": _dedupe_scripts(scripts),
     }
 
 
 def build_pipeline_steps(
     *,
+    source: str,
     checkpoint: Dict[str, Any],
     summary: List[Dict[str, Any]],
     pending_gate1: List[Dict[str, Any]],
@@ -384,6 +474,7 @@ def build_pipeline_steps(
     silver_generation_completed: bool,
     gold_generation_completed: bool,
 ) -> List[Dict[str, str]]:
+    source = str(source or "database").lower()
     artifact_types = {str(row.get("artifact_type") or "") for row in summary}
     stages = {str(row.get("stage") or "").lower() for row in summary}
 
@@ -391,7 +482,74 @@ def build_pipeline_steps(
         needle = text.lower()
         return any(needle in stage for stage in stages)
 
-    steps = [
+    if source in {"sftp", "adls_gen2"}:
+        gate1_decision = (checkpoint.get("gate1") or {}).get("decision")
+        gate2_decision = (checkpoint.get("gate2") or {}).get("decision")
+        source_label = "ADLS Gen2" if source == "adls_gen2" else "SFTP"
+        steps = [
+            {
+                "key": "ingestion",
+                "label": "Ingestion",
+                "complete": bool(checkpoint.get("source_ingestion_status") == "COMPLETED" or summary),
+                "detail": f"{source_label} file fetched and parsed",
+            },
+            {
+                "key": "requirements",
+                "label": "Req Extract",
+                "complete": bool(artifact_types.intersection({"REQUIREMENTS", "REQUIREMENTS_WARN"})),
+                "detail": "Context requirements extracted",
+            },
+            {
+                "key": "kpis",
+                "label": "KPI Extract",
+                "complete": bool("KPIS" in artifact_types or checkpoint.get("kpis")),
+                "detail": "KPI candidates generated",
+            },
+            {
+                "key": "gate1",
+                "label": "Gate 1",
+                "complete": gate1_decision == "APPROVED",
+                "detail": "KPI governance review",
+            },
+            {
+                "key": "discovery",
+                "label": "Feed Discovery",
+                "complete": bool(checkpoint.get("candidate_feed")),
+                "detail": "Feed candidate identified from file",
+            },
+            {
+                "key": "gate2",
+                "label": "Gate 2",
+                "complete": gate2_decision == "APPROVED",
+                "detail": "Feed governance review",
+            },
+            {
+                "key": "schema",
+                "label": "Schema Snapshot",
+                "complete": bool("SFTP_SCHEMA_SNAPSHOT" in artifact_types or checkpoint.get("metadata_status") == "COMPLETED"),
+                "detail": "Approved feed schema captured",
+            },
+            {
+                "key": "profiling",
+                "label": "Column Profiling",
+                "complete": bool("SFTP_COLUMN_PROFILING" in artifact_types or checkpoint.get("column_profiling_status") == "COMPLETED"),
+                "detail": "Sample-based feed profiling completed",
+            },
+            {
+                "key": "enrichment",
+                "label": "Semantic Enrichment",
+                "complete": bool("ENRICHED_METADATA" in artifact_types or checkpoint.get("semantic_enrichment_status") == "COMPLETED"),
+                "detail": "File-feed semantics classified",
+            },
+            {
+                "key": "gate3",
+                "label": "Gate 3",
+                "complete": bool("GATE3_APPROVED_ENRICHMENT" in artifact_types or checkpoint.get("enrichment_review_status") == "COMPLETED"),
+                "detail": "Semantic enrichment review",
+            },
+        ]
+    else:
+        steps = [
         {
             "key": "ingestion",
             "label": "Ingestion",
@@ -481,7 +639,7 @@ def build_pipeline_steps(
             "complete": bool(gold_generation_completed),
             "detail": "Gold KPI scripts generated",
         },
-    ]
+        ]
 
     last_complete_index = -1
     for index, step in enumerate(steps):
@@ -521,8 +679,19 @@ def build_pipeline_steps(
     return steps
 
 
+def apply_waiting_stage_state(steps: List[Dict[str, Any]], gate_key: Optional[str]) -> List[Dict[str, Any]]:
+    if not gate_key:
+        return steps
+    for step in steps:
+        if step.get("key") == gate_key:
+            step["state"] = "HITL_WAIT"
+            break
+    return steps
+
+
 def get_run_context(run_id: str) -> Dict[str, Any]:
     checkpoint = load_checkpoint_state(run_id) or {}
+    source_value = str(checkpoint.get("source") or "database").lower()
     summary = fetch_run_summary(run_id)
     pending_gate1 = get_pending_items(run_id, 1)
     completed_gate1 = get_completed_items(run_id, 1)
@@ -552,6 +721,14 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     )
     if downstream_progress_exists:
         pending_gate1 = []
+
+    # For SFTP runs, Gate 2 is feed governance, not table nomination.
+    # Ensure we don't render DB-table Gate 2 panels for SFTP runs.
+    if source_value in {"sftp", "adls_gen2"}:
+        nominated_tables = []
+        certified_tables = []
+        pending_gate1 = []  # SFTP gate1 is tracked via checkpoint.gate1, not SQL queue.
+        completed_gate1 = []
     bronze_generation_completed = any(
         row.get("artifact_type") in {"BRONZE_GENERATION", "BRONZE_SCRIPTS"}
         or str(row.get("stage", "")).lower().startswith("bronze")
@@ -567,9 +744,9 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         or str(row.get("stage", "")).lower().startswith("gold")
         for row in summary
     ) or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
-    bronze = load_bronze_scripts(run_id) if gate3_payload or bronze_generation_completed else {"generated_at": None, "scripts": []}
-    silver = load_silver_scripts(run_id) if silver_generation_completed else {"generated_at": None, "scripts": []}
-    gold = load_gold_scripts(run_id) if gold_generation_completed else {"generated_at": None, "scripts": []}
+    bronze = load_bronze_scripts(run_id, checkpoint) if gate3_payload or bronze_generation_completed else {"generated_at": None, "scripts": []}
+    silver = load_silver_scripts(run_id, checkpoint) if silver_generation_completed else {"generated_at": None, "scripts": []}
+    gold = load_gold_scripts(run_id, checkpoint) if gold_generation_completed else {"generated_at": None, "scripts": []}
 
     enriched_columns = enriched_payload.get("columns", []) if isinstance(enriched_payload, dict) else []
     enriched_joins = enriched_payload.get("joins", []) if isinstance(enriched_payload, dict) else []
@@ -589,7 +766,22 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
 
     next_gate = None
     resume_message = None
-    if pending_gate1:
+    if source_value in {"sftp", "adls_gen2"}:
+        gate1_decision = (checkpoint.get("gate1") or {}).get("decision")
+        gate2_decision = (checkpoint.get("gate2") or {}).get("decision")
+        if gate1_decision in {None, ""}:
+            next_gate = 1
+            resume_message = "Gate 1 is pending. Review KPI items before continuing."
+        elif gate1_decision == "APPROVED" and (gate2_decision in {None, ""}):
+            next_gate = 2
+            resume_message = "Gate 2 is pending. Review the discovered feed before continuing."
+        elif gate2_decision == "APPROVED":
+            resume_message = "Gate 2 is complete."
+        elif gate1_decision == "REJECTED":
+            resume_message = "Gate 1 was rejected."
+        elif gate2_decision == "REJECTED":
+            resume_message = "Gate 2 was rejected."
+    elif pending_gate1:
         next_gate = 1
         resume_message = "Gate 1 is pending. Review the KPI items below."
     elif nominated_tables and not certified_tables:
@@ -617,6 +809,7 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     if gold_generation_completed:
         status = "PIPELINE_COMPLETED"
     pipeline_steps = build_pipeline_steps(
+        source=str(checkpoint.get("source") or "database"),
         checkpoint=checkpoint,
         summary=summary,
         pending_gate1=pending_gate1,
@@ -629,7 +822,11 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         silver_generation_completed=silver_generation_completed,
         gold_generation_completed=gold_generation_completed,
     )
-    current_pipeline_step = next((step for step in pipeline_steps if step["state"] == "running"), None)
+    waiting_gate_key = "gate1" if next_gate == 1 else "gate2" if next_gate == 2 else "gate3" if next_gate == 3 else None
+    pipeline_steps = apply_waiting_stage_state(pipeline_steps, waiting_gate_key)
+    current_pipeline_step = next((step for step in pipeline_steps if str(step.get("state")).upper() == "RUNNING"), None)
+    if not current_pipeline_step and waiting_gate_key:
+        current_pipeline_step = next((step for step in pipeline_steps if step["key"] == waiting_gate_key), None)
     if not current_pipeline_step and status == "PIPELINE_COMPLETED":
         current_pipeline_step = {
             "key": "completed",
@@ -672,21 +869,35 @@ def start_pipeline(
     *,
     brd_text: Optional[str] = None,
     input_path: Optional[str] = None,
+    source: Optional[str] = None,
     source_databases: Optional[List[str]] = None,
+    sftp_entity: Optional[str] = None,
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    from graph import app as graph_app
-
     run_id = run_id or str(uuid.uuid4())
     default_source_db = config["azure_sql"].get("source_database") or "insurance"
+    source_value = str(source or "database").lower()
+    file_sources = {"sftp", "adls_gen2"}
     initial_state: Dict[str, Any] = {
         "brd_text": brd_text or input_path or "",
         "run_id": run_id,
         "metadata": {},
         "status": "PENDING",
+        "source": source_value,
+        "sftp_entity": str(sftp_entity or "transactions").lower(),
         "source_databases": source_databases or [default_source_db],
     }
-    result = graph_app.invoke(initial_state, {"configurable": {"thread_id": run_id}})
+
+    if source_value in file_sources:
+        from source_ingestion_pipeline import build_source_ingestion_graph
+
+        graph_app = build_source_ingestion_graph()
+        result = graph_app.invoke(initial_state)
+    else:
+        from graph import app as graph_app
+
+        result = graph_app.invoke(initial_state, {"configurable": {"thread_id": run_id}})
+
     return {
         "run_id": run_id,
         "result": result,

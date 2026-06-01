@@ -1,0 +1,121 @@
+{
+  "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+  "generated_at": "2026-05-19T19:45:58.099947",
+  "script_count": 2,
+  "dimension_script_count": 2,
+  "blocked_count": 8,
+  "contract_status": "READY_WITH_WARNINGS",
+  "llm_enabled": false,
+  "scripts": [
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "kpi_name": "Claims Record Count",
+      "status": "APPROVED",
+      "source_table": "silver.silver_policy_transactions",
+      "target_table": "gold.fact_claims_record_count",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\gold\\gold_kpi_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claims_record_count.py",
+      "dimension_script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\gold\\gold_dim_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claims_record_count.py",
+      "generation_mode": "DETERMINISTIC",
+      "fallback_reason": null,
+      "time_grain": "month",
+      "dimension_count": 12,
+      "kimball_dimension_count": 3,
+      "join_count": 2
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "kpi_name": "Policy Record Count",
+      "status": "APPROVED",
+      "source_table": "silver.silver_policy_transactions",
+      "target_table": "gold.fact_policy_record_count",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\gold\\gold_kpi_3d8b1e79_22a2_436e_ac3f_937e63e85a73_policy_record_count.py",
+      "dimension_script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\gold\\gold_dim_3d8b1e79_22a2_436e_ac3f_937e63e85a73_policy_record_count.py",
+      "generation_mode": "DETERMINISTIC",
+      "fallback_reason": null,
+      "time_grain": "month",
+      "dimension_count": 12,
+      "kimball_dimension_count": 3,
+      "join_count": 2
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "kpi_name": "Claims Data Ingestion Rate",
+      "status": "BLOCKED",
+      "reason": "Gold contract mapping is incomplete or requires formula certification.",
+      "source_table": "silver.silver_policy_transactions",
+      "target_table": "gold.fact_claims_data_ingestion_rate",
+      "script_path": null,
+      "dimension_script_path": null
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "kpi_name": "Policy Data Ingestion Rate",
+      "status": "BLOCKED",
+      "reason": "Gold contract mapping is incomplete or requires formula certification.",
+      "source_table": "silver.silver_policy_transactions",
+      "target_table": "gold.fact_policy_data_ingestion_rate",
+      "script_path": null,
+      "dimension_script_path": null
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "kpi_name": "Identifier Consistency Rate",
+      "status": "BLOCKED",
+      "reason": "Gold contract mapping is incomplete or requires formula certification.",
+      "source_table": "silver.silver_policy_transactions",
+      "target_table": "gold.fact_identifier_consistency_rate",
+      "script_path": null,
+      "dimension_script_path": null
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "kpi_name": "Claims Record Traceability Percentage",
+      "status": "BLOCKED",
+      "reason": "Gold contract mapping is incomplete or requires formula certification.",
+      "source_table": "silver.silver_policy_transactions",
+      "target_table": "gold.fact_claims_record_traceability_percentage",
+      "script_path": null,
+      "dimension_script_path": null
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "kpi_name": "Policy Record Traceability Percentage",
+      "status": "BLOCKED",
+      "reason": "Gold contract mapping is incomplete or requires formula certification.",
+      "source_table": "silver.silver_policy_transactions",
+      "target_table": "gold.fact_policy_record_traceability_percentage",
+      "script_path": null,
+      "dimension_script_path": null
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "kpi_name": "Claims Data Ingestion Duration",
+      "status": "BLOCKED",
+      "reason": "Gold contract mapping is incomplete or requires formula certification.",
+      "source_table": "silver.silver_policy_transactions",
+      "target_table": "gold.fact_claims_data_ingestion_duration",
+      "script_path": null,
+      "dimension_script_path": null
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "kpi_name": "Policy Data Ingestion Duration",
+      "status": "BLOCKED",
+      "reason": "Gold contract mapping is incomplete or requires formula certification.",
+      "source_table": "silver.silver_policy_transactions",
+      "target_table": "gold.fact_policy_data_ingestion_duration",
+      "script_path": null,
+      "dimension_script_path": null
+    },
+    {
+      "run_id": "3d8b1e79-22a2-436e-ac3f-937e63e85a73",
+      "kpi_name": "Claims to Policy Linkage Ratio",
+      "status": "BLOCKED",
+      "reason": "Gold contract mapping is incomplete or requires formula certification.",
+      "source_table": "silver.silver_policy_transactions",
+      "target_table": "gold.fact_claims_to_policy_linkage_ratio",
+      "script_path": null,
+      "dimension_script_path": null
+    }
+  ]
+}

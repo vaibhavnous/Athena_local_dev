@@ -39,6 +39,9 @@ from services.pipeline_runtime import (
     submit_gate2_review,
     submit_gate3_review,
 )
+from services.sftp_runtime import get_sftp_run_context, start_sftp_pipeline
+from services.sftp_runtime import build_sftp_display_name
+from sftp_nodes.hitl import submit_sftp_gate1_review, submit_sftp_gate2_review, submit_sftp_gate3_review
 
 
 app = FastAPI(title="Athena Backend API", version="1.0.0")
@@ -87,6 +90,7 @@ async def athena_http_exception_handler(request: Request, exc: HTTPException) ->
 class PipelineRunRequest(BaseModel):
     brd_text: str = Field(default="")
     brd_filename: Optional[str] = None
+    source: Optional[str] = "database"
     provider: Optional[str] = "azure_openai"
     deployment: Optional[str] = None
     budget: Optional[float] = None
@@ -95,6 +99,7 @@ class PipelineRunRequest(BaseModel):
     database_name: Optional[str] = None
     database_type: Optional[str] = None
     source_databases: Optional[List[str]] = None
+    sftp_entity: Optional[str] = "transactions"
 
 
 class HitlDecision(BaseModel):
@@ -124,6 +129,9 @@ def _pipeline_schema() -> str:
         or "dbo"
     )
 
+def _is_file_source(source: Optional[str]) -> bool:
+    return str(source or "").lower() in {"sftp", "adls_gen2"}
+
 
 def _json_loads(value: Any) -> Any:
     if not value:
@@ -140,19 +148,35 @@ def _run_pipeline_background(
     *,
     run_id: str,
     brd_text: str,
+    source: Optional[str],
     source_databases: Optional[List[str]],
+    sftp_entity: Optional[str],
 ) -> None:
     try:
-        result = start_pipeline(
-            brd_text=brd_text,
-            source_databases=source_databases,
-            run_id=run_id,
-        )
+        existing_checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+        if _is_file_source(source):
+            result = start_sftp_pipeline(
+                run_id=run_id,
+                brd_text=brd_text,
+                sftp_entity=sftp_entity,
+                source=str(source or "sftp").lower(),
+            )
+        else:
+            result = start_pipeline(
+                brd_text=brd_text,
+                source=source,
+                source_databases=source_databases,
+                sftp_entity=sftp_entity,
+                run_id=run_id,
+            )
         state = result.get("result") if isinstance(result, dict) else {}
         if isinstance(state, dict):
             pending_gate1 = get_pending_items(run_id, 1)
-            state["status"] = "HITL_WAIT" if pending_gate1 else state.get("status", "COMPLETED")
-            save_checkpoint_state(run_id, {**state, "run_id": run_id})
+            if _is_file_source(state.get("source") or source):
+                state["status"] = state.get("status", "COMPLETED")
+            else:
+                state["status"] = "HITL_WAIT" if pending_gate1 else state.get("status", "COMPLETED")
+            save_checkpoint_state(run_id, {**existing_checkpoint, **state, "run_id": run_id})
     except Exception as exc:
         checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
         checkpoint.update({"status": "FAILED", "error": str(exc)})
@@ -167,8 +191,10 @@ def _submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             _run_pipeline_background,
             run_id=run_id,
             brd_text=payload.brd_text,
+            source=payload.source,
             source_databases=payload.source_databases
             or ([payload.database_name] if payload.database_name else None),
+            sftp_entity=payload.sftp_entity,
         )
         BACKGROUND_JOBS[job_key] = future
 
@@ -298,6 +324,12 @@ def _status_from_context(context: Dict[str, Any]) -> str:
     return status
 
 
+def _display_run_name(checkpoint: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> str:
+    if _is_file_source(checkpoint.get("source")):
+        return (context or {}).get("display_name") or build_sftp_display_name(checkpoint)
+    return checkpoint.get("brd_filename") or "athena_brd.txt"
+
+
 def _iso_or_none(value: Any) -> Optional[str]:
     if not value:
         return None
@@ -310,6 +342,10 @@ def _stage_key(value: Any) -> Optional[str]:
     text = str(value or "").lower().replace("_", " ")
     if not text:
         return None
+    if "feed discovery" in text or "candidate feed" in text:
+        return "discovery"
+    if "source ingestion" in text or "sftp source" in text:
+        return "ingestion"
     if "ingestion" in text:
         return "ingestion"
     if "memory" in text:
@@ -324,6 +360,8 @@ def _stage_key(value: Any) -> Optional[str]:
         return "nomination"
     if "gate2" in text or "gate 2" in text or "hitl table" in text:
         return "gate2"
+    if "schema snapshot" in text or "sftp metadata discovery" in text:
+        return "schema"
     if "metadata discovery" in text:
         return "discovery"
     if "column profiling" in text:
@@ -432,6 +470,8 @@ def _ui_stages(context: Dict[str, Any], run_id: str) -> List[Dict[str, Any]]:
                     if raw_state in {"COMPLETE", "COMPLETED"}
                     else "FAILED"
                     if raw_state == "FAILED"
+                    else "HITL_WAIT"
+                    if raw_state in {"HITL_WAIT", "PAUSED_FOR_HITL"}
                     else "RUNNING"
                     if raw_state in {"RUNNING", "IN_PROGRESS"}
                     else "PENDING"
@@ -518,6 +558,8 @@ def _summary_stage_list(
                     if raw_state in {"COMPLETE", "COMPLETED"}
                     else "FAILED"
                     if raw_state == "FAILED"
+                    else "HITL_WAIT"
+                    if raw_state in {"HITL_WAIT", "PAUSED_FOR_HITL"}
                     else "RUNNING"
                     if raw_state in {"RUNNING", "IN_PROGRESS"}
                     else "PENDING"
@@ -628,6 +670,42 @@ def _summary_status(
 
 def _ui_run_summary(run_id: str) -> Dict[str, Any]:
     checkpoint = load_checkpoint_state(run_id) or {}
+    if _is_file_source(checkpoint.get("source")):
+        context = get_sftp_run_context(run_id)
+        summary = context.get("summary") or []
+        checkpoint = context.get("checkpoint") or checkpoint
+        pipeline_steps = context.get("pipeline_steps") or []
+        status = _summary_status(
+            checkpoint=checkpoint,
+            next_gate=context.get("next_gate"),
+            bronze_generation_completed=bool(context.get("bronze_generation_completed")),
+            silver_generation_completed=bool(context.get("silver_generation_completed")),
+            gold_generation_completed=bool(context.get("gold_generation_completed")),
+        )
+        return {
+            "id": run_id,
+            "run_id": run_id,
+            "brd_filename": _display_run_name(checkpoint, context),
+            "source": str(checkpoint.get("source") or "sftp"),
+            "status": status,
+            "provider": checkpoint.get("provider") or "azure_openai",
+            "deployment": checkpoint.get("deployment"),
+            "started_at": summary[0].get("stored_at") if summary else None,
+            "completed_at": summary[-1].get("stored_at") if status == "SUCCESS" and summary else None,
+            "cache_hit": "NONE",
+            "cache_score": 0,
+            "extraction_path": checkpoint.get("extraction_path") or checkpoint.get("kpi_source") or "SFTP_GRAPH",
+            "total_tokens": sum(int(row.get("token_count") or 0) for row in summary),
+            "total_cost": sum(float(row.get("cost_usd") or 0) for row in summary),
+            "stages": _summary_stage_list(checkpoint=checkpoint, summary=summary, pipeline_steps=pipeline_steps),
+            "next_gate": context.get("next_gate"),
+            "resume_message": context.get("resume_message"),
+            "script_counts": {"bronze": 0, "silver": 0, "gold": 0},
+            "sftp_entity": context.get("sftp_entity"),
+            "source_row_count": context.get("source_row_count"),
+            "source_columns": context.get("source_columns") or [],
+        }
+
     summary = fetch_run_summary(run_id)
     nominated_tables = checkpoint.get("nominated_tables") or []
     certified_tables = checkpoint.get("certified_tables") or []
@@ -662,6 +740,7 @@ def _ui_run_summary(run_id: str) -> Dict[str, Any]:
         or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
     )
     pipeline_steps = build_pipeline_steps(
+        source=str(checkpoint.get("source") or "database"),
         checkpoint=checkpoint,
         summary=summary,
         pending_gate1=[],
@@ -693,6 +772,7 @@ def _ui_run_summary(run_id: str) -> Dict[str, Any]:
         "id": run_id,
         "run_id": run_id,
         "brd_filename": checkpoint.get("brd_filename") or "athena_brd.txt",
+        "source": checkpoint.get("source") or "database",
         "status": status,
         "provider": checkpoint.get("provider") or "azure_openai",
         "deployment": checkpoint.get("deployment"),
@@ -770,7 +850,11 @@ def _hitl_decisions(run_id: str, context: Dict[str, Any]) -> List[Dict[str, Any]
 
 
 def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
-    context = get_run_context(run_id)
+    checkpoint_hint = load_checkpoint_state(run_id) or {}
+    if _is_file_source(checkpoint_hint.get("source")):
+        context = get_sftp_run_context(run_id)
+    else:
+        context = get_run_context(run_id)
     summary = context.get("summary") or []
     checkpoint = context.get("checkpoint") or {}
     total_tokens = sum(int(row.get("token_count") or 0) for row in summary)
@@ -783,7 +867,8 @@ def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
     payload = {
         "id": run_id,
         "run_id": run_id,
-        "brd_filename": checkpoint.get("brd_filename") or "athena_brd.txt",
+        "brd_filename": _display_run_name(checkpoint, context),
+        "source": checkpoint.get("source") or "database",
         "status": status,
         "provider": checkpoint.get("provider") or "azure_openai",
         "deployment": checkpoint.get("deployment"),
@@ -811,6 +896,11 @@ def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
         "next_gate": context.get("next_gate"),
         "resume_message": context.get("resume_message"),
         "databricks_run_id": run_id,
+        "sftp_entity": context.get("sftp_entity") or checkpoint.get("sftp_entity"),
+        "candidate_feed": (context.get("candidate_feed") or checkpoint.get("candidate_feed")) if _is_file_source(checkpoint.get("source")) else None,
+        "candidate_feeds": (context.get("candidate_feeds") or checkpoint.get("candidate_feeds") or []) if _is_file_source(checkpoint.get("source")) else [],
+        "source_row_count": context.get("source_row_count") or checkpoint.get("source_row_count"),
+        "source_columns": context.get("source_columns") or checkpoint.get("source_columns") or [],
     }
     if include_scripts:
         payload.update(
@@ -838,6 +928,10 @@ def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
 
 def _maybe_resume_gate1(run_id: str) -> None:
     if get_pending_items(run_id, 1):
+        return
+    checkpoint = load_checkpoint_state(run_id) or {}
+    if _is_file_source(checkpoint.get("source")):
+        submit_background(run_id, "gate1", submit_sftp_gate1_review, run_id, True)
         return
     submit_background(run_id, "gate1", submit_gate1_review, run_id, [])
 
@@ -868,7 +962,9 @@ def _read_logs(run_id: str, limit: int = 1000, since: Optional[str] = None) -> L
     if not log_path.exists():
         return []
 
-    raw_lines = _tail_lines(log_path, max(limit * 20, 1000))
+    # This is called frequently by the UI. Keep the tail window bounded so we
+    # don't repeatedly parse huge files on every poll.
+    raw_lines = _tail_lines(log_path, max(limit * 5, 2000))
 
     logs: List[Dict[str, Any]] = []
     for line_number, line in enumerate(raw_lines):
@@ -921,39 +1017,35 @@ def health() -> Dict[str, str]:
 
 @app.post("/pipeline/run")
 def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
-    if not payload.brd_text.strip():
+    source = str(payload.source or "database").lower()
+    if not _is_file_source(source) and not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
     run_id = str(uuid.uuid4())
 
-    # Keep this endpoint fast and deterministic: enqueue the run first, and then
-    # persist the checkpoint state in the background. If SQL is unreachable, the
-    # background worker will mark the run FAILED and the UI can show that error.
+    try:
+        existing = load_checkpoint_state(run_id) or {"run_id": run_id}
+        save_checkpoint_state(
+            run_id,
+            {
+                **existing,
+                "run_id": run_id,
+                "status": existing.get("status") or "RUNNING",
+                "brd_text": existing.get("brd_text") or payload.brd_text,
+                "brd_filename": existing.get("brd_filename") or payload.brd_filename,
+                "source": existing.get("source") or payload.source or "database",
+                "provider": existing.get("provider") or payload.provider,
+                "deployment": existing.get("deployment") or payload.deployment,
+                "source_databases": existing.get("source_databases")
+                or payload.source_databases
+                or ([payload.database_name] if payload.database_name else None),
+                "sftp_entity": existing.get("sftp_entity") or payload.sftp_entity or "transactions",
+            },
+        )
+    except Exception as exc:
+        logger.exception("Initial checkpoint save failed for run_id=%s", run_id)
+        raise HTTPException(status_code=503, detail=f"Failed to initialize run checkpoint: {exc}") from exc
+
     _submit_pipeline_start(run_id, payload)
-
-    def _persist_initial_checkpoint() -> None:
-        try:
-            save_checkpoint_state(
-                run_id,
-                {
-                    "run_id": run_id,
-                    "status": "RUNNING",
-                    "brd_text": payload.brd_text,
-                    "brd_filename": payload.brd_filename,
-                    "provider": payload.provider,
-                    "deployment": payload.deployment,
-                    "source_databases": payload.source_databases
-                    or ([payload.database_name] if payload.database_name else None),
-                },
-            )
-        except Exception as exc:
-            logger.exception("Initial checkpoint save failed for run_id=%s", run_id)
-            try:
-                save_checkpoint_state(run_id, {"run_id": run_id, "status": "FAILED", "error": str(exc)})
-            except Exception:
-                # If SQL is entirely unavailable, there's nothing else to do here.
-                pass
-
-    BACKGROUND_EXECUTOR.submit(_persist_initial_checkpoint)
     # Keep backward-compatible semantics for the UI: a submitted run is effectively running.
     return {"run_id": run_id, "status": "RUNNING"}
 
@@ -1021,17 +1113,26 @@ def table_reviews(run_id: str) -> Dict[str, Any]:
         run = _ui_run(run_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    checkpoint = load_checkpoint_state(run_id) or {}
     return {
         "run_id": run_id,
+        "source": run.get("source"),
         "next_gate": run.get("next_gate"),
         "resume_message": run.get("resume_message"),
         "nominated_tables": run.get("nominated_tables") or [],
         "certified_tables": run.get("certified_tables") or [],
+        "candidate_feed": checkpoint.get("candidate_feed") if _is_file_source(run.get("source")) else None,
+        "candidate_feeds": (checkpoint.get("candidate_feeds") or []) if _is_file_source(run.get("source")) else [],
     }
 
 
 @app.post("/table-reviews/{run_id}")
 def submit_table_reviews(run_id: str, payload: Gate2DecisionPayload) -> Dict[str, Any]:
+    checkpoint = load_checkpoint_state(run_id) or {}
+    if _is_file_source(checkpoint.get("source")):
+        submit_background(run_id, "gate2", submit_sftp_gate2_review, run_id, True)
+        return {"run_id": run_id, "status": "SUBMITTED", "approve": True}
+
     approved_tables = [item for item in payload.approved_tables if str(item).strip()]
     if not approved_tables:
         raise HTTPException(status_code=400, detail="At least one table must be approved for Gate 2.")
@@ -1063,6 +1164,10 @@ def enrichment_reviews(run_id: str) -> Dict[str, Any]:
 
 @app.post("/enrichment-reviews/{run_id}")
 def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict[str, Any]:
+    checkpoint = load_checkpoint_state(run_id) or {}
+    if _is_file_source(checkpoint.get("source")):
+        submit_background(run_id, "gate3", submit_sftp_gate3_review, run_id, payload.approve)
+        return {"run_id": run_id, "status": "SUBMITTED", "approve": payload.approve}
     submit_background(run_id, "gate3", submit_gate3_review, run_id, payload.approve)
     return {"run_id": run_id, "status": "SUBMITTED", "approve": payload.approve}
 
@@ -1210,10 +1315,10 @@ def discover_logs_status(run_id: str) -> Dict[str, Any]:
 
 
 @app.get("/logs/{run_id}")
-def logs(run_id: str, limit: int = 1000) -> Dict[str, Any]:
+def logs(run_id: str, limit: int = 300) -> Dict[str, Any]:
     return {"runId": run_id, "logs": _read_logs(run_id, limit=limit)}
 
 
 @app.get("/logs/{run_id}/since/{since_timestamp}")
-def logs_since(run_id: str, since_timestamp: str) -> Dict[str, Any]:
-    return {"runId": run_id, "logs": _read_logs(run_id, since=since_timestamp)}
+def logs_since(run_id: str, since_timestamp: str, limit: int = 300) -> Dict[str, Any]:
+    return {"runId": run_id, "logs": _read_logs(run_id, limit=limit, since=since_timestamp)}

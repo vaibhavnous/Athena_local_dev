@@ -24,7 +24,7 @@ try:
 except Exception:
     print("Could not create schema 'silver' in the current catalog")
 
-RUN_ID = "8c8b190c-56e9-41f6-8329-de7690bc58a8"
+RUN_ID = "c1f9bd4c-b92a-49fe-bdbf-86cf4eca4489"
 SOURCE_TABLE = "bronze.bronze_claim_payment_indemnity"
 TARGET_TABLE = "silver.silver_claim_payment_indemnity"
 TEMP_VIEW = "silver_src_claim_payment_indemnity"

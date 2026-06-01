@@ -210,6 +210,7 @@ function HorizontalBubbleNode({ stage, index, onClick, compact = false }) {
 function HorizontalConnector({ upstream, downstream, compact }) {
   const upstreamStatus = String(upstream.status || '').toUpperCase()
   const isRunning = upstreamStatus === 'RUNNING'
+  const isHitlWait = upstreamStatus === 'HITL_WAIT' || upstreamStatus === 'PAUSED_FOR_HITL'
   const isActive = upstreamStatus === 'COMPLETED' || upstreamStatus === 'RUNNING'
 
   return (
@@ -232,6 +233,20 @@ function HorizontalConnector({ upstream, downstream, compact }) {
             className="dag-connector-animated"
           />
         </svg>
+      ) : isHitlWait ? (
+        <svg width="100%" height="1.6" className="overflow-visible" style={{ display: 'block', position: 'absolute', left: 0, top: 0 }} preserveAspectRatio="none">
+          <line
+            x1="0"
+            y1="0.8"
+            x2="100%"
+            y2="0.8"
+            stroke="#f59e0b"
+            strokeWidth="1.6"
+            strokeDasharray="2.4 2.4"
+            strokeLinecap="round"
+            className="dag-connector-animated"
+          />
+        </svg>
       ) : isActive ? (
         // Solid connector with gradient
         <div style={{ height: '1.6px' }} className="w-full bg-gradient-to-r from-accent-green/60 via-accent-green/40 to-bg-border" />
@@ -249,6 +264,7 @@ function HorizontalConnector({ upstream, downstream, compact }) {
 function VerticalConnector({ upstream, downstream }) {
   const upstreamStatus = String(upstream.status || '').toUpperCase()
   const isRunning = upstreamStatus === 'RUNNING'
+  const isHitlWait = upstreamStatus === 'HITL_WAIT' || upstreamStatus === 'PAUSED_FOR_HITL'
   const isActive = upstreamStatus === 'COMPLETED' || upstreamStatus === 'RUNNING'
 
   return (
@@ -267,6 +283,20 @@ function VerticalConnector({ upstream, downstream }) {
             stroke="#3b82f6"
             strokeWidth="1.6"
             strokeDasharray="3.2 2.4"
+            strokeLinecap="round"
+            className="dag-connector-animated"
+          />
+        </svg>
+      ) : isHitlWait ? (
+        <svg width="1.6" height="100%" className="overflow-visible" style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} preserveAspectRatio="none">
+          <line
+            x1="0.8"
+            y1="0"
+            x2="0.8"
+            y2="100%"
+            stroke="#f59e0b"
+            strokeWidth="1.6"
+            strokeDasharray="2.4 2.4"
             strokeLinecap="round"
             className="dag-connector-animated"
           />

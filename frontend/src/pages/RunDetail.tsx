@@ -24,7 +24,12 @@ function RunDetail() {
   const storeRun = getRunById(runId)
   const [backendRun, setBackendRun] = useState(null)
   const [activeTab, setActiveTab] = useState('Overview')
-  const run = backendRun || storeRun
+  const run = backendRun?.id === runId ? backendRun : storeRun
+
+  useEffect(() => {
+    // Prevent stale run details from a previously opened run.
+    setBackendRun(null)
+  }, [runId])
 
   useEffect(() => {
     if (!runId || !serverOnline) return
@@ -38,6 +43,7 @@ function RunDetail() {
       try {
         const data = await getRun(runId)
         if (cancelled) return
+        if (!data || String(data.id) !== String(runId)) return
         setBackendRun(data)
         updateRun(runId, data)
       } catch (error) {
@@ -131,19 +137,27 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
   const [submittingGate3, setSubmittingGate3] = useState(false)
   const currentStatus = (run.status || '').toUpperCase()
   const reviewableRun = currentStatus === 'HITL_WAIT' || currentStatus === 'PAUSED_FOR_HITL'
+  const isSftpRun = run.source === 'sftp' || run.source === 'adls_gen2'
+  const availableSftpFeeds = getSftpFeeds(run)
 
   useEffect(() => {
-    const nominated = run.nominated_tables || []
+    setSelectedTables({})
+  }, [run.id, run.source, run.next_gate])
+
+  useEffect(() => {
+    const nominated = isSftpRun
+      ? availableSftpFeeds
+      : (run.nominated_tables || [])
     if (!nominated.length) return
     setSelectedTables((prev) => {
       const next = { ...prev }
-      for (const table of nominated) {
-        const key = tableReviewKey(table)
+      for (const item of nominated) {
+        const key = isSftpRun ? sftpFeedKey(item) : tableReviewKey(item)
         if (!(key in next)) next[key] = true
       }
       return next
     })
-  }, [run.nominated_tables])
+  }, [run.nominated_tables, run.candidate_feed, run.candidate_feeds, isSftpRun, availableSftpFeeds])
 
   // Build Gantt data
   const ganttData = (run.stages || []).map((s) => {
@@ -173,15 +187,21 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
   }
 
   const handleSubmitGate2 = async () => {
-    const approvedTables = (run.nominated_tables || [])
-      .map((table) => tableReviewKey(table))
-      .filter((key) => selectedTables[key])
+    const approvedItems = isSftpRun
+      ? (availableSftpFeeds
+          .map((feed) => sftpFeedKey(feed))
+          .filter((key) => selectedTables[key]))
+      : ((run.nominated_tables || [])
+          .map((table) => tableReviewKey(table))
+          .filter((key) => selectedTables[key]))
 
-    if (!approvedTables.length) {
+    if (!approvedItems.length) {
       addNotification({
         type: 'amber',
-        title: 'No Tables Selected',
-        message: 'Select at least one nominated table before submitting Gate 2.',
+        title: isSftpRun ? 'No Feeds Selected' : 'No Tables Selected',
+        message: isSftpRun
+          ? 'Select at least one discovered feed before submitting Gate 2.'
+          : 'Select at least one nominated table before submitting Gate 2.',
         duration: 4000
       })
       return
@@ -189,13 +209,15 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
 
     setSubmittingGate2(true)
     try {
-      await submitTableReviews(run.id, approvedTables)
+      await submitTableReviews(run.id, isSftpRun ? ['sftp-feed-approved'] : approvedItems)
       const refreshed = await getRun(run.id)
       onRunRefresh(refreshed)
       addNotification({
         type: 'success',
         title: 'Gate 2 Submitted',
-        message: 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
+        message: isSftpRun
+          ? 'Approved feeds were submitted for SFTP Gate 2.'
+          : 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
         duration: 5000
       })
     } catch (error) {
@@ -252,7 +274,11 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
           <div className="space-y-2">
             {[
               { label: 'Run ID', value: <CopyableId id={run.id} chars={20} /> },
-              { label: 'BRD File', value: run.brd_filename },
+              { label: 'Run Label', value: run.brd_filename },
+              { label: 'Source', value: run.source || 'database' },
+              { label: 'File Entity', value: (run.source === 'sftp' || run.source === 'adls_gen2') ? (run.sftp_entity || 'transactions') : '—' },
+              { label: 'Source Rows', value: (run.source === 'sftp' || run.source === 'adls_gen2') ? (run.source_row_count || '—') : '—' },
+              { label: 'Source Columns', value: (run.source === 'sftp' || run.source === 'adls_gen2') ? ((run.source_columns || []).length || '—') : '—' },
               { label: 'Provider', value: run.provider },
               { label: 'Deployment', value: run.deployment || '—' },
               { label: 'Cache Hit', value: run.cache_hit || 'NONE' },
@@ -293,49 +319,73 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
           </div>
         )}
 
-        {reviewableRun && run.next_gate === 2 && (run.nominated_tables || []).length > 0 && (
+        {reviewableRun && run.next_gate === 2 && (isSftpRun ? (availableSftpFeeds.length > 0) : (run.nominated_tables || []).length > 0) && (
           <div className="card p-4">
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
-                <h3 className="text-sm font-semibold text-gray-300">Gate 2 Table Review</h3>
-                <p className="text-xs text-gray-500 mt-1">{run.resume_message || 'Review and certify nominated tables.'}</p>
+                <h3 className="text-sm font-semibold text-gray-300">{isSftpRun ? 'Gate 2 Feed Review' : 'Gate 2 Table Review'}</h3>
+                <p className="text-xs text-gray-500 mt-1">{run.resume_message || (isSftpRun ? 'Review and certify discovered feeds.' : 'Review and certify nominated tables.')}</p>
+                {isSftpRun && (
+                  <p className="text-xs text-gray-400 mt-2">
+                    Gate 2 is the SFTP governance checkpoint. Confirm each discovered feed, its source file, sample row volume, columns, and inferred business signals before approval.
+                  </p>
+                )}
               </div>
               <StatusBadge status="PENDING" size="sm" />
             </div>
 
             <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-              {(run.nominated_tables || []).map((table) => {
-                const key = tableReviewKey(table)
-                return (
-                  <label key={key} className="flex items-start gap-3 p-3 rounded-lg border border-bg-border hover:border-gray-600 transition-colors cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={!!selectedTables[key]}
-                      onChange={() => handleToggleTable(key)}
-                      className="mt-1 accent-accent-blue"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm text-gray-200 font-medium break-all">{key}</div>
-                      <div className="flex gap-3 flex-wrap mt-1 text-[11px] text-gray-500">
-                        <span>Confidence: {Number(table.confidence_score || 0).toFixed(3)}</span>
-                        <span>Lexical: {Number(table.lexical_score || 0).toFixed(3)}</span>
-                        <span>Semantic: {Number(table.semantic_score || 0).toFixed(3)}</span>
-                        {(table.matched_columns || []).length > 0 && (
-                          <span>Matched columns: {(table.matched_columns || []).length}</span>
-                        )}
-                      </div>
-                      {table.nomination_reason && (
-                        <p className="text-xs text-gray-400 mt-1">{table.nomination_reason}</p>
-                      )}
-                    </div>
-                  </label>
-                )
-              })}
+              {(isSftpRun
+                ? (availableSftpFeeds.map((feed) => {
+                    const key = sftpFeedKey(feed)
+                    return (
+                      <label key={key} className="flex items-start gap-3 p-3 rounded-lg border border-bg-border hover:border-gray-600 transition-colors cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedTables[key]}
+                          onChange={() => handleToggleTable(key)}
+                          className="mt-1 accent-accent-blue"
+                        />
+                        <SftpFeedReviewBody feed={feed} />
+                      </label>
+                    )
+                  }))
+                : ((run.nominated_tables || []).map((table) => {
+                    const key = tableReviewKey(table)
+                    return (
+                      <label key={key} className="flex items-start gap-3 p-3 rounded-lg border border-bg-border hover:border-gray-600 transition-colors cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedTables[key]}
+                          onChange={() => handleToggleTable(key)}
+                          className="mt-1 accent-accent-blue"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm text-gray-200 font-medium break-all">{key}</div>
+                          <div className="flex gap-3 flex-wrap mt-1 text-[11px] text-gray-500">
+                            <span>Confidence: {Number(table.confidence_score || 0).toFixed(3)}</span>
+                            <span>Lexical: {Number(table.lexical_score || 0).toFixed(3)}</span>
+                            <span>Semantic: {Number(table.semantic_score || 0).toFixed(3)}</span>
+                            {(table.matched_columns || []).length > 0 && (
+                              <span>Matched columns: {(table.matched_columns || []).length}</span>
+                            )}
+                          </div>
+                          {table.nomination_reason && (
+                            <p className="text-xs text-gray-400 mt-1">{table.nomination_reason}</p>
+                          )}
+                        </div>
+                      </label>
+                    )
+                  })))}
             </div>
 
             <div className="flex items-center justify-between mt-4 gap-3">
               <p className="text-xs text-gray-500">
-                {(run.nominated_tables || []).filter((table) => selectedTables[tableReviewKey(table)]).length} of {(run.nominated_tables || []).length} selected
+                {isSftpRun
+                  ? (availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length)
+                  : ((run.nominated_tables || []).filter((table) => selectedTables[tableReviewKey(table)]).length)} of {isSftpRun
+                  ? (availableSftpFeeds.length)
+                  : ((run.nominated_tables || []).length)} selected
               </p>
               <button
                 onClick={handleSubmitGate2}
@@ -343,7 +393,7 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
                 className="flex items-center gap-2 px-4 py-2 bg-accent-blue hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-lg transition-colors"
               >
                 {submittingGate2 ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                Certify Tables
+                {isSftpRun ? 'Certify Feeds' : 'Certify Tables'}
               </button>
             </div>
           </div>
@@ -392,6 +442,73 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
 
 function tableReviewKey(table) {
   return [table.database_name, table.schema_name, table.table_name].filter(Boolean).join('.')
+}
+
+function sftpFeedKey(feed) {
+  return [feed.vendor, feed.entity, feed.file_name || feed.feed_id].filter(Boolean).join('.')
+}
+
+function getSftpFeeds(run) {
+  if (!run) return []
+  if (Array.isArray(run.candidate_feeds) && run.candidate_feeds.length > 0) {
+    return run.candidate_feeds
+  }
+  return run.candidate_feed ? [run.candidate_feed] : []
+}
+
+function SftpFeedReviewBody({ feed }) {
+  const columns = Array.isArray(feed?.columns) ? feed.columns : []
+  const primaryKeys = Array.isArray(feed?.primary_keys) ? feed.primary_keys : []
+  const measures = Array.isArray(feed?.measures) ? feed.measures : []
+  const entities = Array.isArray(feed?.entities) ? feed.entities : []
+
+  return (
+    <div className="min-w-0 flex-1">
+      <div className="text-sm text-gray-200 font-medium break-all">
+        {feed.vendor || 'Vendor'}.{feed.entity || feed.semantic_type || 'feed'}
+      </div>
+      <div className="grid grid-cols-2 gap-2 mt-2 text-[11px] text-gray-500">
+        <span>File: {feed.file_name || 'n/a'}</span>
+        <span>Format: {feed.format || 'unknown'}</span>
+        <span>Rows: {Number(feed.sample_row_count || 0)}</span>
+        <span>Columns: {columns.length}</span>
+      </div>
+      {entities.length > 0 && (
+        <p className="text-[11px] text-gray-500 mt-2">
+          Entities: {entities.join(', ')}
+        </p>
+      )}
+      {feed.file_path && (
+        <p className="text-[11px] text-gray-500 mt-1 break-all">
+          Path: {feed.file_path}
+        </p>
+      )}
+      {primaryKeys.length > 0 && (
+        <p className="text-[11px] text-gray-500 mt-1">
+          Primary keys: {primaryKeys.join(', ')}
+        </p>
+      )}
+      {measures.length > 0 && (
+        <p className="text-[11px] text-gray-500 mt-1">
+          Measures: {measures.join(', ')}
+        </p>
+      )}
+      {columns.length > 0 && (
+        <div className="flex gap-1 flex-wrap mt-2">
+          {columns.slice(0, 8).map((column) => (
+            <span key={column} className="px-2 py-0.5 rounded-full border border-bg-border bg-bg-base text-[10px] text-gray-400">
+              {column}
+            </span>
+          ))}
+          {columns.length > 8 && (
+            <span className="px-2 py-0.5 rounded-full border border-bg-border bg-bg-base text-[10px] text-gray-400">
+              +{columns.length - 8} more
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function StatTile({ label, value }) {
@@ -623,14 +740,26 @@ function ScriptsTab({ run }) {
   const [layer, setLayer] = useState('gold')
   const scripts = useMemo(() => {
     const rows = []
+    const seen = new Set()
     for (const [layerName, bundle] of Object.entries({
       bronze: run.bronze,
       silver: run.silver,
       gold: run.gold
     })) {
       for (const script of bundle?.scripts || []) {
+        const scriptRunId = script.run_id || bundle?.run_id
+        if (scriptRunId && String(scriptRunId) !== String(run.id || run.run_id)) continue
+        const dimensionBody = script.dimension_script_body || script.dimension_body || ''
+        const key = [
+          layerName,
+          script.script_path || script.target_table || script.source_table || script.table || script.kpi_name,
+          script.dimension_script_path || script.dimension_path || ''
+        ].join('|')
+        if (seen.has(key)) continue
+        seen.add(key)
         rows.push({
           ...script,
+          ui_key: key,
           layer: layerName,
           title:
             script.table ||
@@ -638,23 +767,14 @@ function ScriptsTab({ run }) {
             script.target_table ||
             script.script_path?.split(/[\\/]/).pop() ||
             `${layerName} script`,
-          body: script.script_body || ''
+          body: script.script_body || '',
+          dimension_body: dimensionBody,
+          dimension_script_path: script.dimension_script_path || script.dimension_path || ''
         })
-        if (layerName === 'gold' && script.dimension_script_body) {
-          rows.push({
-            ...script,
-            layer: 'gold',
-            title: `${script.kpi_name || script.target_table || 'KPI'} dimensions`,
-            target_table: script.target_table,
-            script_path: script.dimension_script_path,
-            body: script.dimension_script_body,
-            status: script.status
-          })
-        }
       }
     }
     return rows
-  }, [run.bronze, run.silver, run.gold])
+  }, [run.bronze, run.silver, run.gold, run.id, run.run_id])
 
   const filtered = scripts.filter((script) => script.layer === layer)
   const [selectedPath, setSelectedPath] = useState('')
@@ -664,13 +784,13 @@ function ScriptsTab({ run }) {
       setSelectedPath('')
       return
     }
-    if (!filtered.some((script) => script.script_path === selectedPath)) {
-      setSelectedPath(filtered[0].script_path || filtered[0].title)
+    if (!filtered.some((script) => script.ui_key === selectedPath)) {
+      setSelectedPath(filtered[0].ui_key)
     }
   }, [layer, filtered, selectedPath])
 
   const selected =
-    filtered.find((script) => (script.script_path || script.title) === selectedPath) ||
+    filtered.find((script) => script.ui_key === selectedPath) ||
     filtered[0]
 
   const counts = {
@@ -712,7 +832,7 @@ function ScriptsTab({ run }) {
             <p className="text-xs text-gray-600 py-6 text-center">No {layer} scripts yet.</p>
           ) : (
             filtered.map((script) => {
-              const key = script.script_path || script.title
+              const key = script.ui_key
               const active = key === selectedPath
               return (
                 <button
@@ -743,7 +863,7 @@ function ScriptsTab({ run }) {
               <StatusBadge status={selected.status || 'GENERATED'} size="sm" />
             </div>
             <pre className="flex-1 min-h-[560px] overflow-auto rounded-lg border border-bg-border bg-bg-base p-4 text-xs leading-relaxed text-gray-300">
-              <code>{selected.body || '# Script body is not available.'}</code>
+              <code>{formatScriptBody(selected)}</code>
             </pre>
           </>
         ) : (
@@ -861,6 +981,12 @@ function EmptyState({ message }) {
       {message}
     </div>
   )
+}
+
+function formatScriptBody(script) {
+  const body = script?.body || '# Script body is not available.'
+  if (!script?.dimension_body) return body
+  return `${body}\n\n# ---------------- Gold dimension script ----------------\n\n${script.dimension_body}`
 }
 
 export default RunDetail

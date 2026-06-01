@@ -1,9 +1,51 @@
 {
-  "run_id": "8c8b190c-56e9-41f6-8329-de7690bc58a8",
-  "fingerprint": "2e087fa21b05a907d3a191e2b8c6e29f74286bd5cd8c144ac89b5c0b15bdfd43",
-  "generated_at": "2026-05-18T09:40:57.937898",
+  "run_id": "461a6c90-a1c0-475f-9a22-d43fa88e486a",
+  "fingerprint": "c1643f79273959a6e3157d8d6acf7862c001d5df1dd1374bddae8105ee208458",
+  "generated_at": "2026-05-19T19:51:08.268715",
   "status": "READY_WITH_WARNINGS",
   "silver_tables": [
+    {
+      "table": "3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_information",
+      "source_table": "bronze.bronze_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_information",
+      "target_table": "silver.silver_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_information",
+      "column_count": 0
+    },
+    {
+      "table": "3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_payment_expenses",
+      "source_table": "bronze.bronze_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_payment_expenses",
+      "target_table": "silver.silver_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_payment_expenses",
+      "column_count": 0
+    },
+    {
+      "table": "3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_payment_indemnity",
+      "source_table": "bronze.bronze_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_payment_indemnity",
+      "target_table": "silver.silver_3d8b1e79_22a2_436e_ac3f_937e63e85a73_claim_payment_indemnity",
+      "column_count": 0
+    },
+    {
+      "table": "3d8b1e79_22a2_436e_ac3f_937e63e85a73_expenses_outstanding_estimates",
+      "source_table": "bronze.bronze_3d8b1e79_22a2_436e_ac3f_937e63e85a73_expenses_outstanding_estimates",
+      "target_table": "silver.silver_3d8b1e79_22a2_436e_ac3f_937e63e85a73_expenses_outstanding_estimates",
+      "column_count": 0
+    },
+    {
+      "table": "3d8b1e79_22a2_436e_ac3f_937e63e85a73_indemnity_outstanding_estimates",
+      "source_table": "bronze.bronze_3d8b1e79_22a2_436e_ac3f_937e63e85a73_indemnity_outstanding_estimates",
+      "target_table": "silver.silver_3d8b1e79_22a2_436e_ac3f_937e63e85a73_indemnity_outstanding_estimates",
+      "column_count": 0
+    },
+    {
+      "table": "3d8b1e79_22a2_436e_ac3f_937e63e85a73_policy_cover_level_transactions",
+      "source_table": "bronze.bronze_3d8b1e79_22a2_436e_ac3f_937e63e85a73_policy_cover_level_transactions",
+      "target_table": "silver.silver_3d8b1e79_22a2_436e_ac3f_937e63e85a73_policy_cover_level_transactions",
+      "column_count": 0
+    },
+    {
+      "table": "3d8b1e79_22a2_436e_ac3f_937e63e85a73_policy_transactions",
+      "source_table": "bronze.bronze_3d8b1e79_22a2_436e_ac3f_937e63e85a73_policy_transactions",
+      "target_table": "silver.silver_3d8b1e79_22a2_436e_ac3f_937e63e85a73_policy_transactions",
+      "column_count": 0
+    },
     {
       "table": "claim_information",
       "source_table": "bronze.bronze_claim_information",
@@ -26,19 +68,19 @@
       "table": "expenses_outstanding_estimates",
       "source_table": "bronze.bronze_expenses_outstanding_estimates",
       "target_table": "silver.silver_expenses_outstanding_estimates",
-      "column_count": 0
+      "column_count": 4
     },
     {
       "table": "indemnity_outstanding_estimates",
       "source_table": "bronze.bronze_indemnity_outstanding_estimates",
       "target_table": "silver.silver_indemnity_outstanding_estimates",
-      "column_count": 0
+      "column_count": 4
     },
     {
       "table": "policy_cover_level_transactions",
       "source_table": "bronze.bronze_policy_cover_level_transactions",
       "target_table": "silver.silver_policy_cover_level_transactions",
-      "column_count": 0
+      "column_count": 12
     },
     {
       "table": "policy_transactions",
@@ -49,12 +91,12 @@
   ],
   "kpi_mappings": [
     {
-      "kpi_name": "Total Claims Processed Count",
-      "kpi_description": "The total number of claims processed within a given month.",
-      "source_silver_table": "silver.silver_claim_payment_expenses",
+      "kpi_name": "Claims Record Count",
+      "kpi_description": "Total number of insurance claims records ingested into the centralized data foundation within a specified period.",
+      "source_silver_table": "silver.silver_policy_transactions",
       "measure": {
-        "table": "claim_payment_expenses",
-        "column": "PaymentID",
+        "table": "policy_transactions",
+        "column": "BRANCH_OFFICE_NAME",
         "aggregation": "COUNT",
         "expression": "COUNT(*)",
         "confidence": 5
@@ -64,215 +106,6 @@
         "status": "PROPOSED"
       },
       "grouping_dimensions": [
-        {
-          "table": "claim_payment_expenses",
-          "column": "UpdateNum",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceTax",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeType",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderTypeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "SurveyType",
-          "semantic_type": "DIMENSION"
-        }
-      ],
-      "time": {
-        "grain": "month",
-        "column": {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate"
-        }
-      },
-      "filters": [
-        "Consistent identifiers across systems.",
-        "No transformations at bronze layer.",
-        "Data quality handled downstream."
-      ],
-      "join_paths": [],
-      "readiness": "READY"
-    },
-    {
-      "kpi_name": "Average Claim Processing Time (Days)",
-      "kpi_description": "The average time taken to process claims from submission to resolution, measured in days.",
-      "source_silver_table": "silver.silver_claim_payment_expenses",
-      "measure": {
-        "table": "claim_payment_expenses",
-        "column": "PaymentID",
-        "aggregation": "AVG",
-        "expression": "AVG(PaymentID)",
-        "confidence": 15
-      },
-      "formula": {
-        "type": "single_measure",
-        "status": "PROPOSED"
-      },
-      "grouping_dimensions": [
-        {
-          "table": "claim_payment_expenses",
-          "column": "UpdateNum",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceTax",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeType",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderTypeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "SurveyType",
-          "semantic_type": "DIMENSION"
-        }
-      ],
-      "time": {
-        "grain": "month",
-        "column": {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate"
-        }
-      },
-      "filters": [
-        "Consistent identifiers across systems.",
-        "No transformations at bronze layer.",
-        "Data quality handled downstream."
-      ],
-      "join_paths": [],
-      "readiness": "READY"
-    },
-    {
-      "kpi_name": "Total Premium Collected Amount",
-      "kpi_description": "The total amount of premium collected from policy transactions within a given month.",
-      "source_silver_table": "silver.silver_policy_transactions",
-      "measure": {
-        "table": "policy_transactions",
-        "column": "BRANCH_OFFICE_NAME",
-        "aggregation": "SUM",
-        "expression": "SUM(BRANCH_OFFICE_NAME)",
-        "confidence": 25
-      },
-      "formula": {
-        "type": "single_measure",
-        "status": "PROPOSED"
-      },
-      "grouping_dimensions": [
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_information",
-          "column": "LossDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_information",
-          "column": "InsertedDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_information",
-          "column": "ClaimCloseDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_payment_indemnity",
-          "column": "PaidDate",
-          "semantic_type": "DATE"
-        },
         {
           "table": "policy_transactions",
           "column": "BEGIN_DATE",
@@ -307,6 +140,31 @@
           "table": "policy_transactions",
           "column": "SEGMENT_NAME",
           "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "BUSINESS_DIVISION_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGEN_T_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_SUB_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "CHANNEL_NAME",
+          "semantic_type": "DIMENSION"
         }
       ],
       "time": {
@@ -317,206 +175,42 @@
         }
       },
       "filters": [
-        "Consistent identifiers across systems.",
-        "No transformations at bronze layer.",
-        "Data quality handled downstream."
+        "Consistent identifiers across systems",
+        "No transformations at bronze layer"
       ],
-      "join_paths": [],
-      "readiness": "READY"
-    },
-    {
-      "kpi_name": "Average Coverage Sum Insured Amount",
-      "kpi_description": "The average sum insured across all coverage categories for policies in force.",
-      "source_silver_table": "silver.silver_claim_payment_expenses",
-      "measure": {
-        "table": "claim_payment_expenses",
-        "column": "PaymentID",
-        "aggregation": "AVG",
-        "expression": "AVG(PaymentID)",
-        "confidence": 15
-      },
-      "formula": {
-        "type": "single_measure",
-        "status": "PROPOSED"
-      },
-      "grouping_dimensions": [
+      "join_paths": [
         {
-          "table": "claim_payment_expenses",
-          "column": "UpdateNum",
-          "semantic_type": "DIMENSION"
+          "left_table": "policy_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_cover_level_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceTax",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeType",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderTypeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "SurveyType",
-          "semantic_type": "DIMENSION"
+          "left_table": "policy_cover_level_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
         }
       ],
-      "time": {
-        "grain": "month",
-        "column": {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate"
-        }
-      },
-      "filters": [
-        "Consistent identifiers across systems.",
-        "No transformations at bronze layer.",
-        "Data quality handled downstream."
-      ],
-      "join_paths": [],
-      "readiness": "READY"
+      "readiness": "READY_WITH_WARNINGS"
     },
     {
-      "kpi_name": "Total Outstanding Claims Count",
-      "kpi_description": "The total number of claims that are currently outstanding and not yet resolved.",
-      "source_silver_table": "silver.silver_claim_payment_expenses",
+      "kpi_name": "Policy Record Count",
+      "kpi_description": "Total number of policy records ingested into the centralized data foundation within a specified period.",
+      "source_silver_table": "silver.silver_policy_transactions",
       "measure": {
-        "table": "claim_payment_expenses",
-        "column": "PaymentID",
+        "table": "policy_transactions",
+        "column": "BRANCH_OFFICE_NAME",
         "aggregation": "COUNT",
         "expression": "COUNT(*)",
-        "confidence": 5
-      },
-      "formula": {
-        "type": "single_measure",
-        "status": "PROPOSED"
-      },
-      "grouping_dimensions": [
-        {
-          "table": "claim_payment_expenses",
-          "column": "UpdateNum",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceTax",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PayeeType",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderTypeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeID",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "SurveyType",
-          "semantic_type": "DIMENSION"
-        }
-      ],
-      "time": {
-        "grain": "month",
-        "column": {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate"
-        }
-      },
-      "filters": [
-        "Consistent identifiers across systems.",
-        "No transformations at bronze layer.",
-        "Data quality handled downstream."
-      ],
-      "join_paths": [],
-      "readiness": "READY"
-    },
-    {
-      "kpi_name": "Total Expenses Incurred Amount",
-      "kpi_description": "The total amount of expenses incurred related to claims within a given month.",
-      "source_silver_table": "silver.silver_claim_payment_expenses",
-      "measure": {
-        "table": "claim_payment_expenses",
-        "column": "PaymentID",
-        "aggregation": "SUM",
-        "expression": "SUM(PaymentID)",
         "confidence": 15
       },
       "formula": {
@@ -525,180 +219,220 @@
       },
       "grouping_dimensions": [
         {
-          "table": "claim_payment_expenses",
-          "column": "UpdateNum",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate",
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE",
           "semantic_type": "DATE"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceTax",
+          "table": "policy_transactions",
+          "column": "END_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_ISSUED_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_TRANSACTION_TYPE",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PayeeID",
+          "table": "policy_transactions",
+          "column": "PRODUCT_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PayeeName",
+          "table": "policy_transactions",
+          "column": "PRODUCT_GROUP_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PayeeType",
+          "table": "policy_transactions",
+          "column": "SEGMENT_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderID",
+          "table": "policy_transactions",
+          "column": "BUSINESS_DIVISION_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderName",
+          "table": "policy_transactions",
+          "column": "AGENT_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderTypeName",
+          "table": "policy_transactions",
+          "column": "AGEN_T_CATEGORY_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeID",
+          "table": "policy_transactions",
+          "column": "AGENT_SUB_CATEGORY_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "SurveyType",
+          "table": "policy_transactions",
+          "column": "CHANNEL_NAME",
           "semantic_type": "DIMENSION"
         }
       ],
       "time": {
         "grain": "month",
         "column": {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate"
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE"
         }
       },
       "filters": [
-        "Consistent identifiers across systems.",
-        "No transformations at bronze layer.",
-        "Data quality handled downstream."
+        "Consistent identifiers across systems",
+        "No transformations at bronze layer"
       ],
-      "join_paths": [],
-      "readiness": "READY"
+      "join_paths": [
+        {
+          "left_table": "policy_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_cover_level_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        },
+        {
+          "left_table": "policy_cover_level_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        }
+      ],
+      "readiness": "READY_WITH_WARNINGS"
     },
     {
-      "kpi_name": "Total Risk Sum Insured Amount",
-      "kpi_description": "The total risk sum insured across all policies in force.",
-      "source_silver_table": "silver.silver_claim_payment_expenses",
+      "kpi_name": "Claims Data Ingestion Rate",
+      "kpi_description": "Rate at which claims records are ingested into the data foundation, measured as records per hour or day.",
+      "source_silver_table": "silver.silver_policy_transactions",
       "measure": {
-        "table": "claim_payment_expenses",
-        "column": "PaymentID",
-        "aggregation": "SUM",
-        "expression": "SUM(PaymentID)",
+        "table": "policy_transactions",
+        "column": "BRANCH_OFFICE_NAME",
+        "aggregation": "RATIO",
+        "expression": null,
         "confidence": 5
       },
       "formula": {
-        "type": "single_measure",
-        "status": "PROPOSED"
+        "type": "derived",
+        "status": "NEEDS_CERTIFICATION"
       },
       "grouping_dimensions": [
         {
-          "table": "claim_payment_expenses",
-          "column": "UpdateNum",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate",
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE",
           "semantic_type": "DATE"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceTax",
+          "table": "policy_transactions",
+          "column": "END_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_ISSUED_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_TRANSACTION_TYPE",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PayeeID",
+          "table": "policy_transactions",
+          "column": "PRODUCT_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PayeeName",
+          "table": "policy_transactions",
+          "column": "PRODUCT_GROUP_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PayeeType",
+          "table": "policy_transactions",
+          "column": "SEGMENT_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderID",
+          "table": "policy_transactions",
+          "column": "BUSINESS_DIVISION_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderName",
+          "table": "policy_transactions",
+          "column": "AGENT_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderTypeName",
+          "table": "policy_transactions",
+          "column": "AGEN_T_CATEGORY_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeID",
+          "table": "policy_transactions",
+          "column": "AGENT_SUB_CATEGORY_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "SurveyType",
+          "table": "policy_transactions",
+          "column": "CHANNEL_NAME",
           "semantic_type": "DIMENSION"
         }
       ],
       "time": {
         "grain": "month",
         "column": {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate"
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE"
         }
       },
       "filters": [
-        "Consistent identifiers across systems.",
-        "No transformations at bronze layer.",
-        "Data quality handled downstream."
+        "Consistent identifiers across systems",
+        "No transformations at bronze layer"
       ],
-      "join_paths": [],
-      "readiness": "READY"
+      "join_paths": [
+        {
+          "left_table": "policy_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_cover_level_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        },
+        {
+          "left_table": "policy_cover_level_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        }
+      ],
+      "readiness": "READY_WITH_WARNINGS"
     },
     {
-      "kpi_name": "Claim Resolution Rate Percentage",
-      "kpi_description": "The percentage of claims that have been resolved compared to the total claims submitted in a given month.",
-      "source_silver_table": "silver.silver_claim_payment_expenses",
+      "kpi_name": "Policy Data Ingestion Rate",
+      "kpi_description": "Rate at which policy records are ingested into the data foundation, measured as records per hour or day.",
+      "source_silver_table": "silver.silver_policy_transactions",
       "measure": {
-        "table": "claim_payment_expenses",
-        "column": "PaymentID",
+        "table": "policy_transactions",
+        "column": "BRANCH_OFFICE_NAME",
         "aggregation": "RATIO",
         "expression": null,
         "confidence": 15
@@ -709,122 +443,117 @@
       },
       "grouping_dimensions": [
         {
-          "table": "claim_payment_expenses",
-          "column": "UpdateNum",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate",
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE",
           "semantic_type": "DATE"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceTax",
+          "table": "policy_transactions",
+          "column": "END_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_ISSUED_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_TRANSACTION_TYPE",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PayeeID",
+          "table": "policy_transactions",
+          "column": "PRODUCT_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PayeeName",
+          "table": "policy_transactions",
+          "column": "PRODUCT_GROUP_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PayeeType",
+          "table": "policy_transactions",
+          "column": "SEGMENT_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderID",
+          "table": "policy_transactions",
+          "column": "BUSINESS_DIVISION_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderName",
+          "table": "policy_transactions",
+          "column": "AGENT_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "ServiceProviderTypeName",
+          "table": "policy_transactions",
+          "column": "AGEN_T_CATEGORY_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeID",
+          "table": "policy_transactions",
+          "column": "AGENT_SUB_CATEGORY_NAME",
           "semantic_type": "DIMENSION"
         },
         {
-          "table": "claim_payment_expenses",
-          "column": "PaymentModeName",
-          "semantic_type": "DIMENSION"
-        },
-        {
-          "table": "claim_payment_expenses",
-          "column": "SurveyType",
+          "table": "policy_transactions",
+          "column": "CHANNEL_NAME",
           "semantic_type": "DIMENSION"
         }
       ],
       "time": {
         "grain": "month",
         "column": {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate"
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE"
         }
       },
       "filters": [
-        "Consistent identifiers across systems.",
-        "No transformations at bronze layer.",
-        "Data quality handled downstream."
+        "Consistent identifiers across systems",
+        "No transformations at bronze layer"
       ],
-      "join_paths": [],
-      "readiness": "READY"
+      "join_paths": [
+        {
+          "left_table": "policy_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_cover_level_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        },
+        {
+          "left_table": "policy_cover_level_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        }
+      ],
+      "readiness": "READY_WITH_WARNINGS"
     },
     {
-      "kpi_name": "Average Premium per Policy Amount",
-      "kpi_description": "The average premium amount collected per policy in force.",
+      "kpi_name": "Identifier Consistency Rate",
+      "kpi_description": "Percentage of records with consistent identifiers across claims and policy systems, supporting traceability.",
       "source_silver_table": "silver.silver_policy_transactions",
       "measure": {
         "table": "policy_transactions",
         "column": "BRANCH_OFFICE_NAME",
-        "aggregation": "AVG",
-        "expression": "AVG(BRANCH_OFFICE_NAME)",
+        "aggregation": "RATIO",
+        "expression": null,
         "confidence": 15
       },
       "formula": {
-        "type": "single_measure",
-        "status": "PROPOSED"
+        "type": "derived",
+        "status": "NEEDS_CERTIFICATION"
       },
       "grouping_dimensions": [
-        {
-          "table": "claim_payment_expenses",
-          "column": "PaidDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_information",
-          "column": "LossDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_information",
-          "column": "InsertedDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_information",
-          "column": "ClaimCloseDate",
-          "semantic_type": "DATE"
-        },
-        {
-          "table": "claim_payment_indemnity",
-          "column": "PaidDate",
-          "semantic_type": "DATE"
-        },
         {
           "table": "policy_transactions",
           "column": "BEGIN_DATE",
@@ -859,6 +588,31 @@
           "table": "policy_transactions",
           "column": "SEGMENT_NAME",
           "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "BUSINESS_DIVISION_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGEN_T_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_SUB_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "CHANNEL_NAME",
+          "semantic_type": "DIMENSION"
         }
       ],
       "time": {
@@ -869,17 +623,637 @@
         }
       },
       "filters": [
-        "Consistent identifiers across systems.",
-        "No transformations at bronze layer.",
-        "Data quality handled downstream."
+        "Consistent identifiers across systems",
+        "No transformations at bronze layer"
       ],
-      "join_paths": [],
-      "readiness": "READY"
+      "join_paths": [
+        {
+          "left_table": "policy_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_cover_level_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        },
+        {
+          "left_table": "policy_cover_level_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        }
+      ],
+      "readiness": "READY_WITH_WARNINGS"
+    },
+    {
+      "kpi_name": "Claims Record Traceability Percentage",
+      "kpi_description": "Percentage of claims records that can be traced back to their source system using unique identifiers.",
+      "source_silver_table": "silver.silver_policy_transactions",
+      "measure": {
+        "table": "policy_transactions",
+        "column": "BRANCH_OFFICE_NAME",
+        "aggregation": "RATIO",
+        "expression": null,
+        "confidence": 5
+      },
+      "formula": {
+        "type": "derived",
+        "status": "NEEDS_CERTIFICATION"
+      },
+      "grouping_dimensions": [
+        {
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "END_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_ISSUED_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_TRANSACTION_TYPE",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "PRODUCT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "PRODUCT_GROUP_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "SEGMENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "BUSINESS_DIVISION_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGEN_T_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_SUB_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "CHANNEL_NAME",
+          "semantic_type": "DIMENSION"
+        }
+      ],
+      "time": {
+        "grain": "month",
+        "column": {
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE"
+        }
+      },
+      "filters": [
+        "Consistent identifiers across systems",
+        "No transformations at bronze layer"
+      ],
+      "join_paths": [
+        {
+          "left_table": "policy_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_cover_level_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        },
+        {
+          "left_table": "policy_cover_level_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        }
+      ],
+      "readiness": "READY_WITH_WARNINGS"
+    },
+    {
+      "kpi_name": "Policy Record Traceability Percentage",
+      "kpi_description": "Percentage of policy records that can be traced back to their source system using unique identifiers.",
+      "source_silver_table": "silver.silver_policy_transactions",
+      "measure": {
+        "table": "policy_transactions",
+        "column": "BRANCH_OFFICE_NAME",
+        "aggregation": "RATIO",
+        "expression": null,
+        "confidence": 15
+      },
+      "formula": {
+        "type": "derived",
+        "status": "NEEDS_CERTIFICATION"
+      },
+      "grouping_dimensions": [
+        {
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "END_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_ISSUED_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_TRANSACTION_TYPE",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "PRODUCT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "PRODUCT_GROUP_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "SEGMENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "BUSINESS_DIVISION_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGEN_T_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_SUB_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "CHANNEL_NAME",
+          "semantic_type": "DIMENSION"
+        }
+      ],
+      "time": {
+        "grain": "month",
+        "column": {
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE"
+        }
+      },
+      "filters": [
+        "Consistent identifiers across systems",
+        "No transformations at bronze layer"
+      ],
+      "join_paths": [
+        {
+          "left_table": "policy_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_cover_level_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        },
+        {
+          "left_table": "policy_cover_level_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        }
+      ],
+      "readiness": "READY_WITH_WARNINGS"
+    },
+    {
+      "kpi_name": "Claims Data Ingestion Duration",
+      "kpi_description": "Average time taken to ingest claims data from source systems into the centralized data foundation.",
+      "source_silver_table": "silver.silver_policy_transactions",
+      "measure": {
+        "table": "policy_transactions",
+        "column": "BRANCH_OFFICE_NAME",
+        "aggregation": "RATIO",
+        "expression": null,
+        "confidence": 5
+      },
+      "formula": {
+        "type": "derived",
+        "status": "NEEDS_CERTIFICATION"
+      },
+      "grouping_dimensions": [
+        {
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "END_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_ISSUED_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_TRANSACTION_TYPE",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "PRODUCT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "PRODUCT_GROUP_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "SEGMENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "BUSINESS_DIVISION_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGEN_T_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_SUB_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "CHANNEL_NAME",
+          "semantic_type": "DIMENSION"
+        }
+      ],
+      "time": {
+        "grain": "month",
+        "column": {
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE"
+        }
+      },
+      "filters": [
+        "Consistent identifiers across systems",
+        "No transformations at bronze layer"
+      ],
+      "join_paths": [
+        {
+          "left_table": "policy_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_cover_level_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        },
+        {
+          "left_table": "policy_cover_level_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        }
+      ],
+      "readiness": "READY_WITH_WARNINGS"
+    },
+    {
+      "kpi_name": "Policy Data Ingestion Duration",
+      "kpi_description": "Average time taken to ingest policy data from source systems into the centralized data foundation.",
+      "source_silver_table": "silver.silver_policy_transactions",
+      "measure": {
+        "table": "policy_transactions",
+        "column": "BRANCH_OFFICE_NAME",
+        "aggregation": "RATIO",
+        "expression": null,
+        "confidence": 15
+      },
+      "formula": {
+        "type": "derived",
+        "status": "NEEDS_CERTIFICATION"
+      },
+      "grouping_dimensions": [
+        {
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "END_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_ISSUED_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_TRANSACTION_TYPE",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "PRODUCT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "PRODUCT_GROUP_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "SEGMENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "BUSINESS_DIVISION_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGEN_T_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_SUB_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "CHANNEL_NAME",
+          "semantic_type": "DIMENSION"
+        }
+      ],
+      "time": {
+        "grain": "month",
+        "column": {
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE"
+        }
+      },
+      "filters": [
+        "Consistent identifiers across systems",
+        "No transformations at bronze layer"
+      ],
+      "join_paths": [
+        {
+          "left_table": "policy_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_cover_level_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        },
+        {
+          "left_table": "policy_cover_level_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        }
+      ],
+      "readiness": "READY_WITH_WARNINGS"
+    },
+    {
+      "kpi_name": "Claims to Policy Linkage Ratio",
+      "kpi_description": "Ratio of claims records that are successfully linked to corresponding policy records using consistent identifiers.",
+      "source_silver_table": "silver.silver_policy_transactions",
+      "measure": {
+        "table": "policy_transactions",
+        "column": "BRANCH_OFFICE_NAME",
+        "aggregation": "RATIO",
+        "expression": null,
+        "confidence": 15
+      },
+      "formula": {
+        "type": "derived",
+        "status": "NEEDS_CERTIFICATION"
+      },
+      "grouping_dimensions": [
+        {
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "END_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_ISSUED_DATE",
+          "semantic_type": "DATE"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "POLICY_TRANSACTION_TYPE",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "PRODUCT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "PRODUCT_GROUP_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "SEGMENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "BUSINESS_DIVISION_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGEN_T_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "AGENT_SUB_CATEGORY_NAME",
+          "semantic_type": "DIMENSION"
+        },
+        {
+          "table": "policy_transactions",
+          "column": "CHANNEL_NAME",
+          "semantic_type": "DIMENSION"
+        }
+      ],
+      "time": {
+        "grain": "month",
+        "column": {
+          "table": "policy_transactions",
+          "column": "BEGIN_DATE"
+        }
+      },
+      "filters": [
+        "Consistent identifiers across systems",
+        "No transformations at bronze layer"
+      ],
+      "join_paths": [
+        {
+          "left_table": "policy_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_cover_level_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        },
+        {
+          "left_table": "policy_cover_level_transactions",
+          "left_column": "RERERENCE_ID",
+          "right_table": "policy_transactions",
+          "right_column": "RERERENCE_ID",
+          "join_type": "INNER",
+          "cardinality": "MANY_TO_ONE",
+          "confidence": 0.8,
+          "certified": false
+        }
+      ],
+      "readiness": "READY_WITH_WARNINGS"
     }
   ],
-  "available_joins": [],
+  "available_joins": [
+    {
+      "left_table": "policy_transactions",
+      "left_column": "RERERENCE_ID",
+      "right_table": "policy_cover_level_transactions",
+      "right_column": "RERERENCE_ID",
+      "cardinality": "MANY_TO_ONE",
+      "join_type": "INNER",
+      "confidence": 0.8,
+      "source": "RULES",
+      "certified": false
+    },
+    {
+      "left_table": "policy_cover_level_transactions",
+      "left_column": "RERERENCE_ID",
+      "right_table": "policy_transactions",
+      "right_column": "RERERENCE_ID",
+      "cardinality": "MANY_TO_ONE",
+      "join_type": "INNER",
+      "confidence": 0.8,
+      "source": "RULES",
+      "certified": false
+    }
+  ],
   "warnings": [
-    "KPI 'Claim Resolution Rate Percentage' needs numerator/denominator formula certification before gold SQL is production-safe."
+    "KPI 'Claims Data Ingestion Duration' has join candidates, but none are certified.",
+    "KPI 'Claims Data Ingestion Duration' needs numerator/denominator formula certification before gold SQL is production-safe.",
+    "KPI 'Claims Data Ingestion Rate' has join candidates, but none are certified.",
+    "KPI 'Claims Data Ingestion Rate' needs numerator/denominator formula certification before gold SQL is production-safe.",
+    "KPI 'Claims Record Count' has join candidates, but none are certified.",
+    "KPI 'Claims Record Traceability Percentage' has join candidates, but none are certified.",
+    "KPI 'Claims Record Traceability Percentage' needs numerator/denominator formula certification before gold SQL is production-safe.",
+    "KPI 'Claims to Policy Linkage Ratio' has join candidates, but none are certified.",
+    "KPI 'Claims to Policy Linkage Ratio' needs numerator/denominator formula certification before gold SQL is production-safe.",
+    "KPI 'Identifier Consistency Rate' has join candidates, but none are certified.",
+    "KPI 'Identifier Consistency Rate' needs numerator/denominator formula certification before gold SQL is production-safe.",
+    "KPI 'Policy Data Ingestion Duration' has join candidates, but none are certified.",
+    "KPI 'Policy Data Ingestion Duration' needs numerator/denominator formula certification before gold SQL is production-safe.",
+    "KPI 'Policy Data Ingestion Rate' has join candidates, but none are certified.",
+    "KPI 'Policy Data Ingestion Rate' needs numerator/denominator formula certification before gold SQL is production-safe.",
+    "KPI 'Policy Record Count' has join candidates, but none are certified.",
+    "KPI 'Policy Record Traceability Percentage' has join candidates, but none are certified.",
+    "KPI 'Policy Record Traceability Percentage' needs numerator/denominator formula certification before gold SQL is production-safe."
   ],
   "next_gate_required": "GOLD_CONTRACT_REVIEW"
 }
