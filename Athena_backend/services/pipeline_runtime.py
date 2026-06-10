@@ -338,7 +338,9 @@ def _scripts_from_checkpoint(
 ) -> Dict[str, Any]:
     scripts: List[Dict[str, Any]] = []
     for item in checkpoint.get(result_key) or []:
-        script_body = _read_script_body(item.get("script_path"))
+        script_body = str(item.get("script_body") or "").strip()
+        if not script_body:
+            script_body = _read_script_body(item.get("script_path"))
         dimension_script_body = _read_script_body(item.get("dimension_script_path"))
         row = {
             **item,
@@ -364,7 +366,9 @@ def load_bronze_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None
     bundle_run_id = bundle.get("run_id")
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
-        script_body = _read_script_body(item.get("script_path"))
+        script_body = str(item.get("script_body") or "").strip()
+        if not script_body:
+            script_body = _read_script_body(item.get("script_path"))
         if not _script_matches_run(
             item=item,
             bundle_run_id=bundle_run_id,
@@ -398,7 +402,9 @@ def load_silver_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None
     bundle_run_id = bundle.get("run_id")
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
-        script_body = _read_script_body(item.get("script_path"))
+        script_body = str(item.get("script_body") or "").strip()
+        if not script_body:
+            script_body = _read_script_body(item.get("script_path"))
         if not _script_matches_run(
             item=item,
             bundle_run_id=bundle_run_id,
@@ -432,7 +438,9 @@ def load_gold_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) 
     bundle_run_id = bundle.get("run_id")
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
-        script_body = _read_script_body(item.get("script_path"))
+        script_body = str(item.get("script_body") or "").strip()
+        if not script_body:
+            script_body = _read_script_body(item.get("script_path"))
         dimension_script_body = _read_script_body(item.get("dimension_script_path"))
         if not _script_matches_run(
             item=item,
@@ -485,6 +493,8 @@ def build_pipeline_steps(
     if source in {"sftp", "adls_gen2"}:
         gate1_decision = (checkpoint.get("gate1") or {}).get("decision")
         gate2_decision = (checkpoint.get("gate2") or {}).get("decision")
+        gate4_decision = (checkpoint.get("gate4") or {}).get("decision")
+        gate5_decision = (checkpoint.get("gate5") or {}).get("decision")
         source_label = "ADLS Gen2" if source == "adls_gen2" else "SFTP"
         steps = [
             {
@@ -546,6 +556,65 @@ def build_pipeline_steps(
                 "label": "Gate 3",
                 "complete": bool("GATE3_APPROVED_ENRICHMENT" in artifact_types or checkpoint.get("enrichment_review_status") == "COMPLETED"),
                 "detail": "Semantic enrichment review",
+            },
+            {
+                "key": "pre_bronze",
+                "label": "Pre-Bronze Readiness",
+                "complete": bool(checkpoint.get("bronze_review_artifact")),
+                "detail": "Bronze readiness inputs assembled",
+            },
+            {
+                "key": "bronze",
+                "label": "Bronze Code Generation",
+                "complete": bronze_generation_completed,
+                "detail": "Bronze plan and script generated",
+            },
+            {
+                "key": "gate4",
+                "label": "Gate 4",
+                "complete": gate4_decision == "APPROVED",
+                "detail": "Bronze review",
+            },
+            {
+                "key": "pull",
+                "label": "Source Handoff" if source == "adls_gen2" else "SFTP Pull",
+                "complete": bool(
+                    checkpoint.get("sftp_pull_status") == "COMPLETED"
+                    or checkpoint.get("bronze_ingestion_status") == "HANDOFF_ONLY"
+                ),
+                "detail": "Approved ADLS source handed to generated Bronze script"
+                if source == "adls_gen2"
+                else "Approved SFTP files synchronized",
+            },
+            {
+                "key": "bronze_validation",
+                "label": "Bronze Validation",
+                "complete": bool(checkpoint.get("bronze_validation_status") == "COMPLETED"),
+                "detail": "Bronze readiness validated",
+            },
+            {
+                "key": "silver",
+                "label": "Silver Code Generation",
+                "complete": silver_generation_completed,
+                "detail": "Silver transformation script generated",
+            },
+            {
+                "key": "gate5",
+                "label": "Gate 5",
+                "complete": gate5_decision == "APPROVED",
+                "detail": "Silver review",
+            },
+            {
+                "key": "dq_validation",
+                "label": "DQ Validation",
+                "complete": bool(checkpoint.get("dq_validation_status") == "COMPLETED" or checkpoint.get("dq_validation_status") == "SKIPPED"),
+                "detail": "Data quality validation placeholder",
+            },
+            {
+                "key": "gold",
+                "label": "Gold Code Generation",
+                "complete": gold_generation_completed,
+                "detail": "Gold KPI generation completed",
             },
         ]
     else:
@@ -653,12 +722,20 @@ def build_pipeline_steps(
         if index <= last_complete_index:
             step["complete"] = True
 
-    # Assign states: COMPLETE, RUNNING (first incomplete), or PENDING
+    checkpoint_status = str(checkpoint.get("status") or "").upper()
+    pipeline_is_active = bool(
+        checkpoint.get("background_stage")
+        or checkpoint_status in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
+    )
+
+    # Assign states: COMPLETE, RUNNING only while the backend is actively
+    # processing, otherwise keep incomplete steps pending until a gate/runtime
+    # explicitly marks one active.
     first_incomplete_seen = False
     for step in steps:
         if step["complete"]:
             step["state"] = "COMPLETED"
-        elif not first_incomplete_seen:
+        elif pipeline_is_active and not first_incomplete_seen:
             step["state"] = "RUNNING"
             first_incomplete_seen = True
         else:

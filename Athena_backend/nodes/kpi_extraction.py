@@ -144,6 +144,99 @@ def _format_schema_context(schema_rows: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _format_file_source_context(state: Stage01State, context_text: str) -> str:
+    source = str(state.get("source") or "").lower()
+    if source not in {"sftp", "adls_gen2"}:
+        return ""
+
+    columns = [str(column) for column in (state.get("source_columns") or []) if str(column).strip()]
+    row_count = state.get("source_row_count")
+    source_label = "ADLS Gen2" if source == "adls_gen2" else "SFTP"
+    lines = [f"{source_label} file-source context:"]
+    if row_count is not None:
+        lines.append(f"- Rows ingested: {row_count}")
+    if columns:
+        lines.append("- Available columns: " + ", ".join(columns))
+    if state.get("candidate_feeds"):
+        feeds = [
+            str(feed.get("entity") or feed.get("feed_id") or "").strip()
+            for feed in state.get("candidate_feeds") or []
+            if isinstance(feed, dict)
+        ]
+        feeds = [feed for feed in feeds if feed]
+        if feeds:
+            lines.append("- Discovered feeds: " + ", ".join(feeds))
+    if context_text:
+        lines.append("- Dataset summary: " + context_text[:1200])
+    return "\n".join(lines)
+
+
+def _coerce_kpi_payload(raw: Any) -> List[Dict[str, Any]]:
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        for key in ("kpis", "items", "results"):
+            value = raw.get(key)
+            if isinstance(value, list):
+                return value
+    raise ValueError("KPI response must be a JSON array or an object containing a kpis array")
+
+
+def _fallback_kpis_from_columns(state: Stage01State) -> List[Dict[str, Any]]:
+    source = str(state.get("source") or "").lower()
+    if source not in {"sftp", "adls_gen2"}:
+        return []
+
+    columns = {str(column).strip().lower(): str(column).strip() for column in (state.get("source_columns") or [])}
+    if not columns:
+        return []
+
+    kpis: List[Dict[str, Any]] = [
+        {
+            "kpi_name": "Total Record Count",
+            "kpi_description": "Count of records ingested from the file source for the current pipeline run.",
+            "ai_confidence_score": 0.68,
+            "derivation_type": "implicit",
+            "source_requirement_ref": "source_columns",
+            "grounding": "STRONG",
+        }
+    ]
+
+    if "currency" in columns:
+        kpis.append({
+            "kpi_name": "Currency Distribution Count",
+            "kpi_description": f"Count of records grouped by {columns['currency']} to monitor transaction volume by currency.",
+            "ai_confidence_score": 0.66,
+            "derivation_type": "implicit",
+            "source_requirement_ref": columns["currency"],
+            "grounding": "STRONG",
+        })
+
+    date_column = next((original for lower, original in columns.items() if "date" in lower), None)
+    if date_column:
+        kpis.append({
+            "kpi_name": "Daily Record Count",
+            "kpi_description": f"Count of records grouped by {date_column} to track daily transaction volume.",
+            "ai_confidence_score": 0.66,
+            "derivation_type": "implicit",
+            "source_requirement_ref": date_column,
+            "grounding": "STRONG",
+        })
+
+    user_column = next((columns[key] for key in ("user", "username") if key in columns), None)
+    if user_column:
+        kpis.append({
+            "kpi_name": "Unique User Count",
+            "kpi_description": f"Count of distinct {user_column} values represented in the ingested file source.",
+            "ai_confidence_score": 0.64,
+            "derivation_type": "implicit",
+            "source_requirement_ref": user_column,
+            "grounding": "STRONG",
+        })
+
+    return kpis[:5]
+
+
 def _is_measurable_kpi(kpi: Dict[str, Any]) -> bool:
     text = f"{kpi.get('kpi_name', '')} {kpi.get('kpi_description', '')}".lower()
     if any(phrase in text for phrase in ABSTRACT_KPI_PHRASES):
@@ -214,6 +307,7 @@ def build_kpi_extraction_node(
         source_databases = _resolve_source_databases(state)
         relevant_schema = _fetch_relevant_schema(context_text, source_databases, top_k=10)
         schema_context = _format_schema_context(relevant_schema)
+        file_source_context = _format_file_source_context(state, context_text)
 
         if state.get("memory_layer1", False) and state.get("prior_kpis"):
             kpis = state["prior_kpis"][:25]
@@ -229,8 +323,10 @@ def build_kpi_extraction_node(
             for attempt in range(max_retries + 1):
                 user_prompt = f"""Requirements: {json.dumps(requirements, indent=2)}
 {schema_context}
+{file_source_context}
 Rejected KPI names: {json.dumps(rejected_kpis)}
-Extract KPIs ONLY based on available data schema:"""
+Extract KPIs ONLY based on the available schema or file-source columns above.
+For file sources, every KPI must reference at least one available column when possible."""
 
                 if attempt > 0:
                     user_prompt += f"\n\nPREV ERROR: {last_error}. Fix & ensure valid JSON array."
@@ -247,7 +343,7 @@ Extract KPIs ONLY based on available data schema:"""
                     )
 
                     raw_json = _strip_fences(response.content)
-                    parsed_list = json.loads(raw_json)
+                    parsed_list = _coerce_kpi_payload(json.loads(raw_json))
                     kpis_parsed = [
                         KPISchemaItem.model_validate(kpi).model_dump(mode="json")
                         for kpi in parsed_list
@@ -277,6 +373,20 @@ Extract KPIs ONLY based on available data schema:"""
                 except (json.JSONDecodeError, pydantic.ValidationError, Exception) as exc:
                     last_error = str(exc)[:300]
                     logger.warning("Attempt %d failed: %s", attempt + 1, last_error, extra=log_context)
+
+            if not kpis:
+                fallback_kpis = _fallback_kpis_from_columns(state)
+                if fallback_kpis:
+                    logger.warning(
+                        "Using deterministic file-source KPI fallback after LLM extraction failure: n_kpis=%d",
+                        len(fallback_kpis),
+                        extra=log_context,
+                    )
+                    kpis = fallback_kpis
+                    source = "FILE_SOURCE_FALLBACK"
+                    attempts = max_retries + 1
+                    tokens_used = token_acc.total if token_acc else 0
+                    cost_usd = compute_cost_usd(token_acc.total_input, token_acc.total_output) if token_acc else 0.0
 
             if not kpis:
                 logger.error("KPI extraction FAILED after %d attempts", max_retries + 1, extra=log_context)

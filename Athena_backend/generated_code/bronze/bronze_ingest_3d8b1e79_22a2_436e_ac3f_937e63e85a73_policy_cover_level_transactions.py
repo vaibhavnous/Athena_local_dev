@@ -1,4 +1,4 @@
-
+﻿
 """
 AUTO-GENERATED BRONZE INGESTION SCRIPT
 
@@ -119,3 +119,5 @@ spark.sql(create_table_sql)
 )
 
 print(f"SUCCESS: Bronze ingestion completed for {TARGET_TABLE}")
+
+

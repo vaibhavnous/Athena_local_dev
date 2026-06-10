@@ -45,6 +45,77 @@ def apply_waiting_stage_state(steps: List[Dict[str, Any]], gate_key: Optional[st
     return steps
 
 
+def _feed_semantic_summary(
+    enriched_payload: Dict[str, Any],
+    candidate_feeds: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    enriched_columns = [
+        item for item in (enriched_payload.get("columns") or [])
+        if isinstance(item, dict)
+    ]
+    feed_index: Dict[str, Dict[str, Any]] = {}
+
+    for feed in candidate_feeds or []:
+        if not isinstance(feed, dict):
+            continue
+        feed_id = str(feed.get("feed_id") or "").strip()
+        if not feed_id:
+            continue
+        feed_index[feed_id] = {
+            "feed_id": feed_id,
+            "vendor": str(feed.get("vendor") or ""),
+            "entity": str(feed.get("entity") or ""),
+            "file_name": str(feed.get("file_name") or ""),
+            "format": str(feed.get("format") or ""),
+            "sample_row_count": int(feed.get("sample_row_count") or 0),
+            "column_count": 0,
+            "pii_count": 0,
+            "join_key_count": 0,
+            "measure_count": 0,
+            "semantic_counts": {},
+        }
+
+    for column in enriched_columns:
+        feed_id = str(column.get("feed_id") or "").strip()
+        if not feed_id:
+            continue
+        summary = feed_index.setdefault(
+            feed_id,
+            {
+                "feed_id": feed_id,
+                "vendor": str(column.get("vendor") or ""),
+                "entity": str(column.get("entity") or ""),
+                "file_name": "",
+                "format": "",
+                "sample_row_count": 0,
+                "column_count": 0,
+                "pii_count": 0,
+                "join_key_count": 0,
+                "measure_count": 0,
+                "semantic_counts": {},
+            },
+        )
+        summary["column_count"] += 1
+        if column.get("is_pii"):
+            summary["pii_count"] += 1
+        if column.get("is_primary_key"):
+            summary["join_key_count"] += 1
+        if column.get("is_measure"):
+            summary["measure_count"] += 1
+        semantic_type = str(column.get("semantic_type") or "UNKNOWN")
+        semantic_counts = summary["semantic_counts"]
+        semantic_counts[semantic_type] = semantic_counts.get(semantic_type, 0) + 1
+
+    return sorted(
+        feed_index.values(),
+        key=lambda item: (
+            str(item.get("vendor") or "").lower(),
+            str(item.get("entity") or "").lower(),
+            str(item.get("feed_id") or "").lower(),
+        ),
+    )
+
+
 def start_sftp_pipeline(
     *,
     run_id: str,
@@ -75,21 +146,23 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
     gate1_decision = (checkpoint.get("gate1") or {}).get("decision")
     gate2_decision = (checkpoint.get("gate2") or {}).get("decision")
     gate3_decision = str(checkpoint.get("enrichment_review_decision") or "").upper()
+    gate4_decision = str((checkpoint.get("gate4") or {}).get("decision") or checkpoint.get("bronze_review_decision") or "").upper()
+    gate5_decision = str((checkpoint.get("gate5") or {}).get("decision") or checkpoint.get("silver_review_decision") or "").upper()
     candidate_feed = checkpoint.get("candidate_feed") or {}
 
     bronze_generation_completed = any(
-        row.get("artifact_type") in {"BRONZE_GENERATION", "BRONZE_SCRIPTS"}
-        or str(row.get("stage", "")).lower().startswith("bronze")
+        str(row.get("artifact_type") or "").upper() in {"BRONZE_GENERATION", "BRONZE_SCRIPTS", "SFTP_BRONZE_GENERATION"}
+        or "bronze" in str(row.get("stage", "")).lower()
         for row in summary
     ) or checkpoint.get("bronze_generation_status") == "COMPLETED"
     silver_generation_completed = any(
-        row.get("artifact_type") in {"SILVER_GENERATION", "SILVER_SCRIPTS"}
-        or str(row.get("stage", "")).lower().startswith("silver")
+        str(row.get("artifact_type") or "").upper() in {"SILVER_GENERATION", "SILVER_SCRIPTS", "SFTP_SILVER_GENERATION"}
+        or "silver" in str(row.get("stage", "")).lower()
         for row in summary
     ) or checkpoint.get("silver_generation_status") == "COMPLETED"
     gold_generation_completed = any(
-        row.get("artifact_type") in {"GOLD_GENERATION", "GOLD_SCRIPTS"}
-        or str(row.get("stage", "")).lower().startswith("gold")
+        str(row.get("artifact_type") or "").upper() in {"GOLD_GENERATION", "GOLD_SCRIPTS", "SFTP_GOLD_GENERATION"}
+        or "gold" in str(row.get("stage", "")).lower()
         for row in summary
     ) or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
     schema_discovery_completed = bool(
@@ -102,11 +175,18 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
     )
     enriched_payload = fetch_json_artifact(run_id, "ENRICHED_METADATA") or checkpoint.get("enriched_metadata") or {}
     gate3_payload = fetch_json_artifact(run_id, "GATE3_APPROVED_ENRICHMENT") or checkpoint.get("enrichment_review_artifact") or {}
+    candidate_feeds = checkpoint.get("candidate_feeds") or []
+    feed_semantic_summary = _feed_semantic_summary(
+        enriched_payload if isinstance(enriched_payload, dict) else {},
+        candidate_feeds if isinstance(candidate_feeds, list) else [],
+    )
     semantic_enrichment_completed = bool(
         any(row.get("artifact_type") == "ENRICHED_METADATA" for row in summary)
         or checkpoint.get("semantic_enrichment_status") == "COMPLETED"
         or enriched_payload
     )
+    bronze_review_ready = bool(checkpoint.get("bronze_review_artifact") or checkpoint.get("bronze_generation_results"))
+    silver_review_ready = bool(checkpoint.get("silver_review_artifact") or checkpoint.get("silver_generation_results"))
 
     next_gate = None
     resume_message = None
@@ -115,7 +195,6 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         resume_message = "Gate 1 is pending. Review KPI items before continuing."
     elif gate1_decision == "APPROVED" and gate2_decision in {None, ""}:
         next_gate = 2
-        candidate_feeds = checkpoint.get("candidate_feeds") or []
         entities = ", ".join(
             sorted(
                 {
@@ -134,6 +213,16 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         if semantic_enrichment_completed and gate3_decision not in {"APPROVED", "REJECTED"}:
             next_gate = 3
             resume_message = "Gate 3 is pending. Review semantic enrichment before continuing."
+        elif (gate3_decision == "APPROVED" or gate3_payload) and bronze_review_ready and gate4_decision not in {"APPROVED", "REJECTED"}:
+            next_gate = 4
+            resume_message = "Gate 4 is pending. Review Bronze plan before ingestion."
+        elif gate4_decision == "APPROVED" and silver_review_ready and gate5_decision not in {"APPROVED", "REJECTED"}:
+            next_gate = 5
+            resume_message = "Gate 5 is pending. Review Silver plan before execution."
+        elif gate5_decision == "APPROVED":
+            resume_message = "Gate 5 is complete."
+        elif gate4_decision == "APPROVED":
+            resume_message = "Gate 4 is complete."
         elif gate3_decision == "APPROVED" or gate3_payload:
             resume_message = "SFTP semantic enrichment is approved."
         elif column_profiling_completed:
@@ -148,12 +237,22 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         resume_message = "Gate 2 was rejected."
     elif gate3_decision == "REJECTED":
         resume_message = "Gate 3 was rejected."
+    elif gate4_decision == "REJECTED":
+        resume_message = "Gate 4 was rejected."
+    elif gate5_decision == "REJECTED":
+        resume_message = "Gate 5 was rejected."
     elif not summary and not checkpoint:
         resume_message = "No stored state was found for this run ID."
 
     status = checkpoint.get("status") or "UNKNOWN"
-    if gate3_decision == "APPROVED" or gate3_payload or bronze_generation_completed or silver_generation_completed or gold_generation_completed:
+    if next_gate:
+        status = "HITL_WAIT"
+    elif checkpoint.get("background_stage"):
+        status = "RUNNING"
+    elif gate5_decision == "APPROVED" or gold_generation_completed:
         status = "PIPELINE_COMPLETED"
+    elif silver_generation_completed and gate5_decision not in {"APPROVED", "REJECTED"}:
+        status = "HITL_WAIT"
 
     pipeline_steps = build_pipeline_steps(
         source=str(checkpoint.get("source") or "sftp").lower(),
@@ -169,7 +268,14 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         silver_generation_completed=silver_generation_completed,
         gold_generation_completed=gold_generation_completed,
     )
-    waiting_gate_key = "gate1" if next_gate == 1 else "gate2" if next_gate == 2 else "gate3" if next_gate == 3 else None
+    waiting_gate_key = (
+        "gate1" if next_gate == 1 else
+        "gate2" if next_gate == 2 else
+        "gate3" if next_gate == 3 else
+        "gate4" if next_gate == 4 else
+        "gate5" if next_gate == 5 else
+        None
+    )
     pipeline_steps = apply_waiting_stage_state(pipeline_steps, waiting_gate_key)
     current_pipeline_step = next((step for step in pipeline_steps if step["state"] == "RUNNING"), None)
     if not current_pipeline_step and waiting_gate_key:
@@ -201,6 +307,7 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         "pii_columns": [c for c in (enriched_payload.get("columns") or []) if c.get("is_pii")],
         "join_key_columns": [c for c in (enriched_payload.get("columns") or []) if c.get("is_primary_key")],
         "measure_columns": [c for c in (enriched_payload.get("columns") or []) if c.get("is_measure")],
+        "feed_semantic_summary": feed_semantic_summary,
         "gate3_approved": bool(gate3_payload or gate3_decision == "APPROVED"),
         "discovered_metadata": checkpoint.get("discovered_metadata") or {},
         "column_profiles": checkpoint.get("column_profiles") or {},
@@ -216,7 +323,7 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         "pipeline_steps": pipeline_steps,
         "current_pipeline_step": current_pipeline_step,
         "candidate_feed": candidate_feed,
-        "candidate_feeds": checkpoint.get("candidate_feeds") or [],
+        "candidate_feeds": candidate_feeds,
         "sftp_entity": checkpoint.get("sftp_entity") or "transactions",
         "source_row_count": checkpoint.get("source_row_count"),
         "source_columns": checkpoint.get("source_columns") or [],

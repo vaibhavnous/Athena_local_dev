@@ -10,9 +10,30 @@ import ConfidenceBar from '../components/shared/ConfidenceBar'
 import CopyableId from '../components/shared/CopyableId'
 import JsonViewer from '../components/shared/JsonViewer'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
-import { getRun, submitEnrichmentReview, submitTableReviews } from '../api/athenaApi'
+import {
+  getBronzeReview,
+  getRun,
+  getSilverReview,
+  submitBronzeReview,
+  submitEnrichmentReview,
+  submitSilverReview,
+  submitTableReviews
+} from '../api/athenaApi'
 
-const TABS = ['Overview', 'Requirements', 'KPIs', 'Scripts', 'HITL Decisions', 'Cost Log']
+const TABS = ['Overview', 'Requirements', 'KPIs', 'Scripts', 'Review Gates', 'HITL Decisions', 'Cost Log']
+
+const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
+
+async function waitForRunGate(runId, targetGate, attempts = 20) {
+  let latest = null
+  for (let index = 0; index < attempts; index += 1) {
+    latest = await getRun(runId)
+    if (Number(latest?.next_gate || 0) === targetGate) return latest
+    if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
+    await sleep(1500)
+  }
+  return latest
+}
 
 function RunDetail() {
   const { runId } = useParams()
@@ -122,10 +143,223 @@ function RunDetail() {
           {activeTab === 'Requirements' && <RequirementsTab run={run} />}
           {activeTab === 'KPIs' && <KpisTab run={run} />}
           {activeTab === 'Scripts' && <ScriptsTab run={run} />}
+          {activeTab === 'Review Gates' && <ReviewGatesTab run={run} addNotification={addNotification} onRunRefresh={setBackendRun} />}
           {activeTab === 'HITL Decisions' && <HitlDecisionsTab run={run} />}
           {activeTab === 'Cost Log' && <CostLogTab run={run} />}
         </motion.div>
       </AnimatePresence>
+    </div>
+  )
+}
+
+function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
+  const [bronzeReview, setBronzeReview] = useState(null)
+  const [silverReview, setSilverReview] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [submitting, setSubmitting] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      setLoading(true)
+      try {
+        const [bronze, silver] = await Promise.allSettled([getBronzeReview(run.id), getSilverReview(run.id)])
+        if (cancelled) return
+        if (bronze.status === 'fulfilled') setBronzeReview(bronze.value)
+        if (silver.status === 'fulfilled') setSilverReview(silver.value)
+      } catch (error) {
+        if (!cancelled) {
+          addNotification({
+            type: 'error',
+            title: 'Review Gates Load Failed',
+            message: error.message || 'Unable to load Gate 4 / Gate 5 review data.',
+            duration: 5000
+          })
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [run.id, addNotification])
+
+  const bronzeArtifact = bronzeReview?.bronze_review_artifact || run.bronze_review_artifact || {}
+  const silverArtifact = silverReview?.silver_review_artifact || run.silver_review_artifact || {}
+  const bronzeFeeds = bronzeArtifact.feeds || []
+  const silverItems = silverArtifact.items || []
+
+  const handleSubmit = async (gate, action) => {
+    setSubmitting(gate)
+    try {
+      if (gate === 4) {
+        await submitBronzeReview(run.id, action)
+      } else {
+        await submitSilverReview(run.id, action)
+      }
+      const refreshed = gate === 4 && action === 'APPROVED'
+        ? await waitForRunGate(run.id, 5)
+        : await getRun(run.id)
+      onRunRefresh(refreshed)
+      const bronze = await getBronzeReview(run.id).catch(() => null)
+      const silver = await getSilverReview(run.id).catch(() => null)
+      if (bronze) setBronzeReview(bronze)
+      if (silver) setSilverReview(silver)
+      addNotification({
+        type: 'success',
+        title: `Gate ${gate} ${action.toLowerCase()}`,
+        message: gate === 4 && action === 'APPROVED' && Number(refreshed?.next_gate || 0) === 5
+          ? 'Bronze approved. Silver scripts are ready for Gate 5 review.'
+          : `Gate ${gate} review submitted.`,
+        duration: 4500
+      })
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: `Gate ${gate} submit failed`,
+        message: error.message || 'Unable to submit review.',
+        duration: 5000
+      })
+    } finally {
+      setSubmitting(null)
+    }
+  }
+
+  if (loading) {
+    return <EmptyState message="Loading Gate 4 / Gate 5 review artifacts..." />
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="card p-5">
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-300">Gate 4 - Bronze Review</h3>
+            <p className="text-xs text-gray-500 mt-1">
+              Review Bronze plan, generated config, validation checklist, and script before ingestion.
+            </p>
+          </div>
+          <StatusBadge status={bronzeReview?.next_gate === 4 ? 'PENDING' : 'READY'} size="sm" />
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-2">
+          <div className="space-y-3">
+            {(bronzeFeeds || []).map((feed, index) => (
+              <div key={`${feed.feed_id || index}`} className="rounded-lg border border-bg-border bg-bg-base p-4 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-200">
+                      {feed.vendor}.{feed.entity}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">
+                      {feed.source_type || run.source} | {feed.file_format || 'unknown'}
+                    </div>
+                  </div>
+                  <StatusBadge status={feed.validation_issues?.length ? 'REVIEW' : 'READY'} size="sm" />
+                </div>
+
+                <ReviewKV label="Feed Summary" value={feed.feed_summary ? JSON.stringify(feed.feed_summary, null, 2) : '-'} />
+                <ReviewKV label="Approved Schema" value={JSON.stringify(feed.approved_schema || [], null, 2)} mono />
+                <ReviewKV label="Primary Keys" value={(feed.primary_keys || []).join(', ') || '-'} />
+                <ReviewKV label="Watermark Column" value={feed.watermark_column || '-'} />
+                <ReviewKV label="Landing Path" value={feed.landing_path || '-'} mono />
+                <ReviewKV label="Bronze Output Path" value={feed.bronze_output_path || '-'} mono />
+                <ReviewKV label="Checkpoint Path" value={feed.checkpoint_path || '-'} mono />
+                <ReviewKV label="Validation Checklist" value={(feed.validation_checklist || []).join('\n')} />
+                <ReviewKV label="Generated Bronze Config" value={JSON.stringify(feed.generated_bronze_config || {}, null, 2)} mono />
+                <ReviewKV label="Generated Bronze Script" value={feed.generated_bronze_script || '-'} mono block />
+              </div>
+            ))}
+          </div>
+
+          <div className="rounded-lg border border-bg-border bg-bg-base p-4">
+            <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">Gate 4 Actions</div>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => handleSubmit(4, 'APPROVED')} disabled={submitting === 4} className="btn-primary text-sm">
+                Approve
+              </button>
+              <button onClick={() => handleSubmit(4, 'REJECTED')} disabled={submitting === 4} className="btn-secondary text-sm">
+                Reject
+              </button>
+              <button onClick={() => handleSubmit(4, 'REGENERATE')} disabled={submitting === 4} className="btn-secondary text-sm">
+                Regenerate
+              </button>
+            </div>
+            {bronzeArtifact.validation_checklist && (
+              <div className="mt-4">
+                <JsonViewer data={bronzeArtifact} maxHeight={420} />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="card p-5">
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-300">Gate 5 - Silver Review</h3>
+            <p className="text-xs text-gray-500 mt-1">
+              Review Silver transformations, type casts, dedup logic, DQ rules, masking rules, and the generated script.
+            </p>
+          </div>
+          <StatusBadge status={silverReview?.next_gate === 5 ? 'PENDING' : 'READY'} size="sm" />
+        </div>
+
+        <div className="space-y-3">
+          {(silverItems || []).map((item, index) => (
+            <div key={`${item.entity || index}`} className="rounded-lg border border-bg-border bg-bg-base p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-gray-200">{item.entity || 'Silver Item'}</div>
+                  <div className="text-xs text-gray-500 mt-1">{item.bronze_source || '-'}</div>
+                </div>
+                <StatusBadge status="READY" size="sm" />
+              </div>
+
+              <ReviewKV label="Transformations" value={(item.transformations || []).join('\n') || '-'} />
+              <ReviewKV label="Type Casts" value={JSON.stringify(item.type_casts || [], null, 2)} mono />
+              <ReviewKV label="Dedup Logic" value={item.dedup_logic || '-'} />
+              <ReviewKV label="DQ Rules" value={(item.dq_rules || []).join('\n') || '-'} />
+              <ReviewKV label="PII Masking Rules" value={(item.pii_masking_rules || []).join('\n') || '-'} />
+              <ReviewKV label="Merge Strategy" value={item.merge_strategy || '-'} />
+              <ReviewKV label="Generated Silver Script" value={item.generated_silver_script || '-'} mono block />
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-4 rounded-lg border border-bg-border bg-bg-base p-4">
+          <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">Gate 5 Actions</div>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => handleSubmit(5, 'APPROVED')} disabled={submitting === 5} className="btn-primary text-sm">
+              Approve
+            </button>
+            <button onClick={() => handleSubmit(5, 'REJECTED')} disabled={submitting === 5} className="btn-secondary text-sm">
+              Reject
+            </button>
+            <button onClick={() => handleSubmit(5, 'REGENERATE')} disabled={submitting === 5} className="btn-secondary text-sm">
+              Regenerate
+            </button>
+          </div>
+          {silverArtifact && Object.keys(silverArtifact).length > 0 && (
+            <div className="mt-4">
+              <JsonViewer data={silverArtifact} maxHeight={420} />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ReviewKV({ label, value, mono = false, block = false }) {
+  return (
+    <div className="space-y-1">
+      <div className="text-[10px] uppercase tracking-wider text-gray-500">{label}</div>
+      <pre className={`whitespace-pre-wrap break-words rounded-md border border-bg-border bg-bg-card/60 p-3 text-xs text-gray-300 ${mono ? 'font-mono' : ''} ${block ? 'max-h-64 overflow-auto' : ''}`}>
+        {value || '-'}
+      </pre>
     </div>
   )
 }
@@ -236,13 +470,15 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
     setSubmittingGate3(true)
     try {
       await submitEnrichmentReview(run.id, approve)
-      const refreshed = await getRun(run.id)
+      const refreshed = approve ? await waitForRunGate(run.id, 4) : await getRun(run.id)
       onRunRefresh(refreshed)
       addNotification({
         type: 'success',
         title: approve ? 'Gate 3 Approved' : 'Gate 3 Rejected',
         message: approve
-          ? 'Enrichment was approved. Bronze, Silver, and Gold generation are resuming.'
+          ? Number(refreshed?.next_gate || 0) === 4
+            ? 'Bronze scripts are generated and ready for Gate 4 review.'
+            : 'Enrichment was approved. Bronze generation is still processing.'
           : 'Enrichment was rejected and the run remains paused for rework.',
         duration: 5000
       })
@@ -403,7 +639,7 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
           <div className="card p-4">
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
-                <h3 className="text-sm font-semibold text-gray-300">Gate 3 Enrichment Review</h3>
+                <h3 className="text-sm font-semibold text-gray-300">{isSftpRun ? 'Gate 3 File Schema Enrichment Review' : 'Gate 3 Enrichment Review'}</h3>
                 <p className="text-xs text-gray-500 mt-1">{run.resume_message || 'Approve enrichment to continue script generation.'}</p>
               </div>
               <StatusBadge status="PENDING" size="sm" />
@@ -414,6 +650,14 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
               <StatTile label="Joins" value={(run.enriched_joins || []).length} />
               <StatTile label="PII" value={(run.pii_columns || []).length} />
             </div>
+
+            {isSftpRun && Array.isArray(run.feed_semantic_summary) && run.feed_semantic_summary.length > 0 && (
+              <div className="space-y-3 mb-4">
+                {run.feed_semantic_summary.map((feed, index) => (
+                  <RunDetailSemanticFeedCard key={`${feed.feed_id || feed.entity || index}`} feed={feed} />
+                ))}
+              </div>
+            )}
 
             <div className="flex items-center justify-end gap-2">
               <button
@@ -505,6 +749,44 @@ function SftpFeedReviewBody({ feed }) {
               +{columns.length - 8} more
             </span>
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RunDetailSemanticFeedCard({ feed }) {
+  const semanticCounts = Object.entries(feed?.semantic_counts || {})
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-base p-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-sm text-gray-200 font-medium">
+            {feed.vendor || 'Vendor'}.{feed.entity || feed.feed_id || 'feed'}
+          </div>
+          <div className="text-[11px] text-gray-500 mt-1">
+            {feed.format || 'unknown'}{feed.file_name ? ` • ${feed.file_name}` : ''}
+          </div>
+        </div>
+        <div className="text-[11px] text-gray-500">
+          {Number(feed.sample_row_count || 0)} sample rows
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3">
+        <StatTile label="Columns" value={Number(feed.column_count || 0)} />
+        <StatTile label="PII" value={Number(feed.pii_count || 0)} />
+        <StatTile label="Join Keys" value={Number(feed.join_key_count || 0)} />
+        <StatTile label="Measures" value={Number(feed.measure_count || 0)} />
+      </div>
+
+      {semanticCounts.length > 0 && (
+        <div className="flex gap-1 flex-wrap mt-3">
+          {semanticCounts.map(([key, value]) => (
+            <span key={key} className="px-2 py-0.5 rounded-full border border-bg-border bg-bg-base text-[10px] text-gray-400">
+              {key}: {value}
+            </span>
+          ))}
         </div>
       )}
     </div>

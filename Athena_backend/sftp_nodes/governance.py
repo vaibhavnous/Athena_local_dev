@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from sftp_nodes.hitl import hitl_controller
 from state import Stage01State
+from utilis.db import config, get_pipeline_connection
 from utilis.logger import logger
 
 
@@ -20,6 +22,123 @@ def _load_feed_discovery_node():
     if not hasattr(module, "feed_discovery_node"):
         raise RuntimeError("feed_discovery_node not found in sftp feed discovery module")
     return module.feed_discovery_node
+
+
+def _normalize_feed_registry_entry(feed: Dict[str, Any], status: str = "DISCOVERED") -> Dict[str, Any]:
+    feed_id = str(feed.get("feed_id") or f"{feed.get('vendor')}_{feed.get('entity')}").strip()
+    return {
+        "feed_id": feed_id,
+        "vendor": str(feed.get("vendor") or "unknown").strip(),
+        "entity": str(feed.get("entity") or "unknown").strip(),
+        "format": str(feed.get("format") or "unknown").strip(),
+        "file_name": str(feed.get("file_name") or "").strip(),
+        "file_path": str(feed.get("file_path") or "").strip(),
+        "remote_path": str(feed.get("remote_path") or feed.get("file_path") or "").strip(),
+        "status": status,
+        "source": str(feed.get("source") or "sftp").strip(),
+        "last_modified_at": datetime.now(timezone.utc).isoformat(),
+        "approved_at": None,
+    }
+
+
+def _persist_file_feed_registry(feeds: List[Dict[str, Any]], status: str = "DISCOVERED") -> None:
+    if not feeds:
+        return
+
+    db_conf = config["azure_sql"]
+    schema = db_conf["pipeline_schema"]
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        for feed in feeds:
+            entry = _normalize_feed_registry_entry(feed, status=status)
+            cursor.execute(
+                f"SELECT 1 FROM [{schema}].[file_feed_registry] WHERE feed_id = ?",
+                entry["feed_id"],
+            )
+            existing = cursor.fetchone()
+            if existing:
+                cursor.execute(
+                    f"""
+                    UPDATE [{schema}].[file_feed_registry]
+                    SET vendor = ?,
+                        entity = ?,
+                        format = ?,
+                        file_name = ?,
+                        file_path = ?,
+                        remote_path = ?,
+                        status = CASE
+                            WHEN UPPER(status) = 'APPROVED' AND ? = 'DISCOVERED' THEN status
+                            ELSE ?
+                        END,
+                        source = ?,
+                        last_modified_at = ?,
+                        updated_at = SYSUTCDATETIME()
+                    WHERE feed_id = ?
+                    """,
+                    entry["vendor"],
+                    entry["entity"],
+                    entry["format"],
+                    entry["file_name"],
+                    entry["file_path"],
+                    entry["remote_path"],
+                    entry["status"],
+                    entry["status"],
+                    entry["source"],
+                    entry["last_modified_at"],
+                    entry["feed_id"],
+                )
+            else:
+                cursor.execute(
+                    f"""
+                    INSERT INTO [{schema}].[file_feed_registry]
+                    (feed_id, vendor, entity, format, file_name, file_path, remote_path, status, source, last_modified_at, approved_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    entry["feed_id"],
+                    entry["vendor"],
+                    entry["entity"],
+                    entry["format"],
+                    entry["file_name"],
+                    entry["file_path"],
+                    entry["remote_path"],
+                    entry["status"],
+                    entry["source"],
+                    entry["last_modified_at"],
+                    entry["approved_at"],
+                )
+        conn.commit()
+    except Exception as exc:
+        logger.warning("SFTP feed registry persistence skipped: %s", exc)
+    finally:
+        conn.close()
+
+
+def _mark_registry_feeds_approved(feeds: List[Dict[str, Any]]) -> None:
+    if not feeds:
+        return
+    db_conf = config["azure_sql"]
+    schema = db_conf["pipeline_schema"]
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        approved_at = datetime.now(timezone.utc).isoformat()
+        for feed in feeds:
+            feed_id = str(feed.get("feed_id") or f"{feed.get('vendor')}_{feed.get('entity')}").strip()
+            cursor.execute(
+                f"""
+                UPDATE [{schema}].[file_feed_registry]
+                SET status = 'APPROVED', approved_at = ?, updated_at = SYSUTCDATETIME()
+                WHERE feed_id = ?
+                """,
+                approved_at,
+                feed_id,
+            )
+        conn.commit()
+    except Exception as exc:
+        logger.warning("SFTP feed approval persistence skipped: %s", exc)
+    finally:
+        conn.close()
 
 
 def sftp_gate1_node(state: Stage01State) -> Stage01State:
@@ -89,7 +208,7 @@ def sftp_feed_discovery_node(state: Stage01State) -> Stage01State:
         "stage": "sftp_feed_discovery",
     }
     logger.info("SFTP feed discovery starting", extra={**log_context, "event_type": "stage_start"})
-    if str(new_state.get("sftp_entity") or "transactions").lower() == "both":
+    if len(new_state.get("sftp_files") or []) > 1 or str(new_state.get("sftp_entity") or "transactions").lower() in {"both", "auto", "multi"}:
         files = new_state.get("sftp_files") or []
         candidate_feeds = []
         feed_node = _load_feed_discovery_node()
@@ -99,8 +218,19 @@ def sftp_feed_discovery_node(state: Stage01State) -> Stage01State:
             discovered = feed_node(item_state)
             if discovered.get("candidate_feed"):
                 candidate_feeds.append(discovered["candidate_feed"])
+        unique_candidate_feeds = []
+        seen_feed_keys = set()
+        for feed in candidate_feeds:
+            entity = str(feed.get("entity") or "").strip().lower()
+            file_format = str(feed.get("format") or "").strip().lower()
+            feed_key = (entity, file_format)
+            if entity and feed_key not in seen_feed_keys:
+                seen_feed_keys.add(feed_key)
+                unique_candidate_feeds.append(feed)
+        candidate_feeds = unique_candidate_feeds
         candidate_feeds = sorted(candidate_feeds, key=lambda item: str(item.get("entity") or ""))
         new_state["candidate_feeds"] = candidate_feeds
+        _persist_file_feed_registry(candidate_feeds, status="DISCOVERED")
         total_rows = sum(int(feed.get("sample_row_count") or 0) for feed in candidate_feeds)
         all_columns = sorted(
             {
@@ -131,7 +261,7 @@ def sftp_feed_discovery_node(state: Stage01State) -> Stage01State:
         new_state["candidate_feed"] = {
             "feed_id": "Vendor1_both",
             "vendor": "Vendor1",
-            "entity": "both",
+            "entity": "multi",
             "semantic_type": "multi-feed",
             "format": "mixed",
             "file_name": ", ".join(file_names),
@@ -156,6 +286,7 @@ def sftp_feed_discovery_node(state: Stage01State) -> Stage01State:
     feed_node = _load_feed_discovery_node()
     discovered = feed_node(new_state)
     candidate_feed = discovered.get("candidate_feed") or {}
+    _persist_file_feed_registry([candidate_feed], status="DISCOVERED")
     logger.info(
         "SFTP feed discovery completed: entity=%s format=%s rows=%s",
         candidate_feed.get("entity"),
@@ -211,6 +342,10 @@ def sftp_gate2_node(state: Stage01State) -> Stage01State:
         extra={**log_context, "event_type": "stage_end"},
     )
     if result.get("decision") == "APPROVED":
+        feeds = [dict(feed) for feed in (new_state.get("candidate_feeds") or []) if isinstance(feed, dict)]
+        if not feeds and isinstance(new_state.get("candidate_feed"), dict):
+            feeds = [dict(new_state["candidate_feed"])]
+        _mark_registry_feeds_approved(feeds)
         return new_state
 
     new_state["status"] = "FAILED"

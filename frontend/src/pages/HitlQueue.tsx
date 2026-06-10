@@ -6,21 +6,40 @@ import useAthenaStore from '../store/useAthenaStore'
 import KpiReviewCard from '../components/hitl/KpiReviewCard'
 import EditKpiModal from '../components/hitl/EditKpiModal'
 import {
+  getBronzeReview,
   approveKpi,
   getEnrichmentReviews,
   fetchKpiReviews,
   getRun,
   getPipelineKpis,
+  getSilverReview,
   getTableReviews,
   modifyKpi,
   rejectKpi,
+  submitBronzeReview,
   submitEnrichmentReview,
+  submitSilverReview,
   submitTableReviews
 } from '../api/athenaApi'
+
+const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
+
+async function waitForRunGate(runId, updateRun, targetGate, attempts = 20) {
+  let latest = null
+  for (let index = 0; index < attempts; index += 1) {
+    latest = await getRun(runId)
+    updateRun(runId, latest)
+    if (Number(latest?.next_gate || 0) === targetGate) return latest
+    if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
+    await sleep(1500)
+  }
+  return latest
+}
 
 function HitlQueue() {
   const {
     runs,
+    activeRunId,
     hitlQueues,
     addNotification,
     submitDecisions: storeSubmitDecisions,
@@ -33,12 +52,14 @@ function HitlQueue() {
     () =>
       runs.filter((run) => {
         const gate = Number(run?.next_gate || 0)
-        return gate === 1 || gate === 2 || gate === 3
+        return gate >= 1 && gate <= 5
       }),
     [runs]
   )
 
-  const [selectedRunId, setSelectedRunId] = useState(reviewRuns[0]?.id || null)
+  const initialReviewRun =
+    reviewRuns.find((run) => run.id === activeRunId) || null
+  const [selectedRunId, setSelectedRunId] = useState(initialReviewRun?.id || null)
   const [statusFilter, setStatusFilter] = useState('All')
   const [localDecisions, setLocalDecisions] = useState({})
   const [editedKpis, setEditedKpis] = useState({})
@@ -49,14 +70,19 @@ function HitlQueue() {
   const [tableReview, setTableReview] = useState(null)
   const [selectedTables, setSelectedTables] = useState({})
   const [enrichmentReview, setEnrichmentReview] = useState(null)
+  const [bronzeReview, setBronzeReview] = useState(null)
+  const [silverReview, setSilverReview] = useState(null)
   const [gate3Decision, setGate3Decision] = useState('APPROVED')
+  const [gateDecision, setGateDecision] = useState('APPROVED')
 
   const REVIEWER_ID = 'reviewer@nousinfo.com'
   const currentRun = runs.find((run) => run.id === selectedRunId)
   const gateToReview = Number(currentRun?.next_gate || 0)
-  const isReviewableRun = gateToReview === 1 || gateToReview === 2 || gateToReview === 3
+  const isReviewableRun = gateToReview >= 1 && gateToReview <= 5
   const isGate2 = gateToReview === 2
   const isGate3 = gateToReview === 3
+  const isGate4 = gateToReview === 4
+  const isGate5 = gateToReview === 5
   const isSftpRun = currentRun?.source === 'sftp' || currentRun?.source === 'adls_gen2'
   const queue = useMemo(
     () => hitlQueues[selectedRunId] || (currentRun?.kpis || []),
@@ -64,31 +90,37 @@ function HitlQueue() {
   )
 
   useEffect(() => {
+    const activeReviewRun = reviewRuns.find((run) => run.id === activeRunId)
+    if (activeReviewRun && activeReviewRun.id !== selectedRunId) {
+      setSelectedRunId(activeReviewRun.id)
+      setTableReview(null)
+      setEnrichmentReview(null)
+      setSelectedTables({})
+      setLocalDecisions({})
+      return
+    }
+
     const selectedStillExists = selectedRunId && runs.some((run) => run.id === selectedRunId)
     const selectedNeedsReview = currentRun && isReviewableRun
 
     if (selectedStillExists && selectedNeedsReview) return
 
-    const nextRun = reviewRuns[0] || null
-    if (nextRun && nextRun.id !== selectedRunId) {
-      setSelectedRunId(nextRun.id)
-      setTableReview(null)
-      setEnrichmentReview(null)
-      setSelectedTables({})
-      setLocalDecisions({})
-    } else if (!nextRun && selectedRunId) {
+    if (selectedRunId) {
       setSelectedRunId(null)
       setTableReview(null)
       setEnrichmentReview(null)
       setSelectedTables({})
       setLocalDecisions({})
     }
-  }, [runs, reviewRuns, selectedRunId, currentRun, isReviewableRun])
+  }, [runs, reviewRuns, selectedRunId, currentRun, isReviewableRun, activeRunId])
 
   useEffect(() => {
     setTableReview(null)
     setEnrichmentReview(null)
+    setBronzeReview(null)
+    setSilverReview(null)
     setSelectedTables({})
+    setGateDecision('APPROVED')
   }, [selectedRunId, currentRun?.source, gateToReview])
 
   useEffect(() => {
@@ -111,9 +143,34 @@ function HitlQueue() {
             pii_columns: review.pii_columns || [],
             join_key_columns: review.join_key_columns || [],
             measure_columns: review.measure_columns || [],
+            feed_semantic_summary: review.feed_semantic_summary || [],
             next_gate: review.next_gate,
             resume_message: review.resume_message,
             gate3_approved: review.gate3_approved
+          })
+          return
+        }
+
+        if (isGate4) {
+          const review = await getBronzeReview(selectedRunId)
+          if (cancelled) return
+          setBronzeReview(review)
+          updateRun(selectedRunId, {
+            next_gate: review.next_gate,
+            resume_message: review.resume_message,
+            bronze_review_artifact: review.bronze_review_artifact || {}
+          })
+          return
+        }
+
+        if (isGate5) {
+          const review = await getSilverReview(selectedRunId)
+          if (cancelled) return
+          setSilverReview(review)
+          updateRun(selectedRunId, {
+            next_gate: review.next_gate,
+            resume_message: review.resume_message,
+            silver_review_artifact: review.silver_review_artifact || {}
           })
           return
         }
@@ -161,8 +218,8 @@ function HitlQueue() {
         if (cancelled) return
         addNotification({
           type: 'error',
-          title: isGate2 ? 'Gate 2 Load Failed' : 'KPI Load Failed',
-          message: error.message || (isGate2 ? 'Unable to load table review data.' : 'Unable to load KPI review data.'),
+          title: isGate2 ? 'Gate 2 Load Failed' : isGate3 ? 'Gate 3 Load Failed' : isGate4 ? 'Gate 4 Load Failed' : isGate5 ? 'Gate 5 Load Failed' : 'KPI Load Failed',
+          message: error.message || (isGate2 ? 'Unable to load table review data.' : isGate3 ? 'Unable to load enrichment review data.' : isGate4 ? 'Unable to load Bronze review data.' : isGate5 ? 'Unable to load Silver review data.' : 'Unable to load KPI review data.'),
           duration: 5000
         })
       } finally {
@@ -174,7 +231,7 @@ function HitlQueue() {
     return () => {
       cancelled = true
     }
-  }, [selectedRunId, isGate2, isGate3, setHitlQueue, setHitlSourceRunId, updateRun, addNotification, currentRun?.source])
+  }, [selectedRunId, isGate2, isGate3, isGate4, isGate5, setHitlQueue, setHitlSourceRunId, updateRun, addNotification, currentRun?.source])
 
   const filteredQueue = useMemo(() => {
     if (statusFilter === 'All') return queue
@@ -197,7 +254,16 @@ function HitlQueue() {
   const availableSftpFeeds = getSftpFeeds(tableReview)
   const selectedFeedCount = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length
   const totalFeedCount = availableSftpFeeds.length
-  const someDecided = Object.keys(localDecisions).length > 0
+  const bronzeReviewFeeds = bronzeReview?.bronze_review_artifact?.feeds || []
+  const silverReviewItems = silverReview?.silver_review_artifact?.items || []
+  const gateReviewReady = isGate4 ? bronzeReviewFeeds.length > 0 : isGate5 ? silverReviewItems.length > 0 : false
+  const canSubmitReview = isGate2
+    ? (isSftpRun ? totalFeedCount > 0 : (tableReview?.nominated_tables || []).length > 0)
+    : isGate3
+    ? true
+    : (isGate4 || isGate5)
+    ? true
+    : Object.keys(localDecisions).length > 0
 
   const handleApprove = (kpiId) => {
     setLocalDecisions((prev) => ({ ...prev, [kpiId]: 'APPROVED' }))
@@ -302,17 +368,67 @@ function HitlQueue() {
       setSubmitting(true)
       try {
         await submitEnrichmentReview(selectedRunId, gate3Decision === 'APPROVED')
-        const refreshed = await getRun(selectedRunId)
+        const refreshed = gate3Decision === 'APPROVED'
+          ? await waitForRunGate(selectedRunId, updateRun, 4)
+          : await getRun(selectedRunId)
         updateRun(selectedRunId, refreshed)
         setEnrichmentReview(null)
         addNotification({
           type: 'success',
           title: 'Gate 3 Submitted',
-          message: 'Enrichment review was submitted. Script generation is resuming.',
+          message: gate3Decision === 'APPROVED' && Number(refreshed?.next_gate || 0) === 4
+            ? 'Gate 3 approved. Bronze scripts are generated and ready for Gate 4 review.'
+            : 'Enrichment review was submitted. Pipeline is still processing.',
           duration: 5000
         })
       } catch (error) {
         addNotification({ type: 'error', title: 'Gate 3 Failed', message: error.message, duration: 5000 })
+      } finally {
+        setSubmitting(false)
+      }
+      return
+    }
+
+    if (isGate4) {
+      setSubmitting(true)
+      try {
+        await submitBronzeReview(selectedRunId, gateDecision)
+        const refreshed = gateDecision === 'APPROVED'
+          ? await waitForRunGate(selectedRunId, updateRun, 5)
+          : await getRun(selectedRunId)
+        updateRun(selectedRunId, refreshed)
+        setBronzeReview(null)
+        addNotification({
+          type: 'success',
+          title: 'Gate 4 Submitted',
+          message: Number(refreshed?.next_gate || 0) === 5
+            ? 'Bronze approved. Silver scripts are generated and ready for Gate 5 review.'
+            : 'Bronze review was submitted. Pipeline is still processing.',
+          duration: 5000
+        })
+      } catch (error) {
+        addNotification({ type: 'error', title: 'Gate 4 Failed', message: error.message, duration: 5000 })
+      } finally {
+        setSubmitting(false)
+      }
+      return
+    }
+
+    if (isGate5) {
+      setSubmitting(true)
+      try {
+        await submitSilverReview(selectedRunId, gateDecision)
+        const refreshed = await getRun(selectedRunId)
+        updateRun(selectedRunId, refreshed)
+        setSilverReview(null)
+        addNotification({
+          type: 'success',
+          title: 'Gate 5 Submitted',
+          message: 'Silver review was submitted. Pipeline is resuming.',
+          duration: 5000
+        })
+      } catch (error) {
+        addNotification({ type: 'error', title: 'Gate 5 Failed', message: error.message, duration: 5000 })
       } finally {
         setSubmitting(false)
       }
@@ -409,10 +525,14 @@ function HitlQueue() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-lg font-bold text-white">
-            {isGate3 ? 'Gate 3 - Enrichment Review' : isGate2 ? (isSftpRun ? 'Gate 2 - SFTP Feed Review' : 'Gate 2 - Table Review') : 'Gate 1 - KPI Review'}
+            {isGate5 ? 'Gate 5 - Silver Review' : isGate4 ? 'Gate 4 - Bronze Review' : isGate3 ? 'Gate 3 - Enrichment Review' : isGate2 ? (isSftpRun ? 'Gate 2 - SFTP Feed Review' : 'Gate 2 - Table Review') : 'Gate 1 - KPI Review'}
           </h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            {isGate3
+            {isGate5
+              ? (silverReview?.resume_message || 'Review the Silver plan before the pipeline continues')
+              : isGate4
+              ? (bronzeReview?.resume_message || 'Review the Bronze plan before the pipeline continues')
+              : isGate3
               ? (enrichmentReview?.resume_message || 'Review semantic enrichment before the pipeline continues')
               : isGate2
               ? (tableReview?.resume_message || (isSftpRun ? 'Review discovered SFTP feeds before the pipeline continues.' : 'Review and certify nominated tables before the pipeline continues'))
@@ -429,13 +549,13 @@ function HitlQueue() {
             >
               {reviewRuns.map((run) => (
                 <option key={run.id} value={run.id}>
-                  {run.id.slice(0, 14)} - {run.brd_filename} ({run.next_gate === 3 ? 'Gate 3' : run.next_gate === 2 ? 'Gate 2' : 'Gate 1'})
+                  {run.id.slice(0, 14)} - {run.brd_filename} (Gate {run.next_gate})
                 </option>
               ))}
             </select>
           )}
 
-          {!isGate2 && !isGate3 && (
+          {!isGate2 && !isGate3 && !isGate4 && !isGate5 && (
             <select
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value)}
@@ -454,12 +574,80 @@ function HitlQueue() {
       <div className="flex gap-4 flex-1 min-h-0">
         <div className="flex-1 overflow-y-auto pr-1 space-y-4 pb-20">
           {selectedRunId && isReviewableRun ? (
-            isGate3 ? (
+            isGate5 ? (
+            <div className="space-y-4">
+              <div className="card p-5">
+                <h3 className="text-base font-bold text-text-primary mb-3">Silver Review</h3>
+                {silverReviewItems.length === 0 && (
+                  <div className="rounded-lg border border-bg-border bg-bg-base p-4 text-sm text-text-secondary">
+                    Silver scripts are not loaded yet. Submit is still available if Gate 5 is pending.
+                  </div>
+                )}
+                {((silverReview?.silver_review_artifact?.items) || []).map((item, index) => (
+                  <div key={`${item.entity || index}`} className="rounded-lg border border-bg-border bg-bg-base p-4 space-y-3 mb-3">
+                    <div className="text-sm font-semibold text-text-primary">{item.entity || 'Silver Item'}</div>
+                    <ReviewBlock label="Bronze Source" value={item.bronze_source || '-'} />
+                    <ReviewBlock label="Transformations" value={(item.transformations || []).join('\n') || '-'} />
+                    <ReviewBlock label="Type Casts" value={JSON.stringify(item.type_casts || [], null, 2)} />
+                    <ReviewBlock label="Dedup Logic" value={item.dedup_logic || '-'} />
+                    <ReviewBlock label="DQ Rules" value={(item.dq_rules || []).join('\n') || '-'} />
+                    <ReviewBlock label="PII Masking Rules" value={(item.pii_masking_rules || []).join('\n') || '-'} />
+                    <ReviewBlock label="Merge Strategy" value={item.merge_strategy || '-'} />
+                    <ReviewBlock label="Generated Silver Script" value={item.generated_silver_script || '-'} />
+                  </div>
+                ))}
+              </div>
+
+              <GateDecisionCard gateDecision={gateDecision} setGateDecision={setGateDecision} approveLabel="Approve Silver" rejectLabel="Reject Silver" regenerateLabel="Regenerate Silver" />
+              <button
+                onClick={handleSubmit}
+                disabled={hydrating || submitting || !selectedRunId}
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-5 py-3 text-sm font-bold text-white shadow-lg transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {submitting ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
+                Submit Gate 5 & Continue Pipeline
+              </button>
+            </div>
+            ) : isGate4 ? (
+            <div className="space-y-4">
+              <div className="card p-5">
+                <h3 className="text-base font-bold text-text-primary mb-3">Bronze Review</h3>
+                {bronzeReviewFeeds.length === 0 && (
+                  <div className="rounded-lg border border-bg-border bg-bg-base p-4 text-sm text-text-secondary">
+                    Bronze scripts are not loaded yet. Submit is still available if Gate 4 is pending.
+                  </div>
+                )}
+                {((bronzeReview?.bronze_review_artifact?.feeds) || []).map((feed, index) => (
+                  <div key={`${feed.entity || index}`} className="rounded-lg border border-bg-border bg-bg-base p-4 space-y-3 mb-3">
+                    <div className="text-sm font-semibold text-text-primary">{feed.vendor || 'Vendor'}.{feed.entity || 'Feed'}</div>
+                    <ReviewBlock label="Source Type" value={feed.source_type || '-'} />
+                    <ReviewBlock label="File Format" value={feed.file_format || '-'} />
+                    <ReviewBlock label="Primary Keys" value={(feed.primary_keys || []).join(', ') || '-'} />
+                    <ReviewBlock label="Watermark Column" value={feed.watermark_column || '-'} />
+                    <ReviewBlock label="Landing Path" value={feed.landing_path || '-'} />
+                    <ReviewBlock label="Bronze Output Path" value={feed.bronze_output_path || '-'} />
+                    <ReviewBlock label="Checkpoint Path" value={feed.checkpoint_path || '-'} />
+                    <ReviewBlock label="Generated Bronze Script" value={feed.generated_bronze_script || '-'} />
+                  </div>
+                ))}
+              </div>
+
+              <GateDecisionCard gateDecision={gateDecision} setGateDecision={setGateDecision} approveLabel="Approve Bronze" rejectLabel="Reject Bronze" regenerateLabel="Regenerate Bronze" />
+              <button
+                onClick={handleSubmit}
+                disabled={hydrating || submitting || !selectedRunId}
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-5 py-3 text-sm font-bold text-white shadow-lg transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {submitting ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
+                Submit Gate 4 & Generate Silver
+              </button>
+            </div>
+            ) : isGate3 ? (
             <div className="space-y-4">
               <div className="card p-5">
                 <div className="flex items-center justify-between gap-3 mb-4">
                   <div>
-                    <h3 className="text-base font-bold text-text-primary">Enrichment Summary</h3>
+                    <h3 className="text-base font-bold text-text-primary">{isSftpRun ? 'File Schema Enrichment Summary' : 'Enrichment Summary'}</h3>
                     <p className="text-sm text-text-secondary mt-1">{enrichmentReview?.resume_message || 'Review enriched metadata and approve or reject it.'}</p>
                   </div>
                 </div>
@@ -470,6 +658,17 @@ function HitlQueue() {
                   <StatTile label="Join Keys" value={(enrichmentReview?.join_key_columns || []).length} />
                 </div>
               </div>
+
+              {isSftpRun && Array.isArray(enrichmentReview?.feed_semantic_summary) && enrichmentReview.feed_semantic_summary.length > 0 && (
+                <div className="card p-5">
+                  <h3 className="text-base font-bold text-text-primary mb-3">Per Feed Breakdown</h3>
+                  <div className="space-y-3">
+                    {enrichmentReview.feed_semantic_summary.map((feed, index) => (
+                      <FileSemanticFeedCard key={`${feed.feed_id || feed.entity || index}`} feed={feed} />
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="card p-5">
                 <h3 className="text-base font-bold text-text-primary mb-3">Semantic Types</h3>
@@ -586,7 +785,7 @@ function HitlQueue() {
             <div className="flex items-center justify-center h-40 rounded-2xl border border-dashed border-bg-border bg-bg-card/40 text-center px-6">
               <div>
                 <p className="text-sm font-semibold text-gray-300">No pending gate review</p>
-                <p className="text-xs text-gray-500 mt-1">This page only shows runs paused at Gate 1, Gate 2, or Gate 3.</p>
+                <p className="text-xs text-gray-500 mt-1">This page shows runs paused at Gate 1 through Gate 5.</p>
               </div>
             </div>
           )}
@@ -609,6 +808,16 @@ function HitlQueue() {
                   <CountRow label="Joins" value={(enrichmentReview?.enriched_joins || []).length} color="text-accent-blue" />
                   <CountRow label="Decision" value={gate3Decision === 'APPROVED' ? 'Approve' : 'Reject'} color={gate3Decision === 'APPROVED' ? 'text-accent-green' : 'text-accent-red'} pulse />
                 </>
+                ) : isGate4 ? (
+                <>
+                  <CountRow label="Bronze Plans" value={bronzeReviewFeeds.length} color="text-gray-300" />
+                  <CountRow label="Decision" value={gateDecision === 'APPROVED' ? 'Approve' : gateDecision === 'REJECTED' ? 'Reject' : 'Regenerate'} color={gateDecision === 'APPROVED' ? 'text-accent-green' : gateDecision === 'REJECTED' ? 'text-accent-red' : 'text-accent-blue'} pulse />
+                </>
+                ) : isGate5 ? (
+                <>
+                  <CountRow label="Silver Scripts" value={silverReviewItems.length} color="text-gray-300" />
+                  <CountRow label="Decision" value={gateDecision === 'APPROVED' ? 'Approve' : gateDecision === 'REJECTED' ? 'Reject' : 'Regenerate'} color={gateDecision === 'APPROVED' ? 'text-accent-green' : gateDecision === 'REJECTED' ? 'text-accent-red' : 'text-accent-blue'} pulse />
+                </>
                 ) : (
                 <>
                   <CountRow label="Total" value={kpiCounts.total} color="text-gray-300" />
@@ -630,6 +839,8 @@ function HitlQueue() {
                   style={{
                     width: `${isGate3
                       ? 100
+                      : isGate4 || isGate5
+                      ? (gateReviewReady ? 100 : 0)
                       : isGate2
                       ? (isSftpRun
                           ? (totalFeedCount > 0 ? (selectedFeedCount / totalFeedCount) * 100 : 0)
@@ -651,11 +862,11 @@ function HitlQueue() {
           </div>
 
           <button
-            onClick={isGate3 ? () => setGate3Decision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleSelectAllTables) : handleAutoApproveAll}
+            onClick={isGate3 ? () => setGate3Decision('APPROVED') : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleSelectAllTables) : handleAutoApproveAll}
             className="flex items-center justify-center gap-2 px-4 py-3 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/25 text-accent-green text-sm font-semibold rounded-xl transition-colors"
           >
             <CheckCircle size={15} />
-            {isGate3 ? 'Set Approve' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
+            {isGate3 || isGate4 || isGate5 ? 'Set Approve' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
           </button>
 
           <div className="p-3 bg-bg-card border border-bg-border rounded-xl">
@@ -667,7 +878,11 @@ function HitlQueue() {
                     ? 'Gate 2 validates the discovered SFTP feeds. Review entity, source file, sample rows, columns, keys, and measures before approving the feed set.'
                     : 'Certified tables become the source set for metadata discovery, profiling, and enrichment.')
                   : isGate3
-                  ? 'Approving Gate 3 starts bronze, silver, and gold code generation. Rejecting keeps the run paused for rework.'
+                  ? 'Approving Gate 3 generates Bronze review artifacts. Rejecting keeps the run paused for rework.'
+                  : isGate4
+                  ? 'Approving Gate 4 accepts the Bronze scripts and starts Silver script generation.'
+                  : isGate5
+                  ? 'Approving Gate 5 accepts the Silver scripts and continues downstream validation.'
                   : 'Approvals are final once submitted. Rejected KPIs will be excluded from the final export.'}
               </p>
             </div>
@@ -675,7 +890,7 @@ function HitlQueue() {
         </div>
       </div>
 
-      {((isGate2 ? (isSftpRun ? (totalFeedCount > 0) : (tableReview?.nominated_tables || []).length > 0) : isGate3 ? true : someDecided)) && (
+      {canSubmitReview && (
         <motion.div
           initial={{ y: 80, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
@@ -684,7 +899,14 @@ function HitlQueue() {
           style={{ background: 'rgba(17,24,39,0.95)', backdropFilter: 'blur(10px)' }}
         >
           <div className="flex items-center gap-4 text-sm">
-            {isGate3 ? (
+            {isGate4 || isGate5 ? (
+              <>
+                <span className={gateDecision === 'APPROVED' ? 'text-accent-green font-semibold' : gateDecision === 'REJECTED' ? 'text-accent-red font-semibold' : 'text-accent-blue font-semibold'}>
+                  {gateDecision === 'APPROVED' ? 'Approve selected' : gateDecision === 'REJECTED' ? 'Reject selected' : 'Regenerate selected'}
+                </span>
+                <span className="text-gray-500">{isGate4 ? `${bronzeReviewFeeds.length} Bronze plan(s)` : `${silverReviewItems.length} Silver script(s)`}</span>
+              </>
+            ) : isGate3 ? (
               <>
                 <span className={gate3Decision === 'APPROVED' ? 'text-accent-green font-semibold' : 'text-accent-red font-semibold'}>
                   {gate3Decision === 'APPROVED' ? 'Approve selected' : 'Reject selected'}
@@ -718,8 +940,8 @@ function HitlQueue() {
               </>
             ) : (
               <>
-                {isGate3 || isGate2 ? <CheckCircle2 size={14} /> : <Send size={14} />}
-                {isGate3 ? 'Submit Gate 3 & Resume Pipeline ->' : isGate2 ? 'Submit Gate 2 & Resume Pipeline ->' : 'Submit All Decisions & Resume Pipeline ->'}
+                {isGate3 || isGate2 || isGate4 || isGate5 ? <CheckCircle2 size={14} /> : <Send size={14} />}
+                {isGate5 ? 'Submit Gate 5 & Continue Pipeline ->' : isGate4 ? 'Submit Gate 4 & Generate Silver ->' : isGate3 ? 'Submit Gate 3 & Generate Bronze ->' : isGate2 ? 'Submit Gate 2 & Resume Pipeline ->' : 'Submit All Decisions & Resume Pipeline ->'}
               </>
             )}
           </button>
@@ -861,4 +1083,93 @@ function SftpFeedReviewBody({ feed }) {
   )
 }
 
+function FileSemanticFeedCard({ feed }) {
+  const semanticCounts = Object.entries(feed?.semantic_counts || {})
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-base p-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-sm font-semibold text-text-primary">
+            {feed.vendor || 'Vendor'}.{feed.entity || feed.feed_id || 'feed'}
+          </div>
+          <div className="text-xs text-text-secondary mt-1">
+            {feed.format || 'unknown'}{feed.file_name ? ` • ${feed.file_name}` : ''}
+          </div>
+        </div>
+        <div className="text-xs text-text-secondary">
+          {Number(feed.sample_row_count || 0)} sample rows
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3">
+        <StatTile label="Columns" value={Number(feed.column_count || 0)} />
+        <StatTile label="PII" value={Number(feed.pii_count || 0)} />
+        <StatTile label="Join Keys" value={Number(feed.join_key_count || 0)} />
+        <StatTile label="Measures" value={Number(feed.measure_count || 0)} />
+      </div>
+
+      {semanticCounts.length > 0 && (
+        <div className="flex flex-wrap gap-2 mt-3">
+          {semanticCounts.map(([key, value]) => (
+            <span key={key} className="px-2 py-1 rounded-full text-[10px] font-medium bg-bg-surface border border-bg-border text-text-secondary">
+              {key}: {value}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default HitlQueue
+
+function GateDecisionCard({ gateDecision, setGateDecision, approveLabel, rejectLabel, regenerateLabel }) {
+  return (
+    <div className="card p-5">
+      <h3 className="text-base font-bold text-text-primary mb-3">Decision</h3>
+      <div className="grid grid-cols-3 gap-3">
+        <button
+          onClick={() => setGateDecision('APPROVED')}
+          className={`px-4 py-3 rounded-lg border text-sm font-semibold transition-colors ${
+            gateDecision === 'APPROVED'
+              ? 'bg-accent-green/15 border-accent-green/30 text-accent-green'
+              : 'border-bg-border text-text-secondary hover:border-gray-600'
+          }`}
+        >
+          {approveLabel}
+        </button>
+        <button
+          onClick={() => setGateDecision('REJECTED')}
+          className={`px-4 py-3 rounded-lg border text-sm font-semibold transition-colors ${
+            gateDecision === 'REJECTED'
+              ? 'bg-accent-red/15 border-accent-red/30 text-accent-red'
+              : 'border-bg-border text-text-secondary hover:border-gray-600'
+          }`}
+        >
+          {rejectLabel}
+        </button>
+        <button
+          onClick={() => setGateDecision('REGENERATE')}
+          className={`px-4 py-3 rounded-lg border text-sm font-semibold transition-colors ${
+            gateDecision === 'REGENERATE'
+              ? 'bg-accent-blue/15 border-accent-blue/30 text-accent-blue'
+              : 'border-bg-border text-text-secondary hover:border-gray-600'
+          }`}
+        >
+          {regenerateLabel}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ReviewBlock({ label, value }) {
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wider text-text-tertiary mb-1">{label}</div>
+      <pre className="whitespace-pre-wrap break-words rounded-lg border border-bg-border bg-[#0a1020] p-3 text-xs text-text-secondary overflow-auto max-h-64">
+        {value || '-'}
+      </pre>
+    </div>
+  )
+}

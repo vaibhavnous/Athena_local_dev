@@ -97,7 +97,7 @@ def ai_store_db_writer(
         )
         
         conn.commit()
-        logger.info("✅ ai_store written (stage=%s)", stage, extra=log_context)
+        logger.info("ai_store written (stage=%s)", stage, extra=log_context)
         
     except Exception as e:
         logger.error(f"ai_store write failed: {e}", extra=log_context)

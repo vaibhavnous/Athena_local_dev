@@ -1,0 +1,432 @@
+{
+  "run_id": "eba8b430-c0f5-47ba-9d8a-4542426f44c1",
+  "feed_id": "Vendor1_DevInfo",
+  "vendor": "Vendor1",
+  "entity": "DevInfo",
+  "source_type": "adls_gen2",
+  "file_format": "xml",
+  "feed_summary": {
+    "file_name": "",
+    "file_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\DevInfo\\2026-12-1_0626DevInfo_.xml",
+    "remote_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\DevInfo\\2026-12-1_0626DevInfo_.xml",
+    "format": "xml",
+    "status": "APPROVED"
+  },
+  "bronze_config": {
+    "feed_id": "Vendor1_DevInfo",
+    "vendor": "Vendor1",
+    "entity": "DevInfo",
+    "vendor_safe": "vendor1",
+    "entity_safe": "devinfo",
+    "source_type": "adls_gen2",
+    "file_format": "xml",
+    "row_tag": "RemoteMessage",
+    "landing_path": "abfss://athena@atheastorage.dfs.core.windows.net/evention/vendor1/machine1/DevInfo/",
+    "original_file_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\DevInfo\\2026-12-1_0626DevInfo_.xml",
+    "remote_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\DevInfo\\2026-12-1_0626DevInfo_.xml",
+    "bronze_output_path": "/Volumes/main/bronze/pipeline_artifacts/tables/bronze/vendor1/devinfo",
+    "checkpoint_path": "/Volumes/main/bronze/pipeline_artifacts/checkpoints/bronze/vendor1/devinfo",
+    "schema_location": "/Volumes/main/bronze/pipeline_artifacts/schemas/bronze/vendor1/devinfo",
+    "target_table": "bronze.vendor1_devinfo_raw",
+    "schema_columns": [
+      {
+        "column_name": "RemoteMessage_BDM_RecFw",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_RecFw__version",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_RecTemplates_Template",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_bagsConfig_bag",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_fw",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_fw__version",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_machineId",
+        "data_type": "long",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_model",
+        "data_type": "long",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_model__name",
+        "data_type": "long",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_model__sn",
+        "data_type": "long",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_stocksConfig_stock",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_videoPack",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_videoPack__version",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_CDM",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_DDM",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__CustomerCode",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__Date",
+        "data_type": "date",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__DeviceID",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__NOP",
+        "data_type": "long",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__TestMode",
+        "data_type": "long",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__Time",
+        "data_type": "timestamp",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__operation",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_os",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_software_sw",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_software_sw__name",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_software_sw__version",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      }
+    ],
+    "schema_version": 5,
+    "schema_fingerprint": "237539d3e4c95b46bd731b0b9b61c7bc",
+    "primary_keys": [
+      "RemoteMessage_BDM_machineId",
+      "RemoteMessage_BDM_videoPack",
+      "RemoteMessage_BDM_videoPack__version",
+      "RemoteMessage__DeviceID"
+    ],
+    "watermark_column": "RemoteMessage__Date",
+    "validation_checklist": [
+      "Feed approved in file_feed_registry",
+      "Schema approved in file_feed_schema_registry",
+      "Source path is Databricks-readable",
+      "Primary keys reviewed",
+      "Watermark column reviewed",
+      "Landing and output paths confirmed",
+      "Generated Bronze script compiles",
+      "No forbidden patterns found in generated script"
+    ]
+  },
+  "generated_bronze_config": {
+    "feed_id": "Vendor1_DevInfo",
+    "vendor": "Vendor1",
+    "entity": "DevInfo",
+    "vendor_safe": "vendor1",
+    "entity_safe": "devinfo",
+    "source_type": "adls_gen2",
+    "file_format": "xml",
+    "row_tag": "RemoteMessage",
+    "landing_path": "abfss://athena@atheastorage.dfs.core.windows.net/evention/vendor1/machine1/DevInfo/",
+    "original_file_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\DevInfo\\2026-12-1_0626DevInfo_.xml",
+    "remote_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\DevInfo\\2026-12-1_0626DevInfo_.xml",
+    "bronze_output_path": "/Volumes/main/bronze/pipeline_artifacts/tables/bronze/vendor1/devinfo",
+    "checkpoint_path": "/Volumes/main/bronze/pipeline_artifacts/checkpoints/bronze/vendor1/devinfo",
+    "schema_location": "/Volumes/main/bronze/pipeline_artifacts/schemas/bronze/vendor1/devinfo",
+    "target_table": "bronze.vendor1_devinfo_raw",
+    "schema_columns": [
+      {
+        "column_name": "RemoteMessage_BDM_RecFw",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_RecFw__version",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_RecTemplates_Template",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_bagsConfig_bag",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_fw",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_fw__version",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_machineId",
+        "data_type": "long",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_model",
+        "data_type": "long",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_model__name",
+        "data_type": "long",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_model__sn",
+        "data_type": "long",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_stocksConfig_stock",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_videoPack",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_BDM_videoPack__version",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_CDM",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_DDM",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__CustomerCode",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__Date",
+        "data_type": "date",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__DeviceID",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__NOP",
+        "data_type": "long",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__TestMode",
+        "data_type": "long",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__Time",
+        "data_type": "timestamp",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage__operation",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_os",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_software_sw",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_software_sw__name",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_software_sw__version",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      }
+    ],
+    "schema_version": 5,
+    "schema_fingerprint": "237539d3e4c95b46bd731b0b9b61c7bc",
+    "primary_keys": [
+      "RemoteMessage_BDM_machineId",
+      "RemoteMessage_BDM_videoPack",
+      "RemoteMessage_BDM_videoPack__version",
+      "RemoteMessage__DeviceID"
+    ],
+    "watermark_column": "RemoteMessage__Date",
+    "validation_checklist": [
+      "Feed approved in file_feed_registry",
+      "Schema approved in file_feed_schema_registry",
+      "Source path is Databricks-readable",
+      "Primary keys reviewed",
+      "Watermark column reviewed",
+      "Landing and output paths confirmed",
+      "Generated Bronze script compiles",
+      "No forbidden patterns found in generated script"
+    ]
+  },
+  "generated_bronze_script": "import json\nimport os\nimport re\nimport xml.etree.ElementTree as ET\nfrom io import BytesIO\n\nimport pandas as pd\nfrom azure.identity import ClientSecretCredential\nfrom azure.storage.filedatalake import DataLakeServiceClient\nfrom pyspark.sql import functions as F\nfrom pyspark.sql.types import ArrayType, MapType, StructType\n\nRUN_ID = \"eba8b430-c0f5-47ba-9d8a-4542426f44c1\"\nPIPELINE_VERSION = \"v1\"\nSOURCE_TYPE = \"adls_gen2\"\nSOURCE_FEED = \"Vendor1/DevInfo\"\nFILE_FORMAT = \"xml\"\nROW_TAG = \"RemoteMessage\"\nSOURCE_PATH = \"abfss://athena@atheastorage.dfs.core.windows.net/evention/vendor1/machine1/DevInfo/\"\nTARGET_TABLE = \"bronze.vendor1_devinfo_raw\"\nSCHEMA_LOCATION = \"/Volumes/main/bronze/pipeline_artifacts/schemas/bronze/vendor1/devinfo\"\nCHECKPOINT_PATH = \"/Volumes/main/bronze/pipeline_artifacts/checkpoints/bronze/vendor1/devinfo\"\nSECRET_SCOPE = \"dataedge-secrets\"\nTENANT_KEY = \"adls-tenant-id\"\nCLIENT_ID_KEY = \"adls-client-id\"\nCLIENT_SECRET_KEY = \"adls-client-secret\"\nDEBUG = False\nEXPECTED_COLUMNS = [\n    \"RemoteMessage_BDM_RecFw\",\n    \"RemoteMessage_BDM_RecFw__version\",\n    \"RemoteMessage_BDM_RecTemplates_Template\",\n    \"RemoteMessage_BDM_bagsConfig_bag\",\n    \"RemoteMessage_BDM_fw\",\n    \"RemoteMessage_BDM_fw__version\",\n    \"RemoteMessage_BDM_machineId\",\n    \"RemoteMessage_BDM_model\",\n    \"RemoteMessage_BDM_model__name\",\n    \"RemoteMessage_BDM_model__sn\",\n    \"RemoteMessage_BDM_stocksConfig_stock\",\n    \"RemoteMessage_BDM_videoPack\",\n    \"RemoteMessage_BDM_videoPack__version\",\n    \"RemoteMessage_CDM\",\n    \"RemoteMessage_DDM\",\n    \"RemoteMessage__CustomerCode\",\n    \"RemoteMessage__Date\",\n    \"RemoteMessage__DeviceID\",\n    \"RemoteMessage__NOP\",\n    \"RemoteMessage__TestMode\",\n    \"RemoteMessage__Time\",\n    \"RemoteMessage__operation\",\n    \"RemoteMessage_os\",\n    \"RemoteMessage_software_sw\",\n    \"RemoteMessage_software_sw__name\",\n    \"RemoteMessage_software_sw__version\",\n    \"RemoteMessage_Details_countings_counted\",\n    \"RemoteMessage_contentAfter_count\",\n    \"RemoteMessage_contentBefore_count\",\n    \"RemoteMessage_destDetails_count\"\n]\nEXPECTED_TYPES = {\n    \"RemoteMessage_BDM_RecFw\": \"string\",\n    \"RemoteMessage_BDM_RecFw__version\": \"string\",\n    \"RemoteMessage_BDM_RecTemplates_Template\": \"string\",\n    \"RemoteMessage_BDM_bagsConfig_bag\": \"string\",\n    \"RemoteMessage_BDM_fw\": \"string\",\n    \"RemoteMessage_BDM_fw__version\": \"string\",\n    \"RemoteMessage_BDM_machineId\": \"long\",\n    \"RemoteMessage_BDM_model\": \"long\",\n    \"RemoteMessage_BDM_model__name\": \"long\",\n    \"RemoteMessage_BDM_model__sn\": \"long\",\n    \"RemoteMessage_BDM_stocksConfig_stock\": \"string\",\n    \"RemoteMessage_BDM_videoPack\": \"string\",\n    \"RemoteMessage_BDM_videoPack__version\": \"string\",\n    \"RemoteMessage_CDM\": \"string\",\n    \"RemoteMessage_DDM\": \"string\",\n    \"RemoteMessage__CustomerCode\": \"string\",\n    \"RemoteMessage__Date\": \"date\",\n    \"RemoteMessage__DeviceID\": \"string\",\n    \"RemoteMessage__NOP\": \"long\",\n    \"RemoteMessage__TestMode\": \"long\",\n    \"RemoteMessage__Time\": \"timestamp\",\n    \"RemoteMessage__operation\": \"string\",\n    \"RemoteMessage_os\": \"string\",\n    \"RemoteMessage_software_sw\": \"string\",\n    \"RemoteMessage_software_sw__name\": \"string\",\n    \"RemoteMessage_software_sw__version\": \"string\",\n    \"RemoteMessage_Details_countings_counted\": \"string\",\n    \"RemoteMessage_contentAfter_count\": \"string\",\n    \"RemoteMessage_contentBefore_count\": \"string\",\n    \"RemoteMessage_destDetails_count\": \"string\"\n}\n\nprint(f\"Starting Bronze ingestion for {SOURCE_FEED}\")\nprint(f\"Source path: {SOURCE_PATH}\")\nprint(f\"Target table: {TARGET_TABLE}\")\n\n\ndef _secret(key):\n    return dbutils.secrets.get(SECRET_SCOPE, key)\n\n\ndef _parse_abfss_path(path):\n    match = re.match(r\"^abfss://([^@]+)@([^.]+)\\.dfs\\.core\\.windows\\.net/(.*)$\", path.strip())\n    if not match:\n        raise ValueError(f\"SOURCE_PATH must be an abfss:// ADLS Gen2 path, got: {path}\")\n    file_system, account_name, source_prefix = match.groups()\n    return file_system, account_name, source_prefix.strip(\"/\")\n\n\ndef _file_system_client():\n    file_system, account_name, _ = _parse_abfss_path(SOURCE_PATH)\n    credential = ClientSecretCredential(\n        tenant_id=_secret(TENANT_KEY),\n        client_id=_secret(CLIENT_ID_KEY),\n        client_secret=_secret(CLIENT_SECRET_KEY),\n    )\n    service_client = DataLakeServiceClient(\n        account_url=f\"https://{account_name}.dfs.core.windows.net\",\n        credential=credential,\n    )\n    return service_client.get_file_system_client(file_system)\n\n\ndef _list_source_files(file_system_client):\n    _, _, source_prefix = _parse_abfss_path(SOURCE_PATH)\n    paths = list(file_system_client.get_paths(path=source_prefix, recursive=False))\n    source_files = [\n        item\n        for item in paths\n        if not getattr(item, \"is_directory\", False)\n        and str(getattr(item, \"name\", \"\")).lower().endswith(f\".{FILE_FORMAT}\")\n    ]\n    if not source_files:\n        raise ValueError(f\"No .{FILE_FORMAT} files found under {SOURCE_PATH}\")\n    return source_files\n\n\ndef _download_file(file_system_client, file_path):\n    return file_system_client.get_file_client(file_path).download_file().readall()\n\n\ndef _xml_strings_from_bytes(payload):\n    root = ET.fromstring(payload)\n    if root.tag.split(\"}\")[-1] == ROW_TAG:\n        return [ET.tostring(root, encoding=\"unicode\")]\n    rows = [node for node in root.iter() if node.tag.split(\"}\")[-1] == ROW_TAG]\n    return [ET.tostring(node, encoding=\"unicode\") for node in rows]\n\n\ndef _safe_col_name(value):\n    cleaned = re.sub(r\"[^A-Za-z0-9_]+\", \"_\", str(value or \"\"))\n    return cleaned if re.search(r\"[A-Za-z0-9]\", cleaned) else \"unknown\"\n\n\ndef _quote_path(path):\n    return \".\".join(f\"`{part}`\" for part in path.split(\".\"))\n\n\ndef _flatten_columns(schema, prefix, path):\n    columns = []\n    for field in schema.fields:\n        child_path = f\"{path}.{field.name}\"\n        output_name = _safe_col_name(f\"{prefix}_{field.name}\")\n        dtype = field.dataType\n        if isinstance(dtype, StructType):\n            columns.extend(_flatten_columns(dtype, output_name, child_path))\n        elif isinstance(dtype, (ArrayType, MapType)):\n            columns.append(F.to_json(F.col(_quote_path(child_path))).alias(output_name))\n        else:\n            columns.append(F.col(_quote_path(child_path)).alias(output_name))\n    return columns\n\n\ndef _project_column(available_columns, name, target_type):\n    if name in available_columns:\n        return F.col(f\"`{name}`\").cast(target_type).alias(name)\n    return F.lit(None).cast(target_type).alias(name)\n\n\ndef _project_bronze_df(source_df):\n    available_columns = set(source_df.columns)\n    expected_set = set(EXPECTED_COLUMNS)\n    extra_names = sorted(available_columns - expected_set)\n    if DEBUG and extra_names:\n        print(\"Extra source columns not in approved schema:\", extra_names)\n    projected = [\n        _project_column(available_columns, name, EXPECTED_TYPES.get(name, \"string\"))\n        for name in EXPECTED_COLUMNS\n    ]\n    extra_columns = [\n        F.col(f\"`{name}`\")\n        for name in extra_names\n    ]\n    return source_df.select(*(projected + extra_columns)) if projected or extra_columns else source_df\n\n\nfs_client = _file_system_client()\n_source_files = _list_source_files(fs_client)\n_source_file_names = \", \".join([os.path.basename(item.name) for item in _source_files])\n\nif FILE_FORMAT == \"csv\":\n    frames = [pd.read_csv(BytesIO(_download_file(fs_client, item.name))) for item in _source_files]\n    pdf = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]\n    df = spark.createDataFrame(pdf)\nelif FILE_FORMAT == \"json\":\n    records = []\n    for item in _source_files:\n        payload = json.loads(_download_file(fs_client, item.name).decode(\"utf-8\"))\n        if isinstance(payload, list):\n            records.extend([row for row in payload if isinstance(row, dict)])\n        elif isinstance(payload, dict):\n            nested_rows = [\n                value for value in payload.values()\n                if isinstance(value, list) and value and isinstance(value[0], dict)\n            ]\n            if nested_rows:\n                records.extend(nested_rows[0])\n            else:\n                records.append(payload)\n    if not records:\n        raise ValueError(f\"No JSON records found under {SOURCE_PATH}\")\n    df = spark.createDataFrame(pd.DataFrame(records))\nelif FILE_FORMAT == \"xml\":\n    xml_rows = []\n    for item in _source_files:\n        xml_rows.extend(_xml_strings_from_bytes(_download_file(fs_client, item.name)))\n    if not xml_rows:\n        raise ValueError(f\"No <{ROW_TAG}> records found under {SOURCE_PATH}\")\n    xml_df = spark.createDataFrame([(text,) for text in xml_rows], [\"_xml\"])\n    xml_schema = spark.range(1).select(\n        F.schema_of_xml(F.lit(xml_rows[0]), {\"rowTag\": ROW_TAG}).alias(\"schema\")\n    ).first()[\"schema\"]\n    parsed_df = xml_df.select(F.from_xml(F.col(\"_xml\"), xml_schema, {\"rowTag\": ROW_TAG}).alias(ROW_TAG))\n    flattened_columns = _flatten_columns(parsed_df.schema[ROW_TAG].dataType, ROW_TAG, ROW_TAG)\n    df = parsed_df.select(*flattened_columns)\nelse:\n    raise ValueError(f\"Unsupported FILE_FORMAT: {FILE_FORMAT}\")\n\nif df.limit(1).count() == 0:\n    raise ValueError(f\"No records found in Bronze source path: {SOURCE_PATH}\")\n\nif DEBUG:\n    print(\"Available columns:\", df.columns)\n\nbronze_df = _project_bronze_df(df)\n\nbronze_df = (\n    bronze_df\n    .withColumn(\"_run_id\", F.lit(RUN_ID))\n    .withColumn(\"_ingestion_timestamp\", F.current_timestamp())\n    .withColumn(\"_source_system\", F.lit(SOURCE_TYPE))\n    .withColumn(\"_source_feed\", F.lit(SOURCE_FEED))\n    .withColumn(\"_source_file_path\", F.lit(SOURCE_PATH))\n    .withColumn(\"_source_file_name\", F.lit(_source_file_names))\n    .withColumn(\"_file_modification_time\", F.lit(None).cast(\"timestamp\"))\n    .withColumn(\"_pipeline_version\", F.lit(PIPELINE_VERSION))\n    .withColumn(\"_rescued_data\", F.lit(None).cast(\"string\"))\n)\n\ntarget_schema = \".\".join(TARGET_TABLE.split(\".\")[:-1])\nif target_schema:\n    spark.sql(f\"CREATE SCHEMA IF NOT EXISTS {target_schema}\")\n\n(\n    bronze_df.write\n    .format(\"delta\")\n    .mode(\"append\")\n    .option(\"mergeSchema\", \"true\")\n    .saveAsTable(TARGET_TABLE)\n)\n\nrow_count = spark.table(TARGET_TABLE).count()\nprint(f\"Bronze ingestion completed: {TARGET_TABLE}\")\nprint(f\"Total rows now in target: {row_count:,}\")",
+  "schema_version": 5,
+  "schema_fingerprint": "237539d3e4c95b46bd731b0b9b61c7bc",
+  "primary_keys": [
+    "RemoteMessage_BDM_machineId",
+    "RemoteMessage_BDM_videoPack",
+    "RemoteMessage_BDM_videoPack__version",
+    "RemoteMessage__DeviceID"
+  ],
+  "watermark_column": "RemoteMessage__Date",
+  "landing_path": "abfss://athena@atheastorage.dfs.core.windows.net/evention/vendor1/machine1/DevInfo/",
+  "target_table": "bronze.vendor1_devinfo_raw",
+  "bronze_output_path": "/Volumes/main/bronze/pipeline_artifacts/tables/bronze/vendor1/devinfo",
+  "checkpoint_path": "/Volumes/main/bronze/pipeline_artifacts/checkpoints/bronze/vendor1/devinfo",
+  "schema_location": "/Volumes/main/bronze/pipeline_artifacts/schemas/bronze/vendor1/devinfo",
+  "validation_checklist": [
+    "Feed approved in file_feed_registry",
+    "Schema approved in file_feed_schema_registry",
+    "Source path is Databricks-readable",
+    "Primary keys reviewed",
+    "Watermark column reviewed",
+    "Landing and output paths confirmed",
+    "Generated Bronze script compiles",
+    "No forbidden patterns found in generated script"
+  ],
+  "review_status": "PENDING",
+  "generated_at": "2026-06-09T06:20:37.832665+00:00",
+  "validation_issues": [],
+  "plan_valid": true
+}

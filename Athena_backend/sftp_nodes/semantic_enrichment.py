@@ -96,6 +96,81 @@ def _persist_enriched_rows(rows: List[Dict[str, Any]], *, log_context: Dict[str,
         conn.close()
 
 
+def _schema_review_columns() -> List[str]:
+    conn = get_pipeline_connection()
+    table_schema = config["azure_sql"]["pipeline_schema"]
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = ?
+              AND TABLE_NAME = 'file_feed_schema_registry'
+            """,
+            table_schema,
+        )
+        return [str(row.COLUMN_NAME).lower() for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def _update_schema_review_status(
+    rows: List[Dict[str, Any]],
+    *,
+    status: str,
+    approved_by: str | None,
+    rejection_reason: str | None,
+    log_context: Dict[str, Any],
+) -> None:
+    if not rows:
+        return
+
+    available = set(_schema_review_columns())
+    if "schema_status" not in available:
+        logger.warning("Schema review columns missing on file_feed_schema_registry", extra=log_context)
+        return
+
+    conn = get_pipeline_connection()
+    table_schema = config["azure_sql"]["pipeline_schema"]
+    try:
+        cursor = conn.cursor()
+        approved_at = datetime.now(timezone.utc).isoformat()
+        for row in rows:
+            set_parts = ["schema_status = ?"]
+            params: List[Any] = [status]
+            if "approved_by" in available:
+                set_parts.append("approved_by = ?")
+                params.append(approved_by)
+            if "approved_at" in available:
+                set_parts.append("approved_at = ?")
+                params.append(approved_at if status == "APPROVED" else None)
+            if "rejection_reason" in available:
+                set_parts.append("rejection_reason = ?")
+                params.append(rejection_reason if status == "REJECTED" else None)
+
+            params.extend(
+                [
+                    row["feed_id"],
+                    row["schema_fingerprint"],
+                ]
+            )
+            cursor.execute(
+                f"""
+                UPDATE [{table_schema}].[file_feed_schema_registry]
+                SET {', '.join(set_parts)}
+                WHERE feed_id = ?
+                  AND schema_fingerprint = ?
+                """,
+                *params,
+            )
+        conn.commit()
+    except Exception as exc:
+        logger.warning("Schema review status persistence skipped: %s", exc, extra=log_context)
+    finally:
+        conn.close()
+
+
 def sftp_semantic_enrichment_node(state: Stage01State) -> Stage01State:
     new_state = _copy_state(state)
     log_context = {
@@ -110,12 +185,12 @@ def sftp_semantic_enrichment_node(state: Stage01State) -> Stage01State:
 
     schema_entries = _schema_entries(new_state)
     profile_rows = _profile_entries(new_state)
-    if not schema_entries or not profile_rows:
+    if not schema_entries:
         new_state.update({
             "semantic_enrichment_status": "FAILED",
-            "enrichment_review_error": "Schema snapshot and column profiles are required before SFTP semantic enrichment",
+            "enrichment_review_error": "Schema snapshot is required before file semantic enrichment",
             "status": "FAILED",
-            "error": "SFTP semantic enrichment prerequisites missing",
+            "error": "File semantic enrichment prerequisites missing",
         })
         return new_state
 
@@ -157,20 +232,21 @@ def sftp_semantic_enrichment_node(state: Stage01State) -> Stage01State:
     payload = {
         "run_id": new_state.get("run_id"),
         "fingerprint": new_state.get("fingerprint") or new_state.get("run_id"),
-        "source": "SFTP_SEMANTIC_ENRICHMENT",
+        "source": "FILE_SEMANTIC_ENRICHMENT",
         "enriched_at": created_at,
         "columns": enriched_columns,
         "joins": joins,
         "semantic_counts": counts,
+        "schema_review_artifact": new_state.get("schema_review_artifact") or {},
     }
 
     ai_store_db_writer(
         run_id=str(new_state.get("run_id") or "unknown"),
-        stage="SFTP Semantic Enrichment",
+        stage="File Semantic Enrichment",
         artifact_type="ENRICHED_METADATA",
         payload=payload,
-        schema_version="SFTP_ENRICHED_METADATA_v1",
-        prompt_version="SFTP_NB09A_v1",
+        schema_version="FILE_ENRICHED_METADATA_v2",
+        prompt_version="FILE_NB09A_v2",
         faithfulness_status="NOT_APPLICABLE",
         token_count=0,
         input_tokens=0,
@@ -188,24 +264,24 @@ def sftp_semantic_enrichment_node(state: Stage01State) -> Stage01State:
         "join_key_annotations_reviewed": False,
         "status": "IN_PROGRESS",
     })
-    logger.info("SFTP semantic enrichment completed: columns=%d", len(enriched_columns), extra={**log_context, "event_type": "stage_end"})
+    logger.info("File semantic enrichment completed: columns=%d", len(enriched_columns), extra={**log_context, "event_type": "stage_end"})
     return new_state
 
 
 def certify_sftp_gate3(run_id: str, enrichment_artifact: Dict[str, Any], fingerprint: str | None = None) -> None:
     ai_store_db_writer(
         run_id=run_id,
-        stage="SFTP Gate 3 Certification",
+        stage="File Gate 3 Certification",
         artifact_type="GATE3_APPROVED_ENRICHMENT",
         payload={
             "fingerprint": fingerprint or run_id,
             "storage_fingerprint": f"{fingerprint or run_id}:GATE3_APPROVED_ENRICHMENT",
             "run_id": run_id,
             "enrichment_artifact": enrichment_artifact,
-            "source": "SFTP_HUMAN_CERTIFIED_ENRICHMENT",
+            "source": "FILE_HUMAN_CERTIFIED_ENRICHMENT",
         },
-        schema_version="SFTP_GATE3_v1",
-        prompt_version="SFTP_NB09B_v1",
+        schema_version="FILE_GATE3_v2",
+        prompt_version="FILE_NB09B_v2",
         faithfulness_status="PASSED",
         token_count=0,
         input_tokens=0,
@@ -225,6 +301,8 @@ def sftp_gate3_node(state: Stage01State) -> Stage01State:
     # Treat ADLS Gen2 as the same "file pipeline" as SFTP.
     if str(new_state.get("source") or "").lower() not in {"sftp", "adls_gen2"}:
         return new_state
+    if str(new_state.get("status") or "").upper() == "FAILED":
+        return new_state
 
     auto_mode = os.getenv("ATHENA_SFTP_HITL_AUTO", "").strip().lower() in {"1", "true", "yes", "on"}
     override = str(new_state.get("gate3_decision") or new_state.get("enrichment_review_decision") or "").strip().upper()
@@ -238,6 +316,13 @@ def sftp_gate3_node(state: Stage01State) -> Stage01State:
         return new_state
 
     if override == "REJECTED":
+        _update_schema_review_status(
+            _schema_entries(new_state),
+            status="REJECTED",
+            approved_by="athena_gate3",
+            rejection_reason="Rejected by reviewer",
+            log_context=log_context,
+        )
         new_state["enrichment_review_status"] = "FAILED"
         new_state["enrichment_review_decision"] = "REJECTED"
         new_state["enrichment_review_error"] = "Rejected by reviewer"
@@ -249,12 +334,19 @@ def sftp_gate3_node(state: Stage01State) -> Stage01State:
         artifact,
         str(new_state.get("fingerprint") or new_state.get("run_id") or "unknown"),
     )
+    _update_schema_review_status(
+        _schema_entries(new_state),
+        status="APPROVED",
+        approved_by="athena_gate3",
+        rejection_reason=None,
+        log_context=log_context,
+    )
     new_state["enrichment_review_status"] = "COMPLETED"
     new_state["enrichment_review_decision"] = "APPROVED"
     new_state["semantic_tags_reviewed"] = True
     new_state["pii_classifications_reviewed"] = True
     new_state["join_key_annotations_reviewed"] = True
     new_state["enrichment_review_artifact"] = artifact
-    new_state["status"] = "PIPELINE_COMPLETED"
+    new_state["status"] = "IN_PROGRESS"
     logger.info("SFTP Gate 3 approved", extra={**log_context, "event_type": "stage_end"})
     return new_state

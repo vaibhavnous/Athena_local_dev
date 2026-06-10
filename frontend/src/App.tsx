@@ -8,6 +8,10 @@ import RunDetail from './pages/RunDetail'
 import HitlQueue from './pages/HitlQueue'
 import Settings from './pages/Settings'
 import DatabaseConfig from './pages/DatabaseConfig'
+import RunHistoryPage from './pages/RunHistoryPage'
+import ProjectInitiation from './pages/ProjectInitiation'
+import DataQuality from './pages/DataQuality'
+import DataMigration from './pages/DataMigration'
 import useThemeStore from './store/useThemeStore'
 
 function App() {
@@ -29,8 +33,12 @@ function App() {
         <Route path="/app" element={<AppShell />}>
           <Route index element={<DashboardPage />} />
           <Route path="data-discovery" element={<PipelineMonitor />} />
+          <Route path="run-history" element={<RunHistoryPage />} />
           <Route path="runs/:runId" element={<RunDetail />} />
           <Route path="hitl" element={<HitlQueue />} />
+          <Route path="project" element={<ProjectInitiation />} />
+          <Route path="data-quality" element={<DataQuality />} />
+          <Route path="data-migration" element={<DataMigration />} />
           <Route path="settings" element={<Settings />} />
           <Route path="db-config" element={<DatabaseConfig />} />
           <Route path="*" element={<Navigate to="/app" replace />} />

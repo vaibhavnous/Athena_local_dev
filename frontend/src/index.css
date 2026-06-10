@@ -116,6 +116,14 @@
     @apply block text-xs font-medium text-text-secondary mb-1 uppercase tracking-wide;
   }
 
+  .modal-label {
+    @apply mb-2 block text-[11px] font-semibold uppercase tracking-wide text-slate-100;
+  }
+
+  .modal-input {
+    @apply block w-full border outline-none transition-colors duration-150 focus:border-accent-blue focus:ring-1 focus:ring-accent-blue;
+  }
+
   .mono {
     @apply font-mono text-xs text-text-primary;
   }

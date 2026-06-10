@@ -1,0 +1,67 @@
+{
+  "run_id": "39fa7f0c-3bd1-4837-8b20-51b7cf53d1ca",
+  "fingerprint": "026203a6fd230e76773119e549eaf7b654c8a0fa1072b3efec0342d57d25382f",
+  "generated_at": "2026-06-09T09:06:29.814624+00:00",
+  "script_count": 3,
+  "scripts": [
+    {
+      "run_id": "39fa7f0c-3bd1-4837-8b20-51b7cf53d1ca",
+      "entity": "Deposit",
+      "vendor": "Vendor1",
+      "bronze_table": "bronze.vendor1_deposit_raw",
+      "silver_table": "silver.vendor1_deposit_clean",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\silver\\silver_transform_Deposit.py",
+      "llm_enhanced": false,
+      "llm_error": null,
+      "primary_keys": [
+        "RemoteMessage_Details_countings__valid",
+        "RemoteMessage_TransactionID",
+        "RemoteMessage_UserAlternateID",
+        "RemoteMessage__DeviceID",
+        "RemoteMessage_groupID"
+      ],
+      "watermark_column": "RemoteMessage__Date",
+      "bronze_columns_count": 32,
+      "status": "COMPLETED"
+    },
+    {
+      "run_id": "39fa7f0c-3bd1-4837-8b20-51b7cf53d1ca",
+      "entity": "DevInfo",
+      "vendor": "Vendor1",
+      "bronze_table": "bronze.vendor1_devinfo_raw",
+      "silver_table": "silver.vendor1_devinfo_clean",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\silver\\silver_transform_DevInfo.py",
+      "llm_enhanced": false,
+      "llm_error": null,
+      "primary_keys": [
+        "RemoteMessage_BDM_machineId",
+        "RemoteMessage_BDM_videoPack",
+        "RemoteMessage_BDM_videoPack__version",
+        "RemoteMessage__DeviceID"
+      ],
+      "watermark_column": "RemoteMessage__Date",
+      "bronze_columns_count": 30,
+      "status": "COMPLETED"
+    },
+    {
+      "run_id": "39fa7f0c-3bd1-4837-8b20-51b7cf53d1ca",
+      "entity": "Withdrawal",
+      "vendor": "Vendor1",
+      "bronze_table": "bronze.vendor1_withdrawal_raw",
+      "silver_table": "silver.vendor1_withdrawal_clean",
+      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\silver\\silver_transform_Withdrawal.py",
+      "llm_enhanced": false,
+      "llm_error": null,
+      "primary_keys": [
+        "RemoteMessage_Details_countings__valid",
+        "RemoteMessage_TransactionID",
+        "RemoteMessage_UserAlternateID",
+        "RemoteMessage__DeviceID",
+        "RemoteMessage_groupID"
+      ],
+      "watermark_column": "RemoteMessage__Date",
+      "bronze_columns_count": 26,
+      "status": "COMPLETED"
+    }
+  ]
+}

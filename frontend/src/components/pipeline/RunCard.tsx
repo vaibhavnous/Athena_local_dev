@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ExternalLink, StopCircle, Clock, Cpu, FileText, Table2, ShieldCheck } from 'lucide-react'
+import { Code2, ExternalLink, StopCircle, Clock, Cpu, FileText, Table2, ShieldCheck } from 'lucide-react'
 import StatusBadge from '../shared/StatusBadge'
 import CopyableId from '../shared/CopyableId'
 import useAthenaStore from '../../store/useAthenaStore'
@@ -19,7 +19,7 @@ import { abortRun } from '../../api/athenaApi'
  */
 function RunCard({ run, isActive, onClick, compact = false }) {
   const navigate = useNavigate()
-  const { updateRun, addNotification } = useAthenaStore()
+  const { updateRun, addNotification, setActiveRun } = useAthenaStore()
   const [aborting, setAborting] = useState(false)
   const [elapsed, setElapsed] = useState('')
 
@@ -64,6 +64,7 @@ function RunCard({ run, isActive, onClick, compact = false }) {
 
   const handleResumeReview = (e) => {
     e.stopPropagation()
+    setActiveRun(run.id)
     navigate('/app/hitl')
   }
 
@@ -133,13 +134,13 @@ function RunCard({ run, isActive, onClick, compact = false }) {
       {/* Action buttons */}
       {!compact && (
         <div className="flex gap-2">
-          {(run.next_gate === 2 || run.next_gate === 3) && (
+          {[2, 3, 4, 5].includes(Number(run.next_gate || 0)) && (
             <button
               onClick={handleResumeReview}
               className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-accent-blue hover:text-white hover:bg-accent-blue border border-accent-blue/20 rounded-lg transition-colors"
             >
-              {run.next_gate === 2 ? <Table2 size={11} /> : <ShieldCheck size={11} />}
-              Resume
+              {run.next_gate === 2 ? <Table2 size={11} /> : run.next_gate === 4 || run.next_gate === 5 ? <Code2 size={11} /> : <ShieldCheck size={11} />}
+              Gate {run.next_gate}
             </button>
           )}
           <button

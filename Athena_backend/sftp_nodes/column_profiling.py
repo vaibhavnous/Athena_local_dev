@@ -179,18 +179,27 @@ def sftp_column_profiling_node(state: Stage01State) -> Stage01State:
     feeds = _approved_feeds_from_state(new_state)
     if not feeds:
         new_state["column_profiling_status"] = "SKIPPED"
-        new_state["column_profiling_error"] = "No approved SFTP feeds available for profiling"
+        new_state["column_profiling_error"] = "No approved file-source feeds available for profiling"
         return new_state
 
     fingerprint = str(new_state.get("fingerprint") or new_state.get("run_id") or "unknown")
     profile_rows: List[Dict[str, Any]] = []
     feed_results: List[Dict[str, Any]] = []
+    skipped_feeds: List[Dict[str, Any]] = []
 
     try:
         for feed in feeds:
-            file_path = str(feed.get("local_file_path") or feed.get("file_path") or "").strip()
+            file_path = str(feed.get("local_file_path") or feed.get("sample_file_path") or feed.get("file_path") or "").strip()
             if not file_path:
-                raise ValueError(f"Missing file_path for feed {feed.get('vendor')}.{feed.get('entity')}")
+                skipped_feeds.append(
+                    {
+                        "feed_id": feed.get("feed_id"),
+                        "vendor": feed.get("vendor"),
+                        "entity": feed.get("entity"),
+                        "reason": "No local sample file available for profiling",
+                    }
+                )
+                continue
             frame = _read_sample_dataframe(file_path, str(feed.get("format") or "unknown"))
             column_names = list(frame.columns)
             for column_name in column_names:
@@ -213,6 +222,7 @@ def sftp_column_profiling_node(state: Stage01State) -> Stage01State:
             "feed_count": len(feed_results),
             "profile_row_count": len(profile_rows),
             "feed_results": feed_results,
+            "skipped_feeds": skipped_feeds,
             "column_profiles": profile_rows,
             "sample_limit": _profile_limit(),
             "profiling_strategy": "file_sample_profile_v1",
@@ -234,9 +244,9 @@ def sftp_column_profiling_node(state: Stage01State) -> Stage01State:
         new_state.update(
             {
                 "column_profiles": payload,
-                "column_profiling_status": "COMPLETED",
+                "column_profiling_status": "COMPLETED" if profile_rows else "SKIPPED",
                 "column_profiling_error": None,
-                "status": "PIPELINE_COMPLETED",
+                "status": "IN_PROGRESS",
             }
         )
         logger.info("SFTP column profiling completed: feeds=%d profiles=%d", len(feed_results), len(profile_rows), extra={**log_context, "event_type": "stage_end"})

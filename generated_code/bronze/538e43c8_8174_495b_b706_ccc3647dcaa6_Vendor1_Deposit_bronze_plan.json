@@ -1,0 +1,657 @@
+{
+  "run_id": "538e43c8-8174-495b-b706-ccc3647dcaa6",
+  "feed_id": "Vendor1_Deposit",
+  "vendor": "Vendor1",
+  "entity": "Deposit",
+  "source_type": "adls_gen2",
+  "file_format": "xml",
+  "feed_summary": {
+    "file_name": "",
+    "file_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\Deposit\\2026-13-2_0539Deposit_.xml",
+    "remote_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\Deposit\\2026-13-2_0539Deposit_.xml",
+    "format": "xml",
+    "status": "APPROVED"
+  },
+  "bronze_config": {
+    "feed_id": "Vendor1_Deposit",
+    "vendor": "Vendor1",
+    "entity": "Deposit",
+    "vendor_safe": "vendor1",
+    "entity_safe": "deposit",
+    "source_type": "adls_gen2",
+    "file_format": "xml",
+    "row_tag": "RemoteMessage",
+    "landing_path": "abfss://athena@atheastorage.dfs.core.windows.net/evention/vendor1/machine1/Deposit/",
+    "original_file_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\Deposit\\2026-13-2_0539Deposit_.xml",
+    "remote_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\Deposit\\2026-13-2_0539Deposit_.xml",
+    "bronze_output_path": "dbfs:/pipelines/bronze/vendor1/deposit",
+    "checkpoint_path": "dbfs:/pipelines/checkpoints/bronze/vendor1/deposit",
+    "schema_location": "dbfs:/pipelines/schemas/bronze/vendor1/deposit",
+    "target_table": "bronze.vendor1_deposit_raw",
+    "schema_columns": [
+      {
+        "column_name": "RemoteMessage_CustomerCode",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Date",
+        "data_type": "timestamp",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_Currency",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_countings_counted_denom",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_countings_counted_quantity",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_countings_counted_type",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_countings_valid",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_total",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_DeviceID",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_NOP",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_TestMode",
+        "data_type": "boolean",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Time",
+        "data_type": "timestamp",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_TransactionID",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_User",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_UserLevel",
+        "data_type": "boolean",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_UserName",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_accountingDate",
+        "data_type": "timestamp",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_authenticationMode",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_N",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_curr",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_den",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_machineId",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_qty",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_sType",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_type",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_N",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_curr",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_den",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_machineId",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_qty",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_sType",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_type",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_N",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_curr",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_den",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_machineId",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_qty",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_sType",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_type",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_endShiftDeposit",
+        "data_type": "boolean",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_groupID",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_groupName",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_isKit",
+        "data_type": "boolean",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_operation",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      }
+    ],
+    "schema_version": 3,
+    "schema_fingerprint": "9cad3c77600ae7f40bc98ec0c6d52e84",
+    "primary_keys": [
+      "RemoteMessage_Details_countings_valid",
+      "RemoteMessage_DeviceID",
+      "RemoteMessage_TransactionID",
+      "RemoteMessage_contentAfter_count_machineId",
+      "RemoteMessage_contentBefore_count_machineId",
+      "RemoteMessage_destDetails_count_machineId",
+      "RemoteMessage_groupID"
+    ],
+    "watermark_column": "RemoteMessage_Date",
+    "validation_checklist": [
+      "Feed approved in file_feed_registry",
+      "Schema approved in file_feed_schema_registry",
+      "Source path is Databricks-readable",
+      "Primary keys reviewed",
+      "Watermark column reviewed",
+      "Landing and output paths confirmed",
+      "Generated Bronze script compiles",
+      "No forbidden patterns found in generated script"
+    ]
+  },
+  "generated_bronze_config": {
+    "feed_id": "Vendor1_Deposit",
+    "vendor": "Vendor1",
+    "entity": "Deposit",
+    "vendor_safe": "vendor1",
+    "entity_safe": "deposit",
+    "source_type": "adls_gen2",
+    "file_format": "xml",
+    "row_tag": "RemoteMessage",
+    "landing_path": "abfss://athena@atheastorage.dfs.core.windows.net/evention/vendor1/machine1/Deposit/",
+    "original_file_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\Deposit\\2026-13-2_0539Deposit_.xml",
+    "remote_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\uploads\\adls\\Vendor1\\Deposit\\2026-13-2_0539Deposit_.xml",
+    "bronze_output_path": "dbfs:/pipelines/bronze/vendor1/deposit",
+    "checkpoint_path": "dbfs:/pipelines/checkpoints/bronze/vendor1/deposit",
+    "schema_location": "dbfs:/pipelines/schemas/bronze/vendor1/deposit",
+    "target_table": "bronze.vendor1_deposit_raw",
+    "schema_columns": [
+      {
+        "column_name": "RemoteMessage_CustomerCode",
+        "data_type": "string",
+        "nullable": true,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Date",
+        "data_type": "timestamp",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_Currency",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_countings_counted_denom",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_countings_counted_quantity",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_countings_counted_type",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_countings_valid",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Details_total",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_DeviceID",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_NOP",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_TestMode",
+        "data_type": "boolean",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_Time",
+        "data_type": "timestamp",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_TransactionID",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_User",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_UserLevel",
+        "data_type": "boolean",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_UserName",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_accountingDate",
+        "data_type": "timestamp",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_authenticationMode",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_N",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_curr",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_den",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_machineId",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_qty",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_sType",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentAfter_count_type",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_N",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_curr",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_den",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_machineId",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_qty",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_sType",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_contentBefore_count_type",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_N",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_curr",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_den",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_machineId",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_qty",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_sType",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_destDetails_count_type",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_endShiftDeposit",
+        "data_type": "boolean",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_groupID",
+        "data_type": "int",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_groupName",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_isKit",
+        "data_type": "boolean",
+        "nullable": false,
+        "source_format": "xml"
+      },
+      {
+        "column_name": "RemoteMessage_operation",
+        "data_type": "string",
+        "nullable": false,
+        "source_format": "xml"
+      }
+    ],
+    "schema_version": 3,
+    "schema_fingerprint": "9cad3c77600ae7f40bc98ec0c6d52e84",
+    "primary_keys": [
+      "RemoteMessage_Details_countings_valid",
+      "RemoteMessage_DeviceID",
+      "RemoteMessage_TransactionID",
+      "RemoteMessage_contentAfter_count_machineId",
+      "RemoteMessage_contentBefore_count_machineId",
+      "RemoteMessage_destDetails_count_machineId",
+      "RemoteMessage_groupID"
+    ],
+    "watermark_column": "RemoteMessage_Date",
+    "validation_checklist": [
+      "Feed approved in file_feed_registry",
+      "Schema approved in file_feed_schema_registry",
+      "Source path is Databricks-readable",
+      "Primary keys reviewed",
+      "Watermark column reviewed",
+      "Landing and output paths confirmed",
+      "Generated Bronze script compiles",
+      "No forbidden patterns found in generated script"
+    ]
+  },
+  "generated_bronze_script": "from pyspark.sql import SparkSession, functions as F\n\nspark = SparkSession.builder.getOrCreate()\n\nRUN_ID = \"538e43c8-8174-495b-b706-ccc3647dcaa6\"\nPIPELINE_VERSION = \"v1\"\nSOURCE_TYPE = \"adls_gen2\"\nSOURCE_FEED = \"Vendor1/Deposit\"\nFILE_FORMAT = \"xml\"\nROW_TAG = \"RemoteMessage\"\nSOURCE_PATH = \"abfss://athena@atheastorage.dfs.core.windows.net/evention/vendor1/machine1/Deposit/\"\nTARGET_TABLE = \"bronze.vendor1_deposit_raw\"\nSCHEMA_LOCATION = \"dbfs:/pipelines/schemas/bronze/vendor1/deposit\"\nCHECKPOINT_PATH = \"dbfs:/pipelines/checkpoints/bronze/vendor1/deposit\"\n\nprint(f\"Starting Bronze ingestion for {SOURCE_FEED}\")\nprint(f\"Source path: {SOURCE_PATH}\")\nprint(f\"Target table: {TARGET_TABLE}\")\n\nif FILE_FORMAT == \"csv\":\n    df = (\n        spark.read\n        .option(\"header\", \"true\")\n        .option(\"inferSchema\", \"false\")\n        .option(\"mode\", \"PERMISSIVE\")\n        .csv(SOURCE_PATH)\n    )\nelif FILE_FORMAT == \"json\":\n    df = (\n        spark.read\n        .option(\"multiLine\", \"false\")\n        .option(\"mode\", \"PERMISSIVE\")\n        .json(SOURCE_PATH)\n    )\nelif FILE_FORMAT == \"xml\":\n    df = (\n        spark.read\n        .format(\"xml\")\n        .option(\"rowTag\", ROW_TAG)\n        .option(\"mode\", \"PERMISSIVE\")\n        .load(SOURCE_PATH)\n    )\nelse:\n    raise ValueError(f\"Unsupported FILE_FORMAT: {FILE_FORMAT}\")\n\nif df.limit(1).count() == 0:\n    raise ValueError(f\"No records found in Bronze source path: {SOURCE_PATH}\")\n\nbronze_df = df.select(\n    F.col(\"RemoteMessage_CustomerCode\").cast(\"string\").alias(\"RemoteMessage_CustomerCode\"),\n    F.col(\"RemoteMessage_Date\").cast(\"timestamp\").alias(\"RemoteMessage_Date\"),\n    F.col(\"RemoteMessage_Details_Currency\").cast(\"string\").alias(\"RemoteMessage_Details_Currency\"),\n    F.col(\"RemoteMessage_Details_countings_counted_denom\").cast(\"string\").alias(\"RemoteMessage_Details_countings_counted_denom\"),\n    F.col(\"RemoteMessage_Details_countings_counted_quantity\").cast(\"string\").alias(\"RemoteMessage_Details_countings_counted_quantity\"),\n    F.col(\"RemoteMessage_Details_countings_counted_type\").cast(\"string\").alias(\"RemoteMessage_Details_countings_counted_type\"),\n    F.col(\"RemoteMessage_Details_countings_valid\").cast(\"int\").alias(\"RemoteMessage_Details_countings_valid\"),\n    F.col(\"RemoteMessage_Details_total\").cast(\"int\").alias(\"RemoteMessage_Details_total\"),\n    F.col(\"RemoteMessage_DeviceID\").cast(\"string\").alias(\"RemoteMessage_DeviceID\"),\n    F.col(\"RemoteMessage_NOP\").cast(\"int\").alias(\"RemoteMessage_NOP\"),\n    F.col(\"RemoteMessage_TestMode\").cast(\"boolean\").alias(\"RemoteMessage_TestMode\"),\n    F.col(\"RemoteMessage_Time\").cast(\"timestamp\").alias(\"RemoteMessage_Time\"),\n    F.col(\"RemoteMessage_TransactionID\").cast(\"int\").alias(\"RemoteMessage_TransactionID\"),\n    F.col(\"RemoteMessage_User\").cast(\"int\").alias(\"RemoteMessage_User\"),\n    F.col(\"RemoteMessage_UserLevel\").cast(\"boolean\").alias(\"RemoteMessage_UserLevel\"),\n    F.col(\"RemoteMessage_UserName\").cast(\"string\").alias(\"RemoteMessage_UserName\"),\n    F.col(\"RemoteMessage_accountingDate\").cast(\"timestamp\").alias(\"RemoteMessage_accountingDate\"),\n    F.col(\"RemoteMessage_authenticationMode\").cast(\"string\").alias(\"RemoteMessage_authenticationMode\"),\n    F.col(\"RemoteMessage_contentAfter_count_N\").cast(\"string\").alias(\"RemoteMessage_contentAfter_count_N\"),\n    F.col(\"RemoteMessage_contentAfter_count_curr\").cast(\"string\").alias(\"RemoteMessage_contentAfter_count_curr\"),\n    F.col(\"RemoteMessage_contentAfter_count_den\").cast(\"string\").alias(\"RemoteMessage_contentAfter_count_den\"),\n    F.col(\"RemoteMessage_contentAfter_count_machineId\").cast(\"string\").alias(\"RemoteMessage_contentAfter_count_machineId\"),\n    F.col(\"RemoteMessage_contentAfter_count_qty\").cast(\"string\").alias(\"RemoteMessage_contentAfter_count_qty\"),\n    F.col(\"RemoteMessage_contentAfter_count_sType\").cast(\"string\").alias(\"RemoteMessage_contentAfter_count_sType\"),\n    F.col(\"RemoteMessage_contentAfter_count_type\").cast(\"string\").alias(\"RemoteMessage_contentAfter_count_type\"),\n    F.col(\"RemoteMessage_contentBefore_count_N\").cast(\"string\").alias(\"RemoteMessage_contentBefore_count_N\"),\n    F.col(\"RemoteMessage_contentBefore_count_curr\").cast(\"string\").alias(\"RemoteMessage_contentBefore_count_curr\"),\n    F.col(\"RemoteMessage_contentBefore_count_den\").cast(\"string\").alias(\"RemoteMessage_contentBefore_count_den\"),\n    F.col(\"RemoteMessage_contentBefore_count_machineId\").cast(\"string\").alias(\"RemoteMessage_contentBefore_count_machineId\"),\n    F.col(\"RemoteMessage_contentBefore_count_qty\").cast(\"string\").alias(\"RemoteMessage_contentBefore_count_qty\"),\n    F.col(\"RemoteMessage_contentBefore_count_sType\").cast(\"string\").alias(\"RemoteMessage_contentBefore_count_sType\"),\n    F.col(\"RemoteMessage_contentBefore_count_type\").cast(\"string\").alias(\"RemoteMessage_contentBefore_count_type\"),\n    F.col(\"RemoteMessage_destDetails_count_N\").cast(\"string\").alias(\"RemoteMessage_destDetails_count_N\"),\n    F.col(\"RemoteMessage_destDetails_count_curr\").cast(\"string\").alias(\"RemoteMessage_destDetails_count_curr\"),\n    F.col(\"RemoteMessage_destDetails_count_den\").cast(\"string\").alias(\"RemoteMessage_destDetails_count_den\"),\n    F.col(\"RemoteMessage_destDetails_count_machineId\").cast(\"string\").alias(\"RemoteMessage_destDetails_count_machineId\"),\n    F.col(\"RemoteMessage_destDetails_count_qty\").cast(\"string\").alias(\"RemoteMessage_destDetails_count_qty\"),\n    F.col(\"RemoteMessage_destDetails_count_sType\").cast(\"string\").alias(\"RemoteMessage_destDetails_count_sType\"),\n    F.col(\"RemoteMessage_destDetails_count_type\").cast(\"string\").alias(\"RemoteMessage_destDetails_count_type\"),\n    F.col(\"RemoteMessage_endShiftDeposit\").cast(\"boolean\").alias(\"RemoteMessage_endShiftDeposit\"),\n    F.col(\"RemoteMessage_groupID\").cast(\"int\").alias(\"RemoteMessage_groupID\"),\n    F.col(\"RemoteMessage_groupName\").cast(\"string\").alias(\"RemoteMessage_groupName\"),\n    F.col(\"RemoteMessage_isKit\").cast(\"boolean\").alias(\"RemoteMessage_isKit\"),\n    F.col(\"RemoteMessage_operation\").cast(\"string\").alias(\"RemoteMessage_operation\")\n)\n\nbronze_df = (\n    bronze_df\n    .withColumn(\"_run_id\", F.lit(RUN_ID))\n    .withColumn(\"_ingestion_timestamp\", F.current_timestamp())\n    .withColumn(\"_source_system\", F.lit(SOURCE_TYPE))\n    .withColumn(\"_source_feed\", F.lit(SOURCE_FEED))\n    .withColumn(\"_source_file_path\", F.input_file_name())\n    .withColumn(\"_source_file_name\", F.element_at(F.split(F.input_file_name(), \"/\"), -1))\n    .withColumn(\"_file_modification_time\", F.lit(None).cast(\"timestamp\"))\n    .withColumn(\"_pipeline_version\", F.lit(PIPELINE_VERSION))\n    .withColumn(\"_rescued_data\", F.lit(None).cast(\"string\"))\n)\n\ntarget_schema = \".\".join(TARGET_TABLE.split(\".\")[:-1])\nif target_schema:\n    spark.sql(f\"CREATE SCHEMA IF NOT EXISTS {target_schema}\")\n\n(\n    bronze_df.write\n    .format(\"delta\")\n    .mode(\"append\")\n    .option(\"mergeSchema\", \"true\")\n    .saveAsTable(TARGET_TABLE)\n)\n\nrow_count = spark.table(TARGET_TABLE).count()\nprint(f\"Bronze ingestion completed: {TARGET_TABLE}\")\nprint(f\"Total rows now in target: {row_count:,}\")\n\n# Optional Auto Loader pattern for production:\n# (\n#     spark.readStream\n#     .format(\"cloudFiles\")\n#     .option(\"cloudFiles.format\", FILE_FORMAT)\n#     .option(\"cloudFiles.schemaLocation\", SCHEMA_LOCATION)\n#     .load(SOURCE_PATH)\n#     .withColumn(\"_run_id\", F.lit(RUN_ID))\n#     .withColumn(\"_ingestion_timestamp\", F.current_timestamp())\n#     .withColumn(\"_source_system\", F.lit(SOURCE_TYPE))\n#     .withColumn(\"_source_feed\", F.lit(SOURCE_FEED))\n#     .withColumn(\"_source_file_path\", F.input_file_name())\n#     .writeStream\n#     .format(\"delta\")\n#     .option(\"checkpointLocation\", CHECKPOINT_PATH)\n#     .trigger(availableNow=True)\n#     .toTable(TARGET_TABLE)\n# )",
+  "schema_version": 3,
+  "schema_fingerprint": "9cad3c77600ae7f40bc98ec0c6d52e84",
+  "primary_keys": [
+    "RemoteMessage_Details_countings_valid",
+    "RemoteMessage_DeviceID",
+    "RemoteMessage_TransactionID",
+    "RemoteMessage_contentAfter_count_machineId",
+    "RemoteMessage_contentBefore_count_machineId",
+    "RemoteMessage_destDetails_count_machineId",
+    "RemoteMessage_groupID"
+  ],
+  "watermark_column": "RemoteMessage_Date",
+  "landing_path": "abfss://athena@atheastorage.dfs.core.windows.net/evention/vendor1/machine1/Deposit/",
+  "target_table": "bronze.vendor1_deposit_raw",
+  "bronze_output_path": "dbfs:/pipelines/bronze/vendor1/deposit",
+  "checkpoint_path": "dbfs:/pipelines/checkpoints/bronze/vendor1/deposit",
+  "schema_location": "dbfs:/pipelines/schemas/bronze/vendor1/deposit",
+  "validation_checklist": [
+    "Feed approved in file_feed_registry",
+    "Schema approved in file_feed_schema_registry",
+    "Source path is Databricks-readable",
+    "Primary keys reviewed",
+    "Watermark column reviewed",
+    "Landing and output paths confirmed",
+    "Generated Bronze script compiles",
+    "No forbidden patterns found in generated script"
+  ],
+  "review_status": "PENDING",
+  "generated_at": "2026-06-03T04:49:59.023798+00:00",
+  "validation_issues": [],
+  "plan_valid": true
+}

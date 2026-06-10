@@ -142,33 +142,189 @@ def submit_sftp_gate1_review(run_id: str, approve: bool = True) -> Dict[str, Any
 
 def submit_sftp_gate2_review(run_id: str, approve: bool = True) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+    from sftp_nodes.bronze_code_generation import sftp_bronze_code_generation_node
     from sftp_nodes.column_profiling import sftp_column_profiling_node
+    from sftp_nodes.feed_nomination import sftp_feed_nomination_node
     from sftp_nodes.governance import sftp_gate2_node
-    from sftp_nodes.metadata_discovery import sftp_metadata_discovery_node
+    from sftp_nodes.metadata_discovery import file_metadata_discovery_node
+    from sftp_nodes.review_gates import source_access_readiness_check_node, sftp_gate4_node
     from sftp_nodes.semantic_enrichment import sftp_gate3_node, sftp_semantic_enrichment_node
 
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
     checkpoint_state["gate2_decision"] = "APPROVED" if approve else "REJECTED"
-    gate2_state = sftp_gate2_node(checkpoint_state)
+
+    nomination_state = sftp_feed_nomination_node(checkpoint_state)
+    gate2_state = sftp_gate2_node(nomination_state)
     if gate2_state.get("status") == "FAILED":
         save_checkpoint_state(run_id, gate2_state)
         return gate2_state
 
-    metadata_state = sftp_metadata_discovery_node(gate2_state)
+    metadata_state = file_metadata_discovery_node(gate2_state)
     profiling_state = sftp_column_profiling_node(metadata_state)
     enriched_state = sftp_semantic_enrichment_node(profiling_state)
     gate3_state = sftp_gate3_node(enriched_state)
-    save_checkpoint_state(run_id, gate3_state)
-    return gate3_state
+    if gate3_state.get("status") == "HITL_WAIT":
+        save_checkpoint_state(run_id, gate3_state)
+        return gate3_state
+    if gate3_state.get("status") == "FAILED":
+        save_checkpoint_state(run_id, gate3_state)
+        return gate3_state
+
+    readiness_state = source_access_readiness_check_node(gate3_state)
+    bronze_code_state = sftp_bronze_code_generation_node(readiness_state)
+    if bronze_code_state.get("bronze_generation_status") == "FAILED" or bronze_code_state.get("status") == "FAILED":
+        save_checkpoint_state(run_id, bronze_code_state)
+        return bronze_code_state
+
+    gate4_state = sftp_gate4_node(bronze_code_state)
+    save_checkpoint_state(run_id, gate4_state)
+    return gate4_state
 
 
 def submit_sftp_gate3_review(run_id: str, approve: bool = True) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+    from sftp_nodes.bronze_code_generation import sftp_bronze_code_generation_node
+    from sftp_nodes.review_gates import source_access_readiness_check_node, sftp_gate4_node, sftp_gate5_node, bronze_validation_node, dq_validation_node
     from sftp_nodes.semantic_enrichment import sftp_gate3_node
+    from sftp_nodes.sftp_pull import sftp_pull_node
+    from sftp_nodes.silver_code_generation import sftp_silver_code_generation_node
+    from sftp_nodes.bronze_ingestion import sftp_bronze_ingestion_node
+    from sftp_nodes.gold_code_generation import sftp_gold_code_generation_node
 
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
     checkpoint_state["gate3_decision"] = "APPROVED" if approve else "REJECTED"
     checkpoint_state["enrichment_review_decision"] = "APPROVED" if approve else "REJECTED"
-    result = sftp_gate3_node(checkpoint_state)
-    save_checkpoint_state(run_id, result)
-    return result
+    gate3_state = sftp_gate3_node(checkpoint_state)
+    if gate3_state.get("status") == "HITL_WAIT":
+        save_checkpoint_state(run_id, gate3_state)
+        return gate3_state
+    if gate3_state.get("status") == "FAILED":
+        save_checkpoint_state(run_id, gate3_state)
+        return gate3_state
+
+    readiness_state = source_access_readiness_check_node(gate3_state)
+    bronze_code_state = sftp_bronze_code_generation_node(readiness_state)
+    if bronze_code_state.get("bronze_generation_status") == "FAILED" or bronze_code_state.get("status") == "FAILED":
+        save_checkpoint_state(run_id, bronze_code_state)
+        return bronze_code_state
+
+    gate4_state = sftp_gate4_node({**bronze_code_state, "bronze_review_decision": None})
+    if gate4_state.get("status") == "HITL_WAIT" or gate4_state.get("status") == "FAILED":
+        save_checkpoint_state(run_id, gate4_state)
+        return gate4_state
+
+    # If a prior checkpoint already contains a decision, preserve it; otherwise
+    # stop here and let the UI present Gate 4 for Bronze review.
+    if str((gate4_state.get("gate4") or {}).get("decision") or "").upper() != "APPROVED":
+        save_checkpoint_state(run_id, gate4_state)
+        return gate4_state
+
+    if str(gate4_state.get("source") or "").lower() == "sftp":
+        pull_state = sftp_pull_node(gate4_state)
+        bronze_state = sftp_bronze_ingestion_node(pull_state)
+    else:
+        bronze_state = {
+            **gate4_state,
+            "bronze_ingestion_status": "HANDOFF_ONLY",
+            "bronze_handoff_status": "READY_FOR_DATABRICKS_REVIEWED_SCRIPT",
+        }
+    if bronze_state.get("status") == "FAILED":
+        save_checkpoint_state(run_id, bronze_state)
+        return bronze_state
+
+    validated_state = bronze_validation_node(bronze_state)
+    silver_state = sftp_silver_code_generation_node(validated_state)
+    if silver_state.get("silver_generation_status") == "FAILED" or silver_state.get("status") == "FAILED":
+        save_checkpoint_state(run_id, silver_state)
+        return silver_state
+
+    gate5_state = sftp_gate5_node({**silver_state, "silver_review_decision": "APPROVED"})
+    if gate5_state.get("status") == "HITL_WAIT" or gate5_state.get("status") == "FAILED":
+        save_checkpoint_state(run_id, gate5_state)
+        return gate5_state
+
+    dq_state = dq_validation_node(gate5_state)
+    gold_state = sftp_gold_code_generation_node(dq_state)
+    save_checkpoint_state(run_id, gold_state)
+    return gold_state
+
+
+def submit_sftp_gate4_review(run_id: str, action: str = "APPROVED") -> Dict[str, Any]:
+    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+    from sftp_nodes.bronze_code_generation import sftp_bronze_code_generation_node
+    from sftp_nodes.review_gates import bronze_validation_node, sftp_gate4_node
+    from sftp_nodes.bronze_ingestion import sftp_bronze_ingestion_node
+    from sftp_nodes.sftp_pull import sftp_pull_node
+    from sftp_nodes.silver_code_generation import sftp_silver_code_generation_node
+    from sftp_nodes.review_gates import sftp_gate5_node
+
+    checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
+    checkpoint_state["bronze_review_decision"] = str(action or "APPROVED").upper()
+    gate4_state = sftp_gate4_node(checkpoint_state)
+    if gate4_state.get("status") == "REGENERATE_REQUIRED":
+        regenerated = sftp_bronze_code_generation_node({**checkpoint_state, "bronze_review_decision": None})
+        resumed = sftp_gate4_node(regenerated)
+        save_checkpoint_state(run_id, resumed)
+        return resumed
+    if gate4_state.get("status") in {"FAILED", "HITL_WAIT"}:
+        save_checkpoint_state(run_id, gate4_state)
+        return gate4_state
+
+    source_type = str(gate4_state.get("source") or "").lower()
+    post_gate4 = gate4_state
+    if source_type == "sftp":
+        post_gate4 = sftp_pull_node(post_gate4)
+        if post_gate4.get("status") == "FAILED":
+            save_checkpoint_state(run_id, post_gate4)
+            return post_gate4
+        bronze_state = sftp_bronze_ingestion_node(post_gate4)
+    else:
+        bronze_state = {
+            **post_gate4,
+            "bronze_ingestion_status": "HANDOFF_ONLY",
+            "bronze_handoff_status": "READY_FOR_DATABRICKS_REVIEWED_SCRIPT",
+        }
+    validated = bronze_validation_node(bronze_state)
+    if validated.get("status") == "FAILED":
+        save_checkpoint_state(run_id, validated)
+        return validated
+
+    silver_state = sftp_silver_code_generation_node(validated)
+    silver_status = str(silver_state.get("silver_generation_status") or "").upper()
+    silver_items = ((silver_state.get("silver_review_artifact") or {}).get("items") or [])
+    if silver_status not in {"COMPLETED", "PARTIAL"} or not silver_items:
+        blocked_state = {
+            **silver_state,
+            "status": "FAILED",
+            "error": silver_state.get("silver_generation_error") or "Silver generation did not produce a review artifact after Gate 4 approval.",
+        }
+        save_checkpoint_state(run_id, blocked_state)
+        return blocked_state
+
+    gate5_state = sftp_gate5_node(silver_state)
+    save_checkpoint_state(run_id, gate5_state)
+    return gate5_state
+
+
+def submit_sftp_gate5_review(run_id: str, action: str = "APPROVED") -> Dict[str, Any]:
+    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+    from sftp_nodes.gold_code_generation import sftp_gold_code_generation_node
+    from sftp_nodes.review_gates import dq_validation_node, sftp_gate5_node
+    from sftp_nodes.silver_code_generation import sftp_silver_code_generation_node
+
+    checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
+    checkpoint_state["silver_review_decision"] = str(action or "APPROVED").upper()
+    gate5_state = sftp_gate5_node(checkpoint_state)
+    if gate5_state.get("status") == "REGENERATE_REQUIRED":
+        regenerated = sftp_silver_code_generation_node({**checkpoint_state, "silver_review_decision": None})
+        resumed = sftp_gate5_node(regenerated)
+        save_checkpoint_state(run_id, resumed)
+        return resumed
+    if gate5_state.get("status") in {"FAILED", "HITL_WAIT"}:
+        save_checkpoint_state(run_id, gate5_state)
+        return gate5_state
+
+    dq_state = dq_validation_node(gate5_state)
+    gold_state = sftp_gold_code_generation_node(dq_state)
+    save_checkpoint_state(run_id, gold_state)
+    return gold_state

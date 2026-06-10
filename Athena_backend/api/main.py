@@ -31,7 +31,9 @@ from services.pipeline_runtime import (
     fetch_run_summary,
     get_run_context,
     list_runs,
+    load_bronze_scripts,
     load_checkpoint_state,
+    load_silver_scripts,
     save_checkpoint_state,
     start_pipeline,
     submit_background,
@@ -41,7 +43,13 @@ from services.pipeline_runtime import (
 )
 from services.sftp_runtime import get_sftp_run_context, start_sftp_pipeline
 from services.sftp_runtime import build_sftp_display_name
-from sftp_nodes.hitl import submit_sftp_gate1_review, submit_sftp_gate2_review, submit_sftp_gate3_review
+from sftp_nodes.hitl import (
+    submit_sftp_gate1_review,
+    submit_sftp_gate2_review,
+    submit_sftp_gate3_review,
+    submit_sftp_gate4_review,
+    submit_sftp_gate5_review,
+)
 
 
 app = FastAPI(title="Athena Backend API", version="1.0.0")
@@ -120,6 +128,10 @@ class Gate2DecisionPayload(BaseModel):
 
 class Gate3DecisionPayload(BaseModel):
     approve: bool = True
+
+
+class GenericGateDecisionPayload(BaseModel):
+    action: str = "APPROVED"
 
 
 def _pipeline_schema() -> str:
@@ -304,10 +316,10 @@ def _fetch_hitl_rows(run_id: str, status: Optional[str] = None) -> List[Dict[str
 
 def _status_from_context(context: Dict[str, Any]) -> str:
     checkpoint = context.get("checkpoint") or {}
+    if context.get("pending_gate1") or context.get("next_gate") in {1, 2, 3, 4, 5}:
+        return "HITL_WAIT"
     if checkpoint.get("background_stage"):
         return "RUNNING"
-    if context.get("pending_gate1") or context.get("next_gate") in {1, 2, 3}:
-        return "HITL_WAIT"
     status = str(context.get("status") or "UNKNOWN")
     if status in {"UNKNOWN", "NOT_FOUND"}:
         return "NOT_FOUND"
@@ -328,6 +340,80 @@ def _display_run_name(checkpoint: Dict[str, Any], context: Optional[Dict[str, An
     if _is_file_source(checkpoint.get("source")):
         return (context or {}).get("display_name") or build_sftp_display_name(checkpoint)
     return checkpoint.get("brd_filename") or "athena_brd.txt"
+
+
+def _bronze_review_from_scripts(run_id: str, checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    bundle = load_bronze_scripts(run_id, checkpoint)
+    scripts = bundle.get("scripts") or []
+    if not scripts:
+        return {}
+    feeds = []
+    for item in scripts:
+        config_payload = item.get("bronze_config") or item.get("generated_bronze_config") or {}
+        feeds.append(
+            {
+                "feed_summary": item.get("feed_summary") or f"{item.get('vendor') or 'Vendor'}.{item.get('entity') or 'Feed'}",
+                "source_type": item.get("source_type") or config_payload.get("source_type") or checkpoint.get("source"),
+                "vendor": item.get("vendor") or config_payload.get("vendor"),
+                "entity": item.get("entity") or config_payload.get("entity"),
+                "file_format": item.get("file_format") or config_payload.get("file_format"),
+                "approved_schema": config_payload.get("schema_columns") or item.get("approved_schema") or [],
+                "primary_keys": item.get("primary_keys") or config_payload.get("primary_keys") or [],
+                "watermark_column": item.get("watermark_column") or config_payload.get("watermark_column"),
+                "landing_path": item.get("landing_path") or config_payload.get("landing_path"),
+                "target_table": item.get("target_table") or config_payload.get("target_table"),
+                "bronze_output_path": item.get("bronze_output_path") or config_payload.get("bronze_output_path"),
+                "checkpoint_path": item.get("checkpoint_path") or config_payload.get("checkpoint_path"),
+                "schema_location": item.get("schema_location") or config_payload.get("schema_location"),
+                "generated_bronze_config": item.get("generated_bronze_config") or config_payload,
+                "generated_bronze_script": item.get("generated_bronze_script") or item.get("script_body") or "",
+                "validation_checklist": item.get("validation_checklist") or [],
+                "validation_issues": item.get("validation_issues") or [],
+                "plan_valid": item.get("plan_valid", item.get("status") == "COMPLETED"),
+                "review_status": item.get("review_status") or "PENDING",
+            }
+        )
+    return {
+        "run_id": run_id,
+        "generated_at": bundle.get("generated_at") or checkpoint.get("bronze_generated_at"),
+        "feeds": feeds,
+    }
+
+
+def _silver_review_from_scripts(run_id: str, checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    bundle = load_silver_scripts(run_id, checkpoint)
+    scripts = bundle.get("scripts") or []
+    if not scripts:
+        return {}
+    items = []
+    for item in scripts:
+        primary_keys = item.get("primary_keys") or []
+        items.append(
+            {
+                "entity": item.get("entity") or item.get("table") or "Silver Item",
+                "vendor": item.get("vendor"),
+                "bronze_source": item.get("bronze_table") or item.get("source_table"),
+                "silver_target": item.get("silver_table") or item.get("target_table"),
+                "primary_keys": primary_keys,
+                "watermark_column": item.get("watermark_column"),
+                "transformations": [
+                    "column rename (bronze -> business names)",
+                    "type casting",
+                    "deduplication",
+                    "null audit",
+                    "silver audit columns",
+                ],
+                "pii_masking_rules": item.get("pii_masking_rules") or [],
+                "merge_strategy": "MERGE upsert" if primary_keys else "overwrite",
+                "llm_enhanced": item.get("llm_enhanced", False),
+                "generated_silver_script": item.get("generated_silver_script") or item.get("script_body") or "",
+            }
+        )
+    return {
+        "run_id": run_id,
+        "generated_at": bundle.get("generated_at") or checkpoint.get("silver_generated_at"),
+        "items": items,
+    }
 
 
 def _iso_or_none(value: Any) -> Optional[str]:
@@ -370,8 +456,20 @@ def _stage_key(value: Any) -> Optional[str]:
         return "enrichment"
     if "gate3" in text or "gate 3" in text or "enrichment certification" in text:
         return "gate3"
+    if "pre-bronze" in text or "bronze readiness" in text:
+        return "pre_bronze"
+    if "gate4" in text or "gate 4" in text or "bronze review" in text:
+        return "gate4"
+    if "sftp pull" in text:
+        return "pull"
+    if "bronze validation" in text:
+        return "bronze_validation"
     if "bronze" in text:
         return "bronze"
+    if "gate5" in text or "gate 5" in text or "silver review" in text:
+        return "gate5"
+    if "dq validation" in text:
+        return "dq_validation"
     if "silver" in text:
         return "silver"
     if "gold" in text:
@@ -620,6 +718,10 @@ def _summary_resume_message(
         return "Gate 2 is pending. Review and certify nominated tables below."
     if next_gate == 3:
         return "Gate 3 is pending. Review enrichment details below."
+    if next_gate == 4:
+        return "Gate 4 is pending. Review Bronze plan before ingestion."
+    if next_gate == 5:
+        return "Gate 5 is pending. Review Silver plan before execution."
     if gate3_approved:
         return "Gate 3 is complete."
     if certified_tables and not enriched_payload:
@@ -639,10 +741,10 @@ def _summary_status(
     silver_generation_completed: bool,
     gold_generation_completed: bool,
 ) -> str:
+    if next_gate in {1, 2, 3, 4, 5}:
+        return "HITL_WAIT"
     if checkpoint.get("background_stage"):
         return "RUNNING"
-    if next_gate in {1, 2, 3}:
-        return "HITL_WAIT"
 
     status = str(
         checkpoint.get("status")
@@ -663,7 +765,7 @@ def _summary_status(
         return "SUCCESS"
     if status in {"HITL_WAIT", "PAUSED_FOR_HITL"}:
         return "HITL_WAIT"
-    if status in {"RUNNING", "PROCESSING", "PENDING", "GATE1_COMPLETE", "GATE2_COMPLETE", "GATE3_COMPLETE"}:
+    if status in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS", "GATE1_COMPLETE", "GATE2_COMPLETE", "GATE3_COMPLETE"}:
         return "RUNNING"
     return status
 
@@ -700,7 +802,11 @@ def _ui_run_summary(run_id: str) -> Dict[str, Any]:
             "stages": _summary_stage_list(checkpoint=checkpoint, summary=summary, pipeline_steps=pipeline_steps),
             "next_gate": context.get("next_gate"),
             "resume_message": context.get("resume_message"),
-            "script_counts": {"bronze": 0, "silver": 0, "gold": 0},
+            "script_counts": {
+                "bronze": len((context.get("bronze") or {}).get("scripts") or []),
+                "silver": len((context.get("silver") or {}).get("scripts") or []),
+                "gold": len((context.get("gold") or {}).get("scripts") or []),
+            },
             "sftp_entity": context.get("sftp_entity"),
             "source_row_count": context.get("source_row_count"),
             "source_columns": context.get("source_columns") or [],
@@ -892,6 +998,7 @@ def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
         "pii_columns": context.get("pii_columns") or [],
         "join_key_columns": context.get("join_key_columns") or [],
         "measure_columns": context.get("measure_columns") or [],
+        "feed_semantic_summary": context.get("feed_semantic_summary") or [],
         "gate3_approved": context.get("gate3_approved") or False,
         "next_gate": context.get("next_gate"),
         "resume_message": context.get("resume_message"),
@@ -1158,6 +1265,7 @@ def enrichment_reviews(run_id: str) -> Dict[str, Any]:
         "pii_columns": run.get("pii_columns") or [],
         "join_key_columns": run.get("join_key_columns") or [],
         "measure_columns": run.get("measure_columns") or [],
+        "feed_semantic_summary": run.get("feed_semantic_summary") or [],
         "gate3_approved": run.get("gate3_approved") or False,
     }
 
@@ -1170,6 +1278,54 @@ def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict
         return {"run_id": run_id, "status": "SUBMITTED", "approve": payload.approve}
     submit_background(run_id, "gate3", submit_gate3_review, run_id, payload.approve)
     return {"run_id": run_id, "status": "SUBMITTED", "approve": payload.approve}
+
+
+@app.get("/bronze-reviews/{run_id}")
+def bronze_reviews(run_id: str) -> Dict[str, Any]:
+    try:
+        run = _ui_run(run_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    checkpoint = load_checkpoint_state(run_id) or {}
+    bronze_artifact = checkpoint.get("bronze_review_artifact") or run.get("bronze_review_artifact") or {}
+    if not (bronze_artifact.get("feeds") or []):
+        bronze_artifact = _bronze_review_from_scripts(run_id, checkpoint)
+    return {
+        "run_id": run_id,
+        "next_gate": run.get("next_gate"),
+        "resume_message": run.get("resume_message"),
+        "bronze_review_artifact": bronze_artifact,
+    }
+
+
+@app.post("/bronze-reviews/{run_id}")
+def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
+    submit_background(run_id, "gate4", submit_sftp_gate4_review, run_id, payload.action)
+    return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
+
+
+@app.get("/silver-reviews/{run_id}")
+def silver_reviews(run_id: str) -> Dict[str, Any]:
+    try:
+        run = _ui_run(run_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    checkpoint = load_checkpoint_state(run_id) or {}
+    silver_artifact = checkpoint.get("silver_review_artifact") or run.get("silver_review_artifact") or {}
+    if not (silver_artifact.get("items") or []):
+        silver_artifact = _silver_review_from_scripts(run_id, checkpoint)
+    return {
+        "run_id": run_id,
+        "next_gate": run.get("next_gate"),
+        "resume_message": run.get("resume_message"),
+        "silver_review_artifact": silver_artifact,
+    }
+
+
+@app.post("/silver-reviews/{run_id}")
+def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
+    submit_background(run_id, "gate5", submit_sftp_gate5_review, run_id, payload.action)
+    return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
 
 
 @app.get("/kpi-reviews/{run_id}")

@@ -66,6 +66,16 @@ export const getEnrichmentReviews = (runId: string) => api.get(`/enrichment-revi
 export const submitEnrichmentReview = (runId: string, approve: boolean) =>
   api.post(`/enrichment-reviews/${runId}`, { approve })
 
+export const getBronzeReview = (runId: string) => api.get(`/bronze-reviews/${runId}`)
+
+export const submitBronzeReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE') =>
+  api.post(`/bronze-reviews/${runId}`, { action })
+
+export const getSilverReview = (runId: string) => api.get(`/silver-reviews/${runId}`)
+
+export const submitSilverReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE') =>
+  api.post(`/silver-reviews/${runId}`, { action })
+
 export const abortRun = (runId: string) => api.post(`/pipeline/${runId}/abort`)
 
 export const getHitlQueue = (runId: string) => api.get(`/hitl/${runId}`)

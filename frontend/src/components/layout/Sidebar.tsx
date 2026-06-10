@@ -1,181 +1,168 @@
 // @ts-nocheck
 import React from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { AnimatePresence, motion } from 'framer-motion'
 import {
-  Brain,
+  ArrowRightLeft,
   ChevronLeft,
   ChevronRight,
   Database,
+  FolderKanban,
   LayoutDashboard,
   PlayCircle,
   Settings,
   ShieldCheck,
+  Sparkles,
+  Trophy,
 } from 'lucide-react'
 import useAthenaStore from '../../store/useAthenaStore'
 
 function Sidebar({ collapsed, onToggle }) {
-  const pendingCount = useAthenaStore((s) => s.getPendingHitlCount())
+  const userRole = useAthenaStore((s) => s.userRole)
 
-  const navItems = [
+  const mainItems = [
     { to: '/app', icon: LayoutDashboard, label: 'Dashboard', exact: true },
-    { to: '/app/data-discovery', icon: PlayCircle, label: 'Pipeline Monitor' },
-    { to: '/app/hitl', icon: ShieldCheck, label: 'Gate Review', badge: pendingCount > 0 ? pendingCount : null },
-    { to: '/app/db-config', icon: Database, label: 'Database Config' },
+    { to: '/app/data-discovery', icon: Sparkles, label: 'Data Discovery' },
+    { to: '/app/run-history', icon: PlayCircle, label: 'Run History' },
+    { to: '/app/project', icon: FolderKanban, label: 'Project' },
+    { to: '/app/data-quality', icon: ShieldCheck, label: 'Data Quality' },
+    { to: '/app/data-migration', icon: ArrowRightLeft, label: 'Data Migration' },
+  ]
+
+  const secondaryItems = [
+    { to: '/app/db-config', icon: Database, label: 'Configuration' },
     { to: '/app/settings', icon: Settings, label: 'Settings' },
   ]
 
   return (
-    <motion.aside
-      animate={{ width: collapsed ? 68 : 240 }}
-      transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-      className="relative flex h-full flex-shrink-0 flex-col overflow-hidden border-r border-bg-border bg-bg-card"
-      style={{ minHeight: 0 }}
-    >
-      <div
-        className="flex flex-shrink-0 items-center border-b border-bg-border"
-        style={{ height: '51.2px', paddingLeft: '9.6px', paddingRight: '9.6px' }}
-      >
+    <aside className={`relative flex h-full flex-shrink-0 flex-col overflow-hidden border-r border-[#253044] bg-[#131c2c] transition-[width] duration-300 ${collapsed ? 'w-[78px]' : 'w-[280px]'}`}>
+      <div className="flex h-[60px] items-center justify-between border-b border-[#253044] px-4">
+        <div className="flex items-center gap-3 overflow-hidden">
+          <AthenaMark />
+          {!collapsed && <div className="text-[18px] font-semibold text-white">Athena</div>}
+        </div>
         <button
           onClick={onToggle}
-          className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-bg-hover transition-colors"
+          className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-white"
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
-          <div className="flex items-center justify-center rounded-lg bg-accent-blue p-1.5">
-            <Brain className="text-white" size={14} strokeWidth={2.2} />
-          </div>
+          {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
         </button>
-
-        <AnimatePresence>
-          {!collapsed && (
-            <motion.div
-              initial={{ opacity: 0, width: 0 }}
-              animate={{ opacity: 1, width: 'auto' }}
-              exit={{ opacity: 0, width: 0 }}
-              transition={{ duration: 0.2 }}
-              className="ml-3 flex flex-1 items-center justify-between overflow-hidden"
-            >
-              <span className="whitespace-nowrap text-sm font-bold text-text-primary">
-                Athena
-              </span>
-              <button
-                onClick={onToggle}
-                className="flex h-7 w-7 items-center justify-center rounded-lg text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors"
-              >
-                <ChevronLeft size={14} />
-              </button>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {collapsed && (
-          <button
-            onClick={onToggle}
-            className="absolute right-1 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-text-tertiary opacity-0 transition-opacity hover:bg-bg-hover hover:text-text-secondary group-hover:opacity-100"
-          >
-            <ChevronRight size={14} />
-          </button>
-        )}
       </div>
 
-      <nav className="overflow-hidden py-4">
-        {navItems.map((item) => (
-          <NavItem key={item.to} item={item} collapsed={collapsed} />
-        ))}
-      </nav>
+      <div className="px-3 py-4">
+        {!collapsed && (
+          <SidebarShowcase title="Databricks Edition" subtitle="Unity Catalog, Delta Lake" />
+        )}
 
-      <div className="flex-1" />
-      <SidebarFooter collapsed={collapsed} />
-    </motion.aside>
+        <nav className="mt-9 space-y-2">
+          {mainItems.map((item) => (
+            <NavItem key={item.to} item={item} collapsed={collapsed} />
+          ))}
+        </nav>
+      </div>
+
+      <div className="mt-auto border-t border-[#253044] px-3 py-4">
+        {!collapsed && (
+          <>
+            <SidebarShowcase title="Data Engineer" subtitle="Pipeline Designer & Builder" compact />
+
+            <div className="mt-6 px-2">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                Databricks Integrations
+              </div>
+              <div className="mt-4 space-y-2.5">
+                <IntegrationItem label="Unity Catalog" tone="emerald" />
+                <IntegrationItem label="Delta Live Tables" tone="emerald" />
+                <IntegrationItem label="MosaicAI" tone="amber" />
+              </div>
+            </div>
+
+            <nav className="mt-7 space-y-2">
+              {secondaryItems.map((item) => (
+                <NavItem key={item.to} item={item} collapsed={collapsed} />
+              ))}
+            </nav>
+          </>
+        )}
+
+        {collapsed && (
+          <nav className="space-y-2">
+            {secondaryItems.map((item) => (
+              <NavItem key={item.to} item={item} collapsed={collapsed} />
+            ))}
+          </nav>
+        )}
+
+        <div className={`mt-5 border-t border-[#253044] px-3 pt-4 ${collapsed ? 'hidden' : 'block'}`}>
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="truncate text-[12px] font-semibold text-white">Jayaprakasha Sarma C</div>
+              <div className="truncate text-[10px] text-slate-400">{userRole || 'Pipeline Designer & Builder'}</div>
+            </div>
+            <button className="flex h-7 w-7 items-center justify-center rounded-md text-red-300" title="Profile action">
+              <Trophy size={14} />
+            </button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  )
+}
+
+function SidebarShowcase({ title, subtitle, compact = false }) {
+  return (
+    <div className={`rounded-lg ${compact ? 'bg-transparent px-2 py-2' : 'border border-[#2f5fb2] bg-[#182a47] px-3 py-3'}`}>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-[12px] font-semibold text-white">{title}</div>
+          <div className="mt-0.5 text-[10px] text-slate-300">{subtitle}</div>
+        </div>
+        <ChevronRight size={14} className="text-slate-300" />
+      </div>
+    </div>
+  )
+}
+
+function IntegrationItem({ label, tone }) {
+  const dotClass = tone === 'amber' ? 'bg-amber-400' : 'bg-emerald-400'
+  return (
+    <div className="flex items-center gap-2 text-[12px] text-white">
+      <span className={`h-2 w-2 rounded-full ${dotClass}`} />
+      {label}
+    </div>
   )
 }
 
 function NavItem({ item, collapsed }) {
   const location = useLocation()
-  const isActive = item.exact
-    ? location.pathname === item.to
-    : location.pathname.startsWith(item.to)
-
+  const isActive = item.exact ? location.pathname === item.to : location.pathname.startsWith(item.to)
   const Icon = item.icon
 
   return (
-    <div className="relative group" style={{ paddingLeft: '8px', paddingRight: '8px', marginBottom: '4px' }}>
-      <NavLink
-        to={item.to}
-        className={`flex items-center rounded-lg border font-medium transition-all duration-200 ${
-          isActive
-            ? 'border-accent-blue/20 bg-accent-blue/15 text-accent-blue'
-            : 'border-transparent text-text-secondary hover:bg-accent-blue/10 hover:text-accent-blue'
-        }`}
-        style={{
-          gap: '9.6px',
-          paddingLeft: '9.6px',
-          paddingRight: '9.6px',
-          paddingTop: '8px',
-          paddingBottom: '8px',
-          fontSize: '11.2px',
-          justifyContent: collapsed ? 'center' : 'flex-start',
-          height: '32px',
-          alignItems: 'center',
-        }}
-      >
-        <div className="relative flex h-[14.4px] w-[14.4px] flex-shrink-0 items-center justify-center">
-          <Icon size={14.4} strokeWidth={1.5} />
-          {item.badge && (
-            <span className="absolute -right-1.5 -top-1.5 flex h-[12.8px] min-w-[12.8px] items-center justify-center rounded-full bg-accent-amber px-[2px] text-[8px] font-bold text-gray-900">
-              {item.badge > 9 ? '9+' : item.badge}
-            </span>
-          )}
-        </div>
-
-        <AnimatePresence>
-          {!collapsed && (
-            <motion.div
-              initial={{ opacity: 0, width: 0 }}
-              animate={{ opacity: 1, width: 'auto' }}
-              exit={{ opacity: 0, width: 0 }}
-              transition={{ duration: 0.2 }}
-              className="flex flex-1 items-center justify-between overflow-hidden"
-            >
-              <span className="whitespace-nowrap">{item.label}</span>
-              {item.badge && (
-                <span className="ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent-amber px-1 text-[8px] font-bold text-gray-900">
-                  {item.badge > 9 ? '9+' : item.badge}
-                </span>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </NavLink>
-    </div>
+    <NavLink
+      to={item.to}
+      className={`group flex items-center gap-3 rounded-lg border px-3 py-2.5 text-[14px] font-semibold transition-colors ${
+        isActive
+          ? 'border-[#2f5fb2] bg-[#1f325d] text-[#3f82ff]'
+          : 'border-transparent text-slate-100 hover:bg-white/[0.05] hover:text-white'
+      } ${collapsed ? 'justify-center px-0' : ''}`}
+    >
+      <div className="flex h-5 w-5 items-center justify-center">
+        <Icon size={18} strokeWidth={1.8} />
+      </div>
+      {!collapsed && <span className="truncate">{item.label}</span>}
+    </NavLink>
   )
 }
 
-function SidebarFooter({ collapsed }) {
-  const serverOnline = useAthenaStore((s) => s.serverOnline)
-
+function AthenaMark() {
   return (
-    <div className="flex-shrink-0 border-t border-bg-border p-[9.6px]">
-      <div className={`flex items-center ${collapsed ? 'justify-center' : ''}`} style={{ gap: '9px' }}>
-        <div
-          className={`h-2 w-2 rounded-full flex-shrink-0 ${
-            serverOnline ? 'bg-accent-green' : 'bg-gray-600'
-          }`}
-        />
-        <AnimatePresence>
-          {!collapsed && (
-            <motion.span
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              style={{ fontSize: '9.6px' }}
-              className="whitespace-nowrap text-gray-500"
-            >
-              {serverOnline ? 'FastAPI connected' : 'FastAPI offline'}
-            </motion.span>
-          )}
-        </AnimatePresence>
-      </div>
+    <div className="relative h-9 w-9 flex-shrink-0">
+      <div
+        className="absolute left-0 top-0 h-9 w-9 bg-gradient-to-br from-[#25d5ff] via-[#3f82ff] to-[#7c3cff]"
+        style={{ clipPath: 'polygon(43% 0, 100% 100%, 73% 100%, 51% 56%, 30% 100%, 0 100%)' }}
+      />
+      <div className="absolute left-[12px] top-[18px] h-[5px] w-[15px] -rotate-12 rounded-full bg-[#20e0c6]" />
     </div>
   )
 }

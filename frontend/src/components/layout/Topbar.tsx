@@ -10,29 +10,21 @@ function Topbar() {
 
   return (
     <>
-      <header className="border-b border-bg-border bg-bg-card flex items-center justify-end flex-shrink-0 transition-colors duration-200" style={{ height: '51.2px', paddingLeft: '19.2px', paddingRight: '19.2px', gap: '12.8px' }}>
-        {/* Right: Theme toggle + Provider badge + New Run button */}
-        <div className="flex items-center" style={{ gap: '9.6px' }}>
-          {/* Theme Toggle Button */}
+      <header className="flex h-[60px] items-center justify-end border-b border-[#253044] bg-[#131c2c] px-6">
+        <div className="flex items-center gap-3">
           <button
             onClick={toggleTheme}
-            className="p-2 rounded-lg border border-bg-border bg-bg-base hover:bg-bg-hover text-text-secondary 
-                       hover:text-text-primary transition-colors duration-150"
+            className="flex h-10 w-10 items-center justify-center rounded-lg border border-[#253044] bg-[#0b1120] text-slate-300 transition-colors hover:bg-white/[0.05] hover:text-white"
             title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
           >
-            {theme === 'dark' ? (
-              <Sun size={16} strokeWidth={2} />
-            ) : (
-              <Moon size={16} strokeWidth={2} />
-            )}
+            {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
           </button>
 
           <button
             onClick={() => setShowNewRunModal(true)}
-            className="flex items-center bg-accent-blue hover:bg-blue-600 active:bg-blue-700 text-white font-semibold rounded-lg transition-colors duration-150 shadow-lg shadow-blue-900/30"
-            style={{ gap: '8px', paddingLeft: '16px', paddingRight: '16px', paddingTop: '8px', paddingBottom: '8px', fontSize: '11.2px' }}
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#3f82ff] px-5 text-[14px] font-semibold text-white transition-colors hover:bg-[#5a93f7]"
           >
-            <Plus size={12} strokeWidth={2.5} />
+            <Plus size={18} />
             New Run
           </button>
         </div>

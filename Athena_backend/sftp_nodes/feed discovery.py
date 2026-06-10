@@ -4,6 +4,15 @@ import os
 import pandas as pd
 
 
+def _lookup_source_mapping(state, file_path):
+    mappings = state.get("source_file_mappings") or []
+    target = str(file_path or "").strip()
+    for item in mappings:
+        if str(item.get("local_file_path") or "").strip() == target:
+            return item
+    return {}
+
+
 def call_llm_for_semantics(columns):
     """
     LLM helper function.
@@ -48,6 +57,8 @@ def feed_discovery_node(state):
         file_format = "csv"
     elif ext == ".json":
         file_format = "json"
+    elif ext == ".xml":
+        file_format = "xml"
     else:
         file_format = "unknown"
 
@@ -58,6 +69,8 @@ def feed_discovery_node(state):
             with open(file_path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
             df = pd.DataFrame(data[:50]) if isinstance(data, list) else pd.DataFrame([data])
+        elif file_format == "xml":
+            df = pd.read_xml(file_path).head(50)
         else:
             raise ValueError("Unsupported format")
     except Exception as exc:
@@ -68,6 +81,7 @@ def feed_discovery_node(state):
     dataset_type = llm_output.get("dataset_type", entity)
     primary_keys = llm_output.get("primary_keys", [])
     measures = llm_output.get("measures", [])
+    source_mapping = _lookup_source_mapping(state, file_path)
 
     candidate_feed = {
         "feed_id": f"{vendor}_{entity}",
@@ -77,6 +91,9 @@ def feed_discovery_node(state):
         "format": file_format,
         "file_name": file_name,
         "file_path": file_path,
+        "remote_path": source_mapping.get("remote_path") or "",
+        "databricks_source_path": source_mapping.get("databricks_source_path") or state.get("databricks_source_path") or "",
+        "cloud_path": source_mapping.get("databricks_source_path") or state.get("databricks_source_path") or "",
         "columns": columns,
         "sample_row_count": len(df),
         "primary_keys": primary_keys,

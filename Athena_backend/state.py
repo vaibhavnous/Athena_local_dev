@@ -32,6 +32,9 @@ class Stage01State(TypedDict, total=False):
     candidate_feeds: Optional[List[Dict[str, Any]]]
     gate1: Optional[Dict[str, Any]]
     gate2: Optional[Dict[str, Any]]
+    gate3: Optional[Dict[str, Any]]
+    gate4: Optional[Dict[str, Any]]
+    gate5: Optional[Dict[str, Any]]
 
     # ── Embedding / Vectorization Flags (NEW) ──────────────
     brd_embedded: Optional[bool]          # BRD stored in ai-store-index
@@ -88,8 +91,11 @@ class Stage01State(TypedDict, total=False):
     certified_tables: Optional[List[Dict]]
 
     discovered_metadata: Optional[Dict[str, Any]]
+    metadata_discovery_status: Optional[str]
     metadata_status: Optional[str]  # 'PENDING' | 'COMPLETED' | 'FAILED' | 'SKIPPED'
     metadata_error: Optional[str]
+    schema_registry_results: Optional[List[Dict[str, Any]]]
+    schema_review_artifact: Optional[Dict[str, Any]]
 
     column_profiles: Optional[Dict[str, Any]]
     column_profiling_status: Optional[str]  # 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'FAILED' | 'SKIPPED'
@@ -115,6 +121,11 @@ class Stage01State(TypedDict, total=False):
     bronze_generation_bundle_path: Optional[str]
     bronze_generation_readme_path: Optional[str]
     bronze_generation_ui_path: Optional[str]
+    bronze_execution_plan: Optional[Dict[str, Any]]
+    bronze_review_artifact: Optional[Dict[str, Any]]
+    bronze_review_decision: Optional[str]
+    bronze_validation_status: Optional[str]
+    bronze_validation_error: Optional[str]
 
     # Silver Code Generation
     silver_catalog: Optional[str]
@@ -126,6 +137,11 @@ class Stage01State(TypedDict, total=False):
     silver_generation_bundle_path: Optional[str]
     silver_generation_readme_path: Optional[str]
     silver_generation_ui_path: Optional[str]
+    silver_review_artifact: Optional[Dict[str, Any]]
+    silver_review_decision: Optional[str]
+    silver_execution_status: Optional[str]
+    dq_validation_status: Optional[str]
+    dq_validation_error: Optional[str]
 
     # Gold Code Generation Handoff
     gold_contract_status: Optional[str]  # 'READY' | 'READY_WITH_WARNINGS' | 'FAILED' | 'SKIPPED'

@@ -391,6 +391,7 @@ def _store_and_register(state: Stage01State) -> Stage01State:
         pipeline_status = "STAGE_01_COMPLETE"
         utc_now = datetime.now(timezone.utc)
         metadata_str = json.dumps(metadata)
+        pipeline_schema = config["azure_sql"].get("pipeline_schema", db_schema)
 
         conn = get_pipeline_connection()
         try:
@@ -414,6 +415,25 @@ def _store_and_register(state: Stage01State) -> Stage01State:
                     utc_now,
                 ),
             )
+
+            try:
+                cursor.execute(
+                    f"""
+                    INSERT INTO [{pipeline_schema}].pipeline_run_log
+                    (run_id, source, status, started_at, completed_at, error_message)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        new_state.get("source", "unknown"),
+                        pipeline_status,
+                        utc_now,
+                        utc_now,
+                        None,
+                    ),
+                )
+            except Exception as exc:
+                logger.warning("Pipeline run log persistence skipped: %s", exc, extra=log_context)
 
             conn.commit()
         finally:

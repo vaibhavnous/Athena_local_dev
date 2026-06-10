@@ -1,7 +1,9 @@
 // @ts-nocheck
 import React, { useEffect, useRef } from 'react'
 import { Outlet } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
+import { AlertCircle, ChevronRight } from 'lucide-react'
 import Sidebar from './Sidebar'
 import Topbar from './Topbar'
 import useAthenaStore from '../../store/useAthenaStore'
@@ -13,13 +15,16 @@ import { getRuns } from '../../api/athenaApi'
  * Manages the notification toast stack.
  */
 function AppShell() {
+  const navigate = useNavigate()
   const {
+    runs,
     sidebarCollapsed,
     toggleSidebar,
     notifications,
     removeNotification,
     setRuns,
     setActiveRun,
+    setServerOnline,
     activeRunId,
     serverOnline,
     addNotification
@@ -55,7 +60,7 @@ function AppShell() {
     }
 
     const loadRuns = async () => {
-      if (!serverOnline || runsRequestInFlightRef.current) {
+      if (runsRequestInFlightRef.current) {
         scheduleNext()
         return
       }
@@ -63,7 +68,8 @@ function AppShell() {
       runsRequestInFlightRef.current = true
       try {
         const backendRuns = await getRuns()
-        if (cancelled || !Array.isArray(backendRuns) || backendRuns.length === 0) return
+        if (cancelled || !Array.isArray(backendRuns)) return
+        setServerOnline(true)
 
         const previousGateMap = gateNotificationSnapshotRef.current
         const hasSnapshot = Object.keys(previousGateMap).length > 0
@@ -71,7 +77,7 @@ function AppShell() {
           for (const run of backendRuns) {
             const nextGate = Number(run?.next_gate || 0) || null
             const previousGate = previousGateMap[run.id] ?? null
-            if ((nextGate === 2 || nextGate === 3) && previousGate !== nextGate) {
+            if ([2, 3, 4, 5].includes(nextGate) && previousGate !== nextGate) {
               addNotification({
                 type: 'info',
                 title: `Gate ${nextGate} Ready`,
@@ -86,12 +92,13 @@ function AppShell() {
         )
 
         setRuns(backendRuns)
-        if (!activeRunId) {
-          const resumable = backendRuns.find((run) => run.next_gate === 2 || run.next_gate === 3)
+        if (!activeRunId && backendRuns.length > 0) {
+          const resumable = backendRuns.find((run) => [2, 3, 4, 5].includes(Number(run?.next_gate || 0)))
           setActiveRun((resumable || backendRuns[0]).id)
         }
       } catch (error) {
         if (!cancelled) {
+          setServerOnline(false)
           console.warn('[AppShell] Failed to hydrate backend runs', error)
         }
       } finally {
@@ -105,10 +112,24 @@ function AppShell() {
       cancelled = true
       if (timer !== null) window.clearTimeout(timer)
     }
-  }, [activeRunId, addNotification, serverOnline, setRuns, setActiveRun])
+  }, [activeRunId, addNotification, setRuns, setActiveRun, setServerOnline])
+
+  const waitingRuns = (runs || []).filter((run) => [1, 2, 3, 4, 5].includes(Number(run?.next_gate || 0)))
+  const activeRun = (runs || []).find((run) => run.id === activeRunId) || null
+  const primaryWaitingRun =
+    activeRun && [1, 2, 3, 4, 5].includes(Number(activeRun?.next_gate || 0))
+      ? activeRun
+      : null
+
+  const openHitlGate = () => {
+    if (primaryWaitingRun?.id) {
+      setActiveRun(primaryWaitingRun.id)
+    }
+    navigate('/app/hitl')
+  }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-bg-base">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#080e1d] text-text-primary">
       {/* Sidebar */}
       <Sidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
 
@@ -119,7 +140,29 @@ function AppShell() {
         transition={{ type: 'spring', stiffness: 300, damping: 30 }}
       >
         <Topbar />
-        <main className="flex-1 overflow-auto p-6">
+        {primaryWaitingRun && (
+          <button
+            onClick={openHitlGate}
+            className="flex h-12 w-full items-center justify-between border-b border-amber-400/25 bg-amber-500/10 px-7 text-left text-amber-100 transition-colors hover:bg-amber-500/15"
+          >
+            <div className="flex min-w-0 items-center gap-3">
+              <AlertCircle size={18} className="flex-shrink-0 text-amber-300" />
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold">
+                  HITL Gate {primaryWaitingRun.next_gate} waiting
+                </div>
+                <div className="truncate text-xs text-amber-100/70">
+                  {primaryWaitingRun.resume_message || primaryWaitingRun.brd_filename || primaryWaitingRun.id}
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-shrink-0 items-center gap-3 text-xs font-semibold text-amber-200">
+              {waitingRuns.length > 1 ? `${waitingRuns.length} total pending gates` : 'Open review'}
+              <ChevronRight size={16} />
+            </div>
+          </button>
+        )}
+        <main className="flex-1 overflow-auto bg-[#080e1d] px-7 py-7">
           <Outlet />
         </main>
       </motion.div>
