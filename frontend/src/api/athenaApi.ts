@@ -42,6 +42,7 @@ export const startRun = (payload: {
   budget?: number
   maxKpis?: number
   devMode?: boolean
+  stage_confirmation_enabled?: boolean
 }) => api.post('/pipeline/run', payload)
 
 export const uploadBrd = (file: File) => {
@@ -77,6 +78,8 @@ export const submitSilverReview = (runId: string, action: 'APPROVED' | 'REJECTED
   api.post(`/silver-reviews/${runId}`, { action })
 
 export const abortRun = (runId: string) => api.post(`/pipeline/${runId}/abort`)
+export const continueStage = (runId: string, autoAdvance = false) =>
+  api.post(`/pipeline/${runId}/continue-stage`, { auto_advance: autoAdvance })
 
 export const getHitlQueue = (runId: string) => api.get(`/hitl/${runId}`)
 
@@ -111,7 +114,7 @@ export const createConfiguration = (data: object) => api.post('/configurations',
 export const updateConfiguration = (id: string | number, data: object) => api.put(`/configurations/${id}`, data)
 export const deleteConfiguration = (id: string | number) => api.delete(`/configurations/${id}`)
 
-// ── HITL Gate 1 — KPI Reviews ─────────────────────────────────────────────────
+// ── HITL KPI Review — KPI Reviews ─────────────────────────────────────────────
 export const fetchKpiReviews = (runId: string, status: string | null = null) =>
   api.get(`/kpi-reviews/${runId}`, { params: status ? { status } : {} })
 

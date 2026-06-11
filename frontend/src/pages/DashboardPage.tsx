@@ -25,7 +25,7 @@ function DashboardPage() {
           <div>
             <h2 className="text-base font-semibold text-text-primary">Backend Pipeline Overview</h2>
             <p className="mt-1 text-sm text-text-secondary">
-              This UI is now aligned to the FastAPI workflow only: run submission, status tracking, Gate 1/2/3 review, and generated script inspection.
+              This UI is now aligned to the FastAPI workflow only: run submission, status tracking, KPI, table/feed, and enrichment review, plus generated script inspection.
             </p>
           </div>
           <Link

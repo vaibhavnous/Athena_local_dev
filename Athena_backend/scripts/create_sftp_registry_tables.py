@@ -38,7 +38,7 @@ def _pipeline_schema() -> str:
     return (
         config["azure_sql"].get("pipeline_schema")
         or config["azure_sql"].get("schema_name")
-        or "dbo"
+        or "metadata"
     )
 
 

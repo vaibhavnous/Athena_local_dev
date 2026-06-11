@@ -36,6 +36,12 @@ def main() -> int:
     failures: list[str] = []
 
     print("== pipeline db ==")
+    print(
+        "target="
+        f"{config['azure_sql'].get('host')}:{config['azure_sql'].get('port')} "
+        f"database={config['azure_sql'].get('pipeline_database')} "
+        f"driver={config['azure_sql'].get('driver')}"
+    )
     try:
         conn = get_pipeline_connection()
         cur = conn.cursor()
@@ -54,6 +60,12 @@ def main() -> int:
         print(f"FAIL {type(exc).__name__}: {exc}")
 
     print("== source db ==")
+    print(
+        "target="
+        f"{config['azure_sql'].get('source_host')}:{config['azure_sql'].get('port')} "
+        f"database={config['azure_sql'].get('source_database')} "
+        f"driver={config['azure_sql'].get('driver')}"
+    )
     try:
         conn = get_client_connection()
         cur = conn.cursor()

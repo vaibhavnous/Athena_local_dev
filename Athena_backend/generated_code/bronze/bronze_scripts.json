@@ -1,11 +1,11 @@
 {
-  "run_id": "461a6c90-a1c0-475f-9a22-d43fa88e486a",
-  "generated_at": "2026-05-19T19:51:07.936107",
+  "run_id": "74898c6a-0e3f-4223-829b-8dda428fce57",
+  "generated_at": "2026-06-10T11:02:13.312514",
   "source_database": "insurance",
-  "script_count": 7,
+  "script_count": 8,
   "scripts": [
     {
-      "run_id": "461a6c90-a1c0-475f-9a22-d43fa88e486a",
+      "run_id": "74898c6a-0e3f-4223-829b-8dda428fce57",
       "table": "policy_transactions",
       "database_name": "insurance",
       "schema_name": "dbo",
@@ -13,65 +13,43 @@
       "cast_rule_count": 9,
       "llm_enhanced": false,
       "llm_enhancement_error": null,
-      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\bronze\\bronze_ingest_461a6c90_a1c0_475f_9a22_d43fa88e486a_policy_transactions.py"
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena agentic\\Athena_backend\\generated_code\\bronze\\bronze_ingest_74898c6a_0e3f_4223_829b_8dda428fce57_policy_transactions.py"
     },
     {
-      "run_id": "461a6c90-a1c0-475f-9a22-d43fa88e486a",
-      "table": "expenses_outstanding_estimates",
-      "database_name": "insurance",
-      "schema_name": "dbo",
-      "status": "APPROVED",
-      "cast_rule_count": 4,
-      "llm_enhanced": false,
-      "llm_enhancement_error": null,
-      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\bronze\\bronze_ingest_461a6c90_a1c0_475f_9a22_d43fa88e486a_expenses_outstanding_estimates.py"
-    },
-    {
-      "run_id": "461a6c90-a1c0-475f-9a22-d43fa88e486a",
-      "table": "indemnity_outstanding_estimates",
-      "database_name": "insurance",
-      "schema_name": "dbo",
-      "status": "APPROVED",
-      "cast_rule_count": 4,
-      "llm_enhanced": false,
-      "llm_enhancement_error": null,
-      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\bronze\\bronze_ingest_461a6c90_a1c0_475f_9a22_d43fa88e486a_indemnity_outstanding_estimates.py"
-    },
-    {
-      "run_id": "461a6c90-a1c0-475f-9a22-d43fa88e486a",
-      "table": "claim_information",
-      "database_name": "insurance",
-      "schema_name": "dbo",
-      "status": "APPROVED",
-      "cast_rule_count": 7,
-      "llm_enhanced": false,
-      "llm_enhancement_error": null,
-      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\bronze\\bronze_ingest_461a6c90_a1c0_475f_9a22_d43fa88e486a_claim_information.py"
-    },
-    {
-      "run_id": "461a6c90-a1c0-475f-9a22-d43fa88e486a",
+      "run_id": "74898c6a-0e3f-4223-829b-8dda428fce57",
       "table": "claim_payment_expenses",
       "database_name": "insurance",
       "schema_name": "dbo",
       "status": "APPROVED",
-      "cast_rule_count": 5,
+      "cast_rule_count": 6,
       "llm_enhanced": false,
       "llm_enhancement_error": null,
-      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\bronze\\bronze_ingest_461a6c90_a1c0_475f_9a22_d43fa88e486a_claim_payment_expenses.py"
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena agentic\\Athena_backend\\generated_code\\bronze\\bronze_ingest_74898c6a_0e3f_4223_829b_8dda428fce57_claim_payment_expenses.py"
     },
     {
-      "run_id": "461a6c90-a1c0-475f-9a22-d43fa88e486a",
+      "run_id": "74898c6a-0e3f-4223-829b-8dda428fce57",
+      "table": "claim_information",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "status": "APPROVED",
+      "cast_rule_count": 8,
+      "llm_enhanced": false,
+      "llm_enhancement_error": null,
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena agentic\\Athena_backend\\generated_code\\bronze\\bronze_ingest_74898c6a_0e3f_4223_829b_8dda428fce57_claim_information.py"
+    },
+    {
+      "run_id": "74898c6a-0e3f-4223-829b-8dda428fce57",
       "table": "claim_payment_indemnity",
       "database_name": "insurance",
       "schema_name": "dbo",
       "status": "APPROVED",
-      "cast_rule_count": 11,
+      "cast_rule_count": 12,
       "llm_enhanced": false,
       "llm_enhancement_error": null,
-      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\bronze\\bronze_ingest_461a6c90_a1c0_475f_9a22_d43fa88e486a_claim_payment_indemnity.py"
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena agentic\\Athena_backend\\generated_code\\bronze\\bronze_ingest_74898c6a_0e3f_4223_829b_8dda428fce57_claim_payment_indemnity.py"
     },
     {
-      "run_id": "461a6c90-a1c0-475f-9a22-d43fa88e486a",
+      "run_id": "74898c6a-0e3f-4223-829b-8dda428fce57",
       "table": "policy_cover_level_transactions",
       "database_name": "insurance",
       "schema_name": "dbo",
@@ -79,7 +57,40 @@
       "cast_rule_count": 6,
       "llm_enhanced": false,
       "llm_enhancement_error": null,
-      "script_path": "C:\\Users\\vaibhavmalik\\Documents\\Athena-Agentic-\\Athena_backend\\generated_code\\bronze\\bronze_ingest_461a6c90_a1c0_475f_9a22_d43fa88e486a_policy_cover_level_transactions.py"
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena agentic\\Athena_backend\\generated_code\\bronze\\bronze_ingest_74898c6a_0e3f_4223_829b_8dda428fce57_policy_cover_level_transactions.py"
+    },
+    {
+      "run_id": "74898c6a-0e3f-4223-829b-8dda428fce57",
+      "table": "expenses_outstanding_estimates",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "status": "APPROVED",
+      "cast_rule_count": 5,
+      "llm_enhanced": false,
+      "llm_enhancement_error": null,
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena agentic\\Athena_backend\\generated_code\\bronze\\bronze_ingest_74898c6a_0e3f_4223_829b_8dda428fce57_expenses_outstanding_estimates.py"
+    },
+    {
+      "run_id": "74898c6a-0e3f-4223-829b-8dda428fce57",
+      "table": "indemnity_outstanding_estimates",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "status": "APPROVED",
+      "cast_rule_count": 5,
+      "llm_enhanced": false,
+      "llm_enhancement_error": null,
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena agentic\\Athena_backend\\generated_code\\bronze\\bronze_ingest_74898c6a_0e3f_4223_829b_8dda428fce57_indemnity_outstanding_estimates.py"
+    },
+    {
+      "run_id": "74898c6a-0e3f-4223-829b-8dda428fce57",
+      "table": "policy_cover_level_transactions_dup_del",
+      "database_name": "insurance",
+      "schema_name": "dbo",
+      "status": "APPROVED",
+      "cast_rule_count": 6,
+      "llm_enhanced": false,
+      "llm_enhancement_error": null,
+      "script_path": "C:\\Users\\vaibhavmalik\\Athena agentic\\Athena_backend\\generated_code\\bronze\\bronze_ingest_74898c6a_0e3f_4223_829b_8dda428fce57_policy_cover_level_transactions_dup_del.py"
     }
   ]
 }

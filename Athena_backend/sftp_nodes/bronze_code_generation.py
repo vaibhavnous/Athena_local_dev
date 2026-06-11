@@ -643,6 +643,7 @@ def _expected_schema_literals(
 
 def _generate_script(config_json: Dict[str, Any], run_id: str, pipeline_version: str) -> str:
     file_format = str(config_json.get("file_format") or "csv").lower()
+    source_feed = f"{config_json['vendor']}/{config_json['entity']}"
     row_tag = (
         _effective_xml_row_tag(config_json)
         if file_format == "xml"
@@ -671,7 +672,7 @@ from pyspark.sql.types import ArrayType, MapType, StructType
 RUN_ID = {json.dumps(run_id)}
 PIPELINE_VERSION = {json.dumps(pipeline_version or "v1")}
 SOURCE_TYPE = {json.dumps(config_json["source_type"])}
-SOURCE_FEED = {json.dumps(f"{config_json["vendor"]}/{config_json["entity"]}")}
+SOURCE_FEED = {json.dumps(source_feed)}
 FILE_FORMAT = {json.dumps(file_format)}
 ROW_TAG = {json.dumps(row_tag)}
 SOURCE_PATH = {json.dumps(config_json["landing_path"])}

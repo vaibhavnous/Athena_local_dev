@@ -15,6 +15,15 @@ function normalizeState(value: string | undefined) {
   return state || 'PENDING'
 }
 
+export function getGateDisplayName(gate: number, sourceType?: string) {
+  if (gate === 1) return 'KPI Review'
+  if (gate === 2) return ['sftp', 'adls_gen2'].includes(String(sourceType || '').toLowerCase()) ? 'Feed Review' : 'Table Review'
+  if (gate === 3) return 'Enrichment Review'
+  if (gate === 4) return 'Bronze Review'
+  if (gate === 5) return 'Silver Review'
+  return `Gate ${gate}`
+}
+
 export const PIPELINE_PHASE_TEMPLATES = {
   database: [
     {
@@ -80,6 +89,7 @@ export function getPipelineSteps(run) {
   if (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length) {
     return run.pipeline_steps.map((step) => ({
       ...step,
+      detail: step.detail || buildStepDetail(run, step.key, normalizeState(step.state), step.detail),
       state: normalizeState(step.state),
     })) as PipelineStep[]
   }
@@ -87,7 +97,7 @@ export function getPipelineSteps(run) {
     return run.stages.map((stage) => ({
       key: stage.key,
       label: stage.name || fallbackStepLabel(stage.key),
-      detail: stage.error || '',
+      detail: stage.error || buildStepDetail(run, stage.key, normalizeState(stage.status), ''),
       state: normalizeState(stage.status),
       complete: normalizeState(stage.status) === 'COMPLETED',
     })) as PipelineStep[]
@@ -151,7 +161,7 @@ export function statusTone(status) {
   const value = String(status || '').toLowerCase()
   if (value === 'done' || value === 'completed' || value === 'success' || value === 'pipeline_completed') return 'emerald'
   if (value === 'running' || value === 'processing' || value === 'submitted' || value === 'in_progress') return 'blue'
-  if (value === 'review' || value === 'waiting' || value === 'hitl_wait' || value === 'paused_for_hitl') return 'amber'
+  if (value === 'review' || value === 'waiting' || value === 'hitl_wait' || value === 'paused_for_hitl' || value === 'paused_for_stage_confirmation') return 'amber'
   if (value === 'failed') return 'red'
   return 'slate'
 }
@@ -164,12 +174,12 @@ function fallbackStepLabel(key) {
     kpis: 'KPI Extraction',
     gate1: 'KPI Review',
     nomination: 'Table Nomination',
-    gate2: 'Source Review',
+    gate2: 'Table Review',
     discovery: 'Metadata Discovery',
     schema: 'Schema Snapshot',
     profiling: 'Column Profiling',
     enrichment: 'Semantic Enrichment',
-    gate3: 'Semantic Review',
+    gate3: 'Enrichment Review',
     pre_bronze: 'Pre-Bronze Readiness',
     bronze: 'Bronze Scripts',
     gate4: 'Bronze Review',
@@ -181,4 +191,64 @@ function fallbackStepLabel(key) {
     gold: 'Gold Scripts',
   }
   return labels[key] || key
+}
+
+function buildStepDetail(run, key, state, existingDetail) {
+  if (existingDetail) return existingDetail
+
+  const nextGate = Number(run?.next_gate || 0)
+  const resumeMessage = String(run?.resume_message || '').trim()
+  const isFileSource = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
+
+  const readyGateMessage = (gateLabel, fallback) => {
+    if (resumeMessage && nextGate > 0) return resumeMessage
+    if (state === 'HITL_WAIT' || nextGate > 0) return fallback
+    if (state === 'COMPLETED') return `${gateLabel} completed.`
+    if (state === 'RUNNING') return `${gateLabel} is being prepared.`
+    return `${gateLabel} will open automatically when it is ready.`
+  }
+
+  switch (key) {
+    case 'gate1':
+      return readyGateMessage('KPI review', 'KPI review is ready. Validate the extracted KPIs before the pipeline continues.')
+    case 'gate2':
+      return readyGateMessage(
+        isFileSource ? 'Feed review' : 'Table review',
+        isFileSource
+          ? 'Feed review is ready. Confirm the discovered feeds before metadata discovery continues.'
+          : 'Table review is ready. Confirm the nominated tables before metadata discovery continues.'
+      )
+    case 'gate3':
+      return readyGateMessage('Enrichment review', 'Enrichment review is ready. Validate semantic enrichment before Bronze generation starts.')
+    case 'gate4':
+      return readyGateMessage('Bronze review', 'Bronze review is ready. Validate generated Bronze artifacts before Silver generation starts.')
+    case 'gate5':
+      return readyGateMessage('Silver review', 'Silver review is ready. Validate generated Silver artifacts before downstream validation continues.')
+    case 'discovery':
+      if (state === 'COMPLETED') return 'Column metadata was discovered for the approved source set.'
+      if (state === 'RUNNING') return 'Collecting source metadata and column definitions.'
+      return 'Metadata discovery begins after Gate 2 approval.'
+    case 'profiling':
+      if (state === 'COMPLETED') return 'Profiling metrics were captured for discovered columns.'
+      if (state === 'RUNNING') return 'Computing source-side aggregates and profiling statistics.'
+      return 'Column profiling starts after metadata discovery completes.'
+    case 'enrichment':
+      if (state === 'COMPLETED') return 'Semantic enrichment completed and is ready for review.'
+      if (state === 'RUNNING') return 'Linking metadata to business meaning and downstream design hints.'
+      return 'Semantic enrichment starts after profiling completes.'
+    case 'bronze':
+      if (state === 'COMPLETED') return 'Bronze scripts were generated.'
+      if (state === 'RUNNING') return 'Generating Bronze ingestion artifacts.'
+      return 'Bronze generation starts after Gate 3 approval.'
+    case 'silver':
+      if (state === 'COMPLETED') return 'Silver scripts were generated.'
+      if (state === 'RUNNING') return 'Generating Silver transformation artifacts.'
+      return 'Silver generation starts after Gate 4 approval.'
+    case 'gold':
+      if (state === 'COMPLETED') return 'Gold analytics scripts were generated.'
+      if (state === 'RUNNING') return 'Generating Gold KPI scripts.'
+      return 'Gold generation starts after Silver processing completes.'
+    default:
+      return existingDetail || ''
+  }
 }

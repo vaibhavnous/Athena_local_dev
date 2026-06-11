@@ -2,6 +2,7 @@ import os
 import json
 import hashlib
 import time
+import socket
 import pyodbc
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -58,6 +59,8 @@ config = {
 FINGERPRINT_MAX_LEN = 64
 SQL_CONNECT_RETRIES = max(1, int(os.getenv("ATHENA_SQL_CONNECT_RETRIES", "3")))
 SQL_CONNECT_RETRY_DELAY_SECONDS = float(os.getenv("ATHENA_SQL_CONNECT_RETRY_DELAY_SECONDS", "1"))
+SQL_TCP_PROBE_TIMEOUT_SECONDS = float(os.getenv("ATHENA_SQL_TCP_PROBE_TIMEOUT_SECONDS", "5"))
+NETWORK_ERROR_MARKERS = ("08S01", "10060", "10061", "10054", "08001")
 
 
 def artifact_storage_fingerprint(fingerprint: str, artifact_type: str) -> str:
@@ -92,23 +95,88 @@ def _build_connection_string(host, port, database_name, username, password, driv
         f"Encrypt={encrypt};"
         f"TrustServerCertificate={trust_server_certificate};"
         f"Connection Timeout={connection_timeout};"
+        f"Login Timeout={connection_timeout};"
     )
 
 
-def _connect_with_retry(conn_str: str, *, database_name: str) -> pyodbc.Connection:
+def _sql_endpoint_summary(*, database_name: str, role: str) -> Dict[str, Any]:
+    db_conf = config["azure_sql"]
+    if role == "source":
+        host = str(db_conf.get("source_host") or "").strip()
+        username = str(db_conf.get("source_username") or "").strip()
+    else:
+        host = str(db_conf.get("host") or "").strip()
+        username = str(db_conf.get("username") or "").strip()
+    return {
+        "role": role,
+        "host": host,
+        "port": int(db_conf.get("port") or 1433),
+        "database_name": database_name,
+        "driver": str(db_conf.get("driver") or "ODBC Driver 18 for SQL Server"),
+        "timeout_seconds": int(db_conf.get("connection_timeout") or 30),
+        "encrypt": str(db_conf.get("encrypt") or "yes"),
+        "trust_server_certificate": str(db_conf.get("trust_server_certificate") or "no"),
+        "username_set": bool(username),
+    }
+
+
+def _probe_sql_endpoint(host: str, port: int, timeout_seconds: float) -> Optional[Exception]:
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            return None
+    except OSError as exc:
+        return exc
+
+
+def _sql_error_hint(exc: Exception, *, role: str, host: str, port: int, database_name: str) -> str:
+    message = str(exc)
+    if any(marker in message for marker in NETWORK_ERROR_MARKERS):
+        return (
+            f"Likely connectivity issue for {role} database '{database_name}' at {host}:{port}. "
+            "Check Azure SQL firewall rules, private endpoint/VPN access, and local network egress to TCP 1433."
+        )
+    return (
+        f"SQL connection failed for {role} database '{database_name}' at {host}:{port}. "
+        "Check credentials, driver compatibility, and database availability."
+    )
+
+
+def _connect_with_retry(
+    conn_str: str,
+    *,
+    database_name: str,
+    host: str,
+    port: int,
+    role: str,
+) -> pyodbc.Connection:
     last_exc = None
+    endpoint_error = _probe_sql_endpoint(host, port, SQL_TCP_PROBE_TIMEOUT_SECONDS) if host else None
+    if endpoint_error:
+        logger.warning(
+            "TCP probe failed before SQL login for %s:%s (%s): %s",
+            host,
+            port,
+            database_name,
+            endpoint_error,
+        )
     for attempt in range(1, SQL_CONNECT_RETRIES + 1):
         try:
             return pyodbc.connect(conn_str)
         except pyodbc.Error as exc:
             last_exc = exc
             if attempt >= SQL_CONNECT_RETRIES:
+                logger.error(
+                    "%s",
+                    _sql_error_hint(exc, role=role, host=host, port=port, database_name=database_name),
+                )
                 break
             logger.warning(
-                "SQL connection attempt %d/%d failed for %s: %s",
+                "SQL connection attempt %d/%d failed for %s at %s:%s: %s",
                 attempt,
                 SQL_CONNECT_RETRIES,
                 database_name,
+                host,
+                port,
                 exc,
             )
             time.sleep(SQL_CONNECT_RETRY_DELAY_SECONDS * attempt)
@@ -168,7 +236,13 @@ def get_pipeline_connection() -> pyodbc.Connection:
         db_conf["driver"],
     )
 
-    return _connect_with_retry(conn_str, database_name=db_conf["pipeline_database"])
+    return _connect_with_retry(
+        conn_str,
+        database_name=db_conf["pipeline_database"],
+        host=db_conf["host"],
+        port=db_conf["port"],
+        role="pipeline",
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -204,7 +278,13 @@ def get_client_connection(database_name: Optional[str] = None) -> pyodbc.Connect
         db_conf["driver"],
     )
 
-    return _connect_with_retry(conn_str, database_name=db)
+    return _connect_with_retry(
+        conn_str,
+        database_name=db,
+        host=db_conf["source_host"],
+        port=db_conf["port"],
+        role="source",
+    )
 
 
 @contextmanager

@@ -5,14 +5,11 @@ import re
 
 class BRDSchema(BaseModel):
     """Pydantic model to enforce business requirement standards."""
-    content: str = Field(..., min_length=200)
+    content: str = Field(..., min_length=1)
     
     @field_validator("content")
     @classmethod
     def check_business_keywords(cls, v: str) -> str:
-        keywords = ["requirement", "business", "user", "system", "feature", "process", "workflow"]
-        if not any(word in v.lower() for word in keywords):
-            raise ValueError("Text does not contain standard business requirements keywords.")
         return v
 
 class RequirementsSchema(BaseModel):

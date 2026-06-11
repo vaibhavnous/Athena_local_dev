@@ -1,7 +1,9 @@
 // @ts-nocheck
 import React from 'react'
 import { Link } from 'react-router-dom'
-import { ChevronDown, Code2, Database, Play, Sparkles, Workflow, Zap, Brain } from 'lucide-react'
+import { ChevronDown, Code2, Database, Play, Sparkles, Zap } from 'lucide-react'
+
+const ATHENA_LOGO_SRC = `${process.env.PUBLIC_URL}/Athena_logo.png`
 
 const stats = [
   { value: '80%', label: 'Faster Pipeline Development', gradient: 'from-[#668cff] to-[#8b82ff]' },
@@ -40,8 +42,8 @@ function LandingPage() {
 
         <header className="relative z-10 border-b border-white/8 bg-[#121833]/95 backdrop-blur">
           <div className="mx-auto flex max-w-[1280px] items-center justify-between px-6 py-4">
-            <div className="flex items-center gap-2">
-              <Brain className="h-5 w-5 text-white" strokeWidth={2.2} />
+            <div className="flex items-center gap-3">
+              <img src={ATHENA_LOGO_SRC} alt="Athena" className="h-9 w-9 object-contain" />
               <span className="text-lg font-semibold tracking-tight text-white">
                 Athena
               </span>
@@ -130,7 +132,10 @@ function LandingPage() {
 
         <footer className="relative z-10 border-t border-white/8 bg-[linear-gradient(90deg,#111834_0%,#080d1d_100%)]">
           <div className="mx-auto flex max-w-[1280px] flex-col items-start justify-between gap-3 px-6 py-4 sm:flex-row sm:items-center">
-            <span className="text-sm font-semibold tracking-tight text-white">Athena</span>
+            <div className="flex items-center gap-3">
+              <img src={ATHENA_LOGO_SRC} alt="Athena" className="h-8 w-8 object-contain" />
+              <span className="text-sm font-semibold tracking-tight text-white">Athena</span>
+            </div>
             <div className="text-xs text-[#aeb8d5]">© 2025 Athena. All rights reserved.</div>
           </div>
         </footer>
@@ -154,44 +159,6 @@ function FeatureCard({ feature }) {
         {feature.description}
       </p>
     </div>
-  )
-}
-
-function BrandMark({ className }) {
-  return (
-    <div className={`flex items-center justify-center bg-gradient-to-br from-[#4d8cff] to-[#8e34ef] shadow-[0_18px_45px_rgba(98,84,255,0.28)] ${className}`}>
-      <Workflow className="h-8 w-8 text-white" strokeWidth={2.2} />
-    </div>
-  )
-}
-
-function AthenaLogo({ size = 42 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden="true">
-      <polygon
-        points="16,2 28,9 28,23 16,30 4,23 4,9"
-        fill="url(#landingHexGrad)"
-        stroke="rgba(59,130,246,0.45)"
-        strokeWidth="1"
-      />
-      <text
-        x="16"
-        y="21"
-        textAnchor="middle"
-        fill="white"
-        fontSize="12"
-        fontWeight="700"
-        fontFamily="Inter, system-ui, sans-serif"
-      >
-        A
-      </text>
-      <defs>
-        <linearGradient id="landingHexGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#3b82f6" />
-          <stop offset="100%" stopColor="#8b5cf6" />
-        </linearGradient>
-      </defs>
-    </svg>
   )
 }
 

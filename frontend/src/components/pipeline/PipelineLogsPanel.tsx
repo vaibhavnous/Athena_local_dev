@@ -33,8 +33,8 @@ function formatStageLabel(stage?: string | null) {
   const normalized = value.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
   if (normalized === 'Sftp Source Ingestion') return 'SFTP Source Ingestion'
   if (normalized === 'Sftp Feed Discovery') return 'SFTP Feed Discovery'
-  if (normalized === 'Sftp Gate1') return 'SFTP Gate 1'
-  if (normalized === 'Sftp Gate2') return 'SFTP Gate 2'
+  if (normalized === 'Sftp Gate1') return 'SFTP KPI Review'
+  if (normalized === 'Sftp Gate2') return 'SFTP Feed Review'
   return normalized
 }
 

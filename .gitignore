@@ -22,6 +22,7 @@ Athena_backend/pipeline_logs.json.localbackup
 Athena_backend/uploads/
 Athena_backend/generated_code/*.zip
 Athena_backend/generated_code/**/__pycache__/
+Athena_backend/generated_code/
 
 # OS / editor
 .DS_Store

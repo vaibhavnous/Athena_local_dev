@@ -27,6 +27,7 @@ from services.pipeline_runtime import (
     BACKGROUND_JOBS,
     BACKGROUND_JOB_LOCK,
     build_pipeline_steps,
+    continue_database_pipeline,
     fetch_json_artifact,
     fetch_run_summary,
     get_run_context,
@@ -108,6 +109,11 @@ class PipelineRunRequest(BaseModel):
     database_type: Optional[str] = None
     source_databases: Optional[List[str]] = None
     sftp_entity: Optional[str] = "transactions"
+    stage_confirmation_enabled: Optional[bool] = True
+
+
+class StageContinueRequest(BaseModel):
+    auto_advance: Optional[bool] = False
 
 
 class HitlDecision(BaseModel):
@@ -138,8 +144,23 @@ def _pipeline_schema() -> str:
     return (
         config["azure_sql"].get("pipeline_schema")
         or config["azure_sql"].get("schema_name")
-        or "dbo"
+        or "metadata"
     )
+
+
+def _gate_label(gate: int, *, source: str = "database") -> str:
+    if gate == 1:
+        return "KPI Review"
+    if gate == 2:
+        return "Feed Review" if str(source or "").lower() in {"sftp", "adls_gen2"} else "Table Review"
+    if gate == 3:
+        return "Enrichment Review"
+    if gate == 4:
+        return "Bronze Review"
+    if gate == 5:
+        return "Silver Review"
+    return f"Gate {gate}"
+
 
 def _is_file_source(source: Optional[str]) -> bool:
     return str(source or "").lower() in {"sftp", "adls_gen2"}
@@ -163,6 +184,7 @@ def _run_pipeline_background(
     source: Optional[str],
     source_databases: Optional[List[str]],
     sftp_entity: Optional[str],
+    stage_confirmation_enabled: bool,
 ) -> None:
     try:
         existing_checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
@@ -180,6 +202,7 @@ def _run_pipeline_background(
                 source_databases=source_databases,
                 sftp_entity=sftp_entity,
                 run_id=run_id,
+                stage_confirmation_enabled=stage_confirmation_enabled,
             )
         state = result.get("result") if isinstance(result, dict) else {}
         if isinstance(state, dict):
@@ -187,7 +210,8 @@ def _run_pipeline_background(
             if _is_file_source(state.get("source") or source):
                 state["status"] = state.get("status", "COMPLETED")
             else:
-                state["status"] = "HITL_WAIT" if pending_gate1 else state.get("status", "COMPLETED")
+                if state.get("status") not in {"PAUSED_FOR_STAGE_CONFIRMATION", "FAILED"}:
+                    state["status"] = "HITL_WAIT" if pending_gate1 else state.get("status", "COMPLETED")
             save_checkpoint_state(run_id, {**existing_checkpoint, **state, "run_id": run_id})
     except Exception as exc:
         checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
@@ -207,6 +231,7 @@ def _submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             source_databases=payload.source_databases
             or ([payload.database_name] if payload.database_name else None),
             sftp_entity=payload.sftp_entity,
+            stage_confirmation_enabled=bool(payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else True),
         )
         BACKGROUND_JOBS[job_key] = future
 
@@ -713,21 +738,21 @@ def _summary_resume_message(
     summary: List[Dict[str, Any]],
 ) -> Optional[str]:
     if next_gate == 1:
-        return "Gate 1 is pending. Review the KPI items below."
+        return "KPI Review is pending. Review the KPI items below."
     if next_gate == 2:
-        return "Gate 2 is pending. Review and certify nominated tables below."
+        return "Table Review is pending. Review and certify nominated tables below."
     if next_gate == 3:
-        return "Gate 3 is pending. Review enrichment details below."
+        return "Enrichment Review is pending. Review enrichment details below."
     if next_gate == 4:
-        return "Gate 4 is pending. Review Bronze plan before ingestion."
+        return "Bronze Review is pending. Review Bronze plan before ingestion."
     if next_gate == 5:
-        return "Gate 5 is pending. Review Silver plan before execution."
+        return "Silver Review is pending. Review Silver plan before execution."
     if gate3_approved:
-        return "Gate 3 is complete."
+        return "Enrichment Review is complete."
     if certified_tables and not enriched_payload:
-        return "Gate 2 is certified. Downstream metadata/profiling/enrichment has not completed yet."
+        return "Table Review is certified. Downstream metadata/profiling/enrichment has not completed yet."
     if checkpoint.get("human_decision") == "COMPLETED" and not nominated_tables:
-        return "Gate 1 is certified. Table nomination has not completed yet."
+        return "KPI Review is certified. Table nomination has not completed yet."
     if not summary and not checkpoint:
         return "No stored state was found for this run ID."
     return None
@@ -771,113 +796,20 @@ def _summary_status(
 
 
 def _ui_run_summary(run_id: str) -> Dict[str, Any]:
-    checkpoint = load_checkpoint_state(run_id) or {}
-    if _is_file_source(checkpoint.get("source")):
-        context = get_sftp_run_context(run_id)
-        summary = context.get("summary") or []
-        checkpoint = context.get("checkpoint") or checkpoint
-        pipeline_steps = context.get("pipeline_steps") or []
-        status = _summary_status(
-            checkpoint=checkpoint,
-            next_gate=context.get("next_gate"),
-            bronze_generation_completed=bool(context.get("bronze_generation_completed")),
-            silver_generation_completed=bool(context.get("silver_generation_completed")),
-            gold_generation_completed=bool(context.get("gold_generation_completed")),
-        )
-        return {
-            "id": run_id,
-            "run_id": run_id,
-            "brd_filename": _display_run_name(checkpoint, context),
-            "source": str(checkpoint.get("source") or "sftp"),
-            "status": status,
-            "provider": checkpoint.get("provider") or "azure_openai",
-            "deployment": checkpoint.get("deployment"),
-            "started_at": summary[0].get("stored_at") if summary else None,
-            "completed_at": summary[-1].get("stored_at") if status == "SUCCESS" and summary else None,
-            "cache_hit": "NONE",
-            "cache_score": 0,
-            "extraction_path": checkpoint.get("extraction_path") or checkpoint.get("kpi_source") or "SFTP_GRAPH",
-            "total_tokens": sum(int(row.get("token_count") or 0) for row in summary),
-            "total_cost": sum(float(row.get("cost_usd") or 0) for row in summary),
-            "stages": _summary_stage_list(checkpoint=checkpoint, summary=summary, pipeline_steps=pipeline_steps),
-            "next_gate": context.get("next_gate"),
-            "resume_message": context.get("resume_message"),
-            "script_counts": {
-                "bronze": len((context.get("bronze") or {}).get("scripts") or []),
-                "silver": len((context.get("silver") or {}).get("scripts") or []),
-                "gold": len((context.get("gold") or {}).get("scripts") or []),
-            },
-            "sftp_entity": context.get("sftp_entity"),
-            "source_row_count": context.get("source_row_count"),
-            "source_columns": context.get("source_columns") or [],
-        }
-
-    summary = fetch_run_summary(run_id)
-    nominated_tables = checkpoint.get("nominated_tables") or []
-    certified_tables = checkpoint.get("certified_tables") or []
-    enriched_payload = _checkpoint_enriched_payload(checkpoint)
-    gate3_approved = bool(
-        checkpoint.get("gate3_approved")
-        or checkpoint.get("enrichment_review_status") == "COMPLETED"
-        or checkpoint.get("enrichment_review_decision") == "APPROVED"
+    checkpoint_hint = load_checkpoint_state(run_id) or {}
+    context = (
+        get_sftp_run_context(run_id)
+        if _is_file_source(checkpoint_hint.get("source"))
+        else get_run_context(run_id)
     )
-    bronze_generation_completed = bool(
-        any(
-            row.get("artifact_type") in {"BRONZE_GENERATION", "BRONZE_SCRIPTS"}
-            or str(row.get("stage", "")).lower().startswith("bronze")
-            for row in summary
-        )
-        or checkpoint.get("bronze_generation_status") == "COMPLETED"
-    )
-    silver_generation_completed = bool(
-        any(
-            row.get("artifact_type") in {"SILVER_GENERATION", "SILVER_SCRIPTS"}
-            or str(row.get("stage", "")).lower().startswith("silver")
-            for row in summary
-        )
-        or checkpoint.get("silver_generation_status") == "COMPLETED"
-    )
-    gold_generation_completed = bool(
-        any(
-            row.get("artifact_type") in {"GOLD_GENERATION", "GOLD_SCRIPTS"}
-            or str(row.get("stage", "")).lower().startswith("gold")
-            for row in summary
-        )
-        or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
-    )
-    pipeline_steps = build_pipeline_steps(
-        source=str(checkpoint.get("source") or "database"),
-        checkpoint=checkpoint,
-        summary=summary,
-        pending_gate1=[],
-        completed_gate1=checkpoint.get("certified_kpis") or [],
-        nominated_tables=nominated_tables,
-        certified_tables=certified_tables,
-        enriched_payload=enriched_payload,
-        gate3_payload=checkpoint.get("enrichment_review_artifact") or {},
-        bronze_generation_completed=bronze_generation_completed,
-        silver_generation_completed=silver_generation_completed,
-        gold_generation_completed=gold_generation_completed,
-    )
-    next_gate = _summary_next_gate(
-        checkpoint=checkpoint,
-        nominated_tables=nominated_tables,
-        certified_tables=certified_tables,
-        enriched_payload=enriched_payload,
-        gate3_approved=gate3_approved,
-    )
-    status = _summary_status(
-        checkpoint=checkpoint,
-        next_gate=next_gate,
-        bronze_generation_completed=bronze_generation_completed,
-        silver_generation_completed=silver_generation_completed,
-        gold_generation_completed=gold_generation_completed,
-    )
+    summary = context.get("summary") or []
+    checkpoint = context.get("checkpoint") or checkpoint_hint
+    status = _status_from_context(context)
 
     return {
         "id": run_id,
         "run_id": run_id,
-        "brd_filename": checkpoint.get("brd_filename") or "athena_brd.txt",
+        "brd_filename": _display_run_name(checkpoint, context),
         "source": checkpoint.get("source") or "database",
         "status": status,
         "provider": checkpoint.get("provider") or "azure_openai",
@@ -889,18 +821,22 @@ def _ui_run_summary(run_id: str) -> Dict[str, Any]:
         "extraction_path": checkpoint.get("extraction_path") or checkpoint.get("kpi_source") or "ATHENA_GRAPH",
         "total_tokens": sum(int(row.get("token_count") or 0) for row in summary),
         "total_cost": sum(float(row.get("cost_usd") or 0) for row in summary),
-        "stages": _summary_stage_list(checkpoint=checkpoint, summary=summary, pipeline_steps=pipeline_steps),
-        "next_gate": next_gate,
-        "resume_message": _summary_resume_message(
-            next_gate=next_gate,
+        "stages": _summary_stage_list(
             checkpoint=checkpoint,
-            nominated_tables=nominated_tables,
-            certified_tables=certified_tables,
-            enriched_payload=enriched_payload,
-            gate3_approved=gate3_approved,
             summary=summary,
+            pipeline_steps=context.get("pipeline_steps") or [],
         ),
-        "script_counts": {"bronze": 0, "silver": 0, "gold": 0},
+        "next_gate": context.get("next_gate"),
+        "resume_message": context.get("resume_message"),
+        "stage_confirmation": context.get("stage_confirmation"),
+        "script_counts": {
+            "bronze": len((context.get("bronze") or {}).get("scripts") or []),
+            "silver": len((context.get("silver") or {}).get("scripts") or []),
+            "gold": len((context.get("gold") or {}).get("scripts") or []),
+        },
+        "sftp_entity": context.get("sftp_entity"),
+        "source_row_count": context.get("source_row_count"),
+        "source_columns": context.get("source_columns") or [],
     }
 
 
@@ -912,7 +848,7 @@ def _hitl_decisions(run_id: str, context: Dict[str, Any]) -> List[Dict[str, Any]
         decisions.append(
             {
                 "id": row.get("id"),
-                "gate": "Gate 1",
+                "gate": _gate_label(1),
                 "type": "KPI",
                 "name": row.get("name"),
                 "definition": row.get("definition"),
@@ -927,7 +863,7 @@ def _hitl_decisions(run_id: str, context: Dict[str, Any]) -> List[Dict[str, Any]
         decisions.append(
             {
                 "id": f"{run_id}:gate2",
-                "gate": "Gate 2",
+                "gate": _gate_label(2, source=str(context.get("checkpoint", {}).get("source") or "database")),
                 "type": "Tables",
                 "name": f"{len(certified_tables)} table(s) certified",
                 "definition": ", ".join(
@@ -943,7 +879,7 @@ def _hitl_decisions(run_id: str, context: Dict[str, Any]) -> List[Dict[str, Any]
         decisions.append(
             {
                 "id": f"{run_id}:gate3",
-                "gate": "Gate 3",
+                "gate": _gate_label(3),
                 "type": "Enrichment",
                 "name": "Semantic enrichment approved",
                 "definition": "Semantic tags, PII classifications, and join annotations approved.",
@@ -1002,6 +938,7 @@ def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
         "gate3_approved": context.get("gate3_approved") or False,
         "next_gate": context.get("next_gate"),
         "resume_message": context.get("resume_message"),
+        "stage_confirmation": context.get("stage_confirmation"),
         "databricks_run_id": run_id,
         "sftp_entity": context.get("sftp_entity") or checkpoint.get("sftp_entity"),
         "candidate_feed": (context.get("candidate_feed") or checkpoint.get("candidate_feed")) if _is_file_source(checkpoint.get("source")) else None,
@@ -1146,6 +1083,11 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
                 or payload.source_databases
                 or ([payload.database_name] if payload.database_name else None),
                 "sftp_entity": existing.get("sftp_entity") or payload.sftp_entity or "transactions",
+                "stage_confirmation_enabled": (
+                    existing.get("stage_confirmation_enabled")
+                    if existing.get("stage_confirmation_enabled") is not None
+                    else bool(payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else True)
+                ),
             },
         )
     except Exception as exc:
@@ -1189,6 +1131,29 @@ def abort_run(run_id: str) -> Dict[str, Any]:
     checkpoint["status"] = "ABORTED"
     save_checkpoint_state(run_id, checkpoint)
     return {"run_id": run_id, "status": "ABORTED"}
+
+
+@app.post("/pipeline/{run_id}/continue-stage")
+def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]:
+    checkpoint = load_checkpoint_state(run_id) or {}
+    next_stage_key = checkpoint.get("next_stage_key")
+    if not next_stage_key:
+        raise HTTPException(status_code=400, detail="No next stage is pending confirmation for this run.")
+    if str(checkpoint.get("source") or "database").lower() in {"sftp", "adls_gen2"}:
+        raise HTTPException(status_code=400, detail="Stage-by-stage confirmation is not enabled for file-source runs yet.")
+
+    result = continue_database_pipeline(
+        run_id,
+        start_stage_key=str(next_stage_key),
+        state=checkpoint,
+        auto_advance=bool(payload.auto_advance),
+    )
+    return {
+        "run_id": run_id,
+        "status": result.get("status") or "RUNNING",
+        "next_stage_key": result.get("next_stage_key"),
+        "resume_message": result.get("resume_message"),
+    }
 
 
 @app.get("/runs")
@@ -1242,7 +1207,7 @@ def submit_table_reviews(run_id: str, payload: Gate2DecisionPayload) -> Dict[str
 
     approved_tables = [item for item in payload.approved_tables if str(item).strip()]
     if not approved_tables:
-        raise HTTPException(status_code=400, detail="At least one table must be approved for Gate 2.")
+        raise HTTPException(status_code=400, detail="At least one table must be approved for Table Review.")
 
     submit_background(run_id, "gate2", submit_gate2_review, run_id, approved_tables)
     return {"run_id": run_id, "status": "SUBMITTED", "approved_tables": approved_tables}

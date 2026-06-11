@@ -3,7 +3,6 @@ import React, { useEffect, useRef } from 'react'
 import { Outlet } from 'react-router-dom'
 import { useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertCircle, ChevronRight } from 'lucide-react'
 import Sidebar from './Sidebar'
 import Topbar from './Topbar'
 import useAthenaStore from '../../store/useAthenaStore'
@@ -33,7 +32,7 @@ function AppShell() {
 
   const lastOnlineRef = useRef<boolean | null>(null)
   const runsRequestInFlightRef = useRef(false)
-  const gateNotificationSnapshotRef = useRef<Record<string, number | null>>({})
+  const lastAutoOpenedGateRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (lastOnlineRef.current === serverOnline) return
@@ -71,29 +70,9 @@ function AppShell() {
         if (cancelled || !Array.isArray(backendRuns)) return
         setServerOnline(true)
 
-        const previousGateMap = gateNotificationSnapshotRef.current
-        const hasSnapshot = Object.keys(previousGateMap).length > 0
-        if (hasSnapshot) {
-          for (const run of backendRuns) {
-            const nextGate = Number(run?.next_gate || 0) || null
-            const previousGate = previousGateMap[run.id] ?? null
-            if ([2, 3, 4, 5].includes(nextGate) && previousGate !== nextGate) {
-              addNotification({
-                type: 'info',
-                title: `Gate ${nextGate} Ready`,
-                message: run.brd_filename || run.id,
-                duration: 3500
-              })
-            }
-          }
-        }
-        gateNotificationSnapshotRef.current = Object.fromEntries(
-          backendRuns.map((run) => [run.id, Number(run?.next_gate || 0) || null])
-        )
-
         setRuns(backendRuns)
         if (!activeRunId && backendRuns.length > 0) {
-          const resumable = backendRuns.find((run) => [2, 3, 4, 5].includes(Number(run?.next_gate || 0)))
+          const resumable = backendRuns.find((run) => [1, 2, 3, 4, 5].includes(Number(run?.next_gate || 0)))
           setActiveRun((resumable || backendRuns[0]).id)
         }
       } catch (error) {
@@ -114,19 +93,21 @@ function AppShell() {
     }
   }, [activeRunId, addNotification, setRuns, setActiveRun, setServerOnline])
 
-  const waitingRuns = (runs || []).filter((run) => [1, 2, 3, 4, 5].includes(Number(run?.next_gate || 0)))
-  const activeRun = (runs || []).find((run) => run.id === activeRunId) || null
-  const primaryWaitingRun =
-    activeRun && [1, 2, 3, 4, 5].includes(Number(activeRun?.next_gate || 0))
-      ? activeRun
-      : null
+  useEffect(() => {
+    const readyRuns = (runs || []).filter((run) => [1, 2, 3, 4, 5].includes(Number(run?.next_gate || 0)))
+    if (!readyRuns.length) return
 
-  const openHitlGate = () => {
-    if (primaryWaitingRun?.id) {
-      setActiveRun(primaryWaitingRun.id)
-    }
+    const preferredRun = readyRuns.find((run) => run.id === activeRunId) || readyRuns[0]
+    const gate = Number(preferredRun?.next_gate || 0)
+    if (!gate) return
+
+    const gateKey = `${preferredRun.id}:${gate}`
+    if (lastAutoOpenedGateRef.current === gateKey) return
+
+    lastAutoOpenedGateRef.current = gateKey
+    setActiveRun(preferredRun.id)
     navigate('/app/hitl')
-  }
+  }, [activeRunId, navigate, runs, setActiveRun])
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#080e1d] text-text-primary">
@@ -140,28 +121,6 @@ function AppShell() {
         transition={{ type: 'spring', stiffness: 300, damping: 30 }}
       >
         <Topbar />
-        {primaryWaitingRun && (
-          <button
-            onClick={openHitlGate}
-            className="flex h-12 w-full items-center justify-between border-b border-amber-400/25 bg-amber-500/10 px-7 text-left text-amber-100 transition-colors hover:bg-amber-500/15"
-          >
-            <div className="flex min-w-0 items-center gap-3">
-              <AlertCircle size={18} className="flex-shrink-0 text-amber-300" />
-              <div className="min-w-0">
-                <div className="truncate text-sm font-semibold">
-                  HITL Gate {primaryWaitingRun.next_gate} waiting
-                </div>
-                <div className="truncate text-xs text-amber-100/70">
-                  {primaryWaitingRun.resume_message || primaryWaitingRun.brd_filename || primaryWaitingRun.id}
-                </div>
-              </div>
-            </div>
-            <div className="flex flex-shrink-0 items-center gap-3 text-xs font-semibold text-amber-200">
-              {waitingRuns.length > 1 ? `${waitingRuns.length} total pending gates` : 'Open review'}
-              <ChevronRight size={16} />
-            </div>
-          </button>
-        )}
         <main className="flex-1 overflow-auto bg-[#080e1d] px-7 py-7">
           <Outlet />
         </main>

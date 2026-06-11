@@ -10,7 +10,6 @@ from contextlib import redirect_stderr, redirect_stdout
 from typing import Optional
 
 import docx
-import tiktoken
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pinecone import Pinecone
@@ -64,6 +63,10 @@ def _get_embedding_model(*, log_context: dict) -> Optional[HuggingFaceEmbeddings
         return _embedding_model
 
     try:
+        if os.getenv("ATHENA_ENABLE_EMBEDDINGS", "").strip().lower() not in {"1", "true", "yes", "on"}:
+            logger.warning("Embedding model disabled; skipping vectorization", extra=log_context)
+            return None
+
         logger.info("Initializing local embedding model", extra={"node": "ingestion_bootstrap"})
         os.environ["TRANSFORMERS_NO_ADVISE"] = "1"
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -71,7 +74,7 @@ def _get_embedding_model(*, log_context: dict) -> Optional[HuggingFaceEmbeddings
         if DEV_MODE:
             _embedding_model = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2",
-                model_kwargs={"local_files_only": False, "trust_remote_code": False},
+                model_kwargs={"local_files_only": True, "trust_remote_code": False},
                 encode_kwargs={"normalize_embeddings": False},
             )
             _embedding_model.embed_query("hello world")
@@ -79,7 +82,7 @@ def _get_embedding_model(*, log_context: dict) -> Optional[HuggingFaceEmbeddings
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 _embedding_model = HuggingFaceEmbeddings(
                     model_name="sentence-transformers/all-MiniLM-L6-v2",
-                    model_kwargs={"local_files_only": False, "trust_remote_code": False},
+                    model_kwargs={"local_files_only": True, "trust_remote_code": False},
                     encode_kwargs={"normalize_embeddings": False},
                 )
                 _embedding_model.embed_query("hello world")
@@ -93,7 +96,7 @@ def _get_embedding_model(*, log_context: dict) -> Optional[HuggingFaceEmbeddings
 
 db_conf = config["azure_sql"]
 pinecone_conf = config.get("pinecone", {})
-db_schema = db_conf.get("schema_name", "dbo")
+pipeline_schema = db_conf.get("pipeline_schema") or db_conf.get("schema_name") or "metadata"
 TOKEN_BUDGET = 50000
 
 
@@ -221,8 +224,9 @@ def _acquire_and_validate_brd(state: Stage01State) -> Stage01State:
             return _mark_failed(new_state, "Validation Failed: input context is empty.")
 
         if new_state.get("data") is None and len(context_text) < 200:
-            logger.error("Validation failed: BRD is too short (< 200 chars)", extra=log_context)
-            return _mark_failed(new_state, "Validation Failed: BRD is too short (< 200 chars).")
+            warning = "BRD is shorter than the preferred 200-character minimum; continuing with a warning."
+            logger.warning(warning, extra=log_context)
+            new_state["validation_warning"] = warning
 
         new_state.update({
             "context_text": context_text,
@@ -250,16 +254,9 @@ def _estimate_and_fingerprint(state: Stage01State) -> Stage01State:
             return new_state
 
         brd_text = state.get("brd_text", "")
-
-        try:
-            encoding = tiktoken.get_encoding("cl100k_base")
-            token_estimate = len(encoding.encode(brd_text))
-            log_context["token_estimate"] = token_estimate
-            logger.info("Token estimate calculated", extra=log_context)
-        except Exception as e:
-            token_estimate = max(1, len(brd_text) // 4)
-            log_context["token_estimate"] = token_estimate
-            logger.warning("tiktoken unavailable, using fallback. Error: %s", e, extra=log_context)
+        token_estimate = max(1, len(brd_text) // 4)
+        log_context["token_estimate"] = token_estimate
+        logger.info("Token estimate calculated", extra=log_context)
 
         fingerprint = hashlib.sha256(brd_text.encode("utf-8")).hexdigest()
         log_context["fingerprint"] = fingerprint
@@ -391,15 +388,13 @@ def _store_and_register(state: Stage01State) -> Stage01State:
         pipeline_status = "STAGE_01_COMPLETE"
         utc_now = datetime.now(timezone.utc)
         metadata_str = json.dumps(metadata)
-        pipeline_schema = config["azure_sql"].get("pipeline_schema", db_schema)
-
         conn = get_pipeline_connection()
         try:
             cursor = conn.cursor()
 
             cursor.execute(
                 f"""
-                INSERT INTO {db_schema}.brd_run_registry
+                INSERT INTO [{pipeline_schema}].brd_run_registry
                 (
                     run_id,
                     status,

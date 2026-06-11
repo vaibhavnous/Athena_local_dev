@@ -19,6 +19,7 @@ import {
   submitSilverReview,
   submitTableReviews
 } from '../api/athenaApi'
+import { getGateDisplayName } from '../utils/pipelinePhases'
 
 const TABS = ['Overview', 'Requirements', 'KPIs', 'Scripts', 'Review Gates', 'HITL Decisions', 'Cost Log']
 
@@ -157,6 +158,8 @@ function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
   const [silverReview, setSilverReview] = useState(null)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(null)
+  const gate4Name = getGateDisplayName(4)
+  const gate5Name = getGateDisplayName(5)
 
   useEffect(() => {
     let cancelled = false
@@ -172,7 +175,7 @@ function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
           addNotification({
             type: 'error',
             title: 'Review Gates Load Failed',
-            message: error.message || 'Unable to load Gate 4 / Gate 5 review data.',
+            message: error.message || `Unable to load ${gate4Name} / ${gate5Name} review data.`,
             duration: 5000
           })
         }
@@ -184,7 +187,7 @@ function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
     return () => {
       cancelled = true
     }
-  }, [run.id, addNotification])
+  }, [run.id, addNotification, gate4Name, gate5Name])
 
   const bronzeArtifact = bronzeReview?.bronze_review_artifact || run.bronze_review_artifact || {}
   const silverArtifact = silverReview?.silver_review_artifact || run.silver_review_artifact || {}
@@ -211,7 +214,7 @@ function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
         type: 'success',
         title: `Gate ${gate} ${action.toLowerCase()}`,
         message: gate === 4 && action === 'APPROVED' && Number(refreshed?.next_gate || 0) === 5
-          ? 'Bronze approved. Silver scripts are ready for Gate 5 review.'
+          ? `Bronze approved. Silver scripts are ready for ${gate5Name} review.`
           : `Gate ${gate} review submitted.`,
         duration: 4500
       })
@@ -228,7 +231,7 @@ function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
   }
 
   if (loading) {
-    return <EmptyState message="Loading Gate 4 / Gate 5 review artifacts..." />
+    return <EmptyState message={`Loading ${gate4Name} / ${gate5Name} review artifacts...`} />
   }
 
   return (
@@ -236,7 +239,7 @@ function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
       <div className="card p-5">
         <div className="flex items-center justify-between gap-3 mb-4">
           <div>
-            <h3 className="text-sm font-semibold text-gray-300">Gate 4 - Bronze Review</h3>
+            <h3 className="text-sm font-semibold text-gray-300">{gate4Name}</h3>
             <p className="text-xs text-gray-500 mt-1">
               Review Bronze plan, generated config, validation checklist, and script before ingestion.
             </p>
@@ -275,7 +278,7 @@ function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
           </div>
 
           <div className="rounded-lg border border-bg-border bg-bg-base p-4">
-            <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">Gate 4 Actions</div>
+            <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">{gate4Name} Actions</div>
             <div className="flex flex-wrap gap-2">
               <button onClick={() => handleSubmit(4, 'APPROVED')} disabled={submitting === 4} className="btn-primary text-sm">
                 Approve
@@ -299,7 +302,7 @@ function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
       <div className="card p-5">
         <div className="flex items-center justify-between gap-3 mb-4">
           <div>
-            <h3 className="text-sm font-semibold text-gray-300">Gate 5 - Silver Review</h3>
+            <h3 className="text-sm font-semibold text-gray-300">{gate5Name}</h3>
             <p className="text-xs text-gray-500 mt-1">
               Review Silver transformations, type casts, dedup logic, DQ rules, masking rules, and the generated script.
             </p>
@@ -330,7 +333,7 @@ function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
         </div>
 
         <div className="mt-4 rounded-lg border border-bg-border bg-bg-base p-4">
-          <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">Gate 5 Actions</div>
+          <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">{gate5Name} Actions</div>
           <div className="flex flex-wrap gap-2">
             <button onClick={() => handleSubmit(5, 'APPROVED')} disabled={submitting === 5} className="btn-primary text-sm">
               Approve
@@ -434,8 +437,8 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
         type: 'amber',
         title: isSftpRun ? 'No Feeds Selected' : 'No Tables Selected',
         message: isSftpRun
-          ? 'Select at least one discovered feed before submitting Gate 2.'
-          : 'Select at least one nominated table before submitting Gate 2.',
+          ? `Select at least one discovered feed before submitting ${gate2Name}.`
+          : `Select at least one nominated table before submitting ${gate2Name}.`,
         duration: 4000
       })
       return
@@ -448,16 +451,16 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
       onRunRefresh(refreshed)
       addNotification({
         type: 'success',
-        title: 'Gate 2 Submitted',
+        title: `${gate2Name} Submitted`,
         message: isSftpRun
-          ? 'Approved feeds were submitted for SFTP Gate 2.'
+          ? `Approved feeds were submitted for ${gate2Name}.`
           : 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
         duration: 5000
       })
     } catch (error) {
       addNotification({
         type: 'error',
-        title: 'Gate 2 Failed',
+        title: `${gate2Name} Failed`,
         message: error.message || 'Unable to submit approved tables.',
         duration: 5000
       })
@@ -474,10 +477,10 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
       onRunRefresh(refreshed)
       addNotification({
         type: 'success',
-        title: approve ? 'Gate 3 Approved' : 'Gate 3 Rejected',
+        title: approve ? `${gate3Name} Approved` : `${gate3Name} Rejected`,
         message: approve
           ? Number(refreshed?.next_gate || 0) === 4
-            ? 'Bronze scripts are generated and ready for Gate 4 review.'
+            ? `Bronze scripts are generated and ready for ${gate4Name} review.`
             : 'Enrichment was approved. Bronze generation is still processing.'
           : 'Enrichment was rejected and the run remains paused for rework.',
         duration: 5000
@@ -485,7 +488,7 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
     } catch (error) {
       addNotification({
         type: 'error',
-        title: 'Gate 3 Failed',
+        title: `${gate3Name} Failed`,
         message: error.message || 'Unable to submit enrichment review.',
         duration: 5000
       })
@@ -559,11 +562,11 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
           <div className="card p-4">
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
-                <h3 className="text-sm font-semibold text-gray-300">{isSftpRun ? 'Gate 2 Feed Review' : 'Gate 2 Table Review'}</h3>
+                <h3 className="text-sm font-semibold text-gray-300">{gate2Name}</h3>
                 <p className="text-xs text-gray-500 mt-1">{run.resume_message || (isSftpRun ? 'Review and certify discovered feeds.' : 'Review and certify nominated tables.')}</p>
                 {isSftpRun && (
                   <p className="text-xs text-gray-400 mt-2">
-                    Gate 2 is the SFTP governance checkpoint. Confirm each discovered feed, its source file, sample row volume, columns, and inferred business signals before approval.
+                    {gate2Name} is the SFTP governance checkpoint. Confirm each discovered feed, its source file, sample row volume, columns, and inferred business signals before approval.
                   </p>
                 )}
               </div>
@@ -639,7 +642,7 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
           <div className="card p-4">
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
-                <h3 className="text-sm font-semibold text-gray-300">{isSftpRun ? 'Gate 3 File Schema Enrichment Review' : 'Gate 3 Enrichment Review'}</h3>
+                <h3 className="text-sm font-semibold text-gray-300">{gate3Name}</h3>
                 <p className="text-xs text-gray-500 mt-1">{run.resume_message || 'Approve enrichment to continue script generation.'}</p>
               </div>
               <StatusBadge status="PENDING" size="sm" />

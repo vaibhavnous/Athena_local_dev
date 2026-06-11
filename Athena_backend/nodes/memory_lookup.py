@@ -36,11 +36,15 @@ def _get_embedding_model(*, log_context: dict) -> Optional[SentenceTransformer]:
     if _EMB_MODEL is not None:
         return _EMB_MODEL
     try:
+        if os.getenv("ATHENA_ENABLE_EMBEDDINGS", "").strip().lower() not in {"1", "true", "yes", "on"}:
+            logger.warning("Embedding model disabled; skipping semantic lookup", extra=log_context)
+            return None
+
         if DEV_MODE:
-            _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+            _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
         else:
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+                _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
         return _EMB_MODEL
     except Exception as exc:
         logger.warning("Embedding model unavailable; skipping semantic lookup: %s", exc, extra=log_context)

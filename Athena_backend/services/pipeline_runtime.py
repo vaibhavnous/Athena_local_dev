@@ -17,6 +17,188 @@ BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("ATHENA_BACKG
 BACKGROUND_JOBS: Dict[str, Future] = {}
 BACKGROUND_JOB_LOCK = threading.Lock()
 
+DATABASE_STAGE_SEQUENCE = [
+    ("ingestion", "BRD Ingest"),
+    ("memory", "Memory Check"),
+    ("requirements", "Requirement Extraction"),
+    ("kpis", "KPI Extraction"),
+    ("gate1", "KPI Review"),
+    ("nomination", "Table Nomination"),
+    ("gate2", "Table Review"),
+    ("discovery", "Metadata Discovery"),
+    ("profiling", "Column Profiling"),
+    ("enrichment", "Semantic Enrichment"),
+    ("gate3", "Enrichment Review"),
+    ("bronze", "Bronze Generation"),
+    ("silver", "Silver Generation"),
+    ("gold", "Gold Generation"),
+]
+
+DATABASE_STAGE_LABELS = dict(DATABASE_STAGE_SEQUENCE)
+
+
+def _gate_label(gate: int, *, source: str = "database") -> str:
+    if gate == 1:
+        return "KPI Review"
+    if gate == 2:
+        return "Feed Review" if str(source or "").lower() in {"sftp", "adls_gen2"} else "Table Review"
+    if gate == 3:
+        return "Enrichment Review"
+    if gate == 4:
+        return "Bronze Review"
+    if gate == 5:
+        return "Silver Review"
+    return f"Gate {gate}"
+
+
+def _database_stage_index(stage_key: str) -> int:
+    for index, (key, _) in enumerate(DATABASE_STAGE_SEQUENCE):
+        if key == stage_key:
+            return index
+    return -1
+
+
+def _database_next_stage_key(stage_key: str) -> Optional[str]:
+    index = _database_stage_index(stage_key)
+    if index < 0 or index + 1 >= len(DATABASE_STAGE_SEQUENCE):
+        return None
+    return DATABASE_STAGE_SEQUENCE[index + 1][0]
+
+
+def _pause_for_stage_confirmation(
+    state: Dict[str, Any],
+    *,
+    run_id: str,
+    completed_stage_key: str,
+) -> Dict[str, Any]:
+    next_stage_key = _database_next_stage_key(completed_stage_key)
+    updated = {
+        **state,
+        "run_id": run_id,
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "awaiting_stage_confirmation": True,
+        "last_completed_stage_key": completed_stage_key,
+        "last_completed_stage_label": DATABASE_STAGE_LABELS.get(completed_stage_key, completed_stage_key),
+        "next_stage_key": next_stage_key,
+        "next_stage_label": DATABASE_STAGE_LABELS.get(next_stage_key, next_stage_key) if next_stage_key else None,
+        "resume_message": (
+            f"{DATABASE_STAGE_LABELS.get(completed_stage_key, completed_stage_key)} finished successfully. "
+            f"Confirm before continuing to {DATABASE_STAGE_LABELS.get(next_stage_key, next_stage_key)}."
+            if next_stage_key
+            else f"{DATABASE_STAGE_LABELS.get(completed_stage_key, completed_stage_key)} finished successfully."
+        ),
+    }
+    save_checkpoint_state(run_id, updated)
+    return updated
+
+
+def _database_stage_runner(stage_key: str):
+    if stage_key == "ingestion":
+        from nodes.ingestion import ingestion_node
+
+        return ingestion_node
+    if stage_key == "memory":
+        from nodes.memory_lookup import memory_lookup_node
+
+        return memory_lookup_node
+    if stage_key == "requirements":
+        from nodes.req_extraction import build_req_extraction_node
+
+        return build_req_extraction_node(llm_provider="azure_openai")
+    if stage_key == "kpis":
+        from nodes.kpi_extraction import kpi_extraction_node
+
+        return kpi_extraction_node
+    if stage_key == "gate1":
+        from nodes.hitl import hitl_review_node
+
+        return hitl_review_node
+    if stage_key == "nomination":
+        from nodes.table_nomination import table_nomination_node
+
+        return table_nomination_node
+    if stage_key == "gate2":
+        from nodes.hitl import hitl_table_review_node
+
+        return hitl_table_review_node
+    if stage_key == "discovery":
+        from nodes.metadata_discovery import metadata_discovery_node
+
+        return metadata_discovery_node
+    if stage_key == "profiling":
+        from nodes.column_profiling import column_profiling_node
+
+        return column_profiling_node
+    if stage_key == "enrichment":
+        from nodes.semantic_enrichment import semantic_enrichment_node
+
+        return semantic_enrichment_node
+    if stage_key == "gate3":
+        from nodes.hitl import build_hitl_enrichment_review_node
+
+        return build_hitl_enrichment_review_node()
+    if stage_key == "bronze":
+        from nodes.bronze_gen import bronze_code_generation_node
+
+        return bronze_code_generation_node
+    if stage_key == "silver":
+        from nodes.silver_gen import silver_code_generation_node
+
+        return silver_code_generation_node
+    if stage_key == "gold":
+        from nodes.gold_gen import gold_code_generation_node
+
+        return gold_code_generation_node
+    raise ValueError(f"Unsupported database stage: {stage_key}")
+
+
+def continue_database_pipeline(
+    run_id: str,
+    *,
+    start_stage_key: str,
+    state: Optional[Dict[str, Any]] = None,
+    auto_advance: Optional[bool] = None,
+) -> Dict[str, Any]:
+    working_state = dict(state or load_checkpoint_state(run_id) or {"run_id": run_id})
+    working_state["run_id"] = run_id
+
+    if auto_advance is not None:
+        working_state["stage_confirmation_enabled"] = not auto_advance
+    stage_confirmation_enabled = bool(working_state.get("stage_confirmation_enabled"))
+
+    current_stage_key = start_stage_key
+    while current_stage_key:
+        runner = _database_stage_runner(current_stage_key)
+        result = runner(working_state)
+        if not isinstance(result, dict):
+            raise ValueError(f"Stage {current_stage_key} returned an invalid state.")
+
+        working_state = {**working_state, **result, "run_id": run_id}
+        working_state["awaiting_stage_confirmation"] = False
+        working_state["last_completed_stage_key"] = current_stage_key
+        working_state["last_completed_stage_label"] = DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key)
+        working_state["next_stage_key"] = _database_next_stage_key(current_stage_key)
+        working_state["next_stage_label"] = DATABASE_STAGE_LABELS.get(working_state["next_stage_key"], working_state["next_stage_key"]) if working_state.get("next_stage_key") else None
+        save_checkpoint_state(run_id, working_state)
+
+        if working_state.get("status") == "FAILED":
+            return working_state
+        if str(working_state.get("status") or "").upper() in {"HITL_WAIT", "PAUSED_FOR_HITL"}:
+            return working_state
+
+        if stage_confirmation_enabled and working_state.get("next_stage_key"):
+            return _pause_for_stage_confirmation(
+                working_state,
+                run_id=run_id,
+                completed_stage_key=current_stage_key,
+            )
+
+        current_stage_key = working_state.get("next_stage_key")
+
+    working_state["status"] = working_state.get("status") or "PIPELINE_COMPLETED"
+    save_checkpoint_state(run_id, working_state)
+    return working_state
+
 
 def _pipeline_schema() -> str:
     return (
@@ -517,7 +699,7 @@ def build_pipeline_steps(
             },
             {
                 "key": "gate1",
-                "label": "Gate 1",
+                "label": _gate_label(1, source=source),
                 "complete": gate1_decision == "APPROVED",
                 "detail": "KPI governance review",
             },
@@ -529,7 +711,7 @@ def build_pipeline_steps(
             },
             {
                 "key": "gate2",
-                "label": "Gate 2",
+                "label": _gate_label(2, source=source),
                 "complete": gate2_decision == "APPROVED",
                 "detail": "Feed governance review",
             },
@@ -553,7 +735,7 @@ def build_pipeline_steps(
             },
             {
                 "key": "gate3",
-                "label": "Gate 3",
+                "label": _gate_label(3, source=source),
                 "complete": bool("GATE3_APPROVED_ENRICHMENT" in artifact_types or checkpoint.get("enrichment_review_status") == "COMPLETED"),
                 "detail": "Semantic enrichment review",
             },
@@ -571,7 +753,7 @@ def build_pipeline_steps(
             },
             {
                 "key": "gate4",
-                "label": "Gate 4",
+                "label": _gate_label(4, source=source),
                 "complete": gate4_decision == "APPROVED",
                 "detail": "Bronze review",
             },
@@ -600,7 +782,7 @@ def build_pipeline_steps(
             },
             {
                 "key": "gate5",
-                "label": "Gate 5",
+                "label": _gate_label(5, source=source),
                 "complete": gate5_decision == "APPROVED",
                 "detail": "Silver review",
             },
@@ -650,7 +832,7 @@ def build_pipeline_steps(
         },
         {
             "key": "gate1",
-            "label": "Gate 1",
+            "label": _gate_label(1, source=source),
             "complete": bool("GATE1_CERTIFIED_KPIS" in artifact_types or (completed_gate1 and not pending_gate1)),
             "detail": "Human KPI certification",
         },
@@ -662,7 +844,7 @@ def build_pipeline_steps(
         },
         {
             "key": "gate2",
-            "label": "Gate 2",
+            "label": _gate_label(2, source=source),
             "complete": bool("GATE2_CERTIFIED_TABLES" in artifact_types or certified_tables),
             "detail": "Human table certification",
         },
@@ -686,7 +868,7 @@ def build_pipeline_steps(
         },
         {
             "key": "gate3",
-            "label": "Gate 3",
+            "label": _gate_label(3, source=source),
             "complete": bool("GATE3_APPROVED_ENRICHMENT" in artifact_types or gate3_payload),
             "detail": "Human enrichment approval",
         },
@@ -799,8 +981,8 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     if downstream_progress_exists:
         pending_gate1 = []
 
-    # For SFTP runs, Gate 2 is feed governance, not table nomination.
-    # Ensure we don't render DB-table Gate 2 panels for SFTP runs.
+    # For SFTP runs, the feed review replaces table nomination.
+    # Ensure we don't render DB-table review panels for SFTP runs.
     if source_value in {"sftp", "adls_gen2"}:
         nominated_tables = []
         certified_tables = []
@@ -848,33 +1030,46 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         gate2_decision = (checkpoint.get("gate2") or {}).get("decision")
         if gate1_decision in {None, ""}:
             next_gate = 1
-            resume_message = "Gate 1 is pending. Review KPI items before continuing."
+            resume_message = "KPI Review is pending. Review KPI items before continuing."
         elif gate1_decision == "APPROVED" and (gate2_decision in {None, ""}):
             next_gate = 2
-            resume_message = "Gate 2 is pending. Review the discovered feed before continuing."
+            resume_message = "Feed Review is pending. Review the discovered feed before continuing."
         elif gate2_decision == "APPROVED":
-            resume_message = "Gate 2 is complete."
+            resume_message = "Feed Review is complete."
         elif gate1_decision == "REJECTED":
-            resume_message = "Gate 1 was rejected."
+            resume_message = "KPI Review was rejected."
         elif gate2_decision == "REJECTED":
-            resume_message = "Gate 2 was rejected."
+            resume_message = "Feed Review was rejected."
     elif pending_gate1:
         next_gate = 1
-        resume_message = "Gate 1 is pending. Review the KPI items below."
+        resume_message = "KPI Review is pending. Review the KPI items below."
     elif nominated_tables and not certified_tables:
         next_gate = 2
-        resume_message = "Gate 2 is pending. Review and certify nominated tables below."
+        resume_message = "Table Review is pending. Review and certify nominated tables below."
     elif enriched_payload and not gate3_payload:
         next_gate = 3
-        resume_message = "Gate 3 is pending. Review enrichment details below."
+        resume_message = "Enrichment Review is pending. Review enrichment details below."
     elif gate3_payload:
-        resume_message = "Gate 3 is complete."
+        resume_message = "Enrichment Review is complete."
     elif certified_tables and not enriched_payload:
-        resume_message = "Gate 2 is certified. Downstream metadata/profiling/enrichment has not completed yet."
+        resume_message = "Table Review is certified. Downstream metadata/profiling/enrichment has not completed yet."
     elif completed_gate1 and not nominated_tables:
-        resume_message = "Gate 1 is certified. Table nomination has not completed yet."
+        resume_message = "KPI Review is certified. Table nomination has not completed yet."
     elif not summary and not checkpoint:
         resume_message = "No stored state was found for this run ID."
+
+    stage_confirmation = None
+    if checkpoint.get("status") == "PAUSED_FOR_STAGE_CONFIRMATION":
+        stage_confirmation = {
+            "enabled": bool(checkpoint.get("stage_confirmation_enabled")),
+            "awaiting_confirmation": True,
+            "last_completed_stage_key": checkpoint.get("last_completed_stage_key"),
+            "last_completed_stage_label": checkpoint.get("last_completed_stage_label"),
+            "next_stage_key": checkpoint.get("next_stage_key"),
+            "next_stage_label": checkpoint.get("next_stage_label"),
+        }
+        if checkpoint.get("resume_message"):
+            resume_message = checkpoint.get("resume_message")
 
     status = checkpoint.get("status") or checkpoint.get("table_nomination_status") or checkpoint.get("enrichment_review_status") or "UNKNOWN"
     if checkpoint.get("bronze_generation_status") == "COMPLETED":
@@ -901,6 +1096,11 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     )
     waiting_gate_key = "gate1" if next_gate == 1 else "gate2" if next_gate == 2 else "gate3" if next_gate == 3 else None
     pipeline_steps = apply_waiting_stage_state(pipeline_steps, waiting_gate_key)
+    if checkpoint.get("status") == "PAUSED_FOR_STAGE_CONFIRMATION" and checkpoint.get("next_stage_key"):
+        for step in pipeline_steps:
+            if step.get("key") == checkpoint.get("next_stage_key") and step.get("state") == "PENDING":
+                step["detail"] = f"Waiting for confirmation before {checkpoint.get('next_stage_label') or step.get('label')}."
+                break
     current_pipeline_step = next((step for step in pipeline_steps if str(step.get("state")).upper() == "RUNNING"), None)
     if not current_pipeline_step and waiting_gate_key:
         current_pipeline_step = next((step for step in pipeline_steps if step["key"] == waiting_gate_key), None)
@@ -936,6 +1136,7 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         "gold": gold,
         "next_gate": next_gate,
         "resume_message": resume_message,
+        "stage_confirmation": stage_confirmation,
         "status": status,
         "pipeline_steps": pipeline_steps,
         "current_pipeline_step": current_pipeline_step,
@@ -950,6 +1151,7 @@ def start_pipeline(
     source_databases: Optional[List[str]] = None,
     sftp_entity: Optional[str] = None,
     run_id: Optional[str] = None,
+    stage_confirmation_enabled: bool = True,
 ) -> Dict[str, Any]:
     run_id = run_id or str(uuid.uuid4())
     default_source_db = config["azure_sql"].get("source_database") or "insurance"
@@ -963,6 +1165,7 @@ def start_pipeline(
         "source": source_value,
         "sftp_entity": str(sftp_entity or "transactions").lower(),
         "source_databases": source_databases or [default_source_db],
+        "stage_confirmation_enabled": bool(stage_confirmation_enabled),
     }
 
     if source_value in file_sources:
@@ -971,9 +1174,11 @@ def start_pipeline(
         graph_app = build_source_ingestion_graph()
         result = graph_app.invoke(initial_state)
     else:
-        from graph import app as graph_app
-
-        result = graph_app.invoke(initial_state, {"configurable": {"thread_id": run_id}})
+        result = continue_database_pipeline(
+            run_id,
+            start_stage_key="ingestion",
+            state=initial_state,
+        )
 
     return {
         "run_id": run_id,
@@ -983,7 +1188,6 @@ def start_pipeline(
 
 def submit_gate1_review(run_id: str, decisions: List[Dict[str, str]]) -> Dict[str, Any]:
     from nodes.hitl import hitl_review_node
-    from nodes.table_nomination import table_nomination_node
 
     pending = get_pending_items(run_id, 1)
     existing_nomination = fetch_json_artifact(run_id, "TABLE_NOMINATIONS")
@@ -1047,33 +1251,22 @@ def submit_gate1_review(run_id: str, decisions: List[Dict[str, str]]) -> Dict[st
     with timed_stage("gate1_hitl_certification", run_id=run_id, node="api"):
         resumed = hitl_review_node(resumed_input)
     if resumed.get("status") == "FAILED":
-        raise ValueError(resumed.get("error", "Gate 1 certification failed."))
+        raise ValueError(resumed.get("error", "KPI Review certification failed."))
 
     save_checkpoint_state(run_id, resumed)
 
-    with timed_stage("table_nomination", run_id=run_id, node="api"):
-        nominated = table_nomination_node(resumed)
-    if nominated.get("status") == "FAILED":
-        raise ValueError(
-            nominated.get("table_nomination_error", nominated.get("error", "Table nomination failed."))
-        )
-
-    save_checkpoint_state(run_id, nominated)
-    return nominated
+    return continue_database_pipeline(run_id, start_stage_key="nomination", state=resumed)
 
 
 def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]:
-    from nodes.column_profiling import column_profiling_node
     from nodes.hitl import hitl_table_review_node
-    from nodes.metadata_discovery import metadata_discovery_node
-    from nodes.semantic_enrichment import semantic_enrichment_node
 
     tables = fetch_json_artifact(run_id, "TABLE_NOMINATIONS").get("nominations", []) or []
     approved_key_set = set(approved_keys)
     approved = [item for item in tables if _table_key(item) in approved_key_set]
 
     if not approved:
-        raise ValueError("At least one table must be approved for Gate 2.")
+        raise ValueError("At least one table must be approved for Table Review.")
 
     resumed_input = load_checkpoint_state(run_id) or {"run_id": run_id}
     resumed_input["human_table_decision"] = "COMPLETED"
@@ -1081,28 +1274,14 @@ def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]
     with timed_stage("gate2_hitl_certification", run_id=run_id, node="api"):
         resumed = hitl_table_review_node(resumed_input)
     if resumed.get("status") == "FAILED":
-        raise ValueError(resumed.get("error", "Gate 2 certification failed."))
+        raise ValueError(resumed.get("error", "Table Review certification failed."))
     save_checkpoint_state(run_id, resumed)
 
-    with timed_stage("metadata_discovery", run_id=run_id, node="api"):
-        discovered = metadata_discovery_node(resumed)
-    save_checkpoint_state(run_id, discovered)
-
-    with timed_stage("column_profiling", run_id=run_id, node="api"):
-        profiled = column_profiling_node(discovered)
-    save_checkpoint_state(run_id, profiled)
-
-    with timed_stage("semantic_enrichment", run_id=run_id, node="api"):
-        enriched = semantic_enrichment_node(profiled)
-    save_checkpoint_state(run_id, enriched)
-    return enriched
+    return continue_database_pipeline(run_id, start_stage_key="discovery", state=resumed)
 
 
 def submit_gate3_review(run_id: str, approve: bool) -> Dict[str, Any]:
-    from nodes.bronze_gen import bronze_code_generation_node
-    from nodes.gold_gen import gold_code_generation_node
     from nodes.hitl import build_hitl_enrichment_review_node
-    from nodes.silver_gen import silver_code_generation_node
 
     checkpoint_state = load_checkpoint_state(run_id) or {}
     metadata = fetch_json_artifact(run_id, "ENRICHED_METADATA") or _checkpoint_enriched_payload(checkpoint_state)
@@ -1130,56 +1309,23 @@ def submit_gate3_review(run_id: str, approve: bool) -> Dict[str, Any]:
         or []
     )
     if not certified_tables:
-        raise ValueError("Bronze generation skipped: no Gate 2 certified tables found.")
+        raise ValueError("Bronze generation skipped: no Table Review certified tables found.")
 
     bronze_state: Dict[str, Any] = {
+        **checkpoint_state,
+        **result,
         "run_id": run_id,
+        "enriched_metadata": metadata,
         "fingerprint": metadata.get("fingerprint") or checkpoint_state.get("fingerprint") or run_id,
         "certified_tables": certified_tables,
         "discovered_metadata": fetch_json_artifact(run_id, "DISCOVERED_METADATA") or checkpoint_state.get("discovered_metadata") or {},
         "bronze_catalog": os.getenv("BRONZE_CATALOG", "main"),
         "bronze_schema": os.getenv("BRONZE_SCHEMA", "bronze"),
-    }
-    with timed_stage("bronze_code_generation", run_id=run_id, node="api"):
-        bronze_result = bronze_code_generation_node(bronze_state)
-    silver_state = {
-        **checkpoint_state,
-        **result,
-        **bronze_result,
-        "run_id": run_id,
-        "enriched_metadata": metadata,
         "silver_catalog": os.getenv("SILVER_CATALOG", os.getenv("BRONZE_CATALOG", "main")),
         "silver_schema": os.getenv("SILVER_SCHEMA", "silver"),
-    }
-    with timed_stage("silver_code_generation", run_id=run_id, node="api"):
-        silver_result = silver_code_generation_node(silver_state)
-    gold_state = {
-        **checkpoint_state,
-        **result,
-        **bronze_result,
-        **silver_result,
-        "run_id": run_id,
         "gold_schema": os.getenv("GOLD_SCHEMA", "gold"),
     }
-    with timed_stage("gold_code_generation", run_id=run_id, node="api"):
-        gold_result = gold_code_generation_node(gold_state)
-    final_state = {
-        **checkpoint_state,
-        **result,
-        **bronze_result,
-        **silver_result,
-        **gold_result,
-        "run_id": run_id,
-    }
-    if silver_result.get("silver_generation_status") == "COMPLETED" or str(gold_result.get("gold_generation_status") or "").startswith("COMPLETED"):
-        final_state["status"] = "PIPELINE_COMPLETED"
-    save_checkpoint_state(run_id, final_state)
-    return {
-        "enrichment_result": result,
-        "bronze_result": bronze_result,
-        "silver_result": silver_result,
-        "gold_result": gold_result,
-    }
+    return continue_database_pipeline(run_id, start_stage_key="bronze", state=bronze_state)
 
 
 def submit_bronze_generation(run_id: str) -> Dict[str, Any]:
@@ -1193,7 +1339,7 @@ def submit_bronze_generation(run_id: str) -> Dict[str, Any]:
         or []
     )
     if not certified_tables:
-        raise ValueError("Bronze generation failed: no Gate 2 certified tables found.")
+        raise ValueError("Bronze generation failed: no Table Review certified tables found.")
 
     state: Dict[str, Any] = {
         **checkpoint_state,

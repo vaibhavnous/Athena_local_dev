@@ -55,9 +55,10 @@ function getStatusConfig(status) {
       }
     case 'HITL_WAIT':
     case 'PAUSED_FOR_HITL':
+    case 'PAUSED_FOR_STAGE_CONFIRMATION':
     case 'PENDING_REVIEW':
       return {
-        label: 'Awaiting Review',
+        label: s === 'PAUSED_FOR_STAGE_CONFIRMATION' ? 'Awaiting Confirm' : 'Awaiting Review',
         classes: 'bg-amber-500/10 text-accent-amber border-accent-amber/25',
         dotColor: 'bg-accent-amber',
         pulse: true

@@ -29,6 +29,7 @@ const DEFAULT_FORM = {
   deployment: '',
   databaseType: 'azure_sql',
   databaseName: 'insurance',
+  stageConfirmationEnabled: true,
 }
 
 const SOURCE_OPTIONS = [
@@ -231,6 +232,7 @@ function NewRunModal({ isOpen, onClose }) {
         budget: settings.budget,
         maxKpis: settings.maxKpis,
         devMode: settings.devMode,
+        stage_confirmation_enabled: form.stageConfirmationEnabled,
       })
 
       addRun({
@@ -563,6 +565,18 @@ function NewRunModal({ isOpen, onClose }) {
                           </span>
                           <BookOpen size={13} className="text-slate-300" />
                           <span>Use Domain Knowledge Base</span>
+                        </label>
+
+                        <label className="flex items-center gap-3 rounded-md border border-[#243149] bg-[#151f2d] px-3 py-3 text-[11px] font-semibold text-white">
+                          <input
+                            type="checkbox"
+                            checked={!!form.stageConfirmationEnabled}
+                            onChange={(event) =>
+                              setForm((current) => ({ ...current, stageConfirmationEnabled: event.target.checked }))
+                            }
+                            className="h-4 w-4 accent-[#3f82ff]"
+                          />
+                          <span>Ask before moving to every next stage</span>
                         </label>
 
                         <div>

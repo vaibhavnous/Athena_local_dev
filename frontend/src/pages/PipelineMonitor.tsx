@@ -1,15 +1,13 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Circle, Play, Users } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, FileText, Play, RefreshCcw, RotateCcw, Users, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
 import { getPhaseGroups, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
-import { getRun, getRuns } from '../api/athenaApi'
+import { abortRun, continueStage, getRun, getRuns } from '../api/athenaApi'
 
 function PipelineMonitor() {
-  const navigate = useNavigate()
-  const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline } = useAthenaStore()
+  const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline, addNotification } = useAthenaStore()
   const activeRun = runs.find((run) => run.id === activeRunId) || runs[0] || null
   const phases = useMemo(() => getPhaseGroups(activeRun), [activeRun])
 
@@ -78,6 +76,25 @@ function PipelineMonitor() {
     setExpandedPhase(defaultExpandedPhase)
   }, [defaultExpandedPhase, activeRun?.id])
 
+  const runLabel = summarizeRunSource(activeRun)
+  const activeTone = statusTone(activeRun?.status)
+  const isFailedRun = String(activeRun?.status || '').toUpperCase() === 'FAILED'
+  const isStageConfirmationPaused = String(activeRun?.status || '').toUpperCase() === 'PAUSED_FOR_STAGE_CONFIRMATION'
+  const [dismissedFailureBannerFor, setDismissedFailureBannerFor] = useState<string | null>(null)
+  const [autoAdvanceStages, setAutoAdvanceStages] = useState(false)
+  const [stageConfirmSubmitting, setStageConfirmSubmitting] = useState(false)
+
+  useEffect(() => {
+    if (!isFailedRun) {
+      setDismissedFailureBannerFor(null)
+    } else if (dismissedFailureBannerFor && dismissedFailureBannerFor !== activeRun?.id) {
+      setDismissedFailureBannerFor(null)
+    }
+  }, [activeRun?.id, dismissedFailureBannerFor, isFailedRun])
+
+  const failureSummary = useMemo(() => buildFailureSummary(activeRun), [activeRun])
+  const stageConfirmation = activeRun?.stage_confirmation || null
+
   if (!activeRun) {
     return (
       <div className="flex min-h-[620px] items-center justify-center rounded-lg border border-[#253044] bg-[#111827]">
@@ -92,33 +109,144 @@ function PipelineMonitor() {
     )
   }
 
-  const runLabel = summarizeRunSource(activeRun)
-  const activeTone = statusTone(activeRun.status)
-  const activeGate = Number(activeRun.next_gate || 0)
-  const hasGateReview = activeGate >= 1 && activeGate <= 5
+  const handleUnavailableFailureAction = (label) => {
+    addNotification({
+      type: 'amber',
+      title: `${label} not available`,
+      message: 'The backend does not expose this recovery action yet. The UI banner is ready once those endpoints are added.',
+      duration: 4500
+    })
+  }
 
-  const openGateReview = () => {
-    setActiveRun(activeRun.id)
-    navigate('/app/hitl')
+  const handleContinueStage = async () => {
+    if (!activeRun?.id) return
+    setStageConfirmSubmitting(true)
+    try {
+      await continueStage(activeRun.id, autoAdvanceStages)
+      const refreshed = await getRun(activeRun.id)
+      updateRun(activeRun.id, refreshed)
+      addNotification({
+        type: 'success',
+        title: 'Stage continued',
+        message: autoAdvanceStages
+          ? 'Auto-advance is enabled for the remaining stages in this run.'
+          : `Continuing to ${stageConfirmation?.next_stage_label || 'the next stage'}.`,
+        duration: 3500,
+      })
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Unable to continue stage',
+        message: error.message || 'The backend could not continue this run.',
+        duration: 4500,
+      })
+    } finally {
+      setStageConfirmSubmitting(false)
+    }
+  }
+
+  const handleCancelRun = async () => {
+    if (!activeRun?.id) return
+    setStageConfirmSubmitting(true)
+    try {
+      await abortRun(activeRun.id)
+      updateRun(activeRun.id, { status: 'ABORTED', completed_at: new Date().toISOString() })
+      addNotification({ type: 'amber', title: 'Run Aborted', message: 'The run was cancelled before the next stage.', duration: 3500 })
+    } catch (error) {
+      addNotification({ type: 'error', title: 'Abort failed', message: error.message || 'Unable to cancel the run.', duration: 4500 })
+    } finally {
+      setStageConfirmSubmitting(false)
+    }
   }
 
   return (
     <div className="flex h-full min-h-[calc(100vh-116px)] flex-col">
-      <div className="mb-7 flex items-center justify-between">
-        <div className="text-[14px] font-semibold tracking-[0.24em] text-[#7d8daa]">
-          Pipeline - {runLabel}
+      <div className="mb-7 flex flex-col gap-4">
+        <div className="flex min-h-[72px] items-center justify-between rounded-xl border border-[#1d2940] bg-[#09111f] px-5">
+          <div className="min-w-0 pr-4 text-[14px] font-semibold tracking-[0.12em] text-[#8ea0c3]">
+            <span className="truncate">Pipeline - {runLabel} - Run ID - {activeRun.id}</span>
+          </div>
+          <div className="flex flex-shrink-0 items-center gap-3">
+            <div className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-[12px] font-semibold ${
+              activeTone === 'amber'
+                ? 'border-amber-400/50 bg-amber-500/10 text-amber-300'
+                : activeTone === 'emerald'
+                ? 'border-emerald-400/35 bg-emerald-500/10 text-emerald-400'
+                : activeTone === 'blue'
+                ? 'border-[#3f82ff]/40 bg-[#3f82ff]/10 text-[#3f82ff]'
+                : activeTone === 'red'
+                ? 'border-red-400/35 bg-red-500/10 text-red-400'
+                : 'border-[#253044] bg-[#0b1120] text-slate-300'
+            }`}>
+              <span className="h-2 w-2 rounded-full bg-current" />
+              {String(activeRun.status || 'Waiting').replace(/_/g, ' ')}
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          {hasGateReview && (
-            <button
-              onClick={openGateReview}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-400/35 bg-amber-500/10 px-3 text-xs font-semibold text-amber-200 transition-colors hover:bg-amber-500/15"
-            >
-              <AlertCircle size={14} />
-              Review Gate {activeGate}
-              <ChevronRight size={14} />
-            </button>
-          )}
+
+        {isFailedRun && dismissedFailureBannerFor !== activeRun.id && (
+          <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-red-500/35 bg-[#17111d] px-6 py-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
+            <div className="flex min-w-0 items-center gap-4">
+              <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border border-red-500/30 bg-red-500/10 text-red-400">
+                <AlertTriangle size={18} />
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-3 text-sm">
+                  <div className="flex min-w-0 items-center gap-2 font-semibold text-white">
+                    <FileText size={15} className="text-[#b8c3d9]" />
+                    <span className="max-w-[420px] truncate">{activeRun.brd_filename || 'BRD File Name'}</span>
+                  </div>
+                  <span className="rounded-lg border border-red-500/35 bg-red-500/12 px-2.5 py-1 text-xs font-semibold text-red-400">
+                    Failed
+                  </span>
+                  <span className="text-[#d4d9e5]">at `{failureSummary.failedStage}`</span>
+                  <span className="text-[#9da7bb]">{failureSummary.progressLabel}</span>
+                </div>
+                <div className="mt-2 flex items-center gap-2 text-sm text-[#9da7bb]">
+                  <Clock3 size={14} />
+                  {failureSummary.timeAgo}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                onClick={() => handleUnavailableFailureAction('Retry Failed Stage')}
+                className="inline-flex h-11 items-center gap-2 rounded-xl border border-amber-500/35 bg-amber-500/10 px-5 text-sm font-semibold text-amber-400 transition-colors hover:bg-amber-500/15"
+              >
+                <RotateCcw size={16} />
+                Retry Failed Stage
+              </button>
+              <button
+                onClick={() => handleUnavailableFailureAction('Resume from Failure')}
+                className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#3f82ff]/40 bg-[#3f82ff]/10 px-5 text-sm font-semibold text-[#3f82ff] transition-colors hover:bg-[#3f82ff]/15"
+              >
+                <Play size={16} />
+                Resume from Failure
+              </button>
+              <button
+                onClick={() => handleUnavailableFailureAction('Restart')}
+                className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#2e394d] bg-[#101827] px-5 text-sm font-semibold text-white transition-colors hover:bg-[#152033]"
+              >
+                <RefreshCcw size={16} />
+                Restart
+              </button>
+              <button
+                onClick={() => setDismissedFailureBannerFor(activeRun.id)}
+                className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#2e394d] bg-transparent text-[#8d96a9] transition-colors hover:bg-white/5 hover:text-white"
+                aria-label="Dismiss failure banner"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-between">
+          <div className="text-[12px] font-semibold tracking-[0.24em] text-[#5f708f]">
+            Discovery Progress
+          </div>
+          <div className="flex items-center gap-3">
           {runs.length > 1 && (
             <select
               value={activeRun.id}
@@ -131,30 +259,10 @@ function PipelineMonitor() {
                 </option>
               ))}
             </select>
-          )}
+              )}
+          </div>
         </div>
       </div>
-
-      {hasGateReview && (
-        <button
-          onClick={openGateReview}
-          className="mb-5 flex w-full items-center justify-between rounded-lg border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-left text-amber-100 transition-colors hover:bg-amber-500/15"
-        >
-          <div className="flex min-w-0 items-center gap-3">
-            <AlertCircle size={18} className="flex-shrink-0 text-amber-300" />
-            <div className="min-w-0">
-              <div className="text-sm font-semibold">Gate {activeGate} review required</div>
-              <div className="mt-0.5 truncate text-xs text-amber-100/70">
-                {activeRun.resume_message || 'Review the pending artifact before the pipeline continues.'}
-              </div>
-            </div>
-          </div>
-          <div className="ml-4 flex flex-shrink-0 items-center gap-2 text-xs font-semibold text-amber-200">
-            Open review
-            <ChevronRight size={15} />
-          </div>
-        </button>
-      )}
 
       <div className="grid min-h-0 flex-1 gap-5 xl:grid-cols-[520px_minmax(0,1fr)]">
         <section className="min-h-0 overflow-hidden rounded-lg border border-[#253044] bg-[#080e1d]">
@@ -233,8 +341,88 @@ function PipelineMonitor() {
           </div>
         </section>
       </div>
+
+      {isStageConfirmationPaused && stageConfirmation?.awaiting_confirmation && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 px-6 backdrop-blur-sm">
+          <div className="w-full max-w-[670px] overflow-hidden rounded-[26px] border border-[#24344d] bg-[#131d2f] shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
+            <div className="flex items-start gap-5 px-8 py-8">
+              <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-[20px] bg-emerald-500/12 text-emerald-400">
+                <CheckCircle2 size={28} />
+              </div>
+              <div>
+                <div className="text-[18px] font-semibold text-white">Stage Completed</div>
+                <div className="mt-1 text-[15px] text-[#dbe2ef]">
+                  {stageConfirmation.last_completed_stage_label || 'Current stage'} finished successfully.
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t border-[#27374f] px-8 py-6">
+              <div className="rounded-[20px] border border-[#29456d] bg-[#16233b] px-6 py-5">
+                <div className="text-sm text-[#8ea2c5]">Next stage</div>
+                <div className="mt-1 text-[17px] font-semibold text-white">
+                  {stageConfirmation.next_stage_label || 'Next Stage'}
+                </div>
+              </div>
+
+              <div className="mt-6 text-center text-[15px] text-[#aeb8ca]">
+                Do you want to proceed to the next stage?
+              </div>
+
+              <label className="mt-6 flex items-center gap-3 text-[15px] text-[#aeb8ca]">
+                <input
+                  type="checkbox"
+                  checked={autoAdvanceStages}
+                  onChange={(event) => setAutoAdvanceStages(event.target.checked)}
+                  className="h-5 w-5 accent-[#3f82ff]"
+                />
+                Don't ask again — auto-advance between stages
+              </label>
+
+              <div className="mt-7 grid grid-cols-2 gap-4">
+                <button
+                  onClick={handleCancelRun}
+                  disabled={stageConfirmSubmitting}
+                  className="inline-flex h-14 items-center justify-center gap-2 rounded-[18px] border border-[#2b3950] bg-transparent text-[15px] font-semibold text-[#d1d7e4] transition-colors hover:bg-white/5 disabled:opacity-50"
+                >
+                  <X size={18} />
+                  Cancel Run
+                </button>
+                <button
+                  onClick={handleContinueStage}
+                  disabled={stageConfirmSubmitting}
+                  className="inline-flex h-14 items-center justify-center gap-2 rounded-[18px] bg-[#4b84f7] text-[15px] font-semibold text-white transition-colors hover:bg-[#5d90f7] disabled:opacity-50"
+                >
+                  <Play size={18} />
+                  {stageConfirmSubmitting ? 'Continuing...' : 'Continue'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
+}
+
+function buildFailureSummary(run) {
+  const steps = Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length
+    ? run.pipeline_steps
+    : Array.isArray(run?.stages)
+    ? run.stages
+    : []
+
+  const failedStep = steps.find((step) => String(step?.state || step?.status || '').toUpperCase() === 'FAILED')
+  const completedCount = steps.filter((step) => {
+    const state = String(step?.state || step?.status || '').toUpperCase()
+    return state === 'COMPLETED' || state === 'SUCCESS'
+  }).length
+
+  return {
+    failedStage: failedStep?.key || failedStep?.id || failedStep?.name || 'stage_unknown',
+    progressLabel: `${completedCount}/${steps.length || 0} stages done`,
+    timeAgo: formatTimeAgo(run?.completed_at || run?.updated_at || run?.started_at),
+  }
 }
 
 function PhaseNumber({ index, tone, status }) {
@@ -323,6 +511,19 @@ function StepRow({ step }) {
       </div>
     </div>
   )
+}
+
+function formatTimeAgo(dateStr) {
+  if (!dateStr) return 'just now'
+  const diff = Math.max(0, Date.now() - new Date(dateStr).getTime())
+  const seconds = Math.floor(diff / 1000)
+  const minutes = Math.floor(seconds / 60)
+  const hours = Math.floor(minutes / 60)
+  const days = Math.floor(hours / 24)
+  if (days > 0) return `${days}d ago`
+  if (hours > 0) return `${hours}h ${minutes % 60}m ago`
+  if (minutes > 0) return `${minutes}m ago`
+  return `${seconds}s ago`
 }
 
 export default PipelineMonitor

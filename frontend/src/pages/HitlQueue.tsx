@@ -21,6 +21,9 @@ import {
   submitSilverReview,
   submitTableReviews
 } from '../api/athenaApi'
+import { getGateDisplayName } from '../utils/pipelinePhases'
+
+const ATHENA_LOGO_SRC = `${process.env.PUBLIC_URL}/Athena_logo.png`
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 
@@ -84,6 +87,11 @@ function HitlQueue() {
   const isGate4 = gateToReview === 4
   const isGate5 = gateToReview === 5
   const isSftpRun = currentRun?.source === 'sftp' || currentRun?.source === 'adls_gen2'
+  const gate1Name = getGateDisplayName(1)
+  const gate2Name = getGateDisplayName(2, currentRun?.source)
+  const gate3Name = getGateDisplayName(3)
+  const gate4Name = getGateDisplayName(4)
+  const gate5Name = getGateDisplayName(5)
   const queue = useMemo(
     () => hitlQueues[selectedRunId] || (currentRun?.kpis || []),
     [currentRun?.kpis, hitlQueues, selectedRunId]
@@ -218,7 +226,7 @@ function HitlQueue() {
         if (cancelled) return
         addNotification({
           type: 'error',
-          title: isGate2 ? 'Gate 2 Load Failed' : isGate3 ? 'Gate 3 Load Failed' : isGate4 ? 'Gate 4 Load Failed' : isGate5 ? 'Gate 5 Load Failed' : 'KPI Load Failed',
+          title: isGate2 ? `${gate2Name} Load Failed` : isGate3 ? `${gate3Name} Load Failed` : isGate4 ? `${gate4Name} Load Failed` : isGate5 ? `${gate5Name} Load Failed` : `${gate1Name} Load Failed`,
           message: error.message || (isGate2 ? 'Unable to load table review data.' : isGate3 ? 'Unable to load enrichment review data.' : isGate4 ? 'Unable to load Bronze review data.' : isGate5 ? 'Unable to load Silver review data.' : 'Unable to load KPI review data.'),
           duration: 5000
         })
@@ -231,7 +239,7 @@ function HitlQueue() {
     return () => {
       cancelled = true
     }
-  }, [selectedRunId, isGate2, isGate3, isGate4, isGate5, setHitlQueue, setHitlSourceRunId, updateRun, addNotification, currentRun?.source])
+  }, [selectedRunId, isGate2, isGate3, isGate4, isGate5, gate1Name, gate2Name, gate3Name, gate4Name, gate5Name, isSftpRun, setHitlQueue, setHitlSourceRunId, updateRun, addNotification, currentRun?.source])
 
   const filteredQueue = useMemo(() => {
     if (statusFilter === 'All') return queue
@@ -322,7 +330,7 @@ function HitlQueue() {
         const approvedFeeds = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)])
 
         if (!approvedFeeds.length) {
-          addNotification({ type: 'amber', title: 'No Feeds Selected', message: 'Select at least one discovered feed before submitting Gate 2.', duration: 3000 })
+          addNotification({ type: 'amber', title: 'No Feeds Selected', message: `Select at least one discovered feed before submitting ${gate2Name}.`, duration: 3000 })
           return
         }
       } else {
@@ -331,7 +339,7 @@ function HitlQueue() {
           .filter((key) => selectedTables[key])
 
         if (!approvedTables.length) {
-          addNotification({ type: 'amber', title: 'No Tables Selected', message: 'Select at least one table before submitting Gate 2.', duration: 3000 })
+          addNotification({ type: 'amber', title: 'No Tables Selected', message: `Select at least one table before submitting ${gate2Name}.`, duration: 3000 })
           return
         }
       }
@@ -350,14 +358,14 @@ function HitlQueue() {
         setSelectedTables({})
         addNotification({
           type: 'success',
-          title: 'Gate 2 Submitted',
+          title: `${gate2Name} Submitted`,
           message: isSftpRun
-            ? 'Approved feeds were submitted for SFTP Gate 2.'
+            ? `Approved feeds were submitted for ${gate2Name}.`
             : 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
           duration: 5000
         })
       } catch (error) {
-        addNotification({ type: 'error', title: 'Gate 2 Failed', message: error.message, duration: 5000 })
+        addNotification({ type: 'error', title: `${gate2Name} Failed`, message: error.message, duration: 5000 })
       } finally {
         setSubmitting(false)
       }
@@ -375,14 +383,14 @@ function HitlQueue() {
         setEnrichmentReview(null)
         addNotification({
           type: 'success',
-          title: 'Gate 3 Submitted',
+          title: `${gate3Name} Submitted`,
           message: gate3Decision === 'APPROVED' && Number(refreshed?.next_gate || 0) === 4
-            ? 'Gate 3 approved. Bronze scripts are generated and ready for Gate 4 review.'
+            ? `${gate3Name} approved. Bronze scripts are generated and ready for ${gate4Name}.`
             : 'Enrichment review was submitted. Pipeline is still processing.',
           duration: 5000
         })
       } catch (error) {
-        addNotification({ type: 'error', title: 'Gate 3 Failed', message: error.message, duration: 5000 })
+        addNotification({ type: 'error', title: `${gate3Name} Failed`, message: error.message, duration: 5000 })
       } finally {
         setSubmitting(false)
       }
@@ -400,14 +408,14 @@ function HitlQueue() {
         setBronzeReview(null)
         addNotification({
           type: 'success',
-          title: 'Gate 4 Submitted',
+          title: `${gate4Name} Submitted`,
           message: Number(refreshed?.next_gate || 0) === 5
-            ? 'Bronze approved. Silver scripts are generated and ready for Gate 5 review.'
+            ? `Bronze approved. Silver scripts are generated and ready for ${gate5Name}.`
             : 'Bronze review was submitted. Pipeline is still processing.',
           duration: 5000
         })
       } catch (error) {
-        addNotification({ type: 'error', title: 'Gate 4 Failed', message: error.message, duration: 5000 })
+        addNotification({ type: 'error', title: `${gate4Name} Failed`, message: error.message, duration: 5000 })
       } finally {
         setSubmitting(false)
       }
@@ -423,12 +431,12 @@ function HitlQueue() {
         setSilverReview(null)
         addNotification({
           type: 'success',
-          title: 'Gate 5 Submitted',
+          title: `${gate5Name} Submitted`,
           message: 'Silver review was submitted. Pipeline is resuming.',
           duration: 5000
         })
       } catch (error) {
-        addNotification({ type: 'error', title: 'Gate 5 Failed', message: error.message, duration: 5000 })
+        addNotification({ type: 'error', title: `${gate5Name} Failed`, message: error.message, duration: 5000 })
       } finally {
         setSubmitting(false)
       }
@@ -522,30 +530,42 @@ function HitlQueue() {
 
   return (
     <div className="flex flex-col h-full gap-4">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-lg font-bold text-white">
-            {isGate5 ? 'Gate 5 - Silver Review' : isGate4 ? 'Gate 4 - Bronze Review' : isGate3 ? 'Gate 3 - Enrichment Review' : isGate2 ? (isSftpRun ? 'Gate 2 - SFTP Feed Review' : 'Gate 2 - Table Review') : 'Gate 1 - KPI Review'}
-          </h1>
-          <p className="text-sm text-gray-500 mt-0.5">
-            {isGate5
-              ? (silverReview?.resume_message || 'Review the Silver plan before the pipeline continues')
-              : isGate4
-              ? (bronzeReview?.resume_message || 'Review the Bronze plan before the pipeline continues')
-              : isGate3
-              ? (enrichmentReview?.resume_message || 'Review semantic enrichment before the pipeline continues')
-              : isGate2
-              ? (tableReview?.resume_message || (isSftpRun ? 'Review discovered SFTP feeds before the pipeline continues.' : 'Review and certify nominated tables before the pipeline continues'))
-              : 'Review and approve extracted KPIs before the pipeline continues'}
-          </p>
-        </div>
+      <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] shadow-[0_20px_80px_rgba(0,0,0,0.25)]">
+        <div className="flex items-center justify-between gap-4 px-6 py-5">
+          <div className="flex min-w-0 items-center gap-4">
+            <img src={ATHENA_LOGO_SRC} alt="Athena" className="h-12 w-12 flex-shrink-0 object-contain" />
+            <div className="min-w-0">
+              <h1 className="text-[18px] font-bold text-white">
+                {isGate5 ? gate5Name : isGate4 ? gate4Name : isGate3 ? gate3Name : isGate2 ? gate2Name : gate1Name}
+              </h1>
+              <p className="mt-0.5 text-sm text-[#95a3bf]">
+                {isGate5
+                  ? (silverReview?.resume_message || 'Review generated Silver scripts before the pipeline continues.')
+                  : isGate4
+                  ? (bronzeReview?.resume_message || 'Review generated Bronze artifacts before the pipeline continues.')
+                  : isGate3
+                  ? (enrichmentReview?.resume_message || 'Review semantic enrichment before the pipeline continues.')
+                  : isGate2
+                  ? (tableReview?.resume_message || (isSftpRun ? 'Review discovered feeds before the pipeline continues.' : 'Review nominated tables before the pipeline continues.'))
+                  : 'Review and approve extracted KPIs before the pipeline continues.'}
+              </p>
+            </div>
+          </div>
 
-        <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={isGate3 ? () => setGate3Decision('APPROVED') : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleSelectAllTables) : handleAutoApproveAll}
+              className="inline-flex items-center gap-2 rounded-xl border border-[#294766] bg-[#1b2a3f] px-4 py-2 text-sm font-semibold text-[#c6d2e8] transition-colors hover:bg-[#223550]"
+            >
+              <CheckCircle size={15} className="text-[#19c37d]" />
+              {isGate2 ? 'Auto-Select Pending' : 'Auto-Approve Pending'}
+            </button>
+
           {reviewRuns.length > 0 && (
             <select
               value={selectedRunId || ''}
               onChange={(event) => setSelectedRunId(event.target.value)}
-              className="input-field w-auto text-xs"
+              className="h-10 rounded-xl border border-[#253044] bg-[#0a1220] px-3 text-xs text-[#c6d2e8] outline-none"
             >
               {reviewRuns.map((run) => (
                 <option key={run.id} value={run.id}>
@@ -559,7 +579,7 @@ function HitlQueue() {
             <select
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value)}
-              className="input-field w-auto text-xs"
+              className="h-10 rounded-xl border border-[#253044] bg-[#0a1220] px-3 text-xs text-[#c6d2e8] outline-none"
             >
               <option value="All">All</option>
               <option value="Pending">Pending</option>
@@ -568,6 +588,7 @@ function HitlQueue() {
               <option value="REJECTED">Rejected</option>
             </select>
           )}
+          </div>
         </div>
       </div>
 
@@ -576,16 +597,19 @@ function HitlQueue() {
           {selectedRunId && isReviewableRun ? (
             isGate5 ? (
             <div className="space-y-4">
-              <div className="card p-5">
+              <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
                 <h3 className="text-base font-bold text-text-primary mb-3">Silver Review</h3>
                 {silverReviewItems.length === 0 && (
-                  <div className="rounded-lg border border-bg-border bg-bg-base p-4 text-sm text-text-secondary">
-                    Silver scripts are not loaded yet. Submit is still available if Gate 5 is pending.
+                  <div className="rounded-2xl border border-[#22304b] bg-[#0b1424] p-4 text-sm text-text-secondary">
+                    Silver scripts are not loaded yet. Submit is still available if {gate5Name} is pending.
                   </div>
                 )}
                 {((silverReview?.silver_review_artifact?.items) || []).map((item, index) => (
-                  <div key={`${item.entity || index}`} className="rounded-lg border border-bg-border bg-bg-base p-4 space-y-3 mb-3">
-                    <div className="text-sm font-semibold text-text-primary">{item.entity || 'Silver Item'}</div>
+                  <div key={`${item.entity || index}`} className="mb-3 rounded-[20px] border border-[#22304b] bg-[#0f1a2e] p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-semibold text-text-primary">{item.entity || 'Silver Item'}</div>
+                      <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-400">Ready</span>
+                    </div>
                     <ReviewBlock label="Bronze Source" value={item.bronze_source || '-'} />
                     <ReviewBlock label="Transformations" value={(item.transformations || []).join('\n') || '-'} />
                     <ReviewBlock label="Type Casts" value={JSON.stringify(item.type_casts || [], null, 2)} />
@@ -605,21 +629,24 @@ function HitlQueue() {
                 className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-5 py-3 text-sm font-bold text-white shadow-lg transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {submitting ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
-                Submit Gate 5 & Continue Pipeline
+                Submit {gate5Name} & Continue Pipeline
               </button>
             </div>
             ) : isGate4 ? (
             <div className="space-y-4">
-              <div className="card p-5">
+              <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
                 <h3 className="text-base font-bold text-text-primary mb-3">Bronze Review</h3>
                 {bronzeReviewFeeds.length === 0 && (
-                  <div className="rounded-lg border border-bg-border bg-bg-base p-4 text-sm text-text-secondary">
-                    Bronze scripts are not loaded yet. Submit is still available if Gate 4 is pending.
+                  <div className="rounded-2xl border border-[#22304b] bg-[#0b1424] p-4 text-sm text-text-secondary">
+                    Bronze scripts are not loaded yet. Submit is still available if {gate4Name} is pending.
                   </div>
                 )}
                 {((bronzeReview?.bronze_review_artifact?.feeds) || []).map((feed, index) => (
-                  <div key={`${feed.entity || index}`} className="rounded-lg border border-bg-border bg-bg-base p-4 space-y-3 mb-3">
-                    <div className="text-sm font-semibold text-text-primary">{feed.vendor || 'Vendor'}.{feed.entity || 'Feed'}</div>
+                  <div key={`${feed.entity || index}`} className="mb-3 rounded-[20px] border border-[#22304b] bg-[#0f1a2e] p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-semibold text-text-primary">{feed.vendor || 'Vendor'}.{feed.entity || 'Feed'}</div>
+                      <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-400">Ready</span>
+                    </div>
                     <ReviewBlock label="Source Type" value={feed.source_type || '-'} />
                     <ReviewBlock label="File Format" value={feed.file_format || '-'} />
                     <ReviewBlock label="Primary Keys" value={(feed.primary_keys || []).join(', ') || '-'} />
@@ -639,12 +666,12 @@ function HitlQueue() {
                 className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-5 py-3 text-sm font-bold text-white shadow-lg transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {submitting ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
-                Submit Gate 4 & Generate Silver
+                Submit {gate4Name} & Generate Silver
               </button>
             </div>
             ) : isGate3 ? (
             <div className="space-y-4">
-              <div className="card p-5">
+              <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
                 <div className="flex items-center justify-between gap-3 mb-4">
                   <div>
                     <h3 className="text-base font-bold text-text-primary">{isSftpRun ? 'File Schema Enrichment Summary' : 'Enrichment Summary'}</h3>
@@ -660,7 +687,7 @@ function HitlQueue() {
               </div>
 
               {isSftpRun && Array.isArray(enrichmentReview?.feed_semantic_summary) && enrichmentReview.feed_semantic_summary.length > 0 && (
-                <div className="card p-5">
+                <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
                   <h3 className="text-base font-bold text-text-primary mb-3">Per Feed Breakdown</h3>
                   <div className="space-y-3">
                     {enrichmentReview.feed_semantic_summary.map((feed, index) => (
@@ -670,7 +697,7 @@ function HitlQueue() {
                 </div>
               )}
 
-              <div className="card p-5">
+              <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
                 <h3 className="text-base font-bold text-text-primary mb-3">Semantic Types</h3>
                 <div className="flex flex-wrap gap-2">
                   {Object.entries(enrichmentReview?.semantic_counts || {}).map(([key, value]) => (
@@ -681,7 +708,7 @@ function HitlQueue() {
                 </div>
               </div>
 
-              <div className="card p-5">
+              <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
                 <h3 className="text-base font-bold text-text-primary mb-3">Decision</h3>
                 <div className="flex gap-3">
                   <button
@@ -719,7 +746,7 @@ function HitlQueue() {
                 ? (availableSftpFeeds.map((feed) => {
                     const key = sftpFeedKey(feed)
                     return (
-                      <label key={key} className="card p-5 flex items-start gap-3 cursor-pointer border border-bg-border hover:border-gray-600 transition-colors">
+                      <label key={key} className="rounded-[20px] border border-[#22304b] bg-[#0d1729] p-5 flex items-start gap-3 cursor-pointer hover:border-[#35507d] transition-colors">
                         <input
                           type="checkbox"
                           checked={!!selectedTables[key]}
@@ -733,7 +760,7 @@ function HitlQueue() {
                 : ((tableReview?.nominated_tables || []).map((table) => {
                     const key = tableReviewKey(table)
                     return (
-                      <label key={key} className="card p-5 flex items-start gap-3 cursor-pointer border border-bg-border hover:border-gray-600 transition-colors">
+                      <label key={key} className="rounded-[20px] border border-[#22304b] bg-[#0d1729] p-5 flex items-start gap-3 cursor-pointer hover:border-[#35507d] transition-colors">
                         <input
                           type="checkbox"
                           checked={!!selectedTables[key]}
@@ -766,7 +793,7 @@ function HitlQueue() {
             )
             ) : filteredQueue.length === 0 ? (
             <div className="flex items-center justify-center h-40 text-gray-600 text-sm">
-              {queue.length === 0 ? 'No KPIs in queue. Select a run with Gate 1 pending.' : 'No KPIs match the current filter.'}
+              {queue.length === 0 ? `No KPIs in queue. Select a run with ${gate1Name} pending.` : 'No KPIs match the current filter.'}
             </div>
           ) : (
             filteredQueue.map((kpi) => (
@@ -785,14 +812,14 @@ function HitlQueue() {
             <div className="flex items-center justify-center h-40 rounded-2xl border border-dashed border-bg-border bg-bg-card/40 text-center px-6">
               <div>
                 <p className="text-sm font-semibold text-gray-300">No pending gate review</p>
-                <p className="text-xs text-gray-500 mt-1">This page shows runs paused at Gate 1 through Gate 5.</p>
+                <p className="text-xs text-gray-500 mt-1">This page shows runs paused at KPI, table/feed, enrichment, bronze, and silver review.</p>
               </div>
             </div>
           )}
         </div>
 
         <div className="w-72 flex-shrink-0 flex flex-col gap-3">
-          <div className="card p-4">
+          <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-4">
             <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-3">Review Progress</h3>
             <div className="space-y-2">
               {selectedRunId && isReviewableRun ? (
@@ -852,7 +879,7 @@ function HitlQueue() {
             </div>
           </div>
 
-          <div className="card p-4">
+          <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-4">
             <div className="flex items-center gap-2 mb-2">
               <Timer size={14} className="text-accent-amber" />
               <span className="text-xs font-medium text-gray-300">Review State</span>
@@ -869,20 +896,20 @@ function HitlQueue() {
             {isGate3 || isGate4 || isGate5 ? 'Set Approve' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
           </button>
 
-          <div className="p-3 bg-bg-card border border-bg-border rounded-xl">
+          <div className="rounded-[20px] border border-[#22304b] bg-[#0d1729] p-3">
             <div className="flex items-start gap-2">
               <Shield size={12} className="text-gray-600 mt-0.5 flex-shrink-0" />
               <p className="text-[10px] text-gray-600 leading-relaxed">
                 {isGate2
                   ? (isSftpRun
-                    ? 'Gate 2 validates the discovered SFTP feeds. Review entity, source file, sample rows, columns, keys, and measures before approving the feed set.'
+                    ? `${gate2Name} validates the discovered SFTP feeds. Review entity, source file, sample rows, columns, keys, and measures before approving the feed set.`
                     : 'Certified tables become the source set for metadata discovery, profiling, and enrichment.')
                   : isGate3
-                  ? 'Approving Gate 3 generates Bronze review artifacts. Rejecting keeps the run paused for rework.'
+                  ? `Approving ${gate3Name} generates Bronze review artifacts. Rejecting keeps the run paused for rework.`
                   : isGate4
-                  ? 'Approving Gate 4 accepts the Bronze scripts and starts Silver script generation.'
+                  ? `Approving ${gate4Name} accepts the Bronze scripts and starts Silver script generation.`
                   : isGate5
-                  ? 'Approving Gate 5 accepts the Silver scripts and continues downstream validation.'
+                  ? `Approving ${gate5Name} accepts the Silver scripts and continues downstream validation.`
                   : 'Approvals are final once submitted. Rejected KPIs will be excluded from the final export.'}
               </p>
             </div>
@@ -941,7 +968,7 @@ function HitlQueue() {
             ) : (
               <>
                 {isGate3 || isGate2 || isGate4 || isGate5 ? <CheckCircle2 size={14} /> : <Send size={14} />}
-                {isGate5 ? 'Submit Gate 5 & Continue Pipeline ->' : isGate4 ? 'Submit Gate 4 & Generate Silver ->' : isGate3 ? 'Submit Gate 3 & Generate Bronze ->' : isGate2 ? 'Submit Gate 2 & Resume Pipeline ->' : 'Submit All Decisions & Resume Pipeline ->'}
+                {isGate5 ? `Submit ${gate5Name} & Continue Pipeline ->` : isGate4 ? `Submit ${gate4Name} & Generate Silver ->` : isGate3 ? `Submit ${gate3Name} & Generate Bronze ->` : isGate2 ? `Submit ${gate2Name} & Resume Pipeline ->` : 'Submit All Decisions & Resume Pipeline ->'}
               </>
             )}
           </button>
@@ -991,8 +1018,8 @@ function CountRow({ label, value, color, pulse }) {
 
 function StatTile({ label, value }) {
   return (
-    <div className="rounded-lg border border-bg-border bg-bg-base px-3 py-3">
-      <div className="text-xs text-text-tertiary">{label}</div>
+    <div className="rounded-2xl border border-[#22304b] bg-[#0b1424] px-3 py-3">
+      <div className="text-xs text-[#7f8eab]">{label}</div>
       <div className="text-lg font-bold text-text-primary mt-1">{value}</div>
     </div>
   )
@@ -1086,7 +1113,7 @@ function SftpFeedReviewBody({ feed }) {
 function FileSemanticFeedCard({ feed }) {
   const semanticCounts = Object.entries(feed?.semantic_counts || {})
   return (
-    <div className="rounded-lg border border-bg-border bg-bg-base p-4">
+    <div className="rounded-[20px] border border-[#22304b] bg-[#0f1a2e] p-4">
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <div className="text-sm font-semibold text-text-primary">
@@ -1111,7 +1138,7 @@ function FileSemanticFeedCard({ feed }) {
       {semanticCounts.length > 0 && (
         <div className="flex flex-wrap gap-2 mt-3">
           {semanticCounts.map(([key, value]) => (
-            <span key={key} className="px-2 py-1 rounded-full text-[10px] font-medium bg-bg-surface border border-bg-border text-text-secondary">
+            <span key={key} className="rounded-full border border-[#2c3f5f] bg-[#111b2d] px-2 py-1 text-[10px] font-medium text-text-secondary">
               {key}: {value}
             </span>
           ))}
@@ -1125,7 +1152,7 @@ export default HitlQueue
 
 function GateDecisionCard({ gateDecision, setGateDecision, approveLabel, rejectLabel, regenerateLabel }) {
   return (
-    <div className="card p-5">
+    <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
       <h3 className="text-base font-bold text-text-primary mb-3">Decision</h3>
       <div className="grid grid-cols-3 gap-3">
         <button
@@ -1166,8 +1193,8 @@ function GateDecisionCard({ gateDecision, setGateDecision, approveLabel, rejectL
 function ReviewBlock({ label, value }) {
   return (
     <div>
-      <div className="text-[11px] uppercase tracking-wider text-text-tertiary mb-1">{label}</div>
-      <pre className="whitespace-pre-wrap break-words rounded-lg border border-bg-border bg-[#0a1020] p-3 text-xs text-text-secondary overflow-auto max-h-64">
+      <div className="mb-1 text-[11px] uppercase tracking-wider text-[#7f8eab]">{label}</div>
+      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-[#22304b] bg-[#09111f] p-3 text-xs text-text-secondary">
         {value || '-'}
       </pre>
     </div>

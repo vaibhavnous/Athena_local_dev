@@ -35,6 +35,20 @@ def build_sftp_display_name(checkpoint: Dict[str, Any]) -> str:
     return f"{prefix}:{vendor}:{entity}"
 
 
+def _gate_label(gate: int) -> str:
+    if gate == 1:
+        return "KPI Review"
+    if gate == 2:
+        return "Feed Review"
+    if gate == 3:
+        return "Enrichment Review"
+    if gate == 4:
+        return "Bronze Review"
+    if gate == 5:
+        return "Silver Review"
+    return f"Gate {gate}"
+
+
 def apply_waiting_stage_state(steps: List[Dict[str, Any]], gate_key: Optional[str]) -> List[Dict[str, Any]]:
     if not gate_key:
         return steps
@@ -192,7 +206,7 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
     resume_message = None
     if gate1_decision in {None, ""}:
         next_gate = 1
-        resume_message = "Gate 1 is pending. Review KPI items before continuing."
+        resume_message = f"{_gate_label(1)} is pending. Review KPI items before continuing."
     elif gate1_decision == "APPROVED" and gate2_decision in {None, ""}:
         next_gate = 2
         entities = ", ".join(
@@ -206,23 +220,23 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         )
         feed_count = len(candidate_feeds) or (1 if candidate_feed else 0)
         if feed_count > 1 and entities:
-            resume_message = f"Gate 2 is pending. Review {feed_count} discovered feeds ({entities}) before continuing."
+            resume_message = f"{_gate_label(2)} is pending. Review {feed_count} discovered feeds ({entities}) before continuing."
         else:
-            resume_message = "Gate 2 is pending. Review the discovered feed before continuing."
+            resume_message = f"{_gate_label(2)} is pending. Review the discovered feed before continuing."
     elif gate2_decision == "APPROVED":
         if semantic_enrichment_completed and gate3_decision not in {"APPROVED", "REJECTED"}:
             next_gate = 3
-            resume_message = "Gate 3 is pending. Review semantic enrichment before continuing."
+            resume_message = f"{_gate_label(3)} is pending. Review semantic enrichment before continuing."
         elif (gate3_decision == "APPROVED" or gate3_payload) and bronze_review_ready and gate4_decision not in {"APPROVED", "REJECTED"}:
             next_gate = 4
-            resume_message = "Gate 4 is pending. Review Bronze plan before ingestion."
+            resume_message = f"{_gate_label(4)} is pending. Review Bronze plan before ingestion."
         elif gate4_decision == "APPROVED" and silver_review_ready and gate5_decision not in {"APPROVED", "REJECTED"}:
             next_gate = 5
-            resume_message = "Gate 5 is pending. Review Silver plan before execution."
+            resume_message = f"{_gate_label(5)} is pending. Review Silver plan before execution."
         elif gate5_decision == "APPROVED":
-            resume_message = "Gate 5 is complete."
+            resume_message = f"{_gate_label(5)} is complete."
         elif gate4_decision == "APPROVED":
-            resume_message = "Gate 4 is complete."
+            resume_message = f"{_gate_label(4)} is complete."
         elif gate3_decision == "APPROVED" or gate3_payload:
             resume_message = "SFTP semantic enrichment is approved."
         elif column_profiling_completed:
@@ -230,17 +244,17 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         elif schema_discovery_completed:
             resume_message = "Schema discovery is complete. Column profiling is in progress."
         else:
-            resume_message = "Gate 2 is complete."
+            resume_message = f"{_gate_label(2)} is complete."
     elif gate1_decision == "REJECTED":
-        resume_message = "Gate 1 was rejected."
+        resume_message = f"{_gate_label(1)} was rejected."
     elif gate2_decision == "REJECTED":
-        resume_message = "Gate 2 was rejected."
+        resume_message = f"{_gate_label(2)} was rejected."
     elif gate3_decision == "REJECTED":
-        resume_message = "Gate 3 was rejected."
+        resume_message = f"{_gate_label(3)} was rejected."
     elif gate4_decision == "REJECTED":
-        resume_message = "Gate 4 was rejected."
+        resume_message = f"{_gate_label(4)} was rejected."
     elif gate5_decision == "REJECTED":
-        resume_message = "Gate 5 was rejected."
+        resume_message = f"{_gate_label(5)} was rejected."
     elif not summary and not checkpoint:
         resume_message = "No stored state was found for this run ID."
 

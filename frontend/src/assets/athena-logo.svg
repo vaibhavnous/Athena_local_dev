@@ -1,0 +1,34 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="athenaStroke" x1="34" y1="24" x2="208" y2="216" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2ED8FF"/>
+      <stop offset="0.54" stop-color="#3C86FF"/>
+      <stop offset="1" stop-color="#6B22FF"/>
+    </linearGradient>
+    <filter id="athenaGlow" x="0" y="0" width="256" height="256" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="2.4"/>
+    </filter>
+  </defs>
+
+  <path
+    d="M79 28L160 28L224 197L194 212L154 112L70 163L34 236L3 220L79 28Z"
+    stroke="rgba(255,255,255,0.28)"
+    stroke-width="7"
+    stroke-linejoin="round"
+    filter="url(#athenaGlow)"
+  />
+  <path
+    d="M79 28L160 28L224 197L194 212L154 112L70 163L34 236L3 220L79 28Z"
+    fill="url(#athenaStroke)"
+  />
+  <path
+    d="M114 62L140 62L184 177L101 129L114 62Z"
+    fill="#22252D"
+    fill-opacity="0.92"
+  />
+  <path
+    d="M72 164L154 112L184 177L101 129L72 164Z"
+    fill="#22252D"
+    fill-opacity="0.92"
+  />
+</svg>

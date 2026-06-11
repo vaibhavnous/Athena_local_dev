@@ -16,6 +16,8 @@ import {
 } from 'lucide-react'
 import useAthenaStore from '../../store/useAthenaStore'
 
+const ATHENA_LOGO_SRC = `${process.env.PUBLIC_URL}/Athena_logo.png`
+
 function Sidebar({ collapsed, onToggle }) {
   const userRole = useAthenaStore((s) => s.userRole)
 
@@ -157,13 +159,7 @@ function NavItem({ item, collapsed }) {
 
 function AthenaMark() {
   return (
-    <div className="relative h-9 w-9 flex-shrink-0">
-      <div
-        className="absolute left-0 top-0 h-9 w-9 bg-gradient-to-br from-[#25d5ff] via-[#3f82ff] to-[#7c3cff]"
-        style={{ clipPath: 'polygon(43% 0, 100% 100%, 73% 100%, 51% 56%, 30% 100%, 0 100%)' }}
-      />
-      <div className="absolute left-[12px] top-[18px] h-[5px] w-[15px] -rotate-12 rounded-full bg-[#20e0c6]" />
-    </div>
+    <img src={ATHENA_LOGO_SRC} alt="Athena" className="h-11 w-11 flex-shrink-0 object-contain" />
   )
 }
 
