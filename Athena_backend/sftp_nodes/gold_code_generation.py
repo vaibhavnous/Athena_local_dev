@@ -53,13 +53,20 @@ def _script_output_path(entity: str, run_id: str) -> str:
     return os.path.join(GOLD_OUTPUT_DIR, f"gold_fact_{_run_slug(run_id)}_{_run_slug(entity)}.py")
 
 
+def _spark_col_expr(column_name: str) -> str:
+    escaped = str(column_name or "").replace("`", "``").replace("\\", "\\\\").replace('"', '\\"')
+    return f'F.col("`{escaped}`")'
+
+
 def _build_gold_script(entity: str, silver_schema: str, gold_schema: str, columns: List[str]) -> str:
     source_table = f"{silver_schema}.silver_{entity}"
     target_table = f"{gold_schema}.gold_{entity}"
-    select_columns = ", ".join([f'`{col}`' for col in columns]) if columns else "*"
+    select_columns = ", ".join([_spark_col_expr(col) for col in columns])
+    select_block = f"df.select({select_columns})" if select_columns else "df"
 
     return f"""
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.functions import count, current_timestamp
 
 spark = SparkSession.builder.getOrCreate()
@@ -69,10 +76,10 @@ TARGET_TABLE = r\"{target_table}\"
 
 print(f\"Loading Silver table {{SOURCE_TABLE}} for Gold KPI generation\")
 df = spark.table(SOURCE_TABLE)
-if df.rdd.isEmpty():
+if df.limit(1).count() == 0:
     raise ValueError(f'Silver source table is empty: {{SOURCE_TABLE}}')
 
-summary = df.select({select_columns})
+summary = {select_block}
 result = summary.agg(count('*').alias('record_count')).withColumn('gold_generated_at', current_timestamp())
 result.write.format('delta').mode('overwrite').saveAsTable(TARGET_TABLE)
 print(f\"Gold script completed for {{TARGET_TABLE}}\")
