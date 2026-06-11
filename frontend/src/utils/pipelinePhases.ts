@@ -199,9 +199,16 @@ function buildStepDetail(run, key, state, existingDetail) {
   const nextGate = Number(run?.next_gate || 0)
   const resumeMessage = String(run?.resume_message || '').trim()
   const isFileSource = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
+  const gateKeyMap = {
+    gate1: 1,
+    gate2: 2,
+    gate3: 3,
+    gate4: 4,
+    gate5: 5,
+  }
 
   const readyGateMessage = (gateLabel, fallback) => {
-    if (resumeMessage && nextGate > 0) return resumeMessage
+    if (resumeMessage && nextGate > 0 && gateKeyMap[key] === nextGate) return resumeMessage
     if (state === 'HITL_WAIT' || nextGate > 0) return fallback
     if (state === 'COMPLETED') return `${gateLabel} completed.`
     if (state === 'RUNNING') return `${gateLabel} is being prepared.`

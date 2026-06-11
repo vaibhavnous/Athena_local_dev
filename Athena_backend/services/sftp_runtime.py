@@ -52,10 +52,19 @@ def _gate_label(gate: int) -> str:
 def apply_waiting_stage_state(steps: List[Dict[str, Any]], gate_key: Optional[str]) -> List[Dict[str, Any]]:
     if not gate_key:
         return steps
-    for step in steps:
+    waiting_index = None
+    for index, step in enumerate(steps):
         if step.get("key") == gate_key:
             step["state"] = "HITL_WAIT"
+            step["complete"] = False
+            waiting_index = index
             break
+    if waiting_index is None:
+        return steps
+    for index, step in enumerate(steps):
+        if index > waiting_index:
+            step["state"] = "PENDING"
+            step["complete"] = False
     return steps
 
 
