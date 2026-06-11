@@ -131,6 +131,7 @@ function HitlQueue() {
     setGateDecision('APPROVED')
   }, [selectedRunId, currentRun?.source, gateToReview])
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!selectedRunId) return
     let cancelled = false
