@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Tuple
 
 from state import Stage01State
 from utilis.db import ai_store_db_writer
+from utilis.domain_kb import get_domain_kb_config, load_domain_kb
 from utilis.logger import logger
 
 
@@ -190,24 +191,33 @@ def _target_fact_table(gold_schema: str, kpi_id: str) -> str:
     return f"{gold_schema}.fact_{kpi_id}"
 
 
-def _llm_prompt(mapping: Dict[str, Any], run_id: str, gold_schema: str) -> str:
+def _llm_prompt(
+    mapping: Dict[str, Any],
+    run_id: str,
+    gold_schema: str,
+    domain_reference_context: str = "",
+) -> str:
     measure = mapping.get("measure") or {}
     time_info = mapping.get("time") or {}
-    return "\n".join(
+    prompt_parts = [
+        "Generate production Databricks PySpark code for a Gold KPI fact table.",
+        "Return only executable Python code.",
+        "",
+        f"KPI Name: {mapping.get('kpi_name')}",
+        f"Run ID: {run_id}",
+        f"Gold schema: {gold_schema}",
+        f"Source Table: {mapping.get('source_silver_table')}",
+        f"Measure: column={measure.get('column')}, aggregation={measure.get('aggregation')}",
+        f"Dimensions: {json.dumps(mapping.get('grouping_dimensions') or [], default=str)}",
+        f"Time grain: {time_info.get('grain')}",
+        f"Filters: {json.dumps(mapping.get('filters') or [], default=str)}",
+        f"Join paths: {json.dumps(mapping.get('join_paths') or [], default=str)}",
+        f"Target table: {_target_fact_table(gold_schema, _safe_identifier(str(mapping.get('kpi_name') or 'kpi'), 'kpi'))}",
+    ]
+    if domain_reference_context:
+        prompt_parts.extend(["", "DOMAIN REFERENCE MODEL:", domain_reference_context])
+    prompt_parts.extend(
         [
-            "Generate production Databricks PySpark code for a Gold KPI fact table.",
-            "Return only executable Python code.",
-            "",
-            f"KPI Name: {mapping.get('kpi_name')}",
-            f"Run ID: {run_id}",
-            f"Gold schema: {gold_schema}",
-            f"Source Table: {mapping.get('source_silver_table')}",
-            f"Measure: column={measure.get('column')}, aggregation={measure.get('aggregation')}",
-            f"Dimensions: {json.dumps(mapping.get('grouping_dimensions') or [], default=str)}",
-            f"Time grain: {time_info.get('grain')}",
-            f"Filters: {json.dumps(mapping.get('filters') or [], default=str)}",
-            f"Join paths: {json.dumps(mapping.get('join_paths') or [], default=str)}",
-            f"Target table: {_target_fact_table(gold_schema, _safe_identifier(str(mapping.get('kpi_name') or 'kpi'), 'kpi'))}",
             "",
             "Instructions to LLM:",
             "- Generate PySpark code.",
@@ -219,10 +229,16 @@ def _llm_prompt(mapping: Dict[str, Any], run_id: str, gold_schema: str) -> str:
             "- Write Delta output incrementally and partition facts by period_start when available.",
         ]
     )
+    return "\n".join(prompt_parts)
 
 
-def llm_generate_gold_code(mapping: Dict[str, Any], run_id: str, gold_schema: str) -> str:
-    prompt = _llm_prompt(mapping, run_id, gold_schema)
+def llm_generate_gold_code(
+    mapping: Dict[str, Any],
+    run_id: str,
+    gold_schema: str,
+    domain_reference_context: str = "",
+) -> str:
+    prompt = _llm_prompt(mapping, run_id, gold_schema, domain_reference_context)
     provider = os.getenv("ATHENA_GOLD_LLM_PROVIDER", "azure_openai")
     model = os.getenv("ATHENA_GOLD_LLM_MODEL")
     try:
@@ -583,6 +599,20 @@ def _generate_one_mapping(
     kpi_name = str(mapping.get("kpi_name") or "KPI")
     kpi_id = _safe_identifier(kpi_name, "kpi")
     target_table = _target_fact_table(gold_schema, kpi_id)
+    kb_cfg = get_domain_kb_config()
+    kb_query_parts = [
+        kpi_name,
+        str(mapping.get("source_silver_table") or ""),
+        json.dumps(mapping.get("measure") or {}, default=str),
+        json.dumps(mapping.get("grouping_dimensions") or [], default=str),
+        json.dumps(mapping.get("join_paths") or [], default=str),
+    ]
+    kb_result = load_domain_kb(
+        query_text=" ".join(kb_query_parts),
+        top_k=kb_cfg.top_k_gold,
+        max_chars=kb_cfg.max_chars_gold,
+        content_types=None,
+    )
 
     if not _usable_mapping(mapping):
         return {
@@ -594,13 +624,24 @@ def _generate_one_mapping(
             "target_table": target_table,
             "script_path": None,
             "dimension_script_path": None,
+            "domain_knowledge_base": {
+                "enabled": kb_cfg.enabled,
+                "knowledge_base_id": kb_result.get("knowledge_base_id"),
+                "rows_retrieved": kb_result.get("rows_retrieved", 0),
+                "chars_injected": kb_result.get("chars_injected", 0),
+            },
         }
 
     llm_requested = _llm_enabled_for_gold()
     generation_mode = "LLM" if llm_requested else "DETERMINISTIC"
     fallback_reason = None
     if llm_requested:
-        code = llm_generate_gold_code(mapping=mapping, run_id=run_id, gold_schema=gold_schema)
+        code = llm_generate_gold_code(
+            mapping=mapping,
+            run_id=run_id,
+            gold_schema=gold_schema,
+            domain_reference_context=str(kb_result.get("context_text") or ""),
+        )
         try:
             _validate_python(code)
         except Exception as exc:
@@ -641,6 +682,12 @@ def _generate_one_mapping(
         "dimension_count": len(mapping.get("grouping_dimensions") or []),
         "kimball_dimension_count": len(_dimension_specs(mapping)),
         "join_count": len(mapping.get("join_paths") or []),
+        "domain_knowledge_base": {
+            "enabled": kb_cfg.enabled,
+            "knowledge_base_id": kb_result.get("knowledge_base_id"),
+            "rows_retrieved": kb_result.get("rows_retrieved", 0),
+            "chars_injected": kb_result.get("chars_injected", 0),
+        },
     }
 
 

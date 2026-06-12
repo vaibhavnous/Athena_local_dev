@@ -54,6 +54,15 @@ Backend reads environment variables (commonly via `Athena_backend/.env`).
 - `PINECONE_API_KEY`
 - `PINECONE_INDEX_NAME`
 - `PINECONE_ENVIRONMENT`
+- `PINECONE_KNOWLEDGE_BASE_INDEX_NAME` (defaults to `knowledgebase`)
+
+**Optional Domain Knowledge Base**
+- `ATHENA_USE_DOMAIN_KB` (default `false`; set `true` for runtime retrieval)
+- `ATHENA_KB_ID` (defaults to `PC_Insurance_V1`)
+- `ATHENA_DOMAIN_PROFILE` (defaults to `Insurance`)
+- `ATHENA_KB_TOP_K_ENRICHMENT`, `ATHENA_KB_TOP_K_GOLD`
+- `ATHENA_KB_MAX_CHARS_ENRICHMENT`, `ATHENA_KB_MAX_CHARS_GOLD`
+- One-time build: `cd Athena_backend && python scripts/build_domain_kb.py`
 
 **Azure OpenAI**
 - `AZURE_OPENAI_API_KEY`
