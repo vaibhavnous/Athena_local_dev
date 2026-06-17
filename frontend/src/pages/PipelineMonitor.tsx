@@ -1,13 +1,15 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, FileText, Play, RefreshCcw, RotateCcw, Users, X } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, FileText, Play, RefreshCcw, RotateCcw, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
 import { getPhaseGroups, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
-import { abortRun, continueStage, getRun, getRuns } from '../api/athenaApi'
+import { abortRun, continueStage, getRun, getRuns, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
 function PipelineMonitor() {
-  const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline, addNotification } = useAthenaStore()
+  const navigate = useNavigate()
+  const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline, addNotification, addRun } = useAthenaStore()
   const activeRun = runs.find((run) => run.id === activeRunId) || runs[0] || null
   const phases = useMemo(() => getPhaseGroups(activeRun), [activeRun])
 
@@ -79,10 +81,13 @@ function PipelineMonitor() {
   const runLabel = summarizeRunSource(activeRun)
   const activeTone = statusTone(activeRun?.status)
   const isFailedRun = String(activeRun?.status || '').toUpperCase() === 'FAILED'
-  const isStageConfirmationPaused = String(activeRun?.status || '').toUpperCase() === 'PAUSED_FOR_STAGE_CONFIRMATION'
+  const isStageConfirmationPaused =
+    String(activeRun?.status || '').toUpperCase() === 'PAUSED_FOR_STAGE_CONFIRMATION' ||
+    Boolean(activeRun?.stage_confirmation?.awaiting_confirmation)
   const [dismissedFailureBannerFor, setDismissedFailureBannerFor] = useState<string | null>(null)
   const [autoAdvanceStages, setAutoAdvanceStages] = useState(false)
   const [stageConfirmSubmitting, setStageConfirmSubmitting] = useState(false)
+  const [failureActionSubmitting, setFailureActionSubmitting] = useState('')
 
   useEffect(() => {
     if (!isFailedRun) {
@@ -109,13 +114,80 @@ function PipelineMonitor() {
     )
   }
 
-  const handleUnavailableFailureAction = (label) => {
-    addNotification({
-      type: 'amber',
-      title: `${label} not available`,
-      message: 'The backend does not expose this recovery action yet. The UI banner is ready once those endpoints are added.',
-      duration: 4500
-    })
+  const handleRetryFailedStage = async () => {
+    if (!activeRun?.id) return
+    setFailureActionSubmitting('retry')
+    try {
+      await retryFailedStage(activeRun.id)
+      const refreshed = await getRun(activeRun.id)
+      updateRun(activeRun.id, refreshed)
+      addNotification({
+        type: 'success',
+        title: 'Failed stage retried',
+        message: `Retry submitted for ${failureSummary.failedStage}.`,
+        duration: 3500,
+      })
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Retry failed stage failed',
+        message: error.message || 'Unable to retry the failed stage.',
+        duration: 4500,
+      })
+    } finally {
+      setFailureActionSubmitting('')
+    }
+  }
+
+  const handleResumeFromFailure = async () => {
+    if (!activeRun?.id) return
+    setFailureActionSubmitting('resume')
+    try {
+      await resumeFromFailure(activeRun.id)
+      const refreshed = await getRun(activeRun.id)
+      updateRun(activeRun.id, refreshed)
+      addNotification({
+        type: 'success',
+        title: 'Failure resume submitted',
+        message: 'The pipeline is resuming from its saved failure state.',
+        duration: 3500,
+      })
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Resume from failure failed',
+        message: error.message || 'Unable to resume the failed run.',
+        duration: 4500,
+      })
+    } finally {
+      setFailureActionSubmitting('')
+    }
+  }
+
+  const handleRestartFailedRun = async () => {
+    if (!activeRun?.id) return
+    setFailureActionSubmitting('restart')
+    try {
+      const restarted = await restartRun(activeRun.id)
+      const nextRun = await getRun(restarted.run_id)
+      addRun(nextRun)
+      setActiveRun(nextRun.id)
+      addNotification({
+        type: 'success',
+        title: 'Run restarted',
+        message: `Started a new run from ${activeRun.brd_filename || activeRun.id}.`,
+        duration: 3500,
+      })
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Restart failed',
+        message: error.message || 'Unable to restart the failed run.',
+        duration: 4500,
+      })
+    } finally {
+      setFailureActionSubmitting('')
+    }
   }
 
   const handleContinueStage = async () => {
@@ -159,6 +231,12 @@ function PipelineMonitor() {
     }
   }
 
+  const handleOpenGateReview = () => {
+    if (!activeRun?.id) return
+    setActiveRun(activeRun.id)
+    navigate('/app/hitl')
+  }
+
   return (
     <div className="flex h-full min-h-[calc(100vh-116px)] flex-col">
       <div className="mb-7 flex flex-col gap-4">
@@ -185,8 +263,9 @@ function PipelineMonitor() {
         </div>
 
         {isFailedRun && dismissedFailureBannerFor !== activeRun.id && (
-          <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-red-500/35 bg-[#17111d] px-6 py-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
-            <div className="flex min-w-0 items-center gap-4">
+          <div className="rounded-2xl border border-red-500/35 bg-[#17111d] px-6 py-5 shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex min-w-0 items-start gap-4">
               <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border border-red-500/30 bg-red-500/10 text-red-400">
                 <AlertTriangle size={18} />
               </div>
@@ -202,6 +281,11 @@ function PipelineMonitor() {
                   <span className="text-[#d4d9e5]">at `{failureSummary.failedStage}`</span>
                   <span className="text-[#9da7bb]">{failureSummary.progressLabel}</span>
                 </div>
+                {activeRun?.error && (
+                  <div className="mt-2 max-w-[920px] truncate text-sm text-red-300/90">
+                    {activeRun.error}
+                  </div>
+                )}
                 <div className="mt-2 flex items-center gap-2 text-sm text-[#9da7bb]">
                   <Clock3 size={14} />
                   {failureSummary.timeAgo}
@@ -209,27 +293,30 @@ function PipelineMonitor() {
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3 xl:justify-end">
               <button
-                onClick={() => handleUnavailableFailureAction('Retry Failed Stage')}
-                className="inline-flex h-11 items-center gap-2 rounded-xl border border-amber-500/35 bg-amber-500/10 px-5 text-sm font-semibold text-amber-400 transition-colors hover:bg-amber-500/15"
+                onClick={handleRetryFailedStage}
+                disabled={failureActionSubmitting !== ''}
+                className="inline-flex h-11 items-center gap-2 rounded-xl border border-amber-500/35 bg-amber-500/10 px-5 text-sm font-semibold text-amber-400 transition-colors hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <RotateCcw size={16} />
-                Retry Failed Stage
+                {failureActionSubmitting === 'retry' ? 'Retrying...' : 'Retry Failed Stage'}
               </button>
               <button
-                onClick={() => handleUnavailableFailureAction('Resume from Failure')}
-                className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#3f82ff]/40 bg-[#3f82ff]/10 px-5 text-sm font-semibold text-[#3f82ff] transition-colors hover:bg-[#3f82ff]/15"
+                onClick={handleResumeFromFailure}
+                disabled={failureActionSubmitting !== ''}
+                className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#3f82ff]/40 bg-[#3f82ff]/10 px-5 text-sm font-semibold text-[#3f82ff] transition-colors hover:bg-[#3f82ff]/15 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Play size={16} />
-                Resume from Failure
+                {failureActionSubmitting === 'resume' ? 'Resuming...' : 'Resume from Failure'}
               </button>
               <button
-                onClick={() => handleUnavailableFailureAction('Restart')}
-                className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#2e394d] bg-[#101827] px-5 text-sm font-semibold text-white transition-colors hover:bg-[#152033]"
+                onClick={handleRestartFailedRun}
+                disabled={failureActionSubmitting !== ''}
+                className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#2e394d] bg-[#101827] px-5 text-sm font-semibold text-white transition-colors hover:bg-[#152033] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <RefreshCcw size={16} />
-                Restart
+                {failureActionSubmitting === 'restart' ? 'Restarting...' : 'Restart'}
               </button>
               <button
                 onClick={() => setDismissedFailureBannerFor(activeRun.id)}
@@ -238,6 +325,7 @@ function PipelineMonitor() {
               >
                 <X size={16} />
               </button>
+            </div>
             </div>
           </div>
         )}
@@ -302,7 +390,7 @@ function PipelineMonitor() {
                       <div className="ml-[18px] border-l border-[#2b3648] pl-7">
                         <div className="space-y-5">
                           {phase.steps.map((step) => (
-                            <StepRow key={step.key} step={step} />
+                            <StepRow key={step.key} step={step} onOpenReview={handleOpenGateReview} />
                           ))}
                         </div>
                       </div>
@@ -417,9 +505,17 @@ function buildFailureSummary(run) {
     const state = String(step?.state || step?.status || '').toUpperCase()
     return state === 'COMPLETED' || state === 'SUCCESS'
   }).length
+  const failedStageLabel =
+    run?.failed_stage_label ||
+    run?.failed_stage_key ||
+    failedStep?.label ||
+    failedStep?.name ||
+    failedStep?.key ||
+    failedStep?.id ||
+    'stage_unknown'
 
   return {
-    failedStage: failedStep?.key || failedStep?.id || failedStep?.name || 'stage_unknown',
+    failedStage: failedStageLabel,
     progressLabel: `${completedCount}/${steps.length || 0} stages done`,
     timeAgo: formatTimeAgo(run?.completed_at || run?.updated_at || run?.started_at),
   }
@@ -474,14 +570,33 @@ function StatusPill({ status, tone, compact }) {
   )
 }
 
-function StepRow({ step }) {
+function StepRow({ step, onOpenReview }) {
   const complete = step.state === 'COMPLETED'
   const waiting = step.state === 'HITL_WAIT'
   const running = step.state === 'RUNNING'
   const failed = step.state === 'FAILED'
+  const isGate = /^gate[1-5]$/.test(String(step.key || ''))
+  const canOpenReview = waiting && isGate && onOpenReview
 
   return (
-    <div className="flex items-center gap-4">
+    <div
+      role={canOpenReview ? 'button' : undefined}
+      tabIndex={canOpenReview ? 0 : undefined}
+      onClick={canOpenReview ? onOpenReview : undefined}
+      onKeyDown={
+        canOpenReview
+          ? (event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                onOpenReview()
+              }
+            }
+          : undefined
+      }
+      className={`flex min-h-[38px] items-center gap-4 ${
+        canOpenReview ? 'cursor-pointer rounded-lg transition-colors hover:bg-white/[0.03]' : ''
+      }`}
+    >
       <div className="relative h-7 w-7 flex-shrink-0">
         {running && (
           <>
@@ -500,14 +615,13 @@ function StepRow({ step }) {
             ? 'border-red-400 bg-red-500/10 text-red-400'
             : 'border-[#253044] bg-[#0b1120] text-[#64748b]'
         }`}>
-          {waiting ? <Users size={14} /> : complete ? <CheckCircle2 size={14} /> : <Circle size={running ? 9 : 11} className={running ? 'animate-pulse' : ''} />}
+          {complete ? <CheckCircle2 size={14} /> : <Circle size={running ? 9 : 11} className={running ? 'animate-pulse' : ''} />}
         </div>
       </div>
       <div className="min-w-0">
         <div className={`truncate text-[14px] font-semibold ${complete || waiting || running ? 'text-white' : 'text-[#7d8daa]'}`}>
           {step.label}
         </div>
-        {step.detail ? <div className="mt-0.5 truncate text-xs text-[#64748b]">{step.detail}</div> : null}
       </div>
     </div>
   )

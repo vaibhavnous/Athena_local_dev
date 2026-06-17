@@ -146,13 +146,20 @@ def start_sftp_pipeline(
     sftp_entity: Optional[str] = None,
     source: str = "sftp",
 ) -> Dict[str, Any]:
+    source_value = str(source or "sftp").lower()
+    entity = str(sftp_entity or "").lower().strip()
+    if source_value == "adls_gen2":
+        entity = "auto"
+    elif source_value == "sftp" and entity not in {"transactions", "employee", "both"}:
+        entity = "transactions"
+
     initial_state: Dict[str, Any] = {
         "brd_text": brd_text or "",
         "run_id": run_id,
         "metadata": {},
         "status": "PENDING",
-        "source": str(source or "sftp").lower(),
-        "sftp_entity": str(sftp_entity or "transactions").lower(),
+        "source": source_value,
+        "sftp_entity": entity,
     }
     graph_app = build_source_ingestion_graph()
     result = graph_app.invoke(initial_state)

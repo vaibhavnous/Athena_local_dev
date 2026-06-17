@@ -1,22 +1,21 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
-import { CheckCircle, CheckCircle2, Loader2, Send, Shield, Table2, Timer } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { CheckCircle, CheckCircle2, Copy, Download, Loader2, Send, Shield, Table2, Timer } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import KpiReviewCard from '../components/hitl/KpiReviewCard'
 import EditKpiModal from '../components/hitl/EditKpiModal'
 import {
   getBronzeReview,
-  approveKpi,
   getEnrichmentReviews,
   fetchKpiReviews,
   getRun,
   getPipelineKpis,
   getSilverReview,
   getTableReviews,
-  modifyKpi,
-  rejectKpi,
   submitBronzeReview,
+  submitDecisions as submitHitlDecisions,
   submitEnrichmentReview,
   submitSilverReview,
   submitTableReviews
@@ -40,22 +39,30 @@ async function waitForRunGate(runId, updateRun, targetGate, attempts = 20) {
 }
 
 function HitlQueue() {
+  const navigate = useNavigate()
   const {
     runs,
     activeRunId,
     hitlQueues,
     addNotification,
     submitDecisions: storeSubmitDecisions,
+    addRun,
     updateRun,
     setHitlQueue,
-    setHitlSourceRunId
+    setHitlSourceRunId,
+    setActiveRun
   } = useAthenaStore()
 
   const reviewRuns = useMemo(
     () =>
       runs.filter((run) => {
         const gate = Number(run?.next_gate || 0)
-        return gate >= 1 && gate <= 5
+        return (
+          gate >= 1 &&
+          gate <= 5 &&
+          String(run?.status || '').toUpperCase() !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
+          !run?.stage_confirmation?.awaiting_confirmation
+        )
       }),
     [runs]
   )
@@ -77,9 +84,10 @@ function HitlQueue() {
   const [silverReview, setSilverReview] = useState(null)
   const [gate3Decision, setGate3Decision] = useState('APPROVED')
   const [gateDecision, setGateDecision] = useState('APPROVED')
+  const [selectedRunDetail, setSelectedRunDetail] = useState(null)
 
   const REVIEWER_ID = 'reviewer@nousinfo.com'
-  const currentRun = runs.find((run) => run.id === selectedRunId)
+  const currentRun = runs.find((run) => run.id === selectedRunId) || (selectedRunDetail?.id === selectedRunId ? selectedRunDetail : null)
   const gateToReview = Number(currentRun?.next_gate || 0)
   const isReviewableRun = gateToReview >= 1 && gateToReview <= 5
   const isGate2 = gateToReview === 2
@@ -92,10 +100,72 @@ function HitlQueue() {
   const gate3Name = getGateDisplayName(3)
   const gate4Name = getGateDisplayName(4)
   const gate5Name = getGateDisplayName(5)
-  const queue = useMemo(
+  const rawQueue = useMemo(
     () => hitlQueues[selectedRunId] || (currentRun?.kpis || []),
     [currentRun?.kpis, hitlQueues, selectedRunId]
   )
+  const queue = useMemo(
+    () => filterReviewQueue(rawQueue, selectedRunId, currentRun?.source),
+    [rawQueue, selectedRunId, currentRun?.source]
+  )
+
+  useEffect(() => {
+    if (selectedRunId || !activeRunId) return
+    let cancelled = false
+
+    const hydrateActiveRun = async () => {
+      try {
+        const detail = await getRun(activeRunId)
+        if (cancelled || !detail?.id) return
+
+        const gate = Number(detail?.next_gate || 0)
+        if (gate < 1 || gate > 5) return
+
+        const alreadyKnown = runs.some((run) => run.id === detail.id)
+        if (alreadyKnown) updateRun(detail.id, detail)
+        else addRun(detail)
+
+        setSelectedRunDetail(detail)
+        setSelectedRunId(detail.id)
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('[HitlQueue] Failed to hydrate active review run', error)
+        }
+      }
+    }
+
+    hydrateActiveRun()
+    return () => {
+      cancelled = true
+    }
+  }, [activeRunId, addRun, runs, selectedRunId, updateRun])
+
+  useEffect(() => {
+    if (!selectedRunId || currentRun) return
+    let cancelled = false
+
+    const hydrateSelectedRun = async () => {
+      try {
+        const detail = await getRun(selectedRunId)
+        if (cancelled || !detail?.id) return
+
+        const alreadyKnown = runs.some((run) => run.id === detail.id)
+        if (alreadyKnown) updateRun(detail.id, detail)
+        else addRun(detail)
+
+        setSelectedRunDetail(detail)
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('[HitlQueue] Failed to hydrate selected review run', error)
+        }
+      }
+    }
+
+    hydrateSelectedRun()
+    return () => {
+      cancelled = true
+    }
+  }, [addRun, currentRun, runs, selectedRunId, updateRun])
 
   useEffect(() => {
     const activeReviewRun = reviewRuns.find((run) => run.id === activeRunId)
@@ -108,7 +178,9 @@ function HitlQueue() {
       return
     }
 
-    const selectedStillExists = selectedRunId && runs.some((run) => run.id === selectedRunId)
+    const selectedStillExists =
+      selectedRunId &&
+      (runs.some((run) => run.id === selectedRunId) || selectedRunDetail?.id === selectedRunId)
     const selectedNeedsReview = currentRun && isReviewableRun
 
     if (selectedStillExists && selectedNeedsReview) return
@@ -120,7 +192,7 @@ function HitlQueue() {
       setSelectedTables({})
       setLocalDecisions({})
     }
-  }, [runs, reviewRuns, selectedRunId, currentRun, isReviewableRun, activeRunId])
+  }, [runs, reviewRuns, selectedRunId, currentRun, isReviewableRun, activeRunId, selectedRunDetail?.id])
 
   useEffect(() => {
     setTableReview(null)
@@ -208,10 +280,33 @@ function HitlQueue() {
           return
         }
 
+        let expectedSource = currentRun?.source
+        if (!expectedSource) {
+          try {
+            const detail = await getRun(selectedRunId)
+            if (cancelled) return
+            expectedSource = detail?.source || expectedSource
+            if (detail?.id) updateRun(selectedRunId, detail)
+          } catch {
+            // KPI review can still be validated by run_id when source is absent from the run summary.
+          }
+        }
+
         const reviewData = await fetchKpiReviews(selectedRunId)
         if (cancelled) return
+        if (!reviewPayloadMatchesRun(reviewData, selectedRunId, expectedSource)) {
+          setHitlQueue(selectedRunId, [])
+          updateRun(selectedRunId, { kpis: [] })
+          addNotification({
+            type: 'error',
+            title: 'Review Source Mismatch',
+            message: 'Blocked KPI review data because it does not match the selected run source.',
+            duration: 5000
+          })
+          return
+        }
         if (reviewData.kpis && reviewData.kpis.length > 0) {
-          const mapped = reviewData.kpis.map(mapHitlRow)
+          const mapped = filterReviewQueue(reviewData.kpis.map(mapHitlRow), selectedRunId, expectedSource)
           setHitlQueue(selectedRunId, mapped)
           setHitlSourceRunId(selectedRunId, selectedRunId)
           updateRun(selectedRunId, { kpis: mapped })
@@ -220,9 +315,15 @@ function HitlQueue() {
 
         const fallback = await getPipelineKpis(selectedRunId)
         if (cancelled) return
-        setHitlQueue(selectedRunId, fallback.kpis || [])
+        if (!reviewPayloadMatchesRun(fallback, selectedRunId, expectedSource)) {
+          setHitlQueue(selectedRunId, [])
+          updateRun(selectedRunId, { kpis: [] })
+          return
+        }
+        const fallbackKpis = filterReviewQueue((fallback.kpis || []).map(mapHitlRow), selectedRunId, expectedSource)
+        setHitlQueue(selectedRunId, fallbackKpis)
         setHitlSourceRunId(selectedRunId, fallback.runId)
-        updateRun(selectedRunId, { kpis: fallback.kpis || [], kpi_source_run_id: fallback.runId })
+        updateRun(selectedRunId, { kpis: fallbackKpis, kpi_source_run_id: fallback.runId })
       } catch (error) {
         if (cancelled) return
         addNotification({
@@ -266,13 +367,19 @@ function HitlQueue() {
   const bronzeReviewFeeds = bronzeReview?.bronze_review_artifact?.feeds || []
   const silverReviewItems = silverReview?.silver_review_artifact?.items || []
   const gateReviewReady = isGate4 ? bronzeReviewFeeds.length > 0 : isGate5 ? silverReviewItems.length > 0 : false
+  const allKpisDecided = queue.length > 0 && queue.every((item) => localDecisions[item.queue_id || item.id] || item.decision)
   const canSubmitReview = isGate2
     ? (isSftpRun ? totalFeedCount > 0 : (tableReview?.nominated_tables || []).length > 0)
     : isGate3
     ? true
     : (isGate4 || isGate5)
     ? true
-    : Object.keys(localDecisions).length > 0
+    : allKpisDecided
+
+  const returnToMonitor = (runId) => {
+    if (runId) setActiveRun(runId)
+    navigate('/app/data-discovery')
+  }
 
   const handleApprove = (kpiId) => {
     setLocalDecisions((prev) => ({ ...prev, [kpiId]: 'APPROVED' }))
@@ -354,7 +461,7 @@ function HitlQueue() {
               .filter((key) => selectedTables[key])
         await submitTableReviews(selectedRunId, approvedTables)
         const refreshed = await getRun(selectedRunId)
-        updateRun(selectedRunId, refreshed)
+        updateRun(selectedRunId, { ...refreshed, status: refreshed?.status || 'RUNNING' })
         setTableReview(null)
         setSelectedTables({})
         addNotification({
@@ -365,6 +472,7 @@ function HitlQueue() {
             : 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
           duration: 5000
         })
+        returnToMonitor(selectedRunId)
       } catch (error) {
         addNotification({ type: 'error', title: `${gate2Name} Failed`, message: error.message, duration: 5000 })
       } finally {
@@ -390,6 +498,7 @@ function HitlQueue() {
             : 'Enrichment review was submitted. Pipeline is still processing.',
           duration: 5000
         })
+        returnToMonitor(selectedRunId)
       } catch (error) {
         addNotification({ type: 'error', title: `${gate3Name} Failed`, message: error.message, duration: 5000 })
       } finally {
@@ -415,6 +524,7 @@ function HitlQueue() {
             : 'Bronze review was submitted. Pipeline is still processing.',
           duration: 5000
         })
+        returnToMonitor(selectedRunId)
       } catch (error) {
         addNotification({ type: 'error', title: `${gate4Name} Failed`, message: error.message, duration: 5000 })
       } finally {
@@ -436,6 +546,7 @@ function HitlQueue() {
           message: 'Silver review was submitted. Pipeline is resuming.',
           duration: 5000
         })
+        returnToMonitor(selectedRunId)
       } catch (error) {
         addNotification({ type: 'error', title: `${gate5Name} Failed`, message: error.message, duration: 5000 })
       } finally {
@@ -444,42 +555,21 @@ function HitlQueue() {
       return
     }
 
-    const decided = queue.filter((item) => localDecisions[item.queue_id || item.id] || item.decision)
-    if (decided.length === 0) {
-      addNotification({ type: 'amber', title: 'No Decisions', message: 'Make at least one decision before submitting.', duration: 3000 })
+    const missingDecisions = queue.filter((item) => !localDecisions[item.queue_id || item.id] && !item.decision)
+    if (missingDecisions.length > 0) {
+      addNotification({
+        type: 'amber',
+        title: 'Review Incomplete',
+        message: `Decide all KPIs before submitting. ${missingDecisions.length} still pending.`,
+        duration: 4000
+      })
       return
     }
 
     setSubmitting(true)
-    let saved = 0
-    let failed = 0
     const hasQueueIds = queue.some((item) => item.queue_id)
 
     try {
-      if (hasQueueIds) {
-        await Promise.allSettled(
-          queue.map(async (item) => {
-            const key = item.queue_id || item.id
-            const decision = localDecisions[key] || item.decision
-            if (!decision || !item.queue_id) return
-
-            try {
-              if (decision === 'APPROVED') {
-                await approveKpi(item.queue_id, REVIEWER_ID)
-              } else if (decision === 'REJECTED') {
-                await rejectKpi(item.queue_id, REVIEWER_ID, rejectionReasons[key] || 'Rejected by reviewer')
-              } else if (decision === 'EDITED') {
-                const edited = editedKpis[key]
-                await modifyKpi(item.queue_id, REVIEWER_ID, { ...(item.kpi_detail || item), ...edited })
-              }
-              saved++
-            } catch {
-              failed++
-            }
-          })
-        )
-      }
-
       const decisions = queue.map((item) => {
         const key = item.queue_id || item.id
         const decision = localDecisions[key] || item.decision
@@ -494,8 +584,12 @@ function HitlQueue() {
         }
       }).filter(Boolean)
 
+      if (hasQueueIds) {
+        await submitHitlDecisions(selectedRunId, decisions)
+      }
       storeSubmitDecisions(selectedRunId, decisions)
-      updateRun(selectedRunId, { status: 'RUNNING' })
+      const refreshed = hasQueueIds ? await getRun(selectedRunId) : null
+      updateRun(selectedRunId, refreshed || { status: 'RUNNING' })
       setLocalDecisions({})
       setEditedKpis({})
       setRejectionReasons({})
@@ -507,21 +601,15 @@ function HitlQueue() {
           message: 'KPIs were loaded from fallback data. Database update was skipped.',
           duration: 5000
         })
-      } else if (failed === 0) {
+      } else {
         addNotification({
           type: 'success',
           title: 'Decisions Saved',
-          message: `${saved} KPI decision${saved !== 1 ? 's' : ''} saved. Pipeline resuming.`,
-          duration: 5000
-        })
-      } else {
-        addNotification({
-          type: 'amber',
-          title: 'Partial Save',
-          message: `${saved} saved, ${failed} failed to save.`,
+          message: `${decisions.length} KPI decision${decisions.length !== 1 ? 's' : ''} saved. Pipeline resuming.`,
           duration: 5000
         })
       }
+      returnToMonitor(selectedRunId)
     } catch (error) {
       addNotification({ type: 'error', title: 'Submit Failed', message: error.message, duration: 5000 })
     } finally {
@@ -988,14 +1076,24 @@ function HitlQueue() {
 
 function mapHitlRow(row) {
   return {
-    id: row.queue_id,
-    queue_id: row.queue_id,
+    id: row.queue_id || row.id,
+    queue_id: row.queue_id || row.id,
     item_id: row.item_id,
+    run_id: row.run_id,
+    source: row.source ? normalizeSourceValue(row.source) : undefined,
     item_type: row.item_type || 'METADATA',
+    name: row.name,
+    definition: row.definition,
+    category: row.category,
+    domain: row.domain,
+    confidence: row.confidence,
+    status: row.status,
+    grounded: row.grounded,
+    explicit: row.explicit,
     kpi_detail: row.kpi_detail || {},
     modified_detail: row.modified_detail || null,
     gate_status: row.gate_status,
-    decision: row.gate_status !== 'PENDING' ? row.gate_status : null,
+    decision: row.decision || (row.gate_status !== 'PENDING' ? row.gate_status : null),
     reviewer_id: row.reviewer_id,
     rejection_reason: row.rejection_reason,
     auto_approved: row.auto_approved === true || row.auto_approved === 'true',
@@ -1003,6 +1101,38 @@ function mapHitlRow(row) {
     decided_at: row.decided_at,
     timeout_at: row.timeout_at
   }
+}
+
+function normalizeSourceValue(source) {
+  return String(source || '').toLowerCase()
+}
+
+function getReviewItemRunId(item) {
+  if (item?.run_id) return String(item.run_id)
+  const key = String(item?.queue_id || item?.item_id || item?.id || '')
+  return key.includes(':') ? key.split(':')[0] : ''
+}
+
+function filterReviewQueue(items, runId, source) {
+  const expectedRunId = String(runId || '')
+  const expectedSource = normalizeSourceValue(source)
+  return (items || []).filter((item) => {
+    const itemRunId = getReviewItemRunId(item)
+    if (expectedRunId && itemRunId && itemRunId !== expectedRunId) return false
+    const itemSource = normalizeSourceValue(item?.source)
+    if (itemSource && expectedSource && itemSource !== expectedSource) return false
+    return true
+  })
+}
+
+function reviewPayloadMatchesRun(payload, runId, source) {
+  if (!payload) return false
+  if (payload.run_id && String(payload.run_id) !== String(runId || '')) return false
+  if (payload.runId && String(payload.runId) !== String(runId || '')) return false
+  const payloadSource = normalizeSourceValue(payload.source)
+  const expectedSource = normalizeSourceValue(source)
+  if (payloadSource && expectedSource && payloadSource !== expectedSource) return false
+  return true
 }
 
 function CountRow({ label, value, color, pulse }) {
@@ -1192,11 +1322,53 @@ function GateDecisionCard({ gateDecision, setGateDecision, approveLabel, rejectL
 }
 
 function ReviewBlock({ label, value }) {
+  const text = value || '-'
+  const isScript = /script/i.test(label) && text !== '-'
+
+  const copyValue = async () => {
+    await navigator.clipboard.writeText(text)
+  }
+
+  const downloadValue = () => {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const url = window.URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    const fileName = `${label || 'generated_script'}`.replace(/[^\w.-]+/g, '_').toLowerCase()
+    anchor.href = url
+    anchor.download = fileName.endsWith('.py') ? fileName : `${fileName}.py`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    window.URL.revokeObjectURL(url)
+  }
+
   return (
     <div>
-      <div className="mb-1 text-[11px] uppercase tracking-wider text-[#7f8eab]">{label}</div>
+      <div className="mb-1 flex items-center justify-between gap-3">
+        <div className="text-[11px] uppercase tracking-wider text-[#7f8eab]">{label}</div>
+        {isScript && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={copyValue}
+              className="inline-flex items-center gap-1 rounded-md border border-[#22304b] px-2 py-1 text-[10px] font-semibold text-[#aab8d0] hover:border-[#3f82ff] hover:text-white"
+            >
+              <Copy size={11} />
+              Copy
+            </button>
+            <button
+              type="button"
+              onClick={downloadValue}
+              className="inline-flex items-center gap-1 rounded-md border border-[#22304b] px-2 py-1 text-[10px] font-semibold text-[#aab8d0] hover:border-[#3f82ff] hover:text-white"
+            >
+              <Download size={11} />
+              Download
+            </button>
+          </div>
+        )}
+      </div>
       <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-[#22304b] bg-[#09111f] p-3 text-xs text-text-secondary">
-        {value || '-'}
+        {text}
       </pre>
     </div>
   )

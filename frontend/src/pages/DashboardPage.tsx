@@ -264,7 +264,7 @@ function DashboardPage() {
 
                       <div className="flex flex-col items-end gap-2">
                         <StatusBadge status={run.status} size="sm" />
-                        {[2, 3, 4, 5].includes(Number(run.next_gate || 0)) ? (
+                        {[1, 2, 3, 4, 5].includes(Number(run.next_gate || 0)) ? (
                           <span className="text-[11px] text-slate-400">Gate {run.next_gate}</span>
                         ) : (
                           <span className="text-[11px] text-slate-400">

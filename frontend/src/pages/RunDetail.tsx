@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ArrowLeft, ChevronDown, ChevronUp, CheckCircle2, Loader2, ShieldCheck, XCircle, Code2 } from 'lucide-react'
+import { ArrowLeft, ChevronDown, ChevronUp, CheckCircle2, Loader2, ShieldCheck, XCircle, Code2, Copy, Download } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineDag from '../components/pipeline/PipelineDag'
 import StatusBadge from '../components/shared/StatusBadge'
@@ -11,9 +11,7 @@ import CopyableId from '../components/shared/CopyableId'
 import JsonViewer from '../components/shared/JsonViewer'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 import {
-  getBronzeReview,
   getRun,
-  getSilverReview,
   submitBronzeReview,
   submitEnrichmentReview,
   submitSilverReview,
@@ -21,7 +19,7 @@ import {
 } from '../api/athenaApi'
 import { getGateDisplayName } from '../utils/pipelinePhases'
 
-const TABS = ['Overview', 'Requirements', 'KPIs', 'Scripts', 'Review Gates', 'HITL Decisions', 'Cost Log']
+const TABS = ['Overview', 'Requirements', 'KPIs', 'Scripts', 'HITL Decisions', 'Cost Log']
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 
@@ -143,226 +141,11 @@ function RunDetail() {
           {activeTab === 'Overview' && <OverviewTab run={run} onRunRefresh={setBackendRun} addNotification={addNotification} />}
           {activeTab === 'Requirements' && <RequirementsTab run={run} />}
           {activeTab === 'KPIs' && <KpisTab run={run} />}
-          {activeTab === 'Scripts' && <ScriptsTab run={run} />}
-          {activeTab === 'Review Gates' && <ReviewGatesTab run={run} addNotification={addNotification} onRunRefresh={setBackendRun} />}
+          {activeTab === 'Scripts' && <ScriptsTab run={run} addNotification={addNotification} onRunRefresh={setBackendRun} />}
           {activeTab === 'HITL Decisions' && <HitlDecisionsTab run={run} />}
           {activeTab === 'Cost Log' && <CostLogTab run={run} />}
         </motion.div>
       </AnimatePresence>
-    </div>
-  )
-}
-
-function ReviewGatesTab({ run, addNotification, onRunRefresh }) {
-  const [bronzeReview, setBronzeReview] = useState(null)
-  const [silverReview, setSilverReview] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [submitting, setSubmitting] = useState(null)
-  const gate4Name = getGateDisplayName(4)
-  const gate5Name = getGateDisplayName(5)
-
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      setLoading(true)
-      try {
-        const [bronze, silver] = await Promise.allSettled([getBronzeReview(run.id), getSilverReview(run.id)])
-        if (cancelled) return
-        if (bronze.status === 'fulfilled') setBronzeReview(bronze.value)
-        if (silver.status === 'fulfilled') setSilverReview(silver.value)
-      } catch (error) {
-        if (!cancelled) {
-          addNotification({
-            type: 'error',
-            title: 'Review Gates Load Failed',
-            message: error.message || `Unable to load ${gate4Name} / ${gate5Name} review data.`,
-            duration: 5000
-          })
-        }
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-    load()
-    return () => {
-      cancelled = true
-    }
-  }, [run.id, addNotification, gate4Name, gate5Name])
-
-  const bronzeArtifact = bronzeReview?.bronze_review_artifact || run.bronze_review_artifact || {}
-  const silverArtifact = silverReview?.silver_review_artifact || run.silver_review_artifact || {}
-  const bronzeFeeds = bronzeArtifact.feeds || []
-  const silverItems = silverArtifact.items || []
-
-  const handleSubmit = async (gate, action) => {
-    setSubmitting(gate)
-    try {
-      if (gate === 4) {
-        await submitBronzeReview(run.id, action)
-      } else {
-        await submitSilverReview(run.id, action)
-      }
-      const refreshed = gate === 4 && action === 'APPROVED'
-        ? await waitForRunGate(run.id, 5)
-        : await getRun(run.id)
-      onRunRefresh(refreshed)
-      const bronze = await getBronzeReview(run.id).catch(() => null)
-      const silver = await getSilverReview(run.id).catch(() => null)
-      if (bronze) setBronzeReview(bronze)
-      if (silver) setSilverReview(silver)
-      addNotification({
-        type: 'success',
-        title: `Gate ${gate} ${action.toLowerCase()}`,
-        message: gate === 4 && action === 'APPROVED' && Number(refreshed?.next_gate || 0) === 5
-          ? `Bronze approved. Silver scripts are ready for ${gate5Name} review.`
-          : `Gate ${gate} review submitted.`,
-        duration: 4500
-      })
-    } catch (error) {
-      addNotification({
-        type: 'error',
-        title: `Gate ${gate} submit failed`,
-        message: error.message || 'Unable to submit review.',
-        duration: 5000
-      })
-    } finally {
-      setSubmitting(null)
-    }
-  }
-
-  if (loading) {
-    return <EmptyState message={`Loading ${gate4Name} / ${gate5Name} review artifacts...`} />
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="card p-5">
-        <div className="flex items-center justify-between gap-3 mb-4">
-          <div>
-            <h3 className="text-sm font-semibold text-gray-300">{gate4Name}</h3>
-            <p className="text-xs text-gray-500 mt-1">
-              Review Bronze plan, generated config, validation checklist, and script before ingestion.
-            </p>
-          </div>
-          <StatusBadge status={bronzeReview?.next_gate === 4 ? 'PENDING' : 'READY'} size="sm" />
-        </div>
-
-        <div className="grid gap-4 xl:grid-cols-2">
-          <div className="space-y-3">
-            {(bronzeFeeds || []).map((feed, index) => (
-              <div key={`${feed.feed_id || index}`} className="rounded-lg border border-bg-border bg-bg-base p-4 space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-gray-200">
-                      {feed.vendor}.{feed.entity}
-                    </div>
-                    <div className="text-xs text-gray-500 mt-1">
-                      {feed.source_type || run.source} | {feed.file_format || 'unknown'}
-                    </div>
-                  </div>
-                  <StatusBadge status={feed.validation_issues?.length ? 'REVIEW' : 'READY'} size="sm" />
-                </div>
-
-                <ReviewKV label="Feed Summary" value={feed.feed_summary ? JSON.stringify(feed.feed_summary, null, 2) : '-'} />
-                <ReviewKV label="Approved Schema" value={JSON.stringify(feed.approved_schema || [], null, 2)} mono />
-                <ReviewKV label="Primary Keys" value={(feed.primary_keys || []).join(', ') || '-'} />
-                <ReviewKV label="Watermark Column" value={feed.watermark_column || '-'} />
-                <ReviewKV label="Landing Path" value={feed.landing_path || '-'} mono />
-                <ReviewKV label="Bronze Output Path" value={feed.bronze_output_path || '-'} mono />
-                <ReviewKV label="Checkpoint Path" value={feed.checkpoint_path || '-'} mono />
-                <ReviewKV label="Validation Checklist" value={(feed.validation_checklist || []).join('\n')} />
-                <ReviewKV label="Generated Bronze Config" value={JSON.stringify(feed.generated_bronze_config || {}, null, 2)} mono />
-                <ReviewKV label="Generated Bronze Script" value={feed.generated_bronze_script || '-'} mono block />
-              </div>
-            ))}
-          </div>
-
-          <div className="rounded-lg border border-bg-border bg-bg-base p-4">
-            <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">{gate4Name} Actions</div>
-            <div className="flex flex-wrap gap-2">
-              <button onClick={() => handleSubmit(4, 'APPROVED')} disabled={submitting === 4} className="btn-primary text-sm">
-                Approve
-              </button>
-              <button onClick={() => handleSubmit(4, 'REJECTED')} disabled={submitting === 4} className="btn-secondary text-sm">
-                Reject
-              </button>
-              <button onClick={() => handleSubmit(4, 'REGENERATE')} disabled={submitting === 4} className="btn-secondary text-sm">
-                Regenerate
-              </button>
-            </div>
-            {bronzeArtifact.validation_checklist && (
-              <div className="mt-4">
-                <JsonViewer data={bronzeArtifact} maxHeight={420} />
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="card p-5">
-        <div className="flex items-center justify-between gap-3 mb-4">
-          <div>
-            <h3 className="text-sm font-semibold text-gray-300">{gate5Name}</h3>
-            <p className="text-xs text-gray-500 mt-1">
-              Review Silver transformations, type casts, dedup logic, DQ rules, masking rules, and the generated script.
-            </p>
-          </div>
-          <StatusBadge status={silverReview?.next_gate === 5 ? 'PENDING' : 'READY'} size="sm" />
-        </div>
-
-        <div className="space-y-3">
-          {(silverItems || []).map((item, index) => (
-            <div key={`${item.entity || index}`} className="rounded-lg border border-bg-border bg-bg-base p-4 space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-semibold text-gray-200">{item.entity || 'Silver Item'}</div>
-                  <div className="text-xs text-gray-500 mt-1">{item.bronze_source || '-'}</div>
-                </div>
-                <StatusBadge status="READY" size="sm" />
-              </div>
-
-              <ReviewKV label="Transformations" value={(item.transformations || []).join('\n') || '-'} />
-              <ReviewKV label="Type Casts" value={JSON.stringify(item.type_casts || [], null, 2)} mono />
-              <ReviewKV label="Dedup Logic" value={item.dedup_logic || '-'} />
-              <ReviewKV label="DQ Rules" value={(item.dq_rules || []).join('\n') || '-'} />
-              <ReviewKV label="PII Masking Rules" value={(item.pii_masking_rules || []).join('\n') || '-'} />
-              <ReviewKV label="Merge Strategy" value={item.merge_strategy || '-'} />
-              <ReviewKV label="Generated Silver Script" value={item.generated_silver_script || '-'} mono block />
-            </div>
-          ))}
-        </div>
-
-        <div className="mt-4 rounded-lg border border-bg-border bg-bg-base p-4">
-          <div className="text-xs uppercase tracking-wider text-gray-500 mb-2">{gate5Name} Actions</div>
-          <div className="flex flex-wrap gap-2">
-            <button onClick={() => handleSubmit(5, 'APPROVED')} disabled={submitting === 5} className="btn-primary text-sm">
-              Approve
-            </button>
-            <button onClick={() => handleSubmit(5, 'REJECTED')} disabled={submitting === 5} className="btn-secondary text-sm">
-              Reject
-            </button>
-            <button onClick={() => handleSubmit(5, 'REGENERATE')} disabled={submitting === 5} className="btn-secondary text-sm">
-              Regenerate
-            </button>
-          </div>
-          {silverArtifact && Object.keys(silverArtifact).length > 0 && (
-            <div className="mt-4">
-              <JsonViewer data={silverArtifact} maxHeight={420} />
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function ReviewKV({ label, value, mono = false, block = false }) {
-  return (
-    <div className="space-y-1">
-      <div className="text-[10px] uppercase tracking-wider text-gray-500">{label}</div>
-      <pre className={`whitespace-pre-wrap break-words rounded-md border border-bg-border bg-bg-card/60 p-3 text-xs text-gray-300 ${mono ? 'font-mono' : ''} ${block ? 'max-h-64 overflow-auto' : ''}`}>
-        {value || '-'}
-      </pre>
     </div>
   )
 }
@@ -1021,8 +804,13 @@ function KpisTab({ run }) {
   )
 }
 
-function ScriptsTab({ run }) {
+function ScriptsTab({ run, addNotification, onRunRefresh }) {
   const [layer, setLayer] = useState('gold')
+  const [submitting, setSubmitting] = useState(null)
+  const currentGate = Number(run?.next_gate || 0)
+  const reviewLayer = currentGate === 4 ? 'bronze' : currentGate === 5 ? 'silver' : null
+  const gate4Name = getGateDisplayName(4)
+  const gate5Name = getGateDisplayName(5)
   const scripts = useMemo(() => {
     const rows = []
     const seen = new Set()
@@ -1064,6 +852,34 @@ function ScriptsTab({ run }) {
   const filtered = scripts.filter((script) => script.layer === layer)
   const [selectedPath, setSelectedPath] = useState('')
 
+  const counts = {
+    bronze: scripts.filter((script) => script.layer === 'bronze').length,
+    silver: scripts.filter((script) => script.layer === 'silver').length,
+    gold: scripts.filter((script) => script.layer === 'gold').length
+  }
+
+  useEffect(() => {
+    if (currentGate === 4 && counts.bronze > 0) {
+      setLayer('bronze')
+      return
+    }
+    if (currentGate === 5 && counts.silver > 0) {
+      setLayer('silver')
+      return
+    }
+    if (counts.gold > 0) {
+      setLayer('gold')
+      return
+    }
+    if (counts.silver > 0) {
+      setLayer('silver')
+      return
+    }
+    if (counts.bronze > 0) {
+      setLayer('bronze')
+    }
+  }, [currentGate, counts.bronze, counts.gold, counts.silver])
+
   useEffect(() => {
     if (!filtered.length) {
       setSelectedPath('')
@@ -1078,10 +894,101 @@ function ScriptsTab({ run }) {
     filtered.find((script) => script.ui_key === selectedPath) ||
     filtered[0]
 
-  const counts = {
-    bronze: scripts.filter((script) => script.layer === 'bronze').length,
-    silver: scripts.filter((script) => script.layer === 'silver').length,
-    gold: scripts.filter((script) => script.layer === 'gold').length
+  const reviewTitle = reviewLayer === 'bronze'
+    ? 'Bronze script review'
+    : reviewLayer === 'silver'
+    ? 'Silver script review'
+    : 'Generated scripts'
+
+  const reviewMessage = reviewLayer === 'bronze'
+    ? `Review the Bronze scripts below. Approving ${gate4Name} generates Silver scripts next.`
+    : reviewLayer === 'silver'
+    ? `Review the Silver scripts below. Approving ${gate5Name} generates Gold scripts next.`
+    : 'Browse the generated Bronze, Silver, and Gold scripts for this run.'
+
+  const handleCopy = async (script) => {
+    try {
+      await navigator.clipboard.writeText(formatScriptBody(script))
+      addNotification({
+        type: 'success',
+        title: 'Script copied',
+        message: `${script.title} was copied to the clipboard.`,
+        duration: 3000
+      })
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Copy failed',
+        message: error?.message || 'Unable to copy the script.',
+        duration: 4000
+      })
+    }
+  }
+
+  const handleDownload = (script) => {
+    try {
+      const body = formatScriptBody(script)
+      const blob = new Blob([body], { type: 'text/plain;charset=utf-8' })
+      const url = window.URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      const fallbackName = `${script.layer}_${script.title || 'script'}`.replace(/[^\w.-]+/g, '_')
+      const fileName =
+        script.script_path?.split(/[\\/]/).pop() ||
+        `${fallbackName}.py`
+      anchor.href = url
+      anchor.download = fileName
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Download failed',
+        message: error?.message || 'Unable to download the script.',
+        duration: 4000
+      })
+    }
+  }
+
+  const handleReviewAction = async (action) => {
+    if (!reviewLayer) return
+    setSubmitting(action)
+    try {
+      if (reviewLayer === 'bronze') {
+        await submitBronzeReview(run.id, action)
+      } else {
+        await submitSilverReview(run.id, action)
+      }
+
+      const refreshed =
+        reviewLayer === 'bronze' && action === 'APPROVED'
+          ? await waitForRunGate(run.id, 5)
+          : await getRun(run.id)
+
+      onRunRefresh(refreshed)
+
+      addNotification({
+        type: 'success',
+        title: reviewLayer === 'bronze' ? `${gate4Name} submitted` : `${gate5Name} submitted`,
+        message:
+          reviewLayer === 'bronze' && action === 'APPROVED' && Number(refreshed?.next_gate || 0) === 5
+            ? `Bronze approved. Silver scripts are now ready.`
+            : reviewLayer === 'silver' && action === 'APPROVED'
+            ? 'Silver approved. Gold scripts will appear when generation completes.'
+            : 'Script review decision submitted.',
+        duration: 4500
+      })
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Script review failed',
+        message: error?.message || 'Unable to submit the review action.',
+        duration: 5000
+      })
+    } finally {
+      setSubmitting(null)
+    }
   }
 
   if (!scripts.length) {
@@ -1089,7 +996,49 @@ function ScriptsTab({ run }) {
   }
 
   return (
-    <div className="grid grid-cols-[320px_1fr] gap-4 min-h-[640px]">
+    <div className="space-y-4">
+      <div className="card p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-gray-500">Script Workspace</div>
+            <h3 className="text-lg font-semibold text-gray-100 mt-1">{reviewTitle}</h3>
+            <p className="text-sm text-gray-400 mt-1">{reviewMessage}</p>
+          </div>
+          {reviewLayer ? (
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => handleReviewAction('APPROVED')}
+                disabled={!!submitting}
+                className="btn-primary text-sm"
+              >
+                {submitting === 'APPROVED'
+                  ? 'Submitting...'
+                  : reviewLayer === 'bronze'
+                  ? 'Approve Bronze'
+                  : 'Approve Silver'}
+              </button>
+              <button
+                onClick={() => handleReviewAction('REJECTED')}
+                disabled={!!submitting}
+                className="btn-secondary text-sm"
+              >
+                Reject
+              </button>
+              <button
+                onClick={() => handleReviewAction('REGENERATE')}
+                disabled={!!submitting}
+                className="btn-secondary text-sm"
+              >
+                Regenerate
+              </button>
+            </div>
+          ) : (
+            <StatusBadge status={counts.gold > 0 ? 'COMPLETED' : 'GENERATED'} size="sm" />
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-[320px_1fr] gap-4 min-h-[640px]">
       <div className="card p-4 flex flex-col min-h-0">
         <div className="flex items-center gap-2 mb-3">
           <Code2 size={15} className="text-accent-blue" />
@@ -1145,7 +1094,23 @@ function ScriptsTab({ run }) {
                 <h3 className="text-sm font-semibold text-gray-200 break-words">{selected.title}</h3>
                 <p className="text-xs text-gray-500 break-all mt-1">{selected.script_path || selected.target_table}</p>
               </div>
-              <StatusBadge status={selected.status || 'GENERATED'} size="sm" />
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleCopy(selected)}
+                  className="inline-flex items-center gap-2 rounded-lg border border-bg-border px-3 py-2 text-xs text-gray-300 transition-colors hover:border-gray-500 hover:text-white"
+                >
+                  <Copy size={13} />
+                  Copy
+                </button>
+                <button
+                  onClick={() => handleDownload(selected)}
+                  className="inline-flex items-center gap-2 rounded-lg border border-bg-border px-3 py-2 text-xs text-gray-300 transition-colors hover:border-gray-500 hover:text-white"
+                >
+                  <Download size={13} />
+                  Download
+                </button>
+                <StatusBadge status={selected.status || 'GENERATED'} size="sm" />
+              </div>
             </div>
             <pre className="flex-1 min-h-[560px] overflow-auto rounded-lg border border-bg-border bg-bg-base p-4 text-xs leading-relaxed text-gray-300">
               <code>{formatScriptBody(selected)}</code>
@@ -1154,6 +1119,7 @@ function ScriptsTab({ run }) {
         ) : (
           <EmptyState message={`No ${layer} script selected.`} />
         )}
+      </div>
       </div>
     </div>
   )

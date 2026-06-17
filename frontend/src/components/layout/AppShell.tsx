@@ -12,11 +12,12 @@ import { getRun, getRuns } from '../../api/athenaApi'
 import { getGateDisplayName, getPhaseGroups } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
+const REVIEW_READY_NOTIFICATIONS_KEY = 'athena.reviewReadyNotifications'
 
-function loadPausedBannerDismissals() {
+function loadJsonMap(key) {
   if (typeof window === 'undefined') return {}
   try {
-    const raw = window.localStorage.getItem(PAUSED_BANNER_DISMISSALS_KEY)
+    const raw = window.localStorage.getItem(key)
     const parsed = raw ? JSON.parse(raw) : {}
     return parsed && typeof parsed === 'object' ? parsed : {}
   } catch {
@@ -24,10 +25,10 @@ function loadPausedBannerDismissals() {
   }
 }
 
-function persistPausedBannerDismissals(value) {
+function persistJsonMap(key, value) {
   if (typeof window === 'undefined') return
   try {
-    window.localStorage.setItem(PAUSED_BANNER_DISMISSALS_KEY, JSON.stringify(value))
+    window.localStorage.setItem(key, JSON.stringify(value))
   } catch {
     // ignore localStorage errors
   }
@@ -56,7 +57,9 @@ function AppShell() {
 
   const lastOnlineRef = useRef<boolean | null>(null)
   const runsRequestInFlightRef = useRef(false)
-  const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadPausedBannerDismissals())
+  const pausedDetailKeyRef = useRef<string | null>(null)
+  const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadJsonMap(PAUSED_BANNER_DISMISSALS_KEY))
+  const [reviewReadyNotifications, setReviewReadyNotifications] = useState(() => loadJsonMap(REVIEW_READY_NOTIFICATIONS_KEY))
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
 
   useEffect(() => {
@@ -119,28 +122,41 @@ function AppShell() {
   }, [activeRunId, addNotification, setRuns, setActiveRun, setServerOnline])
 
   const pausedRun = useMemo(
-    () => (runs || []).find((run) => run.id === activeRunId && [1, 2, 3, 4, 5].includes(Number(run?.next_gate || 0))) || null,
+    () =>
+      (runs || []).find(
+        (run) =>
+          run.id === activeRunId &&
+          String(run?.status || '').toUpperCase() !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
+          !run?.stage_confirmation?.awaiting_confirmation &&
+          [1, 2, 3, 4, 5].includes(Number(run?.next_gate || 0))
+      ) || null,
     [activeRunId, runs]
   )
 
-  const pausedBannerKey = pausedRun ? `${pausedRun.id}:${Number(pausedRun.next_gate || 0)}` : null
+  const pausedRunId = pausedRun?.id || null
+  const pausedRunGate = Number(pausedRun?.next_gate || 0)
+  const pausedBannerKey = pausedRunId && pausedRunGate ? `${pausedRunId}:${pausedRunGate}` : null
 
   useEffect(() => {
-    if (!pausedRun?.id || !pausedBannerKey) {
+    if (!pausedRunId || !pausedBannerKey) {
+      pausedDetailKeyRef.current = null
       setPausedRunDetail(null)
       return
     }
 
     let cancelled = false
-    setPausedRunDetail(null)
+    if (pausedDetailKeyRef.current !== pausedBannerKey) {
+      pausedDetailKeyRef.current = pausedBannerKey
+      setPausedRunDetail(null)
+    }
 
     const hydratePausedRun = async () => {
       try {
-        const detail = await getRun(pausedRun.id)
+        const detail = await getRun(pausedRunId)
         if (cancelled) return
 
         const detailGate = Number(detail?.next_gate || 0)
-        const expectedGate = Number(pausedRun?.next_gate || 0)
+        const expectedGate = pausedRunGate
         const expectedGateKey =
           detailGate === 1 ? 'gate1' :
           detailGate === 2 ? 'gate2' :
@@ -149,14 +165,23 @@ function AppShell() {
           detailGate === 5 ? 'gate5' :
           null
 
+        const detailSteps = [
+          ...(detail?.pipeline_steps || []),
+          ...(detail?.stages || []).map((stage) => ({
+            key: stage?.key,
+            state: stage?.state || stage?.status,
+          })),
+        ]
         const gateStepReady = expectedGateKey
-          ? (detail?.pipeline_steps || []).some(
+          ? detailSteps.some(
               (step) => step?.key === expectedGateKey && String(step?.state || '').toUpperCase() === 'HITL_WAIT'
             )
           : false
 
         if (detailGate === expectedGate && gateStepReady) {
           setPausedRunDetail(detail)
+        } else {
+          setPausedRunDetail((current) => (current && `${current.id}:${Number(current.next_gate || 0)}` === pausedBannerKey ? current : null))
         }
       } catch (error) {
         if (!cancelled) {
@@ -169,7 +194,7 @@ function AppShell() {
     return () => {
       cancelled = true
     }
-  }, [pausedBannerKey, pausedRun])
+  }, [pausedBannerKey, pausedRunGate, pausedRunId])
 
   const pausedRunSummary = useMemo(() => {
     const bannerRun = pausedRunDetail || pausedRun
@@ -196,10 +221,36 @@ function AppShell() {
       const activeKeys = new Set(pausedKeys)
       const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
       const changed = Object.keys(next).length !== Object.keys(current).length
-      if (changed) persistPausedBannerDismissals(next)
+      if (changed) persistJsonMap(PAUSED_BANNER_DISMISSALS_KEY, next)
+      return changed ? next : current
+    })
+    setReviewReadyNotifications((current) => {
+      const activeKeys = new Set(pausedKeys)
+      const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
+      const changed = Object.keys(next).length !== Object.keys(current).length
+      if (changed) persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
       return changed ? next : current
     })
   }, [runs])
+
+  useEffect(() => {
+    if (!pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return
+    if (reviewReadyNotifications[pausedBannerKey]) return
+
+    addNotification({
+      type: 'amber',
+      title: `${pausedRunSummary.gateLabel} ready for review`,
+      message: pausedRunSummary.resumeMessage,
+      duration: 6000,
+    })
+
+    setReviewReadyNotifications((current) => {
+      if (current[pausedBannerKey]) return current
+      const next = { ...current, [pausedBannerKey]: true }
+      persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
+      return next
+    })
+  }, [addNotification, pausedBannerKey, pausedRunDetail, pausedRunSummary, reviewReadyNotifications])
 
   const isPausedBannerVisible = Boolean(
     pausedRun &&
@@ -212,7 +263,7 @@ function AppShell() {
     if (!pausedBannerKey) return
     setDismissedPausedBanners((current) => {
       const next = { ...current, [pausedBannerKey]: true }
-      persistPausedBannerDismissals(next)
+      persistJsonMap(PAUSED_BANNER_DISMISSALS_KEY, next)
       return next
     })
   }

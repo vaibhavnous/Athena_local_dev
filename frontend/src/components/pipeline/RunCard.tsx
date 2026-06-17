@@ -22,6 +22,9 @@ function RunCard({ run, isActive, onClick, compact = false }) {
   const { updateRun, addNotification, setActiveRun } = useAthenaStore()
   const [aborting, setAborting] = useState(false)
   const [elapsed, setElapsed] = useState('')
+  const isStageConfirmationPaused =
+    String(run?.status || '').toUpperCase() === 'PAUSED_FOR_STAGE_CONFIRMATION' ||
+    Boolean(run?.stage_confirmation?.awaiting_confirmation)
 
   // Live elapsed timer for running runs
   useEffect(() => {
@@ -134,12 +137,12 @@ function RunCard({ run, isActive, onClick, compact = false }) {
       {/* Action buttons */}
       {!compact && (
         <div className="flex gap-2">
-          {[2, 3, 4, 5].includes(Number(run.next_gate || 0)) && (
+          {!isStageConfirmationPaused && [1, 2, 3, 4, 5].includes(Number(run.next_gate || 0)) && (
             <button
               onClick={handleResumeReview}
               className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-accent-blue hover:text-white hover:bg-accent-blue border border-accent-blue/20 rounded-lg transition-colors"
             >
-              {run.next_gate === 2 ? <Table2 size={11} /> : run.next_gate === 4 || run.next_gate === 5 ? <Code2 size={11} /> : <ShieldCheck size={11} />}
+              {run.next_gate === 1 ? <ShieldCheck size={11} /> : run.next_gate === 2 ? <Table2 size={11} /> : run.next_gate === 4 || run.next_gate === 5 ? <Code2 size={11} /> : <ShieldCheck size={11} />}
               Gate {run.next_gate}
             </button>
           )}

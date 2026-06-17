@@ -93,6 +93,21 @@ def _pinecone_index(index_name: str):
     return Pinecone(api_key=api_key).Index(index_name)
 
 
+def _pinecone_index_description(index_name: str) -> Dict[str, Any]:
+    api_key = os.getenv("PINECONE_API_KEY")
+    if not api_key:
+        raise RuntimeError("PINECONE_API_KEY is required for Domain KB")
+    pc = Pinecone(api_key=api_key)
+    description = pc.describe_index(index_name)
+    if hasattr(description, "to_dict"):
+        return description.to_dict()
+    return dict(description)
+
+
+def _index_uses_integrated_embedding(index_name: str) -> bool:
+    return bool(_pinecone_index_description(index_name).get("embed"))
+
+
 def _stable_id(*parts: Any) -> str:
     raw = "|".join(str(part or "").strip().lower() for part in parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -338,20 +353,51 @@ def upsert_kb_rows_to_pinecone(
     cfg = get_domain_kb_config()
     target_index_name = index_name or cfg.index_name
     target_namespace = namespace or cfg.namespace
-    model = _get_embedding_model()
-    if model is None:
-        raise RuntimeError("Domain KB embedding model is unavailable")
 
     active_rows = [row for row in kb_rows if row.get("is_active", True)]
     if not active_rows:
         return {"rows_upserted": 0, "kb_hash": compute_kb_fingerprint(kb_rows), "index_name": target_index_name}
 
     index = _pinecone_index(target_index_name)
+    uses_integrated_embedding = _index_uses_integrated_embedding(target_index_name)
     if refresh:
         try:
             index.delete(filter={"knowledge_base_id": {"$eq": cfg.knowledge_base_id}}, namespace=target_namespace)
         except Exception as exc:
             logger.warning("Domain KB refresh delete skipped: %s", exc)
+
+    if uses_integrated_embedding:
+        pinecone_records = []
+        for row in active_rows:
+            pinecone_records.append(
+                {
+                    "_id": str(row["kb_row_id"]),
+                    "text": str(row["embedding_text"]),
+                    "knowledge_base_id": str(row["knowledge_base_id"]),
+                    "domain_profile": str(row["domain_profile"]),
+                    "kb_content_type": str(row["kb_content_type"]),
+                    "database_name": str(row.get("database_name") or ""),
+                    "schema_name": str(row.get("schema_name") or ""),
+                    "table_name": str(row.get("table_name") or ""),
+                    "column_name": str(row.get("column_name") or ""),
+                    "embedding_text": str(row["embedding_text"])[:2000],
+                    "prompt_context": str(row["prompt_context"])[:2000],
+                    "is_active": bool(row.get("is_active", True)),
+                }
+            )
+        index.upsert_records(records=pinecone_records, namespace=target_namespace)
+        return {
+            "rows_upserted": len(pinecone_records),
+            "kb_hash": compute_kb_fingerprint(active_rows, cfg.knowledge_base_id),
+            "index_name": target_index_name,
+            "namespace": target_namespace,
+            "knowledge_base_id": cfg.knowledge_base_id,
+            "integrated_embedding": True,
+        }
+
+    model = _get_embedding_model()
+    if model is None:
+        raise RuntimeError("Domain KB embedding model is unavailable")
 
     texts = [str(row["embedding_text"]) for row in active_rows]
     vectors = model.embed_documents(texts)
@@ -378,6 +424,7 @@ def upsert_kb_rows_to_pinecone(
         "index_name": target_index_name,
         "namespace": target_namespace,
         "knowledge_base_id": cfg.knowledge_base_id,
+        "integrated_embedding": False,
     }
 
 
@@ -412,10 +459,6 @@ def load_domain_kb(
     if not cfg.enabled:
         return {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_id}
 
-    model = _get_embedding_model()
-    if model is None:
-        return {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_id}
-
     filter_payload: Dict[str, Any] = {
         "knowledge_base_id": {"$eq": kb_id},
         "is_active": {"$eq": True},
@@ -425,22 +468,43 @@ def load_domain_kb(
 
     try:
         index = _pinecone_index(cfg.index_name)
-        vector = model.embed_query(str(query_text or "domain knowledge"))
-        response = index.query(
-            vector=vector,
-            top_k=max(1, int(top_k)),
-            namespace=cfg.namespace,
-            include_metadata=True,
-            filter=filter_payload,
-        )
-        matches = getattr(response, "matches", None)
-        if matches is None and isinstance(response, dict):
-            matches = response.get("matches", [])
+        if _index_uses_integrated_embedding(cfg.index_name):
+            response = index.search(
+                namespace=cfg.namespace,
+                top_k=max(1, int(top_k)),
+                inputs={"text": str(query_text or "domain knowledge")},
+                filter=filter_payload,
+                fields=["prompt_context", "knowledge_base_id", "kb_content_type", "table_name", "column_name"],
+            )
+            result = getattr(response, "result", None)
+            if result is None and isinstance(response, dict):
+                result = response.get("result", {})
+            matches = getattr(result, "hits", None)
+            if matches is None and isinstance(result, dict):
+                matches = result.get("hits", [])
+        else:
+            model = _get_embedding_model()
+            if model is None:
+                return {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_id}
+            vector = model.embed_query(str(query_text or "domain knowledge"))
+            response = index.query(
+                vector=vector,
+                top_k=max(1, int(top_k)),
+                namespace=cfg.namespace,
+                include_metadata=True,
+                filter=filter_payload,
+            )
+            matches = getattr(response, "matches", None)
+            if matches is None and isinstance(response, dict):
+                matches = response.get("matches", [])
         matches = matches or []
         contexts: List[str] = []
         rows = []
         for match in matches:
             metadata = getattr(match, "metadata", None) or match.get("metadata", {}) or {}
+            if not metadata:
+                fields = getattr(match, "fields", None) or match.get("fields", {}) or {}
+                metadata = fields
             prompt_context = str(metadata.get("prompt_context") or "").strip()
             if prompt_context:
                 contexts.append(prompt_context)

@@ -29,10 +29,12 @@ const DEFAULT_FORM = {
   deployment: '',
   databaseType: 'azure_sql',
   databaseName: 'insurance',
+  useDomainKb: false,
   stageConfirmationEnabled: true,
 }
 
 function buildInitialForm(settings, seedRun) {
+  const seedSource = seedRun?.source || DEFAULT_FORM.source
   return {
     ...DEFAULT_FORM,
     provider: settings.provider || DEFAULT_FORM.provider,
@@ -41,13 +43,14 @@ function buildInitialForm(settings, seedRun) {
     ...(seedRun
       ? {
           projectName: seedRun.brd_filename || '',
-          source: seedRun.source || DEFAULT_FORM.source,
-          sftpEntity: seedRun.sftp_entity || DEFAULT_FORM.sftpEntity,
+          source: seedSource,
+          sftpEntity: normalizeFileEntity(seedSource, seedRun.sftp_entity || DEFAULT_FORM.sftpEntity),
           fileName: seedRun.brd_filename || '',
           provider: seedRun.provider || settings.provider || DEFAULT_FORM.provider,
           deployment: seedRun.deployment || settings.azure_deployment || DEFAULT_FORM.deployment,
           databaseType: seedRun.database_type || DEFAULT_FORM.databaseType,
           databaseName: seedRun.database_name || DEFAULT_FORM.databaseName,
+          useDomainKb: !!seedRun.use_domain_kb,
         }
       : {}),
   }
@@ -113,9 +116,18 @@ function isFileSource(source) {
   return source === 'sftp' || source === 'adls_gen2'
 }
 
+function normalizeFileEntity(source, entity) {
+  if (source === 'adls_gen2') return 'auto'
+  if (source === 'sftp') {
+    return ['transactions', 'employee', 'both'].includes(entity) ? entity : 'transactions'
+  }
+  return entity || DEFAULT_FORM.sftpEntity
+}
+
 function buildFileRunLabel(source, entity) {
-  if (source === 'adls_gen2') return buildAdlsRunLabel(entity)
-  return buildSftpRunLabel(entity)
+  const normalizedEntity = normalizeFileEntity(source, entity)
+  if (source === 'adls_gen2') return buildAdlsRunLabel(normalizedEntity)
+  return buildSftpRunLabel(normalizedEntity)
 }
 
 function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
@@ -232,16 +244,17 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         await uploadBrd(uploadedFile)
       }
 
+      const normalizedSftpEntity = normalizeFileEntity(form.source, form.sftpEntity)
       const displayName =
         form.projectName.trim() ||
         form.fileName ||
         (isFileSource(form.source)
-          ? buildFileRunLabel(form.source, form.sftpEntity)
+          ? buildFileRunLabel(form.source, normalizedSftpEntity)
           : 'pasted_brd.txt')
 
       const run = await startRun({
         source: form.source,
-        sftp_entity: form.sftpEntity,
+        sftp_entity: normalizedSftpEntity,
         brd_text: form.brdText,
         brd_filename: displayName,
         provider: form.provider,
@@ -251,6 +264,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         budget: settings.budget,
         maxKpis: settings.maxKpis,
         devMode: settings.devMode,
+        use_domain_kb: !!form.useDomainKb,
         stage_confirmation_enabled: form.stageConfirmationEnabled,
       })
 
@@ -260,7 +274,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         brd_filename: displayName,
         status: run.status || 'RUNNING',
         source: form.source,
-        sftp_entity: form.sftpEntity,
+        sftp_entity: normalizedSftpEntity,
         provider: form.provider,
         deployment: form.deployment || null,
         started_at: new Date().toISOString(),
@@ -488,7 +502,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                         setForm((current) => ({
                                           ...current,
                                           source: option.id,
-                                          sftpEntity: option.id === 'adls_gen2' ? 'auto' : current.sftpEntity,
+                                          sftpEntity: normalizeFileEntity(option.id, current.sftpEntity),
+                                          useDomainKb: option.id === 'database' ? current.useDomainKb : false,
                                         }))
                                       }
                                       className={`flex h-9 items-center justify-center gap-1.5 rounded-md border text-xs font-medium transition-colors ${
@@ -578,25 +593,34 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                           </div>
                         </div>
 
-                        <label className="flex h-10 items-center gap-3 rounded-md border border-[#243149] bg-[#151f2d] px-3 text-[11px] font-semibold text-white">
-                          <span className="relative inline-flex h-4 w-7 items-center rounded-full bg-[#26344b]">
-                            <span className="ml-0.5 h-3 w-3 rounded-full bg-white" />
-                          </span>
-                          <BookOpen size={13} className="text-slate-300" />
-                          <span>Use Domain Knowledge Base</span>
-                        </label>
+                        {form.source === 'database' && (
+                          <label className="flex h-10 items-center gap-3 rounded-md border border-[#243149] bg-[#151f2d] px-3 text-[11px] font-semibold text-white">
+                            <input
+                              type="checkbox"
+                              checked={!!form.useDomainKb}
+                              onChange={(event) =>
+                                setForm((current) => ({ ...current, useDomainKb: event.target.checked }))
+                              }
+                              className="h-4 w-4 accent-[#3f82ff]"
+                            />
+                            <BookOpen size={13} className="text-slate-300" />
+                            <span>Use Domain Knowledge Base</span>
+                          </label>
+                        )}
 
-                        <label className="flex items-center gap-3 rounded-md border border-[#243149] bg-[#151f2d] px-3 py-3 text-[11px] font-semibold text-white">
-                          <input
-                            type="checkbox"
-                            checked={!!form.stageConfirmationEnabled}
-                            onChange={(event) =>
-                              setForm((current) => ({ ...current, stageConfirmationEnabled: event.target.checked }))
-                            }
-                            className="h-4 w-4 accent-[#3f82ff]"
-                          />
-                          <span>Ask before moving to every next stage</span>
-                        </label>
+                        {form.source === 'database' && (
+                          <label className="flex items-center gap-3 rounded-md border border-[#243149] bg-[#151f2d] px-3 py-3 text-[11px] font-semibold text-white">
+                            <input
+                              type="checkbox"
+                              checked={!!form.stageConfirmationEnabled}
+                              onChange={(event) =>
+                                setForm((current) => ({ ...current, stageConfirmationEnabled: event.target.checked }))
+                              }
+                              className="h-4 w-4 accent-[#3f82ff]"
+                            />
+                            <span>Ask before moving to every next stage</span>
+                          </label>
+                        )}
 
                         <div>
                           <div className="space-y-3">
