@@ -24,7 +24,7 @@ def test_pipeline_run_requires_brd_text_for_database_source(monkeypatch, tmp_pat
 
 def test_upload_brd_creates_file(tmp_path, monkeypatch):
     upload_dir = Path(__file__).resolve().parents[1] / "uploads"
-    monkeypatch.setattr("api.main.ROOT_DIR", Path(__file__).resolve().parents[1])
+    monkeypatch.setattr("api.routers.pipeline_router.api_utils.ROOT_DIR", Path(__file__).resolve().parents[1])
 
     file_content = b"test content"
     response = client.post(
