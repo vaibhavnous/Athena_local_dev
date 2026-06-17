@@ -43,7 +43,7 @@ class KPISchemaItem(BaseModel):
 
 class KPISchema(BaseModel):
     """List of KPIs with max 25."""
-    kpis: List[KPISchemaItem] = Field(..., max_items=25)
+    kpis: List[KPISchemaItem] = Field(..., max_length=25)
 
 
 # ── Table Nomination Schema ────────────────────────────
@@ -71,4 +71,4 @@ class NominationItem(BaseModel):
 
 class NominationSchema(BaseModel):
     """Container for all table nominations produced by the hybrid search."""
-    nominations: List[NominationItem] = Field(default_factory=list, max_items=100)
+    nominations: List[NominationItem] = Field(default_factory=list, max_length=100)
