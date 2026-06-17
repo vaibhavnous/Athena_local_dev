@@ -57,3 +57,8 @@ paramiko>=3.4.0
 pandas>=2.2.0
 azure-identity>=1.16.0
 azure-storage-file-datalake>=12.16.0
+
+# -----------------------------
+# Testing
+# -----------------------------
+pytest>=8.0.0
