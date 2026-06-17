@@ -495,4 +495,11 @@ For file sources, every KPI must reference at least one available column when po
     return kpi_extraction_node
 
 
-kpi_extraction_node = build_kpi_extraction_node()
+_KPI_EXTRACTION_NODE: Optional[Callable[[Stage01State], Stage01State]] = None
+
+
+def kpi_extraction_node(state: Stage01State) -> Stage01State:
+    global _KPI_EXTRACTION_NODE
+    if _KPI_EXTRACTION_NODE is None:
+        _KPI_EXTRACTION_NODE = build_kpi_extraction_node()
+    return _KPI_EXTRACTION_NODE(state)

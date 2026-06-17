@@ -310,4 +310,11 @@ def build_req_extraction_node(
     return req_extraction_node
 
 
-req_extraction_node = build_req_extraction_node()
+_REQ_EXTRACTION_NODE: Optional[Callable[[Stage01State], Stage01State]] = None
+
+
+def req_extraction_node(state: Stage01State) -> Stage01State:
+    global _REQ_EXTRACTION_NODE
+    if _REQ_EXTRACTION_NODE is None:
+        _REQ_EXTRACTION_NODE = build_req_extraction_node()
+    return _REQ_EXTRACTION_NODE(state)
