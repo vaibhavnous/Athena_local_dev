@@ -1160,6 +1160,7 @@ def start_pipeline(
     source_databases: Optional[List[str]] = None,
     sftp_entity: Optional[str] = None,
     run_id: Optional[str] = None,
+    use_domain_kb: bool = False,
     stage_confirmation_enabled: bool = True,
 ) -> Dict[str, Any]:
     run_id = run_id or str(uuid.uuid4())
@@ -1174,6 +1175,7 @@ def start_pipeline(
         "source": source_value,
         "sftp_entity": str(sftp_entity or "transactions").lower(),
         "source_databases": source_databases or [default_source_db],
+        "use_domain_kb": bool(use_domain_kb),
         "stage_confirmation_enabled": bool(stage_confirmation_enabled),
     }
 

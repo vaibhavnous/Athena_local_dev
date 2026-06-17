@@ -18,6 +18,19 @@ export interface PipelineLog {
   logged_at: string
 }
 
+function stableLogKey(log: PipelineLog) {
+  return [
+    log.log_id,
+    log.run_id,
+    log.logged_at,
+    log.log_level,
+    log.stage || '',
+    log.step_name || '',
+    log.event_type || '',
+    log.message || '',
+  ].join('|')
+}
+
 export function usePipelineLogs(
   runId: string | null | undefined,
   isActive = true,
@@ -74,9 +87,9 @@ export function usePipelineLogs(
   )
 
   const mergeLogs = useCallback((incoming: PipelineLog[]) => {
-    const unique = incoming.filter((log) => !logIdsRef.current.has(log.log_id))
+    const unique = incoming.filter((log) => !logIdsRef.current.has(stableLogKey(log)))
     if (unique.length === 0) return
-    unique.forEach((log) => logIdsRef.current.add(log.log_id))
+    unique.forEach((log) => logIdsRef.current.add(stableLogKey(log)))
     setLogs((prev) => [...prev, ...unique])
     setLastLogTimestamp(unique[unique.length - 1].logged_at)
   }, [])

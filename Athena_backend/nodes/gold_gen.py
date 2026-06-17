@@ -595,24 +595,29 @@ def _generate_one_mapping(
     *,
     run_id: str,
     gold_schema: str,
+    use_domain_kb: bool,
 ) -> Dict[str, Any]:
     kpi_name = str(mapping.get("kpi_name") or "KPI")
     kpi_id = _safe_identifier(kpi_name, "kpi")
     target_table = _target_fact_table(gold_schema, kpi_id)
     kb_cfg = get_domain_kb_config()
-    kb_query_parts = [
-        kpi_name,
-        str(mapping.get("source_silver_table") or ""),
-        json.dumps(mapping.get("measure") or {}, default=str),
-        json.dumps(mapping.get("grouping_dimensions") or [], default=str),
-        json.dumps(mapping.get("join_paths") or [], default=str),
-    ]
-    kb_result = load_domain_kb(
-        query_text=" ".join(kb_query_parts),
-        top_k=kb_cfg.top_k_gold,
-        max_chars=kb_cfg.max_chars_gold,
-        content_types=None,
-    )
+    use_domain_kb = bool(use_domain_kb) and kb_cfg.enabled
+    if use_domain_kb:
+        kb_query_parts = [
+            kpi_name,
+            str(mapping.get("source_silver_table") or ""),
+            json.dumps(mapping.get("measure") or {}, default=str),
+            json.dumps(mapping.get("grouping_dimensions") or [], default=str),
+            json.dumps(mapping.get("join_paths") or [], default=str),
+        ]
+        kb_result = load_domain_kb(
+            query_text=" ".join(kb_query_parts),
+            top_k=kb_cfg.top_k_gold,
+            max_chars=kb_cfg.max_chars_gold,
+            content_types=None,
+        )
+    else:
+        kb_result = {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_cfg.knowledge_base_id}
 
     if not _usable_mapping(mapping):
         return {
@@ -625,7 +630,7 @@ def _generate_one_mapping(
             "script_path": None,
             "dimension_script_path": None,
             "domain_knowledge_base": {
-                "enabled": kb_cfg.enabled,
+                "enabled": use_domain_kb,
                 "knowledge_base_id": kb_result.get("knowledge_base_id"),
                 "rows_retrieved": kb_result.get("rows_retrieved", 0),
                 "chars_injected": kb_result.get("chars_injected", 0),
@@ -683,7 +688,7 @@ def _generate_one_mapping(
         "kimball_dimension_count": len(_dimension_specs(mapping)),
         "join_count": len(mapping.get("join_paths") or []),
         "domain_knowledge_base": {
-            "enabled": kb_cfg.enabled,
+            "enabled": use_domain_kb,
             "knowledge_base_id": kb_result.get("knowledge_base_id"),
             "rows_retrieved": kb_result.get("rows_retrieved", 0),
             "chars_injected": kb_result.get("chars_injected", 0),
@@ -866,7 +871,12 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
     generated_at = datetime.utcnow().isoformat()
 
     results = [
-        _generate_one_mapping(mapping, run_id=run_id, gold_schema=gold_schema)
+        _generate_one_mapping(
+            mapping,
+            run_id=run_id,
+            gold_schema=gold_schema,
+            use_domain_kb=bool(state.get("use_domain_kb")),
+        )
         for mapping in mappings
         if isinstance(mapping, dict)
     ]

@@ -449,10 +449,34 @@ For file sources, every KPI must reference at least one available column when po
 
         logger.info("KPI Extraction success: source=%s n_kpis=%d cost=$%.6f", source, len(kpis), cost_usd, extra=log_context)
 
-        # Queue for HITL review
-        insert_hitl_queue_items(run_id, kpis, gate_number=1)
+        # Queue for HITL review only once per run. If the queue already exists
+        # or Gate 1 was already certified, do not recreate review items.
+        from utilis.db import get_completed_items, get_pending_items
+
+        existing_pending_gate1 = get_pending_items(run_id, 1)
+        existing_completed_gate1 = get_completed_items(run_id, 1)
+
         new_state["extracted_kpis"] = kpis.copy()
-        new_state["human_decision"] = "PENDING"
+
+        if state.get("human_decision") == "COMPLETED" or existing_completed_gate1:
+            new_state["human_decision"] = "COMPLETED"
+            if not new_state.get("certified_kpis"):
+                new_state["certified_kpis"] = [item["kpi"] for item in existing_completed_gate1]
+            logger.info(
+                "KPI review already certified for run_id=%s; skipping Gate 1 queue creation",
+                run_id,
+                extra=log_context,
+            )
+        elif existing_pending_gate1:
+            new_state["human_decision"] = "PENDING"
+            logger.info(
+                "Existing Gate 1 queue found for run_id=%s; skipping duplicate KPI review queue creation",
+                run_id,
+                extra=log_context,
+            )
+        else:
+            insert_hitl_queue_items(run_id, kpis, gate_number=1)
+            new_state["human_decision"] = "PENDING"
 
         # Checkpoint full state to Azure SQL DB (KPI stage only).
         # Merge with existing checkpoint so startup metadata like source/brd_filename

@@ -221,6 +221,7 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
     discovered = state.get("discovered_metadata", {})
     profiling = state.get("column_profiles", {})
     kb_cfg = get_domain_kb_config()
+    use_domain_kb = bool(state.get("use_domain_kb")) and kb_cfg.enabled
 
     table_names = []
     column_names = []
@@ -229,12 +230,15 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
         for col in table.get("columns", []):
             column_names.append(str(col.get("column_name") or ""))
 
-    kb_result = load_domain_kb(
-        query_text=" ".join(table_names + column_names),
-        top_k=kb_cfg.top_k_enrichment,
-        max_chars=kb_cfg.max_chars_enrichment,
-        content_types=[KB_CONTENT_TABLE, KB_CONTENT_PII, KB_CONTENT_MEASURE],
-    )
+    if use_domain_kb:
+        kb_result = load_domain_kb(
+            query_text=" ".join(table_names + column_names),
+            top_k=kb_cfg.top_k_enrichment,
+            max_chars=kb_cfg.max_chars_enrichment,
+            content_types=[KB_CONTENT_TABLE, KB_CONTENT_PII, KB_CONTENT_MEASURE],
+        )
+    else:
+        kb_result = {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_cfg.knowledge_base_id}
 
     domain_context = {
         "business_objective": state.get("business_objective"),
@@ -272,7 +276,7 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
         "certified_tables": state.get("certified_tables", []),
         "enriched_at": datetime.now(timezone.utc).isoformat(),
         "domain_knowledge_base": {
-            "enabled": kb_cfg.enabled,
+            "enabled": use_domain_kb,
             "knowledge_base_id": kb_result.get("knowledge_base_id"),
             "rows_retrieved": kb_result.get("rows_retrieved", 0),
             "chars_injected": kb_result.get("chars_injected", 0),

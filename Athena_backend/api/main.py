@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import uuid
+import hashlib
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,6 +106,7 @@ class PipelineRunRequest(BaseModel):
     budget: Optional[float] = None
     maxKpis: Optional[int] = None
     devMode: Optional[bool] = None
+    use_domain_kb: Optional[bool] = False
     database_name: Optional[str] = None
     database_type: Optional[str] = None
     source_databases: Optional[List[str]] = None
@@ -166,6 +168,16 @@ def _is_file_source(source: Optional[str]) -> bool:
     return str(source or "").lower() in {"sftp", "adls_gen2"}
 
 
+def _normalize_file_entity(source: Optional[str], sftp_entity: Optional[str]) -> str:
+    source_value = str(source or "").lower()
+    entity = str(sftp_entity or "").lower().strip()
+    if source_value == "adls_gen2":
+        return "auto"
+    if source_value == "sftp":
+        return entity if entity in {"transactions", "employee", "both"} else "transactions"
+    return entity or "transactions"
+
+
 def _json_loads(value: Any) -> Any:
     if not value:
         return None
@@ -184,6 +196,7 @@ def _run_pipeline_background(
     source: Optional[str],
     source_databases: Optional[List[str]],
     sftp_entity: Optional[str],
+    use_domain_kb: bool,
     stage_confirmation_enabled: bool,
 ) -> None:
     try:
@@ -202,6 +215,7 @@ def _run_pipeline_background(
                 source_databases=source_databases,
                 sftp_entity=sftp_entity,
                 run_id=run_id,
+                use_domain_kb=use_domain_kb,
                 stage_confirmation_enabled=stage_confirmation_enabled,
             )
         state = result.get("result") if isinstance(result, dict) else {}
@@ -222,15 +236,19 @@ def _run_pipeline_background(
 
 def _submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
     job_key = f"{run_id}:pipeline"
+    source = str(payload.source or "database").lower()
+    sftp_entity = _normalize_file_entity(source, payload.sftp_entity)
+    use_domain_kb = False if _is_file_source(source) else bool(payload.use_domain_kb)
     with BACKGROUND_JOB_LOCK:
         future = BACKGROUND_EXECUTOR.submit(
             _run_pipeline_background,
             run_id=run_id,
             brd_text=payload.brd_text,
-            source=payload.source,
+            source=source,
             source_databases=payload.source_databases
             or ([payload.database_name] if payload.database_name else None),
-            sftp_entity=payload.sftp_entity,
+            sftp_entity=sftp_entity,
+            use_domain_kb=use_domain_kb,
             stage_confirmation_enabled=bool(payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else True),
         )
         BACKGROUND_JOBS[job_key] = future
@@ -241,6 +259,93 @@ def _submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
                 BACKGROUND_JOBS.pop(job_key, None)
 
     future.add_done_callback(_cleanup)
+
+
+def _normalized_source_databases(checkpoint: Dict[str, Any]) -> Optional[List[str]]:
+    value = checkpoint.get("source_databases")
+    if isinstance(value, list) and value:
+        return value
+    database_name = checkpoint.get("database_name")
+    if database_name:
+        return [database_name]
+    return None
+
+
+def _seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunRequest:
+    source_databases = _normalized_source_databases(checkpoint)
+    database_name = source_databases[0] if source_databases else checkpoint.get("database_name")
+    return PipelineRunRequest(
+        brd_text=str(checkpoint.get("brd_text") or ""),
+        brd_filename=checkpoint.get("brd_filename"),
+        source=str(checkpoint.get("source") or "database"),
+        provider=checkpoint.get("provider") or "azure_openai",
+        deployment=checkpoint.get("deployment"),
+        database_name=database_name,
+        database_type=checkpoint.get("database_type"),
+        source_databases=source_databases,
+        sftp_entity=checkpoint.get("sftp_entity") or "transactions",
+        use_domain_kb=bool(checkpoint.get("use_domain_kb")),
+        stage_confirmation_enabled=checkpoint.get("stage_confirmation_enabled"),
+    )
+
+
+def _clean_checkpoint_for_resume(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = dict(checkpoint or {})
+    cleaned["status"] = "RUNNING"
+    cleaned["background_stage"] = None
+    cleaned["failed_background_stage"] = None
+    cleaned["error"] = None
+    cleaned["resume_message"] = None
+    cleaned["awaiting_stage_confirmation"] = False
+    return cleaned
+
+
+def _database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Optional[str]:
+    if checkpoint.get("failed_background_stage"):
+        return str(checkpoint.get("failed_background_stage"))
+    if checkpoint.get("background_stage"):
+        return _stage_key(checkpoint.get("background_stage"))
+
+    context = get_run_context(run_id)
+    failed_step = next(
+        (
+            step.get("key")
+            for step in (context.get("pipeline_steps") or [])
+            if str(step.get("state") or "").upper() == "FAILED"
+        ),
+        None,
+    )
+    if failed_step:
+        return str(failed_step)
+
+    next_stage_key = checkpoint.get("next_stage_key")
+    if next_stage_key:
+        return str(next_stage_key)
+    return None
+
+
+def _continue_database_pipeline_job(
+    run_id: str,
+    start_stage_key: str,
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    return continue_database_pipeline(
+        run_id,
+        start_stage_key=start_stage_key,
+        state=state,
+    )
+
+
+def _continue_file_pipeline_job(run_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    from source_ingestion_pipeline import build_source_ingestion_graph
+
+    graph_app = build_source_ingestion_graph()
+    working_state = dict(state or {})
+    working_state["run_id"] = run_id
+    result = graph_app.invoke(working_state)
+    if not isinstance(result, dict):
+        raise ValueError("File-source pipeline returned an invalid state.")
+    return result
 
 
 def _artifact_kpis(run_id: str) -> List[Dict[str, Any]]:
@@ -277,7 +382,14 @@ def _kpis_from_checkpoint(checkpoint: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
-def _map_kpi(kpi: Dict[str, Any], *, run_id: str, item_id: Optional[str] = None, status: str = "PENDING") -> Dict[str, Any]:
+def _map_kpi(
+    kpi: Dict[str, Any],
+    *,
+    run_id: str,
+    item_id: Optional[str] = None,
+    status: str = "PENDING",
+    source: Optional[str] = None,
+) -> Dict[str, Any]:
     name = kpi.get("name") or kpi.get("kpi_name") or kpi.get("title") or "Unnamed KPI"
     definition = kpi.get("definition") or kpi.get("kpi_description") or kpi.get("description") or ""
     confidence = kpi.get("confidence") or kpi.get("ai_confidence_score") or 0
@@ -298,6 +410,7 @@ def _map_kpi(kpi: Dict[str, Any], *, run_id: str, item_id: Optional[str] = None,
         "explicit": kpi.get("derivation_type") == "explicit",
         "kpi_detail": kpi,
         "run_id": run_id,
+        "source": source or kpi.get("source"),
     }
 
 
@@ -327,7 +440,14 @@ def _fetch_hitl_rows(run_id: str, status: Optional[str] = None) -> List[Dict[str
     mapped = []
     for row in rows:
         content = _json_loads(row.edited_content) or _json_loads(row.original_content) or {}
-        item = _map_kpi(content, run_id=run_id, item_id=row.item_id, status=row.gate_status)
+        checkpoint = load_checkpoint_state(run_id) or {}
+        item = _map_kpi(
+            content,
+            run_id=run_id,
+            item_id=row.item_id,
+            status=row.gate_status,
+            source=checkpoint.get("source"),
+        )
         item.update(
             {
                 "rejection_reason": row.rejection_reason,
@@ -341,6 +461,8 @@ def _fetch_hitl_rows(run_id: str, status: Optional[str] = None) -> List[Dict[str
 
 def _status_from_context(context: Dict[str, Any]) -> str:
     checkpoint = context.get("checkpoint") or {}
+    if str(checkpoint.get("status") or "").upper() == "PAUSED_FOR_STAGE_CONFIRMATION":
+        return "PAUSED_FOR_STAGE_CONFIRMATION"
     if context.get("pending_gate1") or context.get("next_gate") in {1, 2, 3, 4, 5}:
         return "HITL_WAIT"
     if checkpoint.get("background_stage"):
@@ -500,6 +622,35 @@ def _stage_key(value: Any) -> Optional[str]:
     if "gold" in text:
         return "gold"
     return None
+
+
+def _stage_label_from_key(key: Optional[str], source: Optional[str] = None) -> Optional[str]:
+    if not key:
+        return None
+    labels = {
+        "ingestion": "BRD Ingest" if not _is_file_source(source) else "Ingestion",
+        "memory": "Memory Check",
+        "requirements": "Requirement Extraction",
+        "kpis": "KPI Extraction",
+        "gate1": _gate_label(1, source=str(source or "database")),
+        "nomination": "Table Nomination",
+        "gate2": _gate_label(2, source=str(source or "database")),
+        "discovery": "Metadata Discovery",
+        "schema": "Schema Snapshot",
+        "profiling": "Column Profiling",
+        "enrichment": "Semantic Enrichment",
+        "gate3": _gate_label(3, source=str(source or "database")),
+        "pre_bronze": "Pre-Bronze Readiness",
+        "bronze": "Bronze Generation" if not _is_file_source(source) else "Bronze Code Generation",
+        "gate4": _gate_label(4, source=str(source or "database")),
+        "pull": "Source Handoff" if str(source or "").lower() == "adls_gen2" else "SFTP Pull",
+        "bronze_validation": "Bronze Validation",
+        "silver": "Silver Generation" if not _is_file_source(source) else "Silver Code Generation",
+        "gate5": _gate_label(5, source=str(source or "database")),
+        "dq_validation": "DQ Validation",
+        "gold": "Gold Generation" if not _is_file_source(source) else "Gold Code Generation",
+    }
+    return labels.get(str(key), str(key))
 
 
 def _ui_stages(context: Dict[str, Any], run_id: str) -> List[Dict[str, Any]]:
@@ -766,6 +917,8 @@ def _summary_status(
     silver_generation_completed: bool,
     gold_generation_completed: bool,
 ) -> str:
+    if str(checkpoint.get("status") or "").upper() == "PAUSED_FOR_STAGE_CONFIRMATION":
+        return "PAUSED_FOR_STAGE_CONFIRMATION"
     if next_gate in {1, 2, 3, 4, 5}:
         return "HITL_WAIT"
     if checkpoint.get("background_stage"):
@@ -805,6 +958,12 @@ def _ui_run_summary(run_id: str) -> Dict[str, Any]:
     summary = context.get("summary") or []
     checkpoint = context.get("checkpoint") or checkpoint_hint
     status = _status_from_context(context)
+    failed_stage_key = (
+        checkpoint.get("failed_background_stage")
+        or _stage_key(checkpoint.get("background_stage"))
+        or _stage_key(checkpoint.get("last_completed_stage_key"))
+    )
+    failed_stage_label = _stage_label_from_key(failed_stage_key, checkpoint.get("source"))
 
     return {
         "id": run_id,
@@ -829,6 +988,10 @@ def _ui_run_summary(run_id: str) -> Dict[str, Any]:
         "next_gate": context.get("next_gate"),
         "resume_message": context.get("resume_message"),
         "stage_confirmation": context.get("stage_confirmation"),
+        "failed_stage_key": failed_stage_key,
+        "failed_stage_label": failed_stage_label,
+        "error": checkpoint.get("error"),
+        "updated_at": checkpoint.get("checkpoint_at") or checkpoint.get("updated_at") or summary[-1].get("stored_at") if summary else None,
         "script_counts": {
             "bronze": len((context.get("bronze") or {}).get("scripts") or []),
             "silver": len((context.get("silver") or {}).get("scripts") or []),
@@ -906,6 +1069,19 @@ def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
     hitl_rows = _fetch_hitl_rows(run_id)
     kpis = hitl_rows or [_map_kpi(kpi, run_id=run_id) for kpi in raw_kpis]
     status = _status_from_context(context)
+    failed_stage_key = (
+        checkpoint.get("failed_background_stage")
+        or _stage_key(checkpoint.get("background_stage"))
+        or next(
+            (
+                step.get("key")
+                for step in (context.get("pipeline_steps") or [])
+                if str(step.get("state") or "").upper() == "FAILED"
+            ),
+            None,
+        )
+    )
+    failed_stage_label = _stage_label_from_key(failed_stage_key, checkpoint.get("source"))
     payload = {
         "id": run_id,
         "run_id": run_id,
@@ -939,6 +1115,10 @@ def _ui_run(run_id: str, *, include_scripts: bool = False) -> Dict[str, Any]:
         "next_gate": context.get("next_gate"),
         "resume_message": context.get("resume_message"),
         "stage_confirmation": context.get("stage_confirmation"),
+        "failed_stage_key": failed_stage_key,
+        "failed_stage_label": failed_stage_label,
+        "error": checkpoint.get("error"),
+        "updated_at": summary[-1].get("stored_at") if summary else None,
         "databricks_run_id": run_id,
         "sftp_entity": context.get("sftp_entity") or checkpoint.get("sftp_entity"),
         "candidate_feed": (context.get("candidate_feed") or checkpoint.get("candidate_feed")) if _is_file_source(checkpoint.get("source")) else None,
@@ -1037,9 +1217,22 @@ def _read_logs(run_id: str, limit: int = 1000, since: Optional[str] = None) -> L
 
         stage = item.get("stage") or item.get("node") or item.get("module")
         step_name = item.get("step_name") or item.get("funcName")
+        stable_log_id = hashlib.sha256(
+            "|".join(
+                [
+                    str(run_id),
+                    str(logged_at or ""),
+                    str(item.get("level", "INFO")),
+                    str(stage or ""),
+                    str(step_name or ""),
+                    str(message or ""),
+                    str(event_type or ""),
+                ]
+            ).encode("utf-8")
+        ).hexdigest()
         logs.append(
             {
-                "log_id": f"{run_id}:{logged_at}:{line_number}:{item.get('level', 'INFO')}",
+                "log_id": stable_log_id,
                 "run_id": run_id,
                 "notebook_name": item.get("node") or item.get("module"),
                 "stage": stage,
@@ -1062,9 +1255,11 @@ def health() -> Dict[str, str]:
 @app.post("/pipeline/run")
 def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
     source = str(payload.source or "database").lower()
+    sftp_entity = _normalize_file_entity(source, payload.sftp_entity)
     if not _is_file_source(source) and not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
     run_id = str(uuid.uuid4())
+    use_domain_kb = False if _is_file_source(source) else bool(payload.use_domain_kb)
 
     try:
         existing = load_checkpoint_state(run_id) or {"run_id": run_id}
@@ -1076,13 +1271,18 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
                 "status": existing.get("status") or "RUNNING",
                 "brd_text": existing.get("brd_text") or payload.brd_text,
                 "brd_filename": existing.get("brd_filename") or payload.brd_filename,
-                "source": existing.get("source") or payload.source or "database",
+                "source": existing.get("source") or source,
                 "provider": existing.get("provider") or payload.provider,
                 "deployment": existing.get("deployment") or payload.deployment,
                 "source_databases": existing.get("source_databases")
                 or payload.source_databases
                 or ([payload.database_name] if payload.database_name else None),
-                "sftp_entity": existing.get("sftp_entity") or payload.sftp_entity or "transactions",
+                "sftp_entity": existing.get("sftp_entity") or sftp_entity,
+                "use_domain_kb": (
+                    existing.get("use_domain_kb")
+                    if existing.get("use_domain_kb") is not None
+                    else use_domain_kb
+                ),
                 "stage_confirmation_enabled": (
                     existing.get("stage_confirmation_enabled")
                     if existing.get("stage_confirmation_enabled") is not None
@@ -1153,6 +1353,116 @@ def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]
         "status": result.get("status") or "RUNNING",
         "next_stage_key": result.get("next_stage_key"),
         "resume_message": result.get("resume_message"),
+    }
+
+
+@app.post("/pipeline/{run_id}/retry-failed-stage")
+def retry_failed_stage(run_id: str) -> Dict[str, Any]:
+    checkpoint = load_checkpoint_state(run_id) or {}
+    if str(checkpoint.get("status") or "").upper() != "FAILED":
+        raise HTTPException(status_code=400, detail="Only failed runs can retry a failed stage.")
+
+    source = str(checkpoint.get("source") or "database").lower()
+    if _is_file_source(source):
+        resumed_state = _clean_checkpoint_for_resume(checkpoint)
+        save_checkpoint_state(run_id, resumed_state)
+        submit_background(run_id, "file_resume", _continue_file_pipeline_job, run_id, resumed_state)
+        return {
+            "run_id": run_id,
+            "status": "SUBMITTED",
+            "action": "retry_failed_stage",
+            "start_stage_key": checkpoint.get("failed_background_stage") or "file_resume",
+        }
+
+    failed_stage_key = _database_failed_stage_key(run_id, checkpoint)
+    if not failed_stage_key:
+        raise HTTPException(status_code=400, detail="No failed stage could be identified for this run.")
+
+    resumed_state = _clean_checkpoint_for_resume(checkpoint)
+    save_checkpoint_state(run_id, resumed_state)
+    submit_background(run_id, failed_stage_key, _continue_database_pipeline_job, run_id, failed_stage_key, resumed_state)
+    return {
+        "run_id": run_id,
+        "status": "SUBMITTED",
+        "action": "retry_failed_stage",
+        "start_stage_key": failed_stage_key,
+    }
+
+
+@app.post("/pipeline/{run_id}/resume-from-failure")
+def resume_from_failure(run_id: str) -> Dict[str, Any]:
+    checkpoint = load_checkpoint_state(run_id) or {}
+    if str(checkpoint.get("status") or "").upper() != "FAILED":
+        raise HTTPException(status_code=400, detail="Only failed runs can resume from failure.")
+
+    source = str(checkpoint.get("source") or "database").lower()
+    if _is_file_source(source):
+        resumed_state = _clean_checkpoint_for_resume(checkpoint)
+        save_checkpoint_state(run_id, resumed_state)
+        submit_background(run_id, "file_resume", _continue_file_pipeline_job, run_id, resumed_state)
+        return {
+            "run_id": run_id,
+            "status": "SUBMITTED",
+            "action": "resume_from_failure",
+            "start_stage_key": checkpoint.get("failed_background_stage") or "file_resume",
+        }
+
+    start_stage_key = _database_failed_stage_key(run_id, checkpoint) or checkpoint.get("next_stage_key") or "ingestion"
+    resumed_state = _clean_checkpoint_for_resume(checkpoint)
+    save_checkpoint_state(run_id, resumed_state)
+    submit_background(run_id, start_stage_key, _continue_database_pipeline_job, run_id, start_stage_key, resumed_state)
+    return {
+        "run_id": run_id,
+        "status": "SUBMITTED",
+        "action": "resume_from_failure",
+        "start_stage_key": start_stage_key,
+    }
+
+
+@app.post("/pipeline/{run_id}/restart")
+def restart_pipeline(run_id: str) -> Dict[str, Any]:
+    checkpoint = load_checkpoint_state(run_id) or {}
+    if not checkpoint:
+        raise HTTPException(status_code=404, detail=f"No checkpoint found for run: {run_id}")
+
+    new_run_id = str(uuid.uuid4())
+    payload = _seed_payload_from_checkpoint(checkpoint)
+    source = str(payload.source or "database").lower()
+    sftp_entity = _normalize_file_entity(source, payload.sftp_entity)
+
+    try:
+        existing = load_checkpoint_state(new_run_id) or {"run_id": new_run_id}
+        save_checkpoint_state(
+            new_run_id,
+            {
+                **existing,
+                "run_id": new_run_id,
+                "status": "RUNNING",
+                "brd_text": payload.brd_text,
+                "brd_filename": payload.brd_filename,
+                "source": source,
+                "provider": payload.provider,
+                "deployment": payload.deployment,
+                "database_name": payload.database_name,
+                "database_type": payload.database_type,
+                "source_databases": payload.source_databases,
+                "sftp_entity": sftp_entity,
+                "stage_confirmation_enabled": bool(
+                    payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else True
+                ),
+                "restarted_from_run_id": run_id,
+            },
+        )
+    except Exception as exc:
+        logger.exception("Restart checkpoint initialization failed for source run_id=%s", run_id)
+        raise HTTPException(status_code=503, detail=f"Failed to initialize restarted run checkpoint: {exc}") from exc
+
+    _submit_pipeline_start(new_run_id, payload)
+    return {
+        "run_id": new_run_id,
+        "status": "RUNNING",
+        "action": "restart",
+        "restarted_from_run_id": run_id,
     }
 
 
@@ -1295,13 +1605,20 @@ def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
 
 @app.get("/kpi-reviews/{run_id}")
 def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
+    checkpoint = load_checkpoint_state(run_id) or {}
+    source = str(checkpoint.get("source") or "database").lower()
     try:
         rows = _fetch_hitl_rows(run_id, status=status)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not rows:
-        rows = [_map_kpi(kpi, run_id=run_id) for kpi in _artifact_kpis(run_id)]
-    return {"runId": run_id, "run_id": run_id, "kpis": rows}
+        rows = [_map_kpi(kpi, run_id=run_id, source=source) for kpi in _artifact_kpis(run_id)]
+    rows = [
+        {**row, "run_id": run_id, "source": source}
+        for row in rows
+        if str(row.get("run_id") or run_id) == str(run_id)
+    ]
+    return {"runId": run_id, "run_id": run_id, "source": source, "kpis": rows}
 
 
 @app.post("/kpi-reviews/{queue_id}/approve")
@@ -1348,6 +1665,8 @@ def hitl_queue(run_id: str) -> Dict[str, Any]:
 @app.post("/hitl/{run_id}/decisions")
 def submit_hitl_decisions(run_id: str, payload: HitlDecisionPayload) -> Dict[str, Any]:
     for decision in payload.decisions:
+        if not str(decision.kpi_id or "").startswith(f"{run_id}:"):
+            raise HTTPException(status_code=400, detail="KPI decision does not belong to this run.")
         status = decision.decision.upper()
         if status == "EDITED":
             edited = {"definition": decision.edited_definition, "notes": decision.notes}

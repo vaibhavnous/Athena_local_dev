@@ -42,6 +42,7 @@ export const startRun = (payload: {
   budget?: number
   maxKpis?: number
   devMode?: boolean
+  use_domain_kb?: boolean
   stage_confirmation_enabled?: boolean
 }) => api.post('/pipeline/run', payload)
 
@@ -80,6 +81,9 @@ export const submitSilverReview = (runId: string, action: 'APPROVED' | 'REJECTED
 export const abortRun = (runId: string) => api.post(`/pipeline/${runId}/abort`)
 export const continueStage = (runId: string, autoAdvance = false) =>
   api.post(`/pipeline/${runId}/continue-stage`, { auto_advance: autoAdvance })
+export const retryFailedStage = (runId: string) => api.post(`/pipeline/${runId}/retry-failed-stage`)
+export const resumeFromFailure = (runId: string) => api.post(`/pipeline/${runId}/resume-from-failure`)
+export const restartRun = (runId: string) => api.post(`/pipeline/${runId}/restart`)
 
 export const getHitlQueue = (runId: string) => api.get(`/hitl/${runId}`)
 
