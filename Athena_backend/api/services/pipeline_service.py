@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import os
+import time
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
+
+from fastapi import HTTPException
 
 from services.pipeline_runtime import (
     BACKGROUND_EXECUTOR,
@@ -14,9 +19,75 @@ from services.pipeline_runtime import (
     submit_background,
 )
 from services.sftp_runtime import start_sftp_pipeline
+from source_ingestion_pipeline import build_source_ingestion_graph
+from utilis.db import get_pending_items
+from utilis.logger import logger
 
 from api import utils as api_utils
 from api.models import PipelineRunRequest
+
+TERMINAL_STATUSES = {"ABORTED", "COMPLETED", "FAILED", "PIPELINE_COMPLETED", "SUCCESS"}
+PAUSED_STATUSES = {"HITL_WAIT", "PAUSED_FOR_HITL", "PAUSED_FOR_STAGE_CONFIRMATION"}
+ACTIVE_STATUSES = {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
+
+
+@lru_cache(maxsize=1)
+def source_ingestion_graph():
+    return build_source_ingestion_graph()
+
+
+def _pipeline_timeout_seconds() -> int:
+    return max(1, int(os.getenv("ATHENA_PIPELINE_JOB_TIMEOUT_SECONDS", "3600")))
+
+
+def _validate_pipeline_result(result: Any) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        raise ValueError("Pipeline returned an invalid response object.")
+    state = result.get("result")
+    if not isinstance(state, dict):
+        raise ValueError("Pipeline response is missing a valid result state.")
+    return state
+
+
+def _next_status(current_status: Optional[str], pending_gate1: bool, *, file_source: bool) -> str:
+    status = str(current_status or "").upper()
+    if status in TERMINAL_STATUSES or status in PAUSED_STATUSES or status in ACTIVE_STATUSES:
+        return status
+    if file_source:
+        return current_status or "COMPLETED"
+    return "HITL_WAIT" if pending_gate1 else (current_status or "COMPLETED")
+
+
+def _mark_run_failed(run_id: str, exc: Exception, *, stage: str) -> None:
+    logger.error("Pipeline job failed run_id=%s stage=%s", run_id, stage, exc_info=exc)
+    checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+    checkpoint.update(
+        {
+            "status": "FAILED",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "failed_background_stage": stage,
+            "failed_at": time.time(),
+        }
+    )
+    save_checkpoint_state(run_id, checkpoint)
+
+
+def _job_done_callback(run_id: str, job_key: str, stage: str):
+    def _handle_done(done) -> None:
+        try:
+            exc = done.exception()
+            if exc:
+                _mark_run_failed(run_id, exc, stage=stage)
+            else:
+                logger.info("Pipeline background job completed run_id=%s stage=%s", run_id, stage)
+        finally:
+            with BACKGROUND_JOB_LOCK:
+                if BACKGROUND_JOBS.get(job_key) is done:
+                    BACKGROUND_JOBS.pop(job_key, None)
+
+    return _handle_done
 
 
 def run_pipeline_background(
@@ -29,7 +100,9 @@ def run_pipeline_background(
     use_domain_kb: bool,
     stage_confirmation_enabled: bool,
 ) -> None:
+    started_at = time.monotonic()
     try:
+        logger.info("Pipeline background job started run_id=%s source=%s", run_id, source)
         existing_checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
         if api_utils.is_file_source(source):
             result = start_sftp_pipeline(
@@ -48,20 +121,18 @@ def run_pipeline_background(
                 use_domain_kb=use_domain_kb,
                 stage_confirmation_enabled=stage_confirmation_enabled,
             )
-        state = result.get("result") if isinstance(result, dict) else {}
-        if isinstance(state, dict):
-            from utilis.db import get_pending_items
+        elapsed_seconds = time.monotonic() - started_at
+        if elapsed_seconds > _pipeline_timeout_seconds():
+            raise TimeoutError(f"Pipeline exceeded timeout after {elapsed_seconds:.1f} seconds.")
 
-            pending_gate1 = get_pending_items(run_id, 1)
-            if api_utils.is_file_source(state.get("source") or source):
-                state["status"] = state.get("status", "COMPLETED")
-            elif state.get("status") not in {"PAUSED_FOR_STAGE_CONFIRMATION", "FAILED"}:
-                state["status"] = "HITL_WAIT" if pending_gate1 else state.get("status", "COMPLETED")
-            save_checkpoint_state(run_id, {**existing_checkpoint, **state, "run_id": run_id})
+        state = _validate_pipeline_result(result)
+        pending_gate1 = get_pending_items(run_id, 1)
+        file_source = api_utils.is_file_source(state.get("source") or source)
+        state["status"] = _next_status(state.get("status"), pending_gate1, file_source=file_source)
+        save_checkpoint_state(run_id, {**existing_checkpoint, **state, "run_id": run_id})
+        logger.info("Pipeline background job saved checkpoint run_id=%s status=%s", run_id, state.get("status"))
     except Exception as exc:
-        checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
-        checkpoint.update({"status": "FAILED", "error": str(exc)})
-        save_checkpoint_state(run_id, checkpoint)
+        _mark_run_failed(run_id, exc, stage="pipeline")
         raise
 
 
@@ -71,6 +142,11 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
     sftp_entity = api_utils.normalize_file_entity(source, payload.sftp_entity)
     use_domain_kb = False if api_utils.is_file_source(source) else bool(payload.use_domain_kb)
     with BACKGROUND_JOB_LOCK:
+        if job_key in BACKGROUND_JOBS and not BACKGROUND_JOBS[job_key].done():
+            logger.warning("Duplicate pipeline submission rejected run_id=%s", run_id)
+            raise HTTPException(status_code=409, detail=f"Pipeline job already running for run_id={run_id}")
+
+        logger.info("Submitting pipeline background job run_id=%s source=%s", run_id, source)
         future = BACKGROUND_EXECUTOR.submit(
             run_pipeline_background,
             run_id=run_id,
@@ -86,12 +162,7 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
         )
         BACKGROUND_JOBS[job_key] = future
 
-    def _cleanup(done) -> None:
-        with BACKGROUND_JOB_LOCK:
-            if BACKGROUND_JOBS.get(job_key) is done:
-                BACKGROUND_JOBS.pop(job_key, None)
-
-    future.add_done_callback(_cleanup)
+    future.add_done_callback(_job_done_callback(run_id, job_key, "pipeline"))
 
 
 def normalized_source_databases(checkpoint: Dict[str, Any]) -> Optional[List[str]]:
@@ -127,9 +198,12 @@ def clean_checkpoint_for_resume(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
     cleaned["status"] = "RUNNING"
     cleaned["background_stage"] = None
     cleaned["failed_background_stage"] = None
+    cleaned["last_failed_stage_key"] = checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key")
     cleaned["error"] = None
     cleaned["resume_message"] = None
     cleaned["awaiting_stage_confirmation"] = False
+    cleaned["retry_count"] = int(checkpoint.get("retry_count") or 0) + 1
+    cleaned["resumed_at"] = time.time()
     return cleaned
 
 
@@ -138,12 +212,9 @@ def continue_database_pipeline_job(run_id: str, start_stage_key: str, state: Dic
 
 
 def continue_file_pipeline_job(run_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
-    from source_ingestion_pipeline import build_source_ingestion_graph
-
-    graph_app = build_source_ingestion_graph()
     working_state = dict(state or {})
     working_state["run_id"] = run_id
-    result = graph_app.invoke(working_state)
+    result = source_ingestion_graph().invoke(working_state)
     if not isinstance(result, dict):
         raise ValueError("File-source pipeline returned an invalid state.")
     return result
@@ -154,6 +225,10 @@ def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Option
         return str(checkpoint.get("failed_background_stage"))
     if checkpoint.get("background_stage"):
         return api_utils.stage_key(checkpoint.get("background_stage"))
+
+    next_stage_key = checkpoint.get("next_stage_key")
+    if next_stage_key:
+        return str(next_stage_key)
 
     context = get_run_context(run_id)
     failed_step = next(
@@ -166,8 +241,4 @@ def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Option
     )
     if failed_step:
         return str(failed_step)
-
-    next_stage_key = checkpoint.get("next_stage_key")
-    if next_stage_key:
-        return str(next_stage_key)
     return None

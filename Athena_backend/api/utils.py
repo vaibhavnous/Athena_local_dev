@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -56,6 +57,16 @@ def iso_or_none(value: Any) -> Optional[str]:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def parse_iso(value: Any) -> Optional[datetime]:
+    text = iso_or_none(value)
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def stage_key(value: Any) -> Optional[str]:

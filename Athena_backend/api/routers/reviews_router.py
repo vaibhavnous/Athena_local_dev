@@ -5,19 +5,36 @@ from fastapi import APIRouter, HTTPException
 from api import utils as api_utils
 from api.models import Gate2DecisionPayload, Gate3DecisionPayload, GenericGateDecisionPayload
 from api.services.ui_service import bronze_review_from_scripts, silver_review_from_scripts, ui_run
-from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate2_review, submit_gate3_review
-from sftp_nodes.hitl import submit_sftp_gate2_review, submit_sftp_gate3_review, submit_sftp_gate4_review, submit_sftp_gate5_review
+from services.pipeline_runtime import (
+    load_checkpoint_state,
+    submit_background,
+    submit_gate2_review,
+    submit_gate3_review,
+)
+from sftp_nodes.hitl import (
+    submit_sftp_gate2_review,
+    submit_sftp_gate3_review,
+    submit_sftp_gate4_review,
+    submit_sftp_gate5_review,
+)
+from utilis.logger import logger
 
 router = APIRouter()
 
 
+# -------------------------
+# ✅ TABLE REVIEWS (GET)
+# -------------------------
 @router.get("/table-reviews/{run_id}")
 def table_reviews(run_id: str) -> Dict[str, Any]:
     try:
         run = ui_run(run_id)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception:
+        logger.error("Failed to fetch table review", exc_info=True, extra={"run_id": run_id})
+        raise HTTPException(status_code=503, detail="Failed to load table review")
+
     checkpoint = load_checkpoint_state(run_id) or {}
+
     return {
         "run_id": run_id,
         "source": run.get("source"),
@@ -25,32 +42,50 @@ def table_reviews(run_id: str) -> Dict[str, Any]:
         "resume_message": run.get("resume_message"),
         "nominated_tables": run.get("nominated_tables") or [],
         "certified_tables": run.get("certified_tables") or [],
-        "candidate_feed": checkpoint.get("candidate_feed") if api_utils.is_file_source(run.get("source")) else None,
-        "candidate_feeds": (checkpoint.get("candidate_feeds") or []) if api_utils.is_file_source(run.get("source")) else [],
+        "candidate_feed": checkpoint.get("candidate_feed")
+        if api_utils.is_file_source(run.get("source"))
+        else None,
+        "candidate_feeds": (checkpoint.get("candidate_feeds") or [])
+        if api_utils.is_file_source(run.get("source"))
+        else [],
     }
 
 
+# -------------------------
+# ✅ TABLE REVIEWS (POST)
+# -------------------------
 @router.post("/table-reviews/{run_id}")
 def submit_table_reviews(run_id: str, payload: Gate2DecisionPayload) -> Dict[str, Any]:
+
     checkpoint = load_checkpoint_state(run_id) or {}
+
+    logger.info("Submitting table review", extra={"run_id": run_id})
+
     if api_utils.is_file_source(checkpoint.get("source")):
         submit_background(run_id, "gate2", submit_sftp_gate2_review, run_id, True)
         return {"run_id": run_id, "status": "SUBMITTED", "approve": True}
 
     approved_tables = [item for item in payload.approved_tables if str(item).strip()]
+
     if not approved_tables:
         raise HTTPException(status_code=400, detail="At least one table must be approved for Table Review.")
 
     submit_background(run_id, "gate2", submit_gate2_review, run_id, approved_tables)
+
     return {"run_id": run_id, "status": "SUBMITTED", "approved_tables": approved_tables}
 
 
+# -------------------------
+# ✅ ENRICHMENT REVIEWS (GET)
+# -------------------------
 @router.get("/enrichment-reviews/{run_id}")
 def enrichment_reviews(run_id: str) -> Dict[str, Any]:
     try:
         run = ui_run(run_id)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception:
+        logger.error("Failed to fetch enrichment review", exc_info=True, extra={"run_id": run_id})
+        raise HTTPException(status_code=503, detail="Failed to load enrichment review")
+
     return {
         "run_id": run_id,
         "next_gate": run.get("next_gate"),
@@ -67,26 +102,43 @@ def enrichment_reviews(run_id: str) -> Dict[str, Any]:
     }
 
 
+# -------------------------
+# ✅ ENRICHMENT REVIEWS (POST)
+# -------------------------
 @router.post("/enrichment-reviews/{run_id}")
 def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict[str, Any]:
+
     checkpoint = load_checkpoint_state(run_id) or {}
+
+    logger.info("Submitting enrichment review", extra={"run_id": run_id})
+
     if api_utils.is_file_source(checkpoint.get("source")):
         submit_background(run_id, "gate3", submit_sftp_gate3_review, run_id, payload.approve)
         return {"run_id": run_id, "status": "SUBMITTED", "approve": payload.approve}
+
     submit_background(run_id, "gate3", submit_gate3_review, run_id, payload.approve)
+
     return {"run_id": run_id, "status": "SUBMITTED", "approve": payload.approve}
 
 
+# -------------------------
+# ✅ BRONZE REVIEWS (GET)
+# -------------------------
 @router.get("/bronze-reviews/{run_id}")
 def bronze_reviews(run_id: str) -> Dict[str, Any]:
     try:
         run = ui_run(run_id)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception:
+        logger.error("Failed to fetch bronze review", exc_info=True, extra={"run_id": run_id})
+        raise HTTPException(status_code=503, detail="Failed to load bronze review")
+
     checkpoint = load_checkpoint_state(run_id) or {}
+
     bronze_artifact = checkpoint.get("bronze_review_artifact") or run.get("bronze_review_artifact") or {}
+
     if not (bronze_artifact.get("feeds") or []):
         bronze_artifact = bronze_review_from_scripts(run_id, checkpoint)
+
     return {
         "run_id": run_id,
         "next_gate": run.get("next_gate"),
@@ -95,22 +147,37 @@ def bronze_reviews(run_id: str) -> Dict[str, Any]:
     }
 
 
+# -------------------------
+# ✅ BRONZE REVIEWS (POST)
+# -------------------------
 @router.post("/bronze-reviews/{run_id}")
 def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
+
+    logger.info("Submitting bronze review", extra={"run_id": run_id, "action": payload.action})
+
     submit_background(run_id, "gate4", submit_sftp_gate4_review, run_id, payload.action)
+
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
 
 
+# -------------------------
+# ✅ SILVER REVIEWS (GET)
+# -------------------------
 @router.get("/silver-reviews/{run_id}")
 def silver_reviews(run_id: str) -> Dict[str, Any]:
     try:
         run = ui_run(run_id)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception:
+        logger.error("Failed to fetch silver review", exc_info=True, extra={"run_id": run_id})
+        raise HTTPException(status_code=503, detail="Failed to load silver review")
+
     checkpoint = load_checkpoint_state(run_id) or {}
+
     silver_artifact = checkpoint.get("silver_review_artifact") or run.get("silver_review_artifact") or {}
+
     if not (silver_artifact.get("items") or []):
         silver_artifact = silver_review_from_scripts(run_id, checkpoint)
+
     return {
         "run_id": run_id,
         "next_gate": run.get("next_gate"),
@@ -119,7 +186,14 @@ def silver_reviews(run_id: str) -> Dict[str, Any]:
     }
 
 
+# -------------------------
+# ✅ SILVER REVIEWS (POST)
+# -------------------------
 @router.post("/silver-reviews/{run_id}")
 def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
+
+    logger.info("Submitting silver review", extra={"run_id": run_id, "action": payload.action})
+
     submit_background(run_id, "gate5", submit_sftp_gate5_review, run_id, payload.action)
+
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
