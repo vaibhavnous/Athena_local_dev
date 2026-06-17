@@ -16,6 +16,8 @@ from utilis.logger import logger
 BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("ATHENA_BACKGROUND_WORKERS", "2")))
 BACKGROUND_JOBS: Dict[str, Future] = {}
 BACKGROUND_JOB_LOCK = threading.Lock()
+SCRIPT_BUNDLE_CACHE_LOCK = threading.Lock()
+SCRIPT_BUNDLE_CACHE: Dict[str, Dict[str, Any]] = {}
 
 DATABASE_STAGE_SEQUENCE = [
     ("ingestion", "BRD Ingest"),
@@ -35,6 +37,40 @@ DATABASE_STAGE_SEQUENCE = [
 ]
 
 DATABASE_STAGE_LABELS = dict(DATABASE_STAGE_SEQUENCE)
+
+
+def _bundle_cache_token(path: Path) -> Optional[str]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _load_script_bundle(path: Path) -> Dict[str, Any]:
+    cache_key = str(path.resolve())
+    cache_token = _bundle_cache_token(path)
+    if cache_token is None:
+        return {}
+
+    with SCRIPT_BUNDLE_CACHE_LOCK:
+        cached = SCRIPT_BUNDLE_CACHE.get(cache_key)
+        if cached and cached.get("token") == cache_token:
+            return dict(cached.get("bundle") or {})
+
+    try:
+        bundle = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Failed to load script bundle path=%s", path)
+        return {}
+
+    if not isinstance(bundle, dict):
+        logger.warning("Ignoring malformed script bundle path=%s", path)
+        return {}
+
+    with SCRIPT_BUNDLE_CACHE_LOCK:
+        SCRIPT_BUNDLE_CACHE[cache_key] = {"token": cache_token, "bundle": bundle}
+    return dict(bundle)
 
 
 def _gate_label(gate: int, *, source: str = "database") -> str:
@@ -544,10 +580,14 @@ def load_bronze_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None
     if not bundle_path.exists():
         return _scripts_from_checkpoint(checkpoint or {}, "bronze_generation_results", "bronze_generated_at")
 
-    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle = _load_script_bundle(bundle_path)
+    if not bundle:
+        return _scripts_from_checkpoint(checkpoint or {}, "bronze_generation_results", "bronze_generated_at")
     bundle_run_id = bundle.get("run_id")
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
+        if not isinstance(item, dict):
+            continue
         script_body = str(item.get("script_body") or "").strip()
         if not script_body:
             script_body = _read_script_body(item.get("script_path"))
@@ -580,10 +620,14 @@ def load_silver_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None
     if not bundle_path.exists():
         return _scripts_from_checkpoint(checkpoint or {}, "silver_generation_results", "silver_generated_at")
 
-    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle = _load_script_bundle(bundle_path)
+    if not bundle:
+        return _scripts_from_checkpoint(checkpoint or {}, "silver_generation_results", "silver_generated_at")
     bundle_run_id = bundle.get("run_id")
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
+        if not isinstance(item, dict):
+            continue
         script_body = str(item.get("script_body") or "").strip()
         if not script_body:
             script_body = _read_script_body(item.get("script_path"))
@@ -616,10 +660,14 @@ def load_gold_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) 
     if not bundle_path.exists():
         return _scripts_from_checkpoint(checkpoint or {}, "gold_generation_results", "gold_generated_at")
 
-    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle = _load_script_bundle(bundle_path)
+    if not bundle:
+        return _scripts_from_checkpoint(checkpoint or {}, "gold_generation_results", "gold_generated_at")
     bundle_run_id = bundle.get("run_id")
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
+        if not isinstance(item, dict):
+            continue
         script_body = str(item.get("script_body") or "").strip()
         if not script_body:
             script_body = _read_script_body(item.get("script_path"))
@@ -1180,10 +1228,14 @@ def start_pipeline(
     }
 
     if source_value in file_sources:
-        from source_ingestion_pipeline import build_source_ingestion_graph
+        from services.sftp_runtime import start_sftp_pipeline
 
-        graph_app = build_source_ingestion_graph()
-        result = graph_app.invoke(initial_state)
+        result = start_sftp_pipeline(
+            run_id=run_id,
+            brd_text=initial_state["brd_text"],
+            sftp_entity=initial_state["sftp_entity"],
+            source=source_value,
+        ).get("result")
     else:
         result = continue_database_pipeline(
             run_id,

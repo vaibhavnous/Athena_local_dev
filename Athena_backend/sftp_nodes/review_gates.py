@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from state import Stage01State
 from utilis.db import config, get_pipeline_connection
 from utilis.logger import logger
+
+_BRONZE_PLAN_TABLE_READY = False
+_BRONZE_PLAN_TABLE_LOCK = threading.Lock()
 
 
 def _copy_state(state: Stage01State) -> Stage01State:
@@ -80,7 +84,14 @@ def _latest_schema(feed_id: str) -> Optional[Dict[str, Any]]:
         row = cursor.fetchone()
         if not row:
             return None
-        payload = json.loads(row.schema_json) if row.schema_json else []
+        try:
+            payload = json.loads(row.schema_json) if row.schema_json else []
+        except Exception:
+            logger.exception("Failed to decode approved schema payload for feed_id=%s", feed_id)
+            return None
+        if not isinstance(payload, list):
+            logger.warning("Approved schema payload is not a list for feed_id=%s", feed_id)
+            return None
         return {
             "feed_id": row.feed_id,
             "vendor": row.vendor,
@@ -147,10 +158,13 @@ def state_safe_path(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _persist_bronze_plan(plan: Dict[str, Any]) -> None:
-    conn = get_pipeline_connection()
-    try:
-        cursor = conn.cursor()
+def _ensure_bronze_plan_table(cursor) -> None:
+    global _BRONZE_PLAN_TABLE_READY
+    if _BRONZE_PLAN_TABLE_READY:
+        return
+    with _BRONZE_PLAN_TABLE_LOCK:
+        if _BRONZE_PLAN_TABLE_READY:
+            return
         cursor.execute(
             f"""
             IF OBJECT_ID(N'[{_pipeline_schema()}].[bronze_execution_plan]', N'U') IS NULL
@@ -171,6 +185,14 @@ def _persist_bronze_plan(plan: Dict[str, Any]) -> None:
             END
             """
         )
+        _BRONZE_PLAN_TABLE_READY = True
+
+
+def _persist_bronze_plan(plan: Dict[str, Any]) -> None:
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        _ensure_bronze_plan_table(cursor)
         cursor.execute(
             f"""
             INSERT INTO [{_pipeline_schema()}].[bronze_execution_plan]
@@ -187,6 +209,9 @@ def _persist_bronze_plan(plan: Dict[str, Any]) -> None:
             str(plan.get("review_status") or "PENDING"),
         )
         conn.commit()
+    except Exception:
+        logger.exception("Failed to persist bronze execution plan run_id=%s feed_id=%s", plan.get("run_id"), plan.get("feed_id"))
+        raise
     finally:
         conn.close()
 
@@ -196,6 +221,7 @@ def source_access_readiness_check_node(state: Stage01State) -> Stage01State:
     if str(new_state.get("status") or "").upper() == "FAILED":
         return new_state
 
+    logger.info("Running source access readiness check run_id=%s", new_state.get("run_id"))
     feeds = _resolve_approved_feeds(new_state)
     if not feeds:
         new_state["status"] = "FAILED"
