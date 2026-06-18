@@ -1,11 +1,25 @@
 import React from 'react'
 import { render, screen } from '@testing-library/react'
 
+let mockPathname = '/'
+
+jest.mock('./pages/LandingPage', () => ({
+  __esModule: true,
+  default: () => <div>Landing Mock</div>,
+}))
+
+jest.mock('./components/layout/AppShell', () => ({
+  __esModule: true,
+  default: () => <div>App Shell Mock</div>,
+}))
+
 jest.mock('react-router-dom', () => {
   const React = require('react')
   const Route = ({ path, element, children }) => {
-    if (path && path !== '/') return null
-    return <>{element || children}</>
+    const current = mockPathname
+    if (path === '/') return current === '/' ? <>{element || children}</> : null
+    if (path === '/app') return current.startsWith('/app') ? <>{element || children}</> : null
+    return null
   }
   return {
     __esModule: true,
@@ -17,7 +31,7 @@ jest.mock('react-router-dom', () => {
     Link: ({ children }) => <>{children}</>,
     NavLink: ({ children }) => <>{children}</>,
     useNavigate: () => jest.fn(),
-    useLocation: () => ({ pathname: '/' }),
+    useLocation: () => ({ pathname: mockPathname }),
     useParams: () => ({}),
   }
 }, { virtual: true })
@@ -25,6 +39,13 @@ jest.mock('react-router-dom', () => {
 import App from './App'
 
 test('renders the landing page entry point', () => {
+  mockPathname = '/'
   render(<App />)
-  expect(screen.getByText(/AI-Powered Data Engineering Platform/i)).toBeInTheDocument()
+  expect(screen.getByText('Landing Mock')).toBeInTheDocument()
+})
+
+test('renders the app shell route entry point', () => {
+  mockPathname = '/app'
+  render(<App />)
+  expect(screen.getByText('App Shell Mock')).toBeInTheDocument()
 })

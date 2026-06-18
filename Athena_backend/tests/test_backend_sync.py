@@ -105,3 +105,47 @@ def test_run_detail_endpoint_returns_scripts_from_ui_layer(monkeypatch):
     body = response.json()
     assert body["run_id"] == "run-sync"
     assert body["bronze"]["scripts"][0]["name"] == "bronze.py"
+
+
+def test_mocked_pipeline_progression_stays_in_sync(monkeypatch):
+    state = {
+        "run_id": "run-progress",
+        "status": "HITL_WAIT",
+        "next_gate": 1,
+        "resume_message": "KPI Review is pending.",
+    }
+    decisions = []
+
+    def fake_ui_run(run_id):
+        return {
+            "run_id": run_id,
+            "status": state["status"],
+            "next_gate": state["next_gate"],
+            "resume_message": state["resume_message"],
+            "stages": [{"key": "gate1", "status": state["status"]}],
+        }
+
+    def fake_update_hitl_item(queue_id, action, **kwargs):
+        decisions.append((queue_id, action))
+        state["status"] = "SUCCESS"
+        state["next_gate"] = None
+        state["resume_message"] = "Pipeline completed."
+
+    monkeypatch.setattr("api.routers.pipeline_router.ui_run", fake_ui_run)
+    monkeypatch.setattr("api.routers.kpi_router.update_hitl_item", fake_update_hitl_item)
+    monkeypatch.setattr("api.routers.kpi_router.maybe_resume_gate1", lambda run_id: None)
+
+    before = client.get("/pipeline/run-progress/status")
+    assert before.status_code == 200
+    assert before.json()["status"] == "HITL_WAIT"
+    assert before.json()["run"]["next_gate"] == 1
+
+    approve = client.post("/kpi-reviews/run-progress:1:kpi-1/approve", json={})
+    assert approve.status_code == 200
+    assert approve.json()["status"] == "APPROVED"
+    assert decisions == [("run-progress:1:kpi-1", "APPROVED")]
+
+    after = client.get("/pipeline/run-progress/status")
+    assert after.status_code == 200
+    assert after.json()["status"] == "SUCCESS"
+    assert after.json()["state"]["life_cycle_state"] == "TERMINATED"
