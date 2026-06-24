@@ -1,13 +1,12 @@
 # Azure DevOps Deployment Guide
 
-This guide explains how to deploy the Athena application to Azure using Azure DevOps Pipelines and App Service.
+This guide explains how to deploy the Athena application to Azure as a single combined App Service running both backend and frontend.
 
 ## Architecture
 
-- **Backend App Service**: Linux App Service running Python 3.9 (Flask/FastAPI)
-- **Frontend App Service**: Linux App Service running Node.js 16
+- **Combined App Service**: Single Linux App Service running Python 3.9 (FastAPI) + React frontend as static files
 - **Key Vault**: Azure Key Vault for secure secret management
-- **Shared App Service Plan**: B2 tier Linux plan for both services
+- **App Service Plan**: B2 tier Linux plan
 - **Application Insights**: Monitoring and telemetry
 
 ## Prerequisites
@@ -82,6 +81,7 @@ Edit `infrastructure.parameters.json`:
 ## Step 6: Create Pipelines in Azure DevOps
 
 ### Pipeline 1: Backend CI (azure-pipelines-backend.yml)
+*Builds both backend and frontend, packages as one artifact*
 
 1. **Pipelines** → **New pipeline** → **GitHub** (or your repo)
 2. Select **Existing Azure Pipelines YAML file**
@@ -89,18 +89,14 @@ Edit `infrastructure.parameters.json`:
 4. Name: `Athena-Backend-CI`
 5. Save & queue
 
-### Pipeline 2: Frontend CI (azure-pipelines-frontend.yml)
+### Pipeline 2: CD Release (azure-pipelines-cd.yml)
+*Deploys combined artifact to single App Service*
 
-1. Repeat for `azure-pipelines-frontend.yml`
-2. Name: `Athena-Frontend-CI`
-3. Save & queue
-
-### Pipeline 3: CD Release (azure-pipelines-cd.yml)
-
-1. Repeat for `azure-pipelines-cd.yml`
-2. Name: `Athena-CD`
-3. Configure trigger: **Pipeline completion** for both Backend-CI and Frontend-CI
-4. Save & queue
+1. **Pipelines** → **New pipeline**
+2. Path: `azure-pipelines-cd.yml`
+3. Name: `Athena-CD`
+4. Configure trigger: **Pipeline completion** for Athena-Backend-CI
+5. Save & queue
 
 ## Step 7: Deploy Infrastructure
 
@@ -118,27 +114,27 @@ az deployment group create \
 After infrastructure deployment:
 
 ```bash
-# Get backend app service identity
-BACKEND_PRINCIPAL=$(az webapp identity show \
+# Get app service identity
+APP_PRINCIPAL=$(az webapp identity show \
   --resource-group athena-rg-dev \
-  --name athena-backend-dev \
+  --name athena-combined-dev \
   --query principalId -o tsv)
 
 # Grant Key Vault access
 az keyvault set-policy \
   --name athena-kv-dev \
-  --object-id $BACKEND_PRINCIPAL \
+  --object-id $APP_PRINCIPAL \
   --secret-permissions get list
 ```
 
 ## Step 9: Configure App Service Environment Variables
 
-### Backend (Python)
+### Combined App Service (Python + React)
 
 ```bash
 az webapp config appsettings set \
   --resource-group athena-rg-dev \
-  --name athena-backend-dev \
+  --name athena-combined-dev \
   --settings \
     SQL_CONNECTION_STRING="@Microsoft.KeyVault(VaultName=athena-kv-dev;SecretName=sql-connection-string)" \
     API_KEY="@Microsoft.KeyVault(VaultName=athena-kv-dev;SecretName=api-key)" \
@@ -147,61 +143,46 @@ az webapp config appsettings set \
     LOG_LEVEL="INFO"
 ```
 
-### Frontend (React)
-
-```bash
-az webapp config appsettings set \
-  --resource-group athena-rg-dev \
-  --name athena-frontend-dev \
-  --settings \
-    REACT_APP_API_BASE_URL="https://athena-backend-dev.azurewebsites.net" \
-    REACT_APP_ENVIRONMENT="dev"
-```
-
-## Step 10: Enable Deployment Slot Swap (Backend)
+## Step 10: Enable Deployment Slot Swap
 
 ```bash
 # Create staging slot if not already created
 az webapp deployment slot create \
   --resource-group athena-rg-dev \
-  --name athena-backend-dev \
+  --name athena-combined-dev \
   --slot staging
 ```
 
 ## Step 11: Verify Deployment
 
-Check app services:
+Check app service:
 
 ```bash
-# Backend
-curl https://athena-backend-dev.azurewebsites.net/health
+# Health check (backend)
+curl https://athena-combined-dev.azurewebsites.net/health
 
-# Frontend
-curl https://athena-frontend-dev.azurewebsites.net
+# Frontend (React app loads at root)
+curl https://athena-combined-dev.azurewebsites.net
 ```
 
 View logs:
 
 ```bash
-# Stream logs from backend
+# Stream logs from combined app service
 az webapp log tail \
   --resource-group athena-rg-dev \
-  --name athena-backend-dev
-
-# Stream logs from frontend
-az webapp log tail \
-  --resource-group athena-rg-dev \
-  --name athena-frontend-dev
+  --name athena-combined-dev
 ```
 
 ## Environment Variables Reference
 
-### Backend (Athena_backend)
+### Combined App Service (Athena_backend + React Frontend)
 
 - `SQL_CONNECTION_STRING`: Database connection (from Key Vault)
 - `API_KEY`: API authentication key (from Key Vault)
 - `ENVIRONMENT`: dev/prod
 - `LOG_LEVEL`: DEBUG/INFO/WARNING/ERROR
+- `PYTHONUNBUFFERED`: 1 (for unbuffered Python output)
 - `APPINSIGHTS_INSTRUMENTATIONKEY`: Application Insights key
 
 ### Frontend (frontend)
