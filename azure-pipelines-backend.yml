@@ -11,7 +11,7 @@ pool:
   vmImage: 'ubuntu-latest'
 
 variables:
-  pythonVersion: '3.9'
+  pythonVersion: '3.10'
   backendFolder: 'Athena_backend'
   artifactName: 'backend-app'
   artifactZip: 'backend-app.zip'
