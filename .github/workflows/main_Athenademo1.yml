@@ -8,6 +8,7 @@ on:
 
 env:
   AZURE_WEBAPP_NAME: Athenademo1
+  AZURE_WEBAPP_URL: 'https://athenademo1-a6awbcchgxcchraj.southindia-01.azurewebsites.net'
   AZURE_WEBAPP_PACKAGE_PATH: '.'
   NODE_VERSION: '18.x'
   PYTHON_VERSION: '3.9'
@@ -95,7 +96,7 @@ jobs:
         run: |
           echo "Waiting for app to be ready..."
           sleep 10
-          curl -f https://${{ env.AZURE_WEBAPP_NAME }}.azurewebsites.net/health || echo "Health check pending"
+          curl -f ${{ env.AZURE_WEBAPP_URL }}/health || echo "Health check pending"
         continue-on-error: true
 
       # Upload artifact for reference
