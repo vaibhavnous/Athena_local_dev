@@ -3,8 +3,7 @@ param projectName string = 'athena'
 param environment string = 'dev'
 param keyVaultName string = '${projectName}-kv-${environment}'
 param appServicePlanName string = '${projectName}-asp-${environment}'
-param backendAppName string = '${projectName}-backend-${environment}'
-param frontendAppName string = '${projectName}-frontend-${environment}'
+param combinedAppName string = '${projectName}-combined-${environment}'
 param appInsightsName string = '${projectName}-ai-${environment}'
 
 @secure()
@@ -72,9 +71,9 @@ resource kvSecretApiKey 'Microsoft.KeyVault/vaults/secrets@2021-06-01-preview' =
   }
 }
 
-// Backend App Service (Python)
-resource backendApp 'Microsoft.Web/sites@2021-02-01' = {
-  name: backendAppName
+// Combined App Service (Python FastAPI + React Static Files)
+resource combinedApp 'Microsoft.Web/sites@2021-02-01' = {
+  name: combinedAppName
   location: location
   kind: 'app,linux'
   identity: {
@@ -97,6 +96,18 @@ resource backendApp 'Microsoft.Web/sites@2021-02-01' = {
           name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
           value: 'InstrumentationKey=${appInsights.properties.InstrumentationKey}'
         }
+        {
+          name: 'PYTHONUNBUFFERED'
+          value: '1'
+        }
+        {
+          name: 'ENVIRONMENT'
+          value: environment
+        }
+        {
+          name: 'LOG_LEVEL'
+          value: 'INFO'
+        }
       ]
       connectionStrings: [
         {
@@ -110,15 +121,15 @@ resource backendApp 'Microsoft.Web/sites@2021-02-01' = {
   }
 }
 
-// Backend App Service - enable Key Vault access
-resource backendAppKeyVaultAccess 'Microsoft.KeyVault/vaults/accessPolicies@2021-06-01-preview' = {
+// Combined App Service - enable Key Vault access
+resource combinedAppKeyVaultAccess 'Microsoft.KeyVault/vaults/accessPolicies@2021-06-01-preview' = {
   parent: keyVault
   name: 'add'
   properties: {
     accessPolicies: [
       {
         tenantId: subscription().tenantId
-        objectId: backendApp.identity.principalId
+        objectId: combinedApp.identity.principalId
         permissions: {
           secrets: [
             'get'
@@ -130,37 +141,9 @@ resource backendAppKeyVaultAccess 'Microsoft.KeyVault/vaults/accessPolicies@2021
   }
 }
 
-// Frontend App Service (Node.js)
-resource frontendApp 'Microsoft.Web/sites@2021-02-01' = {
-  name: frontendAppName
-  location: location
-  kind: 'app,linux'
-  properties: {
-    serverFarmId: appServicePlan.id
-    siteConfig: {
-      linuxFxVersion: 'NODE|16-lts'
-      appSettings: [
-        {
-          name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE'
-          value: 'false'
-        }
-        {
-          name: 'APPINSIGHTS_INSTRUMENTATIONKEY'
-          value: appInsights.properties.InstrumentationKey
-        }
-        {
-          name: 'REACT_APP_API_ENDPOINT'
-          value: 'https://${backendApp.properties.defaultHostName}'
-        }
-      ]
-    }
-    httpsOnly: true
-  }
-}
-
-// Backend Deployment Slot (staging)
-resource backendStagingSlot 'Microsoft.Web/sites/slots@2021-02-01' = {
-  parent: backendApp
+// Deployment Slot (staging) - for zero-downtime deployments
+resource combinedStagingSlot 'Microsoft.Web/sites/slots@2021-02-01' = {
+  parent: combinedApp
   name: 'staging'
   location: location
   kind: 'app,linux'
@@ -177,14 +160,24 @@ resource backendStagingSlot 'Microsoft.Web/sites/slots@2021-02-01' = {
           name: 'APPINSIGHTS_INSTRUMENTATIONKEY'
           value: appInsights.properties.InstrumentationKey
         }
+        {
+          name: 'PYTHONUNBUFFERED'
+          value: '1'
+        }
+        {
+          name: 'ENVIRONMENT'
+          value: environment
+        }
+        {
+          name: 'LOG_LEVEL'
+          value: 'INFO'
+        }
       ]
     }
   }
 }
 
-output backendAppName string = backendApp.name
-output frontendAppName string = frontendApp.name
+output combinedAppName string = combinedApp.name
 output keyVaultName string = keyVault.name
 output appInsightsInstrumentationKey string = appInsights.properties.InstrumentationKey
-output backendDefaultHostname string = backendApp.properties.defaultHostName
-output frontendDefaultHostname string = frontendApp.properties.defaultHostName
+output combinedDefaultHostname string = combinedApp.properties.defaultHostName
