@@ -47,11 +47,31 @@ stages:
         testResultsFormat: 'JUnit'
         testRunTitle: 'Backend Tests'
 
+    - task: NodeTool@0
+      inputs:
+        versionSpec: '$(nodeVersion)'
+      displayName: 'Use Node.js $(nodeVersion)'
+
+    - script: |
+        cd $(frontendFolder)
+        npm ci
+      displayName: 'Install frontend dependencies'
+
+    - script: |
+        cd $(frontendFolder)
+        npm run build
+      displayName: 'Build React frontend'
+      env:
+        REACT_APP_API_BASE_URL: 'http://localhost:8000'
+        CI: false
+
     - script: |
         mkdir -p $(Build.ArtifactStagingDirectory)/backend
         cp -r $(backendFolder)/* $(Build.ArtifactStagingDirectory)/backend/
         cp -r $(backendFolder)/requirements.txt $(Build.ArtifactStagingDirectory)/backend/
-      displayName: 'Prepare artifact'
+        mkdir -p $(Build.ArtifactStagingDirectory)/backend/static
+        cp -r $(frontendFolder)/build/* $(Build.ArtifactStagingDirectory)/backend/static/
+      displayName: 'Prepare artifact with frontend'
 
     - script: |
         cd $(Build.ArtifactStagingDirectory)/backend

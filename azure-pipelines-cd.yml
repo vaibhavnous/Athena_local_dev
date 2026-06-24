@@ -9,11 +9,6 @@ resources:
     trigger:
       branches:
       - main
-  - pipeline: FrontendBuild
-    source: 'Athena-Frontend-CI'
-    trigger:
-      branches:
-      - main
 
 pool:
   vmImage: 'ubuntu-latest'
@@ -24,8 +19,7 @@ variables:
   subscriptionId: '$(AZURE_SUBSCRIPTION_ID)'
   environment: 'dev'
   keyVaultName: 'athena-kv-$(environment)'
-  backendAppName: 'athena-backend-$(environment)'
-  frontendAppName: 'athena-frontend-$(environment)'
+  appName: 'athena-combined-$(environment)'
 
 stages:
 - stage: DeployInfrastructure
@@ -52,13 +46,13 @@ stages:
         overrideParameters: '-projectName athena -environment $(environment)'
       displayName: 'Deploy infrastructure.bicep'
 
-- stage: DeployBackend
-  displayName: 'Deploy Backend'
+- stage: DeployApp
+  displayName: 'Deploy Combined App Service'
   dependsOn: DeployInfrastructure
   condition: succeeded()
   jobs:
-  - job: DeployBackendApp
-    displayName: 'Deploy to Backend App Service'
+  - job: DeployAppService
+    displayName: 'Deploy Backend + Frontend'
     steps:
     - task: DownloadPipelineArtifact@2
       inputs:
@@ -67,18 +61,18 @@ stages:
         definition: 'Athena-Backend-CI'
         buildVersionToDownload: 'latest'
         artifactName: 'backend-app'
-        targetPath: '$(Pipeline.Workspace)/backend-app'
-      displayName: 'Download backend artifact'
+        targetPath: '$(Pipeline.Workspace)/app'
+      displayName: 'Download combined artifact'
 
     - task: AzureWebApp@1
       inputs:
         azureSubscription: '$(AZURE_DEVOPS_SERVICE_CONNECTION)'
         appType: 'webAppLinux'
-        appName: '$(backendAppName)'
+        appName: '$(appName)'
         deployToSlotOrASE: true
         resourceGroupName: '$(resourceGroupName)'
         slotName: 'staging'
-        package: '$(Pipeline.Workspace)/backend-app'
+        package: '$(Pipeline.Workspace)/app'
         runtimeStack: 'PYTHON|3.9'
         startupCommand: 'startup.sh'
       displayName: 'Deploy to staging slot'
@@ -88,7 +82,7 @@ stages:
         azureSubscription: '$(AZURE_DEVOPS_SERVICE_CONNECTION)'
         appType: 'webAppLinux'
         action: 'Swap Slots'
-        appName: '$(backendAppName)'
+        appName: '$(appName)'
         resourceGroupName: '$(resourceGroupName)'
         sourceSlot: 'staging'
         swapWithProduction: true
@@ -103,61 +97,18 @@ stages:
           # Configure app settings with Key Vault references
           az webapp config appsettings set \
             --resource-group $(resourceGroupName) \
-            --name $(backendAppName) \
+            --name $(appName) \
             --settings \
               SQL_CONNECTION_STRING="@Microsoft.KeyVault(VaultName=$(keyVaultName);SecretName=sql-connection-string)" \
               API_KEY="@Microsoft.KeyVault(VaultName=$(keyVaultName);SecretName=api-key)" \
               ENVIRONMENT="$(environment)" \
-              LOG_LEVEL="INFO"
-      displayName: 'Configure app settings'
-
-- stage: DeployFrontend
-  displayName: 'Deploy Frontend'
-  dependsOn: DeployInfrastructure
-  condition: succeeded()
-  jobs:
-  - job: DeployFrontendApp
-    displayName: 'Deploy to Frontend App Service'
-    steps:
-    - task: DownloadPipelineArtifact@2
-      inputs:
-        buildType: 'specific'
-        project: '$(System.TeamProject)'
-        definition: 'Athena-Frontend-CI'
-        buildVersionToDownload: 'latest'
-        artifactName: 'frontend-app'
-        targetPath: '$(Pipeline.Workspace)/frontend-app'
-      displayName: 'Download frontend artifact'
-
-    - task: AzureWebApp@1
-      inputs:
-        azureSubscription: '$(AZURE_DEVOPS_SERVICE_CONNECTION)'
-        appType: 'webAppLinux'
-        appName: '$(frontendAppName)'
-        package: '$(Pipeline.Workspace)/frontend-app'
-        runtimeStack: 'NODE|16-lts'
-      displayName: 'Deploy to Frontend App Service'
-
-    - task: AzureCLI@2
-      inputs:
-        azureSubscription: '$(AZURE_DEVOPS_SERVICE_CONNECTION)'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          # Configure frontend app settings
-          az webapp config appsettings set \
-            --resource-group $(resourceGroupName) \
-            --name $(frontendAppName) \
-            --settings \
-              REACT_APP_API_BASE_URL="https://$(backendAppName).azurewebsites.net" \
-              REACT_APP_ENVIRONMENT="$(environment)"
+              LOG_LEVEL="INFO" \
+              PYTHONUNBUFFERED="1"
       displayName: 'Configure app settings'
 
 - stage: PostDeploy
   displayName: 'Post-Deployment Checks'
-  dependsOn:
-  - DeployBackend
-  - DeployFrontend
+  dependsOn: DeployApp
   condition: succeeded()
   jobs:
   - job: HealthCheck
@@ -165,9 +116,9 @@ stages:
     steps:
     - script: |
         echo "Checking backend health..."
-        curl -f https://$(backendAppName).azurewebsites.net/health || echo "Backend health check pending"
+        curl -f https://$(appName).azurewebsites.net/health || echo "Backend health check pending"
         
-        echo "Checking frontend health..."
-        curl -f https://$(frontendAppName).azurewebsites.net || echo "Frontend health check pending"
+        echo "Checking frontend..."
+        curl -f https://$(appName).azurewebsites.net || echo "Frontend check pending"
       displayName: 'Verify deployment'
       continueOnError: true
