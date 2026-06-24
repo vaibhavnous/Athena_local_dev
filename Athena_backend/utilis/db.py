@@ -99,6 +99,16 @@ def _build_connection_string(host, port, database_name, username, password, driv
     )
 
 
+def _driver_candidates() -> list[str]:
+    configured = str(config["azure_sql"].get("driver") or "").strip()
+    candidates = [configured] if configured else []
+    # Local Windows installs often have one of these available, not always both.
+    for fallback in ("ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"):
+        if fallback not in candidates:
+            candidates.append(fallback)
+    return candidates
+
+
 def _sql_endpoint_summary(*, database_name: str, role: str) -> Dict[str, Any]:
     db_conf = config["azure_sql"]
     if role == "source":
@@ -227,22 +237,32 @@ def get_pipeline_connection() -> pyodbc.Connection:
             + " in Athena_backend/.env."
         )
 
-    conn_str = _build_connection_string(
-        db_conf["host"],
-        db_conf["port"],
-        db_conf["pipeline_database"],
-        db_conf["username"],
-        db_conf["password"],
-        db_conf["driver"],
-    )
-
-    return _connect_with_retry(
-        conn_str,
-        database_name=db_conf["pipeline_database"],
-        host=db_conf["host"],
-        port=db_conf["port"],
-        role="pipeline",
-    )
+    last_exc = None
+    for driver in _driver_candidates():
+        try:
+            conn_str = _build_connection_string(
+                db_conf["host"],
+                db_conf["port"],
+                db_conf["pipeline_database"],
+                db_conf["username"],
+                db_conf["password"],
+                driver,
+            )
+            return _connect_with_retry(
+                conn_str,
+                database_name=db_conf["pipeline_database"],
+                host=db_conf["host"],
+                port=db_conf["port"],
+                role="pipeline",
+            )
+        except pyodbc.Error as exc:
+            last_exc = exc
+            if "ODBC Driver" not in str(exc):
+                raise
+            logger.warning("Pipeline DB connection failed with driver=%s, retrying fallback driver", driver)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Unable to establish pipeline DB connection")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -269,22 +289,32 @@ def get_client_connection(database_name: Optional[str] = None) -> pyodbc.Connect
 
     db = _normalize_source_db(database_name)
 
-    conn_str = _build_connection_string(
-        db_conf["source_host"],
-        db_conf["port"],
-        db,
-        db_conf["source_username"],
-        db_conf["source_password"],
-        db_conf["driver"],
-    )
-
-    return _connect_with_retry(
-        conn_str,
-        database_name=db,
-        host=db_conf["source_host"],
-        port=db_conf["port"],
-        role="source",
-    )
+    last_exc = None
+    for driver in _driver_candidates():
+        try:
+            conn_str = _build_connection_string(
+                db_conf["source_host"],
+                db_conf["port"],
+                db,
+                db_conf["source_username"],
+                db_conf["source_password"],
+                driver,
+            )
+            return _connect_with_retry(
+                conn_str,
+                database_name=db,
+                host=db_conf["source_host"],
+                port=db_conf["port"],
+                role="source",
+            )
+        except pyodbc.Error as exc:
+            last_exc = exc
+            if "ODBC Driver" not in str(exc):
+                raise
+            logger.warning("Source DB connection failed with driver=%s, retrying fallback driver", driver)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Unable to establish source DB connection")
 
 
 @contextmanager

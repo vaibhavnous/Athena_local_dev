@@ -22,7 +22,14 @@ def test_pipeline_run_requires_brd_text_for_database_source():
     assert response.json()["detail"] == "brd_text is required"
 
 
-def test_pipeline_run_accepts_file_source_without_brd_text(monkeypatch):
+def test_pipeline_run_requires_brd_text_for_file_source():
+    response = client.post("/pipeline/run", json={"source": "sftp", "brd_text": ""})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "brd_text is required"
+
+
+def test_pipeline_run_accepts_file_source_with_brd_text(monkeypatch):
     saved = {}
 
     monkeypatch.setattr("api.routers.pipeline_router.load_checkpoint_state", lambda run_id: None)
@@ -35,7 +42,7 @@ def test_pipeline_run_accepts_file_source_without_brd_text(monkeypatch):
         lambda run_id, payload: saved.update({"submitted_run_id": run_id, "submitted_source": payload.source}),
     )
 
-    response = client.post("/pipeline/run", json={"source": "sftp", "brd_text": ""})
+    response = client.post("/pipeline/run", json={"source": "sftp", "brd_text": "file source brd"})
 
     assert response.status_code == 200
     body = response.json()

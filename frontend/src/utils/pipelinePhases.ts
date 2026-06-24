@@ -232,6 +232,11 @@ function buildStepDetail(run, key, state, existingDetail) {
     case 'gate5':
       return readyGateMessage('Silver review', 'Silver review is ready. Validate generated Silver artifacts before downstream validation continues.')
     case 'discovery':
+      if (isFileSource) {
+        if (state === 'COMPLETED') return 'The selected ADLS or SFTP source was scanned and feed candidates were identified.'
+        if (state === 'RUNNING') return 'Scanning the selected ADLS or SFTP source and preparing feed candidates.'
+        return 'Feed discovery begins after KPI review is approved.'
+      }
       if (state === 'COMPLETED') return 'Column metadata was discovered for the approved source set.'
       if (state === 'RUNNING') return 'Collecting source metadata and column definitions.'
       return 'Metadata discovery begins after Gate 2 approval.'

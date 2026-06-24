@@ -729,9 +729,15 @@ def build_pipeline_steps(
         steps = [
             {
                 "key": "ingestion",
-                "label": "Ingestion",
-                "complete": bool(checkpoint.get("source_ingestion_status") == "COMPLETED" or summary),
-                "detail": f"{source_label} file fetched and parsed",
+                "label": "BRD Ingest",
+                "complete": bool(
+                    checkpoint.get("fingerprint")
+                    or checkpoint.get("brd_text")
+                    or artifact_types.intersection({"REQUIREMENTS", "REQUIREMENTS_WARN", "KPIS"})
+                    or has_stage("req extract")
+                    or has_stage("kpi")
+                ),
+                "detail": "BRD parsed and run created",
             },
             {
                 "key": "requirements",
@@ -754,8 +760,12 @@ def build_pipeline_steps(
             {
                 "key": "discovery",
                 "label": "Feed Discovery",
-                "complete": bool(checkpoint.get("candidate_feed")),
-                "detail": "Feed candidate identified from file",
+                "complete": bool(
+                    checkpoint.get("source_ingestion_status") == "COMPLETED"
+                    or checkpoint.get("candidate_feed")
+                    or checkpoint.get("candidate_feeds")
+                ),
+                "detail": f"{source_label} source scanned and candidate feeds identified",
             },
             {
                 "key": "gate2",

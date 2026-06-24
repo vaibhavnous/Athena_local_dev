@@ -231,7 +231,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
 
   const handleSubmit = async (event) => {
     event.preventDefault()
-    if (!isFileSource(form.source) && !form.brdText.trim()) {
+    if (!form.brdText.trim()) {
       setError('Please provide BRD text or upload a file.')
       return
     }
@@ -336,7 +336,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                       <h2 className="text-[16px] font-semibold leading-none text-white">New Pipeline Run</h2>
                       <p className="mt-1 text-[10px] text-[#9fb1ca]">
                         {isFileSource(form.source)
-                          ? 'Configure a file-source ingestion run.'
+                          ? 'Upload or paste a BRD, then configure the file source.'
                           : 'Upload or paste a BRD to extract KPIs.'}
                       </p>
                     </div>
@@ -374,82 +374,69 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                           />
                         </Field>
 
-                        {!isFileSource(form.source) && (
-                          <>
-                            <div>
-                              <label className="modal-label">BRD Document *</label>
-                              <div
-                                onDragOver={(event) => {
-                                  event.preventDefault()
-                                  setIsDragging(true)
-                                }}
-                                onDragLeave={() => setIsDragging(false)}
-                                onDrop={handleDrop}
-                                onClick={() => fileInputRef.current?.click()}
-                                className={`mt-2 cursor-pointer rounded-lg border border-dashed px-4 py-9 text-center transition-all ${
-                                  isDragging
-                                    ? 'border-[#4f89f2] bg-[#12203a]'
-                                    : form.fileName
-                                    ? 'border-emerald-400/30 bg-emerald-500/8'
-                                    : 'border-[#2b3950] bg-[#141c2a] hover:border-[#4f89f2]/40 hover:bg-[#172131]'
-                                }`}
-                              >
-                                <input
-                                  ref={fileInputRef}
-                                  type="file"
-                                  accept=".txt,.docx"
-                                  className="hidden"
-                                  onChange={handleFileInput}
-                                />
-                                {form.fileName ? (
-                                  <div className="flex items-center justify-center gap-2 text-emerald-300">
-                                    <FileText size={18} />
-                                    <span className="text-sm font-medium">{form.fileName}</span>
-                                  </div>
-                                ) : (
-                                  <div>
-                                    <Upload size={18} className="mx-auto text-slate-400" />
-                                    <p className="mt-3 text-[11px] text-slate-200">
-                                      Drop `.txt` or `.docx` here, or <span className="text-accent-blue">browse</span>
-                                    </p>
-                                    <p className="mt-1 text-[10px] text-[#8ba0bf]">Max 5 MB</p>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-3">
-                              <div className="h-px flex-1 bg-[#26344b]" />
-                              <span className="text-[10px] text-[#8ba0bf]">or paste text</span>
-                              <div className="h-px flex-1 bg-[#26344b]" />
-                            </div>
-
-                            <Field label="BRD Text" required>
-                              <textarea
-                                className="modal-input min-h-[104px] resize-none rounded-md border-[#26344b] bg-[#0d1422] px-3 py-2 text-[11px] text-white placeholder:text-[#6f84a4]"
-                                placeholder="Paste your Business Requirements Document here..."
-                                value={form.brdText}
-                                onChange={(event) =>
-                                  setForm((current) => ({ ...current, brdText: event.target.value }))
-                                }
+                        <>
+                          <div>
+                            <label className="modal-label">BRD Document *</label>
+                            <div
+                              onDragOver={(event) => {
+                                event.preventDefault()
+                                setIsDragging(true)
+                              }}
+                              onDragLeave={() => setIsDragging(false)}
+                              onDrop={handleDrop}
+                              onClick={() => fileInputRef.current?.click()}
+                              className={`mt-2 cursor-pointer rounded-lg border border-dashed px-4 py-9 text-center transition-all ${
+                                isDragging
+                                  ? 'border-[#4f89f2] bg-[#12203a]'
+                                  : form.fileName
+                                  ? 'border-emerald-400/30 bg-emerald-500/8'
+                                  : 'border-[#2b3950] bg-[#141c2a] hover:border-[#4f89f2]/40 hover:bg-[#172131]'
+                              }`}
+                            >
+                              <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept=".txt,.docx"
+                                className="hidden"
+                                onChange={handleFileInput}
                               />
-                            </Field>
-                          </>
-                        )}
+                              {form.fileName ? (
+                                <div className="flex items-center justify-center gap-2 text-emerald-300">
+                                  <FileText size={18} />
+                                  <span className="text-sm font-medium">{form.fileName}</span>
+                                </div>
+                              ) : (
+                                <div>
+                                  <Upload size={18} className="mx-auto text-slate-400" />
+                                  <p className="mt-3 text-[11px] text-slate-200">
+                                    Drop `.txt` or `.docx` here, or <span className="text-accent-blue">browse</span>
+                                  </p>
+                                  <p className="mt-1 text-[10px] text-[#8ba0bf]">Max 5 MB</p>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="h-px flex-1 bg-[#26344b]" />
+                            <span className="text-[10px] text-[#8ba0bf]">or paste text</span>
+                            <div className="h-px flex-1 bg-[#26344b]" />
+                          </div>
+
+                          <Field label="BRD Text" required>
+                            <textarea
+                              className="modal-input min-h-[104px] resize-none rounded-md border-[#26344b] bg-[#0d1422] px-3 py-2 text-[11px] text-white placeholder:text-[#6f84a4]"
+                              placeholder="Paste your Business Requirements Document here..."
+                              value={form.brdText}
+                              onChange={(event) =>
+                                setForm((current) => ({ ...current, brdText: event.target.value }))
+                              }
+                            />
+                          </Field>
+                        </>
 
                         {isFileSource(form.source) && (
                           <div className="space-y-4">
-                            <Field label="Pipeline Context">
-                              <textarea
-                                className="modal-input min-h-[104px] resize-none rounded-md border-[#26344b] bg-[#0d1422] px-3 py-2 text-[11px] text-white placeholder:text-[#6f84a4]"
-                                placeholder="Optional business context for this file pipeline..."
-                                value={form.brdText}
-                                onChange={(event) =>
-                                  setForm((current) => ({ ...current, brdText: event.target.value }))
-                                }
-                              />
-                            </Field>
-
                             <div className="rounded-[8px] border border-[#243149] bg-[#0d1422] p-3">
                               {form.source === 'adls_gen2' ? (
                                 <div className="space-y-2 text-xs text-slate-300">
@@ -695,7 +682,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                     </button>
                     <button
                       type="submit"
-                      disabled={loading || (!isFileSource(form.source) && !form.brdText.trim())}
+                      disabled={loading || !form.brdText.trim()}
                       className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md bg-[#3f7df0] px-4 text-[11px] font-semibold text-white transition-colors hover:bg-[#4f89f2] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {loading ? (

@@ -43,7 +43,7 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
     source = str(payload.source or "database").lower()
     sftp_entity = api_utils.normalize_file_entity(source, payload.sftp_entity)
 
-    if not api_utils.is_file_source(source) and not payload.brd_text.strip():
+    if not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
 
     run_id = str(uuid.uuid4())

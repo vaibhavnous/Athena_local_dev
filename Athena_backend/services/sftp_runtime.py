@@ -94,6 +94,7 @@ def _compute_next_gate_and_message(
     gate5_decision: str,
     candidate_feed: Dict[str, Any],
     candidate_feeds: List[Dict[str, Any]],
+    source_ingestion_completed: bool,
     semantic_enrichment_completed: bool,
     bronze_review_ready: bool,
     silver_review_ready: bool,
@@ -105,25 +106,31 @@ def _compute_next_gate_and_message(
 ) -> Dict[str, Any]:
     next_gate = None
     resume_message = None
+    feed_review_ready = bool(candidate_feeds) or bool(candidate_feed)
     if gate1_decision in {None, ""}:
         next_gate = 1
         resume_message = f"{_gate_label(1)} is pending. Review KPI items before continuing."
     elif gate1_decision == "APPROVED" and gate2_decision in {None, ""}:
-        next_gate = 2
-        entities = ", ".join(
-            sorted(
-                {
-                    str(feed.get("entity") or "").strip()
-                    for feed in candidate_feeds
-                    if isinstance(feed, dict) and str(feed.get("entity") or "").strip()
-                }
-            )
-        )
-        feed_count = len(candidate_feeds) or (1 if candidate_feed else 0)
-        if feed_count > 1 and entities:
-            resume_message = f"{_gate_label(2)} is pending. Review {feed_count} discovered feeds ({entities}) before continuing."
+        if not source_ingestion_completed:
+            resume_message = "Source ingestion is in progress. Feed review will open when source discovery completes."
+        elif not feed_review_ready:
+            resume_message = "Feed discovery is in progress. Feed review will open when discovery completes."
         else:
-            resume_message = f"{_gate_label(2)} is pending. Review the discovered feed before continuing."
+            next_gate = 2
+            entities = ", ".join(
+                sorted(
+                    {
+                        str(feed.get("entity") or "").strip()
+                        for feed in candidate_feeds
+                        if isinstance(feed, dict) and str(feed.get("entity") or "").strip()
+                    }
+                )
+            )
+            feed_count = len(candidate_feeds) or (1 if candidate_feed else 0)
+            if feed_count > 1 and entities:
+                resume_message = f"{_gate_label(2)} is pending. Review {feed_count} discovered feeds ({entities}) before continuing."
+            else:
+                resume_message = f"{_gate_label(2)} is pending. Review the discovered feed before continuing."
     elif gate2_decision == "APPROVED":
         if semantic_enrichment_completed and gate3_decision not in {"APPROVED", "REJECTED"}:
             next_gate = 3
@@ -168,11 +175,17 @@ def _compute_status(
     gate5_decision: str,
     gold_generation_completed: bool,
     silver_generation_completed: bool,
+    gate1_decision: Any,
+    gate2_decision: Any,
+    source_ingestion_completed: bool,
+    feed_review_ready: bool,
 ) -> str:
     status = checkpoint.get("status") or "UNKNOWN"
     if next_gate:
         return "HITL_WAIT"
     if checkpoint.get("background_stage"):
+        return "RUNNING"
+    if gate1_decision == "APPROVED" and gate2_decision in {None, ""} and (not source_ingestion_completed or not feed_review_ready):
         return "RUNNING"
     if gate5_decision == "APPROVED" or gold_generation_completed:
         return "PIPELINE_COMPLETED"
@@ -359,6 +372,7 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         gate4_decision = str(_safe_dict(checkpoint.get("gate4")).get("decision") or checkpoint.get("bronze_review_decision") or "").upper()
         gate5_decision = str(_safe_dict(checkpoint.get("gate5")).get("decision") or checkpoint.get("silver_review_decision") or "").upper()
         candidate_feed = _safe_dict(checkpoint.get("candidate_feed"))
+        source_ingestion_completed = checkpoint.get("source_ingestion_status") == "COMPLETED"
 
         generation_flags = _compute_generation_flags(summary, checkpoint)
         bronze_generation_completed = generation_flags["bronze_generation_completed"]
@@ -392,6 +406,7 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
             gate5_decision=gate5_decision,
             candidate_feed=candidate_feed,
             candidate_feeds=candidate_feeds,
+            source_ingestion_completed=source_ingestion_completed,
             semantic_enrichment_completed=semantic_enrichment_completed,
             bronze_review_ready=bronze_review_ready,
             silver_review_ready=silver_review_ready,
@@ -410,6 +425,10 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
             gate5_decision=gate5_decision,
             gold_generation_completed=gold_generation_completed,
             silver_generation_completed=silver_generation_completed,
+            gate1_decision=gate1_decision,
+            gate2_decision=gate2_decision,
+            source_ingestion_completed=source_ingestion_completed,
+            feed_review_ready=bool(candidate_feeds) or bool(candidate_feed),
         )
 
         pipeline_steps = build_pipeline_steps(

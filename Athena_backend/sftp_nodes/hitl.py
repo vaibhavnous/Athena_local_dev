@@ -125,6 +125,7 @@ hitl_controller = HITLController(mode="auto")
 def submit_sftp_gate1_review(run_id: str, approve: bool = True) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
     from sftp_nodes.governance import sftp_feed_discovery_node, sftp_gate1_node, sftp_gate2_node
+    from sftp_nodes.source_ingestion import source_ingestion_node
 
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
     checkpoint_state["gate1_decision"] = "APPROVED" if approve else "REJECTED"
@@ -134,7 +135,12 @@ def submit_sftp_gate1_review(run_id: str, approve: bool = True) -> Dict[str, Any
         save_checkpoint_state(run_id, gate1_state)
         return gate1_state
 
-    discovered_state = sftp_feed_discovery_node(gate1_state)
+    source_state = source_ingestion_node(gate1_state)
+    if source_state.get("status") == "FAILED":
+        save_checkpoint_state(run_id, source_state)
+        return source_state
+
+    discovered_state = sftp_feed_discovery_node(source_state)
     gate2_state = sftp_gate2_node(discovered_state)
     save_checkpoint_state(run_id, gate2_state)
     return gate2_state

@@ -52,12 +52,12 @@ def build_source_ingestion_graph():
     graph.add_node("dq_validation", dq_validation_node)
     graph.add_node("gold_code_gen", sftp_gold_code_generation_node)
 
-    graph.set_entry_point("source_ingestion")
+    graph.set_entry_point("ingestion_context_setup")
 
     def route_after_source_ingestion(state: Stage01State) -> str:
         if state.get("status") == "FAILED":
             return END
-        return "ingestion_context_setup"
+        return "feed_discovery"
 
     graph.add_conditional_edges("source_ingestion", route_after_source_ingestion)
     graph.add_edge("ingestion_context_setup", "req_extraction")
@@ -70,7 +70,7 @@ def build_source_ingestion_graph():
         gate1 = state.get("gate1") or {}
         if gate1.get("decision") != "APPROVED":
             return END
-        return "feed_discovery"
+        return "source_ingestion"
 
     graph.add_conditional_edges("sftp_gate1", route_after_sftp_gate1)
     graph.add_edge("feed_discovery", "feed_nomination")

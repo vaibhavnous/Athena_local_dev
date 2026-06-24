@@ -120,6 +120,36 @@ def test_get_sftp_run_context_builds_expected_gate_and_status(monkeypatch):
     assert context["source_row_count"] == 42
 
 
+def test_get_sftp_run_context_does_not_open_gate2_before_source_discovery(monkeypatch):
+    checkpoint = {
+        "run_id": "run-pregate2",
+        "source": "adls_gen2",
+        "gate1": {"decision": "APPROVED"},
+        "sftp_entity": "auto",
+        "brd_text": "valid brd",
+    }
+
+    monkeypatch.setattr(sftp_runtime, "load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(sftp_runtime, "fetch_run_summary", lambda run_id: [])
+    monkeypatch.setattr(sftp_runtime, "fetch_json_artifact", lambda run_id, artifact: {})
+    monkeypatch.setattr(
+        sftp_runtime,
+        "build_pipeline_steps",
+        lambda **kwargs: [
+            {"key": "ingestion", "label": "BRD Ingest", "state": "COMPLETED"},
+            {"key": "gate1", "label": "KPI Review", "state": "COMPLETED"},
+            {"key": "discovery", "label": "Feed Discovery", "state": "PENDING"},
+            {"key": "gate2", "label": "Feed Review", "state": "PENDING"},
+        ],
+    )
+
+    context = sftp_runtime.get_sftp_run_context("run-pregate2")
+
+    assert context["next_gate"] is None
+    assert context["status"] == "RUNNING"
+    assert "Feed review will open" in context["resume_message"]
+
+
 def test_get_sftp_run_context_handles_script_loader_failure(monkeypatch):
     checkpoint = {
         "run_id": "run-script",
