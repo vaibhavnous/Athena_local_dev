@@ -1,92 +1,105 @@
 trigger:
   branches:
     include:
-    - main
+      - main
   paths:
     include:
-    - Athena_backend/**
-    - frontend/**
-    - azure-pipelines-backend.yml
+      - Athena_backend/**
+      - azure-pipelines-backend.yml
 
 pool:
   vmImage: 'ubuntu-latest'
 
 variables:
   pythonVersion: '3.9'
-  nodeVersion: '18.x'
   backendFolder: 'Athena_backend'
-  frontendFolder: 'frontend'
+  artifactName: 'backend-app'
+  artifactZip: 'backend-app.zip'
+  azureServiceConnection: 'REPLACE_WITH_AZURE_SERVICE_CONNECTION'
+  webAppName: 'REPLACE_WITH_BACKEND_WEBAPP_NAME'
 
 stages:
-- stage: Build
-  displayName: 'Build Backend'
-  jobs:
-  - job: BuildBackend
-    displayName: 'Build and Test'
-    steps:
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: '$(pythonVersion)'
-      displayName: 'Use Python $(pythonVersion)'
+  - stage: Build
+    displayName: 'Build Backend'
+    jobs:
+      - job: BuildBackend
+        displayName: 'Install, Test, Package'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Use Python $(pythonVersion)'
 
-    - script: |
-        python -m pip install --upgrade pip
-        pip install -r $(backendFolder)/requirements.txt
-      displayName: 'Install dependencies'
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r $(backendFolder)/requirements.txt
+            displayName: 'Install dependencies'
 
-    - script: |
-        cd $(backendFolder)
-        python -m pytest tests/ -v --junitxml=junit/test-results.xml || true
-      displayName: 'Run tests'
-      continueOnError: true
+          - script: |
+              cd $(backendFolder)
+              python -m pytest tests/ -v --junitxml=junit/test-results.xml || true
+            displayName: 'Run tests'
+            continueOnError: true
 
-    - task: PublishTestResults@2
-      condition: succeededOrFailed()
-      inputs:
-        testResultsFiles: '**/test-results.xml'
-        testResultsFormat: 'JUnit'
-        testRunTitle: 'Backend Tests'
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFiles: '**/test-results.xml'
+              testResultsFormat: 'JUnit'
+              testRunTitle: 'Backend Tests'
 
-    - task: NodeTool@0
-      inputs:
-        versionSpec: '$(nodeVersion)'
-      displayName: 'Use Node.js $(nodeVersion)'
+          - script: |
+              mkdir -p $(Build.ArtifactStagingDirectory)/backend
+              cp -r $(backendFolder)/* $(Build.ArtifactStagingDirectory)/backend/
+              cat > $(Build.ArtifactStagingDirectory)/backend/startup.sh << 'EOF'
+              #!/bin/bash
+              pip install -r requirements.txt
+              python -m uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}
+              EOF
+              chmod +x $(Build.ArtifactStagingDirectory)/backend/startup.sh
+            displayName: 'Prepare backend artifact'
 
-    - script: |
-        cd $(frontendFolder)
-        npm ci
-      displayName: 'Install frontend dependencies'
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/backend'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactZip)'
+              replaceExistingArchive: true
+            displayName: 'Archive backend package'
 
-    - script: |
-        cd $(frontendFolder)
-        npm run build
-      displayName: 'Build React frontend'
-      env:
-        REACT_APP_API_BASE_URL: 'http://localhost:8000'
-        CI: false
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: '$(Build.ArtifactStagingDirectory)/$(artifactZip)'
+              artifactName: '$(artifactName)'
+              publishLocation: 'Container'
+            displayName: 'Publish backend artifact'
 
-    - script: |
-        mkdir -p $(Build.ArtifactStagingDirectory)/backend
-        cp -r $(backendFolder)/* $(Build.ArtifactStagingDirectory)/backend/
-        cp -r $(backendFolder)/requirements.txt $(Build.ArtifactStagingDirectory)/backend/
-        mkdir -p $(Build.ArtifactStagingDirectory)/backend/static
-        cp -r $(frontendFolder)/build/* $(Build.ArtifactStagingDirectory)/backend/static/
-      displayName: 'Prepare artifact with frontend'
+  - stage: Deploy
+    displayName: 'Deploy Backend'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - deployment: DeployBackend
+        displayName: 'Deploy to Azure App Service'
+        environment: 'backend-prod'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadBuildArtifacts@1
+                  inputs:
+                    buildType: 'current'
+                    downloadType: 'single'
+                    artifactName: '$(artifactName)'
+                    downloadPath: '$(Pipeline.Workspace)'
+                  displayName: 'Download backend artifact'
 
-    - script: |
-        cd $(Build.ArtifactStagingDirectory)/backend
-        echo "runtime: python\nruntime_version: 3.9" > runtime.txt
-        cat > startup.sh << 'EOF'
-        #!/bin/bash
-        pip install -r requirements.txt
-        python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
-        EOF
-        chmod +x startup.sh
-      displayName: 'Add startup configuration'
-
-    - task: PublishBuildArtifacts@1
-      inputs:
-        pathToPublish: '$(Build.ArtifactStagingDirectory)/backend'
-        artifactName: 'backend-app'
-        publishLocation: 'Container'
-      displayName: 'Publish backend artifact'
+                - task: AzureWebApp@1
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    appType: 'webAppLinux'
+                    appName: '$(webAppName)'
+                    package: '$(Pipeline.Workspace)/$(artifactName)/$(artifactZip)'
+                    startUpCommand: 'bash startup.sh'
+                  displayName: 'Deploy backend app'

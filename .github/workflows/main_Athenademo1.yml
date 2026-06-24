@@ -1,36 +1,31 @@
-name: Build and Deploy to Azure App Service
+name: Deploy Backend to Azure App Service
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'Athena_backend/**'
+      - '.github/workflows/main_Athenademo1.yml'
   pull_request:
     branches: [main]
+    paths:
+      - 'Athena_backend/**'
+      - '.github/workflows/main_Athenademo1.yml'
 
 env:
   AZURE_WEBAPP_NAME: Athenademo1
   AZURE_WEBAPP_URL: 'https://athenademo1-a6awbcchgxcchraj.southindia-01.azurewebsites.net'
-  AZURE_WEBAPP_PACKAGE_PATH: '.'
-  NODE_VERSION: '18.x'
   PYTHON_VERSION: '3.9'
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
-      # Checkout code
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Set up Node.js
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-          cache-dependency-path: 'frontend/package-lock.json'
-
-      # Set up Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -38,71 +33,49 @@ jobs:
           cache: 'pip'
           cache-dependency-path: 'Athena_backend/requirements.txt'
 
-      # Build frontend
-      - name: Build React frontend
-        working-directory: ./frontend
-        run: |
-          npm ci
-          npm run build
-        env:
-          REACT_APP_API_BASE_URL: ''
-          CI: false
-
-      # Prepare backend artifact with frontend static files
-      - name: Prepare backend artifact with frontend
-        run: |
-          # Copy backend files
-          mkdir -p deploy/Athena_backend
-          cp -r Athena_backend/* deploy/Athena_backend/
-          
-          # Copy frontend build as static files
-          mkdir -p deploy/Athena_backend/static
-          cp -r frontend/build/* deploy/Athena_backend/static/
-          
-          # Copy startup configuration
-          mkdir -p deploy/Athena_backend
-          cat > deploy/Athena_backend/startup.sh << 'EOF'
-          #!/bin/bash
-          pip install -r requirements.txt
-          python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
-          EOF
-          chmod +x deploy/Athena_backend/startup.sh
-          
-          # Create runtime.txt for App Service
-          echo "python-3.9" > deploy/Athena_backend/runtime.txt
-
-      # Run backend tests (optional, can be skipped on PR)
-      - name: Run backend tests
-        if: github.event_name == 'push'
+      - name: Install backend dependencies
         working-directory: ./Athena_backend
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
+
+      - name: Run backend tests
+        if: github.event_name == 'push'
+        working-directory: ./Athena_backend
+        run: |
           python -m pytest tests/test_api_main.py -v || true
 
-      # Deploy to Azure App Service
+      - name: Prepare backend artifact
+        run: |
+          mkdir -p deploy/Athena_backend
+          cp -r Athena_backend/* deploy/Athena_backend/
+          cat > deploy/Athena_backend/startup.sh << 'EOF'
+          #!/bin/bash
+          pip install -r requirements.txt
+          python -m uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}
+          EOF
+          chmod +x deploy/Athena_backend/startup.sh
+
       - name: Deploy to Azure App Service
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: azure/webapps-deploy@v2
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}/deploy/Athena_backend
+          package: ./deploy/Athena_backend
+          startup-command: 'bash startup.sh'
 
-      # Health check post-deployment
       - name: Health check
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           echo "Waiting for app to be ready..."
-          sleep 10
-          curl -f ${{ env.AZURE_WEBAPP_URL }}/health || echo "Health check pending"
-        continue-on-error: true
+          sleep 15
+          curl -f ${{ env.AZURE_WEBAPP_URL }}/health
 
-      # Upload artifact for reference
       - name: Upload deployment artifact
         uses: actions/upload-artifact@v4
         with:
-          name: combined-app
+          name: backend-app
           path: deploy/Athena_backend/
           retention-days: 5
