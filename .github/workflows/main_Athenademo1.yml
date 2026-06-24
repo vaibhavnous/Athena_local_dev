@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  AZURE_WEBAPP_NAME: athena-combined-dev
+  AZURE_WEBAPP_NAME: Athenademo1
   AZURE_WEBAPP_PACKAGE_PATH: '.'
   NODE_VERSION: '18.x'
   PYTHON_VERSION: '3.9'
