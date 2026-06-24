@@ -117,6 +117,7 @@ function connectionTypeFromSource(source) {
 
 function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
   const fileInputRef = useRef(null)
+  const sourceSectionRef = useRef(null)
   const addRun = useAthenaStore((s) => s.addRun)
   const addNotification = useAthenaStore((s) => s.addNotification)
   const settings = useAthenaStore((s) => s.settings)
@@ -164,7 +165,31 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
     setUploadedFile(null)
     setError(null)
     setIsDragging(false)
+    setOpenSourceSelect(null)
   }, [initialSeedRun, isOpen, settings])
+
+  useEffect(() => {
+    if (!openSourceSelect) return
+
+    const handlePointerDown = (event) => {
+      if (!sourceSectionRef.current?.contains(event.target)) {
+        setOpenSourceSelect(null)
+      }
+    }
+
+    const handleEscape = (event) => {
+      if (event.key === 'Escape') {
+        setOpenSourceSelect(null)
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleEscape)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleEscape)
+    }
+  }, [openSourceSelect])
 
   const handleClose = () => {
     if (loading) return
@@ -444,7 +469,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                           </Field>
                         </>
 
-                        <div className="rounded-md border border-[#243149] bg-[#151f2d] p-3">
+                        <div ref={sourceSectionRef} className="rounded-md border border-[#243149] bg-[#151f2d] p-3">
                           <div className="space-y-3">
                             <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-white">Source Connection</div>
 
@@ -505,17 +530,43 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                             )}
 
                             {connectionTypeFromSource(form.source) === 'data_lake' && (
-                              <Field label="Data Lake Type" required compact>
-                                <ModalSelect
-                                  id="dataLakeType"
-                                  value={form.source === 'adls_gen2' ? 'adls_gen2' : ''}
-                                  options={DATA_LAKE_OPTIONS}
-                                  placeholder="Select type..."
-                                  openSelect={openSourceSelect}
-                                  setOpenSelect={setOpenSourceSelect}
-                                  onChange={handleDataLakeTypeChange}
-                                />
-                              </Field>
+                              <div className="space-y-3">
+                                <Field label="Data Lake Type" required compact>
+                                  <ModalSelect
+                                    id="dataLakeType"
+                                    value={form.source === 'adls_gen2' ? 'adls_gen2' : ''}
+                                    options={DATA_LAKE_OPTIONS}
+                                    placeholder="Select type..."
+                                    openSelect={openSourceSelect}
+                                    setOpenSelect={setOpenSourceSelect}
+                                    onChange={handleDataLakeTypeChange}
+                                  />
+                                </Field>
+
+                                <div className="rounded-md border border-[#26344b] bg-[#0d1422] px-3 py-3">
+                                  <div className="text-[11px] font-semibold text-white">ADLS Source</div>
+                                  <div className="mt-2 grid gap-2 text-[10px] text-[#9fb1ca]">
+                                    <div className="rounded border border-[#1e2a3d] bg-[#101827] px-2.5 py-2">
+                                      <div className="text-[#6f84a4]">Account</div>
+                                      <div className="mt-1 break-all font-mono text-white">https://atheastorage.dfs.core.windows.net</div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <div className="rounded border border-[#1e2a3d] bg-[#101827] px-2.5 py-2">
+                                        <div className="text-[#6f84a4]">File system</div>
+                                        <div className="mt-1 font-mono text-white">ADLS_FILE_SYSTEM</div>
+                                      </div>
+                                      <div className="rounded border border-[#1e2a3d] bg-[#101827] px-2.5 py-2">
+                                        <div className="text-[#6f84a4]">Root</div>
+                                        <div className="mt-1 font-mono text-white">ADLS_SOURCE_ROOT</div>
+                                      </div>
+                                    </div>
+                                    <div className="rounded border border-[#1e2a3d] bg-[#101827] px-2.5 py-2">
+                                      <div className="text-[#6f84a4]">Mode</div>
+                                      <div className="mt-1 text-white">Auto-discover folders and files</div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
                             )}
                           </div>
                         </div>
@@ -679,7 +730,7 @@ function ModalSelect({
         type="button"
         onClick={() => setOpenSelect(open ? null : id)}
         className={`flex h-8 w-full items-center justify-between rounded-md border bg-[#0d1422] px-3 text-left text-[11px] font-semibold text-white transition-colors ${
-          open || activeBorder ? 'border-[#4585f5] ring-1 ring-[#4585f5]' : 'border-[#26344b] hover:border-[#4585f5]/70'
+          open ? 'border-[#4585f5] ring-1 ring-[#4585f5]' : activeBorder ? 'border-[#4585f5]' : 'border-[#26344b] hover:border-[#4585f5]/70'
         }`}
       >
         <span className={selected ? 'text-white' : 'text-[#6f84a4]'}>
@@ -703,7 +754,7 @@ function ModalSelect({
               type="button"
               onClick={() => onChange(option.id)}
               className={`block h-9 w-full px-3 text-left text-[11px] font-semibold transition-colors ${
-                option.id === value ? 'bg-[#7a7a7a] text-white' : 'bg-[#070d1a] text-white hover:bg-[#172131]'
+                option.id === value ? 'bg-[#1b2a45] text-white' : 'bg-[#070d1a] text-white hover:bg-[#172131]'
               }`}
             >
               {option.label}
