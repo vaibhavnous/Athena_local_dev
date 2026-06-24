@@ -207,8 +207,18 @@ def clean_checkpoint_for_resume(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
     return cleaned
 
 
-def continue_database_pipeline_job(run_id: str, start_stage_key: str, state: Dict[str, Any]) -> Dict[str, Any]:
-    return continue_database_pipeline(run_id, start_stage_key=start_stage_key, state=state)
+def continue_database_pipeline_job(
+    run_id: str,
+    start_stage_key: str,
+    state: Dict[str, Any],
+    auto_advance: Optional[bool] = None,
+) -> Dict[str, Any]:
+    return continue_database_pipeline(
+        run_id,
+        start_stage_key=start_stage_key,
+        state=state,
+        auto_advance=auto_advance,
+    )
 
 
 def continue_file_pipeline_job(run_id: str, state: Dict[str, Any]) -> Dict[str, Any]:

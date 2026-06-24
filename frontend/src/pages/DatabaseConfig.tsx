@@ -23,7 +23,11 @@ import {
 
 const SOURCE_TYPES = [
   { value: 'database', label: 'Database' },
-  { value: 'data_lake', label: 'Data Lake', disabled: true }
+  { value: 'data_lake', label: 'Data Lake' }
+]
+
+const DATA_LAKE_TYPES = [
+  { value: 'adls_gen2', label: 'ADLS' }
 ]
 
 const DB_PRESETS = {
@@ -61,7 +65,8 @@ const EMPTY_CONNECTION = {
   host: '',
   port: '1433',
   databaseName: '',
-  schema: ''
+  schema: '',
+  dataLakeType: 'adls_gen2'
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
@@ -303,6 +308,33 @@ function ConnectionForm ({ initial, onSave, onClose }) {
 
   const set = (key, value) => setForm((f) => ({ ...f, [key]: value }))
 
+  const handleSourceTypeChange = (sourceType) => {
+    setForm((f) => ({
+      ...f,
+      sourceType,
+      ...(sourceType === 'data_lake'
+        ? {
+            dataLakeType: f.dataLakeType || 'adls_gen2',
+            dbType: '',
+            host: '',
+            port: '',
+            databaseName: '',
+            schema: '',
+            username: '',
+            password: '',
+            jdbcUrl: '',
+            driverClass: '',
+          }
+        : {
+            dataLakeType: f.dataLakeType || 'adls_gen2',
+            dbType: f.dbType || 'azure_sql',
+            driverClass: f.driverClass || DB_PRESETS.azure_sql.driverClass,
+            port: f.port || DB_PRESETS.azure_sql.port,
+          }),
+    }))
+    setErrors({})
+  }
+
   // When dbType changes, auto-populate driver class & port defaults
   const handleDbTypeChange = (dbType) => {
     const preset = DB_PRESETS[dbType] || DB_PRESETS.custom
@@ -317,10 +349,12 @@ function ConnectionForm ({ initial, onSave, onClose }) {
   const validate = () => {
     const e = {}
     if (!form.name.trim()) e.name = 'Connection name is required'
-    if (!form.host.trim()) e.host = 'Host is required'
-    if (!form.driverClass.trim()) e.driverClass = 'Driver class is required'
-    if (!form.username.trim()) e.username = 'Username is required'
-    if (!isEdit && !form.password.trim()) e.password = 'Password is required'
+    if (form.sourceType === 'database') {
+      if (!form.host.trim()) e.host = 'Host is required'
+      if (!form.driverClass.trim()) e.driverClass = 'Driver class is required'
+      if (!form.username.trim()) e.username = 'Username is required'
+      if (!isEdit && !form.password.trim()) e.password = 'Password is required'
+    }
     return e
   }
 
@@ -400,7 +434,7 @@ function ConnectionForm ({ initial, onSave, onClose }) {
                   key={opt.value}
                   type="button"
                   disabled={opt.disabled}
-                  onClick={() => !opt.disabled && set('sourceType', opt.value)}
+                  onClick={() => !opt.disabled && handleSourceTypeChange(opt.value)}
                   className={`
                     flex-1 py-2 rounded-lg border text-[11px] font-medium transition-all duration-150 inline-flex items-center justify-center
                     ${opt.disabled
@@ -412,7 +446,6 @@ function ConnectionForm ({ initial, onSave, onClose }) {
                   `}
                 >
                   {opt.label}
-                  {opt.disabled && <span className="ml-1 text-[10px] text-text-tertiary opacity-70">(soon)</span>}
                 </button>
               ))}
             </div>
@@ -542,6 +575,37 @@ function ConnectionForm ({ initial, onSave, onClose }) {
                 />
               </FormField>
             </>
+          )}
+
+          {form.sourceType === 'data_lake' && (
+            <div className="space-y-4">
+              <FormField label="Data Lake Type" required>
+                <div className="relative group">
+                  <select
+                    className={`${inputClass()} appearance-none pr-8 cursor-pointer`}
+                    value={form.dataLakeType || 'adls_gen2'}
+                    onChange={(e) => set('dataLakeType', e.target.value)}
+                  >
+                    {DATA_LAKE_TYPES.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-tertiary pointer-events-none group-hover:text-text-secondary transition-colors" />
+                </div>
+              </FormField>
+
+              <div className="rounded-lg border border-bg-border bg-bg-base p-4 text-[11px] text-text-secondary">
+                <div className="font-semibold text-text-primary">ADLS Source</div>
+                <div className="mt-2 space-y-1">
+                  <div>Account: <span className="font-mono">https://atheastorage.dfs.core.windows.net</span></div>
+                  <div>File system: backend <span className="font-mono">ADLS_FILE_SYSTEM</span></div>
+                  <div>Root: backend <span className="font-mono">ADLS_SOURCE_ROOT</span></div>
+                  <div>Mode: auto-discover folders and files</div>
+                </div>
+              </div>
+            </div>
           )}
 
           {/* Validation / API error summary */}

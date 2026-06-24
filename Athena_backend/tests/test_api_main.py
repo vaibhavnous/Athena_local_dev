@@ -152,6 +152,45 @@ def test_continue_stage_rejects_file_source(monkeypatch):
     assert response.json()["detail"] == "Stage-by-stage confirmation is not enabled for file-source runs yet."
 
 
+def test_continue_stage_submits_background_job(monkeypatch):
+    recorded = {}
+    checkpoint = {
+        "run_id": "run-123",
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "next_stage_key": "enrichment",
+        "source": "database",
+    }
+
+    monkeypatch.setattr("api.routers.pipeline_router.load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(
+        "api.routers.pipeline_router.save_checkpoint_state",
+        lambda run_id, state: recorded.update({"saved_run_id": run_id, "saved_state": state}),
+    )
+    monkeypatch.setattr(
+        "api.routers.pipeline_router.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update(
+            {"background_run_id": run_id, "background_stage": stage, "background_fn": fn.__name__, "background_args": args}
+        ),
+    )
+
+    response = client.post("/pipeline/run-123/continue-stage", json={"auto_advance": False})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": "run-123",
+        "status": "SUBMITTED",
+        "next_stage_key": "enrichment",
+        "resume_message": "enrichment is running.",
+    }
+    assert recorded["saved_state"]["status"] == "PROCESSING"
+    assert recorded["saved_state"]["background_stage"] == "enrichment"
+    assert recorded["saved_state"]["stage_confirmation_enabled"] is True
+    assert recorded["background_stage"] == "enrichment"
+    assert recorded["background_fn"] == "continue_database_pipeline_job"
+    assert recorded["background_args"][0:3] == ("run-123", "enrichment", recorded["saved_state"])
+    assert recorded["background_args"][3] is False
+
+
 def test_retry_failed_stage_rejects_non_failed_run(monkeypatch):
     monkeypatch.setattr("api.routers.pipeline_router.load_checkpoint_state", lambda run_id: {"status": "RUNNING"})
 

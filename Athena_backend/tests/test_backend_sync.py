@@ -67,6 +67,34 @@ def test_ui_run_builds_cross_layer_payload(monkeypatch):
     assert payload["next_gate"] == 2
 
 
+def test_ui_status_prefers_background_stage_over_stale_stage_confirmation():
+    context = {
+        "checkpoint": {
+            "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+            "background_stage": "enrichment",
+        },
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "next_gate": None,
+        "pending_gate1": [],
+    }
+
+    assert run_ui_service.status_from_context(context) == "RUNNING"
+
+
+def test_ui_status_uses_reconciled_context_over_stale_checkpoint_pause():
+    context = {
+        "checkpoint": {
+            "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        },
+        "status": "PIPELINE_COMPLETED",
+        "stage_confirmation": None,
+        "next_gate": None,
+        "pending_gate1": [],
+    }
+
+    assert run_ui_service.status_from_context(context) == "SUCCESS"
+
+
 def test_pipeline_status_endpoint_syncs_with_ui_service(monkeypatch):
     monkeypatch.setattr(
         "api.routers.pipeline_router.ui_run",

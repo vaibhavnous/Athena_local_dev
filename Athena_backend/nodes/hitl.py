@@ -60,6 +60,7 @@ def build_hitl_enrichment_review_node() -> Callable[[Stage01State], Stage01State
         if not state.get("semantic_tags_reviewed") or not state.get("pii_classifications_reviewed"):
             logger.info("Enrichment review pending human validation", extra=log_context)
             new_state = state.copy()
+            new_state["status"] = "HITL_WAIT"
             new_state["enrichment_review_status"] = "PENDING"
             new_state["enrichment_review_decision"] = "PENDING"
             return new_state
@@ -81,6 +82,7 @@ def build_hitl_enrichment_review_node() -> Callable[[Stage01State], Stage01State
             return new_state
 
         new_state = state.copy()
+        new_state["status"] = "HITL_WAIT"
         new_state["enrichment_review_status"] = "PENDING"
         new_state["enrichment_review_decision"] = "PENDING"
         return new_state
@@ -140,8 +142,11 @@ def build_hitl_review_node() -> Callable[[Stage01State], Stage01State]:
         human_decision = state.get("human_decision")
 
         if human_decision != "COMPLETED":
-            logger.info("HITL review skipped - decision pending", extra=log_context)
-            return state
+            logger.info("HITL review pending human decision", extra=log_context)
+            new_state = state.copy()
+            new_state["status"] = "HITL_WAIT"
+            new_state["human_decision"] = human_decision or "PENDING"
+            return new_state
 
         certified_kpis = state.get("certified_kpis")
         if not certified_kpis:
@@ -166,8 +171,11 @@ def build_hitl_table_review_node() -> Callable[[Stage01State], Stage01State]:
         human_table_decision = state.get("human_table_decision")
 
         if human_table_decision != "COMPLETED":
-            logger.info("HITL table review skipped - decision pending", extra=log_context)
-            return state
+            logger.info("HITL table review pending human decision", extra=log_context)
+            new_state = state.copy()
+            new_state["status"] = "HITL_WAIT"
+            new_state["human_table_decision"] = human_table_decision or "PENDING"
+            return new_state
 
         certified_tables = state.get("certified_tables")
         if not certified_tables:

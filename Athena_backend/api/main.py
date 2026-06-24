@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.routers.analytics_router import router as analytics_router
 from api.routers.config_router import router as config_router
@@ -99,3 +100,10 @@ app.include_router(kpi_router)
 app.include_router(analytics_router)
 app.include_router(config_router)
 app.include_router(logs_router)
+
+
+# Mount static files for React SPA (frontend)
+# This serves the React build files on all routes not matched by API routers
+static_path = os.path.join(os.path.dirname(__file__), "..", "..", "static")
+if os.path.exists(static_path):
+    app.mount("/", StaticFiles(directory=static_path, html=True), name="static")

@@ -34,6 +34,7 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
+    "smoke:test": "node scripts/ui_deploy_smoke_test.js",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {

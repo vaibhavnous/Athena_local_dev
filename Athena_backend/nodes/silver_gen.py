@@ -9,6 +9,7 @@ that bronze tables exist.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -39,6 +40,14 @@ def _silver_output_dir() -> str:
 
 def _run_slug(run_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", str(run_id or "run")).strip("_")[:48] or "run"
+
+
+def _file_slug(value: str, max_length: int = 64) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "table")).strip("_") or "table"
+    if len(slug) <= max_length:
+        return slug
+    digest = hashlib.sha1(slug.encode("utf-8")).hexdigest()[:8]
+    return f"{slug[: max_length - 9].rstrip('_')}_{digest}"
 
 
 def _gold_output_dir() -> str:
@@ -125,9 +134,6 @@ def _resolve_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
             "silver_table": f"{silver_schema}.silver_{table_name}",
             "existing_script_path": script_path if os.path.exists(script_path) else None,
         }
-
-    for ref in _existing_silver_script_refs(silver_schema):
-        resolved_by_table.setdefault(ref["table_name"].lower(), ref)
 
     return list(resolved_by_table.values())
 
@@ -405,7 +411,7 @@ def _generate_one_table(
 
     output_dir = _silver_output_dir()
     os.makedirs(output_dir, exist_ok=True)
-    script_path = os.path.join(output_dir, f"silver_transform_{_run_slug(run_id)}_{table_name}.py")
+    script_path = os.path.join(output_dir, f"silver_transform_{_run_slug(run_id)}_{_file_slug(table_name)}.py")
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
 

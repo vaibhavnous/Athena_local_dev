@@ -4,9 +4,8 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowLeft,
   BookOpen,
-  Database,
+  ChevronDown,
   FileText,
-  FolderOpen,
   Loader2,
   Play,
   Upload,
@@ -57,36 +56,18 @@ function buildInitialForm(settings, seedRun) {
 }
 
 const SOURCE_OPTIONS = [
-  { id: 'database', label: 'Database', icon: Database },
-  { id: 'sftp', label: 'SFTP', icon: FolderOpen },
-  { id: 'adls_gen2', label: 'ADLS', icon: FolderOpen },
+  { id: 'database', label: 'Database' },
+  { id: 'data_lake', label: 'Data Lake' },
+]
+
+const DATA_LAKE_OPTIONS = [
+  { id: 'adls_gen2', label: 'ADLS' },
 ]
 
 const PROVIDER_OPTIONS = [
   { id: 'azure_openai', label: 'Azure OpenAI' },
   { id: 'openai', label: 'OpenAI' },
   { id: 'anthropic', label: 'Anthropic' },
-]
-
-const SFTP_OPTIONS = [
-  {
-    id: 'transactions',
-    name: 'Vendor1 transactions',
-    host: 'localhost:2222',
-    path: '/cash-project/Vendor1/transactions/',
-  },
-  {
-    id: 'employee',
-    name: 'Vendor1 employee',
-    host: 'localhost:2222',
-    path: '/cash-project/Vendor1/employee/',
-  },
-  {
-    id: 'both',
-    name: 'Vendor1 both feeds',
-    host: 'localhost:2222',
-    path: '/cash-project/Vendor1/{transactions,employee}/',
-  },
 ]
 
 const DATABASE_OPTIONS = {
@@ -130,6 +111,10 @@ function buildFileRunLabel(source, entity) {
   return buildSftpRunLabel(normalizedEntity)
 }
 
+function connectionTypeFromSource(source) {
+  return source === 'adls_gen2' || source === 'sftp' ? 'data_lake' : 'database'
+}
+
 function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
   const fileInputRef = useRef(null)
   const addRun = useAthenaStore((s) => s.addRun)
@@ -141,12 +126,36 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
+  const [openSourceSelect, setOpenSourceSelect] = useState(null)
 
   const resetState = () => {
     setForm(buildInitialForm(settings, initialSeedRun))
     setUploadedFile(null)
     setError(null)
     setIsDragging(false)
+  }
+
+  const handleConnectionTypeChange = (connectionType) => {
+    setOpenSourceSelect(null)
+    setForm((current) => {
+      const source = connectionType === 'data_lake' ? 'adls_gen2' : 'database'
+      return {
+        ...current,
+        source,
+        sftpEntity: normalizeFileEntity(source, current.sftpEntity),
+        useDomainKb: source === 'database' ? current.useDomainKb : false,
+      }
+    })
+  }
+
+  const handleDataLakeTypeChange = (source) => {
+    setOpenSourceSelect(null)
+    setForm((current) => ({
+      ...current,
+      source,
+      sftpEntity: normalizeFileEntity(source, current.sftpEntity),
+      useDomainKb: false,
+    }))
   }
 
   useEffect(() => {
@@ -435,147 +444,78 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                           </Field>
                         </>
 
-                        {isFileSource(form.source) && (
-                          <div className="space-y-4">
-                            <div className="rounded-[8px] border border-[#243149] bg-[#0d1422] p-3">
-                              {form.source === 'adls_gen2' ? (
-                                <div className="space-y-2 text-xs text-slate-300">
-                                  <div className="font-medium text-white">ADLS Source</div>
-                                  <div>Account: `https://atheastorage.dfs.core.windows.net`</div>
-                                  <div className="text-slate-400">File system: backend `ADLS_FILE_SYSTEM`</div>
-                                  <div className="text-slate-400">Root: backend `ADLS_SOURCE_ROOT`</div>
-                                  <div className="text-slate-400">Mode: auto-discover folders and files</div>
-                                </div>
-                              ) : (
-                                <div className="space-y-3">
-                                  <Field label="Configured SFTP Source">
-                                    <select
-                                      className="modal-input h-10 rounded-md border-[#26344b] bg-[#101827] px-3 text-xs text-white"
-                                      value={form.sftpEntity}
-                                      onChange={(event) =>
-                                        setForm((current) => ({ ...current, sftpEntity: event.target.value }))
-                                      }
-                                    >
-                                      {SFTP_OPTIONS.map((option) => (
-                                        <option key={option.id} value={option.id}>
-                                          {option.name}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </Field>
-                                  <div className="space-y-1 text-xs text-slate-400">
-                                    <div>{SFTP_OPTIONS.find((option) => option.id === form.sftpEntity)?.host || SFTP_OPTIONS[0].host}</div>
-                                    <div>{SFTP_OPTIONS.find((option) => option.id === form.sftpEntity)?.path || SFTP_OPTIONS[0].path}</div>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
-
                         <div className="rounded-md border border-[#243149] bg-[#151f2d] p-3">
                           <div className="space-y-3">
-                            <div>
-                              <label className="modal-label">Database Connection</label>
-                              <div className="mt-2 grid grid-cols-3 gap-2">
-                                {SOURCE_OPTIONS.map((option) => {
-                                  const Icon = option.icon
-                                  const active = form.source === option.id
-                                  return (
-                                    <button
-                                      key={option.id}
-                                      type="button"
-                                      onClick={() =>
-                                        setForm((current) => ({
-                                          ...current,
-                                          source: option.id,
-                                          sftpEntity: normalizeFileEntity(option.id, current.sftpEntity),
-                                          useDomainKb: option.id === 'database' ? current.useDomainKb : false,
-                                        }))
-                                      }
-                                      className={`flex h-9 items-center justify-center gap-1.5 rounded-md border text-xs font-medium transition-colors ${
-                                        active
-                                          ? 'border-[#4585f5] bg-[#2453a6] text-white'
-                                          : 'border-[#26344b] bg-[#0d1422] text-[#a6b6cf] hover:text-white'
-                                      }`}
-                                    >
-                                      <Icon size={13} />
-                                      {option.label}
-                                    </button>
-                                  )
-                                })}
-                              </div>
-                            </div>
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-white">Source Connection</div>
+
+                            <Field label="Connection Type" required compact>
+                              <ModalSelect
+                                id="connectionType"
+                                value={connectionTypeFromSource(form.source)}
+                                options={SOURCE_OPTIONS}
+                                openSelect={openSourceSelect}
+                                setOpenSelect={setOpenSourceSelect}
+                                onChange={handleConnectionTypeChange}
+                                activeBorder
+                              />
+                            </Field>
 
                             {form.source === 'database' && (
                               <>
                                 <Field label="Database Type" required compact>
-                                  <select
-                                    className="modal-input h-8 rounded-md border-[#26344b] bg-[#0d1422] px-3 text-[11px] font-semibold text-white"
-                                    value={form.databaseType}
-                                    onChange={(event) => {
-                                      const databaseType = event.target.value
-                                      setForm((current) => ({
-                                        ...current,
-                                        databaseType,
-                                        databaseName: DATABASE_OPTIONS[databaseType]?.[0]?.id || '',
-                                      }))
-                                    }}
-                                  >
-                                    <option value="azure_sql">Azure SQL</option>
-                                    <option value="postgresql">PostgreSQL</option>
-                                  </select>
+                                  <div className="relative">
+                                    <select
+                                      className="modal-input h-8 w-full appearance-none rounded-md border-[#26344b] bg-[#0d1422] px-3 pr-8 text-[11px] font-semibold text-white"
+                                      value={form.databaseType}
+                                      onChange={(event) => {
+                                        const databaseType = event.target.value
+                                        setForm((current) => ({
+                                          ...current,
+                                          databaseType,
+                                          databaseName: DATABASE_OPTIONS[databaseType]?.[0]?.id || '',
+                                        }))
+                                      }}
+                                    >
+                                      <option value="" disabled>Select type...</option>
+                                      <option value="azure_sql">Azure SQL</option>
+                                      <option value="postgresql">PostgreSQL</option>
+                                    </select>
+                                    <ChevronDown size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-white" />
+                                  </div>
                                 </Field>
                                 <Field label="Database Name" compact>
-                                  <select
-                                    className="modal-input h-8 rounded-md border-[#26344b] bg-[#0d1422] px-3 text-[11px] font-semibold text-white"
-                                    value={form.databaseName}
-                                    onChange={(event) =>
-                                      setForm((current) => ({ ...current, databaseName: event.target.value }))
-                                    }
-                                  >
-                                    {DATABASE_OPTIONS[form.databaseType]?.map((database) => (
-                                      <option key={database.id} value={database.id}>
-                                        {database.name}
-                                      </option>
-                                    ))}
-                                  </select>
+                                  <div className="relative">
+                                    <select
+                                      className="modal-input h-8 w-full appearance-none rounded-md border-[#26344b] bg-[#0d1422] px-3 pr-8 text-[11px] font-semibold text-white"
+                                      value={form.databaseName}
+                                      onChange={(event) =>
+                                        setForm((current) => ({ ...current, databaseName: event.target.value }))
+                                      }
+                                    >
+                                      {DATABASE_OPTIONS[form.databaseType]?.map((database) => (
+                                        <option key={database.id} value={database.id}>
+                                          {database.name}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <ChevronDown size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-white" />
+                                  </div>
                                 </Field>
                               </>
                             )}
 
-                            {form.source === 'sftp' && (
-                              <>
-                                <Field label="Configured SFTP Source">
-                                  <select
-                                    className="modal-input h-10 rounded-md border-[#26344b] bg-[#0d1422] px-3 text-xs text-white"
-                                    value={form.sftpEntity}
-                                    onChange={(event) =>
-                                      setForm((current) => ({ ...current, sftpEntity: event.target.value }))
-                                    }
-                                  >
-                                    {SFTP_OPTIONS.map((option) => (
-                                      <option key={option.id} value={option.id}>
-                                        {option.name}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </Field>
-                                <div className="space-y-1 text-xs text-slate-400">
-                                  <div>{SFTP_OPTIONS.find((option) => option.id === form.sftpEntity)?.host || SFTP_OPTIONS[0].host}</div>
-                                  <div>{SFTP_OPTIONS.find((option) => option.id === form.sftpEntity)?.path || SFTP_OPTIONS[0].path}</div>
-                                </div>
-                              </>
-                            )}
-
-                            {form.source === 'adls_gen2' && (
-                              <div className="space-y-2 text-xs text-slate-300">
-                                <div className="font-medium text-white">ADLS Source</div>
-                                <div>Account: `https://atheastorage.dfs.core.windows.net`</div>
-                                <div className="text-slate-400">File system: backend `ADLS_FILE_SYSTEM`</div>
-                                <div className="text-slate-400">Root: backend `ADLS_SOURCE_ROOT`</div>
-                                <div className="text-slate-400">Mode: auto-discover folders and files</div>
-                              </div>
+                            {connectionTypeFromSource(form.source) === 'data_lake' && (
+                              <Field label="Data Lake Type" required compact>
+                                <ModalSelect
+                                  id="dataLakeType"
+                                  value={form.source === 'adls_gen2' ? 'adls_gen2' : ''}
+                                  options={DATA_LAKE_OPTIONS}
+                                  placeholder="Select type..."
+                                  openSelect={openSourceSelect}
+                                  setOpenSelect={setOpenSourceSelect}
+                                  onChange={handleDataLakeTypeChange}
+                                />
+                              </Field>
                             )}
                           </div>
                         </div>
@@ -716,6 +656,61 @@ function Field({ label, required = false, compact = false, children }) {
         {label} {required ? '*' : ''}
       </label>
       {children}
+    </div>
+  )
+}
+
+function ModalSelect({
+  id,
+  value,
+  options,
+  placeholder = 'Select type...',
+  openSelect,
+  setOpenSelect,
+  onChange,
+  activeBorder = false,
+}) {
+  const open = openSelect === id
+  const selected = options.find((option) => option.id === value)
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpenSelect(open ? null : id)}
+        className={`flex h-8 w-full items-center justify-between rounded-md border bg-[#0d1422] px-3 text-left text-[11px] font-semibold text-white transition-colors ${
+          open || activeBorder ? 'border-[#4585f5] ring-1 ring-[#4585f5]' : 'border-[#26344b] hover:border-[#4585f5]/70'
+        }`}
+      >
+        <span className={selected ? 'text-white' : 'text-[#6f84a4]'}>
+          {selected?.label || placeholder}
+        </span>
+        <ChevronDown size={15} className={`text-white transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-[80] overflow-hidden rounded-md border border-[#4585f5] bg-[#070d1a] shadow-[0_16px_36px_rgba(0,0,0,0.45)]">
+          <button
+            type="button"
+            disabled
+            className="block h-8 w-full cursor-default px-3 text-left text-[10px] font-medium text-[#6f84a4]"
+          >
+            {placeholder}
+          </button>
+          {options.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => onChange(option.id)}
+              className={`block h-9 w-full px-3 text-left text-[11px] font-semibold transition-colors ${
+                option.id === value ? 'bg-[#7a7a7a] text-white' : 'bg-[#070d1a] text-white hover:bg-[#172131]'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

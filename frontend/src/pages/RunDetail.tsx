@@ -11,6 +11,7 @@ import CopyableId from '../components/shared/CopyableId'
 import JsonViewer from '../components/shared/JsonViewer'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 import {
+  continueStage,
   getRun,
   submitBronzeReview,
   submitEnrichmentReview,
@@ -256,15 +257,13 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
     setSubmittingGate3(true)
     try {
       await submitEnrichmentReview(run.id, approve)
-      const refreshed = approve ? await waitForRunGate(run.id, 4) : await getRun(run.id)
+      const refreshed = await getRun(run.id)
       onRunRefresh(refreshed)
       addNotification({
         type: 'success',
         title: approve ? `${gate3Name} Approved` : `${gate3Name} Rejected`,
         message: approve
-          ? Number(refreshed?.next_gate || 0) === 4
-            ? `Bronze scripts are generated and ready for ${gate4Name} review.`
-            : 'Enrichment was approved. Bronze generation is still processing.'
+          ? 'Enrichment was approved. Bronze generation is running in the background.'
           : 'Enrichment was rejected and the run remains paused for rework.',
         duration: 5000
       })
@@ -471,7 +470,11 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
 }
 
 function tableReviewKey(table) {
-  return [table.database_name, table.schema_name, table.table_name].filter(Boolean).join('.')
+  const database = table.database_name || table.database || table.catalog || table.table_catalog
+  const schema = table.schema_name || table.schema || table.table_schema
+  const tableName = table.table_name || table.name || table.entity || table.table
+  const qualified = [database, schema, tableName].filter(Boolean).join('.')
+  return qualified || String(table.id || table.key || table.full_name || table.table_id || JSON.stringify(table))
 }
 
 function sftpFeedKey(feed) {
@@ -808,7 +811,13 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
   const [layer, setLayer] = useState('gold')
   const [submitting, setSubmitting] = useState(null)
   const currentGate = Number(run?.next_gate || 0)
-  const reviewLayer = currentGate === 4 ? 'bronze' : currentGate === 5 ? 'silver' : null
+  const stageConfirmation = run?.stage_confirmation || null
+  const stageConfirmationLayer =
+    stageConfirmation?.awaiting_confirmation && ['bronze', 'silver', 'gold'].includes(String(stageConfirmation?.last_completed_stage_key || '').toLowerCase())
+      ? String(stageConfirmation.last_completed_stage_key).toLowerCase()
+      : null
+  const reviewLayer = stageConfirmationLayer || (currentGate === 4 ? 'bronze' : currentGate === 5 ? 'silver' : null)
+  const isStageScriptConfirmation = Boolean(stageConfirmationLayer)
   const gate4Name = getGateDisplayName(4)
   const gate5Name = getGateDisplayName(5)
   const scripts = useMemo(() => {
@@ -852,13 +861,17 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
   const filtered = scripts.filter((script) => script.layer === layer)
   const [selectedPath, setSelectedPath] = useState('')
 
-  const counts = {
+  const counts = useMemo(() => ({
     bronze: scripts.filter((script) => script.layer === 'bronze').length,
     silver: scripts.filter((script) => script.layer === 'silver').length,
     gold: scripts.filter((script) => script.layer === 'gold').length
-  }
+  }), [scripts])
 
   useEffect(() => {
+    if (stageConfirmationLayer && counts[stageConfirmationLayer] > 0) {
+      setLayer(stageConfirmationLayer)
+      return
+    }
     if (currentGate === 4 && counts.bronze > 0) {
       setLayer('bronze')
       return
@@ -878,7 +891,7 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
     if (counts.bronze > 0) {
       setLayer('bronze')
     }
-  }, [currentGate, counts.bronze, counts.gold, counts.silver])
+  }, [currentGate, stageConfirmationLayer, counts])
 
   useEffect(() => {
     if (!filtered.length) {
@@ -898,9 +911,13 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
     ? 'Bronze script review'
     : reviewLayer === 'silver'
     ? 'Silver script review'
+    : reviewLayer === 'gold'
+    ? 'Gold script review'
     : 'Generated scripts'
 
-  const reviewMessage = reviewLayer === 'bronze'
+  const reviewMessage = isStageScriptConfirmation
+    ? `Review the generated ${reviewLayer} scripts below. Continue only after copying or downloading anything you need.`
+    : reviewLayer === 'bronze'
     ? `Review the Bronze scripts below. Approving ${gate4Name} generates Silver scripts next.`
     : reviewLayer === 'silver'
     ? `Review the Silver scripts below. Approving ${gate5Name} generates Gold scripts next.`
@@ -955,14 +972,16 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
     if (!reviewLayer) return
     setSubmitting(action)
     try {
-      if (reviewLayer === 'bronze') {
+      if (isStageScriptConfirmation) {
+        await continueStage(run.id, false)
+      } else if (reviewLayer === 'bronze') {
         await submitBronzeReview(run.id, action)
       } else {
         await submitSilverReview(run.id, action)
       }
 
       const refreshed =
-        reviewLayer === 'bronze' && action === 'APPROVED'
+        !isStageScriptConfirmation && reviewLayer === 'bronze' && action === 'APPROVED'
           ? await waitForRunGate(run.id, 5)
           : await getRun(run.id)
 
@@ -970,9 +989,15 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
 
       addNotification({
         type: 'success',
-        title: reviewLayer === 'bronze' ? `${gate4Name} submitted` : `${gate5Name} submitted`,
+        title: isStageScriptConfirmation
+          ? `${capitalize(reviewLayer)} review continued`
+          : reviewLayer === 'bronze'
+          ? `${gate4Name} submitted`
+          : `${gate5Name} submitted`,
         message:
-          reviewLayer === 'bronze' && action === 'APPROVED' && Number(refreshed?.next_gate || 0) === 5
+          isStageScriptConfirmation
+            ? `Continuing to ${stageConfirmation?.next_stage_label || 'the next stage'}.`
+            : reviewLayer === 'bronze' && action === 'APPROVED' && Number(refreshed?.next_gate || 0) === 5
             ? `Bronze approved. Silver scripts are now ready.`
             : reviewLayer === 'silver' && action === 'APPROVED'
             ? 'Silver approved. Gold scripts will appear when generation completes.'
@@ -1013,24 +1038,30 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
               >
                 {submitting === 'APPROVED'
                   ? 'Submitting...'
+                  : isStageScriptConfirmation
+                  ? `Continue to ${stageConfirmation?.next_stage_label || 'Next Stage'}`
                   : reviewLayer === 'bronze'
                   ? 'Approve Bronze'
                   : 'Approve Silver'}
               </button>
-              <button
-                onClick={() => handleReviewAction('REJECTED')}
-                disabled={!!submitting}
-                className="btn-secondary text-sm"
-              >
-                Reject
-              </button>
-              <button
-                onClick={() => handleReviewAction('REGENERATE')}
-                disabled={!!submitting}
-                className="btn-secondary text-sm"
-              >
-                Regenerate
-              </button>
+              {!isStageScriptConfirmation && (
+                <>
+                  <button
+                    onClick={() => handleReviewAction('REJECTED')}
+                    disabled={!!submitting}
+                    className="btn-secondary text-sm"
+                  >
+                    Reject
+                  </button>
+                  <button
+                    onClick={() => handleReviewAction('REGENERATE')}
+                    disabled={!!submitting}
+                    className="btn-secondary text-sm"
+                  >
+                    Regenerate
+                  </button>
+                </>
+              )}
             </div>
           ) : (
             <StatusBadge status={counts.gold > 0 ? 'COMPLETED' : 'GENERATED'} size="sm" />
@@ -1238,6 +1269,11 @@ function formatScriptBody(script) {
   const body = script?.body || '# Script body is not available.'
   if (!script?.dimension_body) return body
   return `${body}\n\n# ---------------- Gold dimension script ----------------\n\n${script.dimension_body}`
+}
+
+function capitalize(value) {
+  const text = String(value || '')
+  return text ? `${text.charAt(0).toUpperCase()}${text.slice(1)}` : ''
 }
 
 export default RunDetail

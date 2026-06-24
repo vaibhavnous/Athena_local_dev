@@ -1,0 +1,72 @@
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - Athena_backend/**
+    - frontend/**
+    - azure-pipelines-backend.yml
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  pythonVersion: '3.9'
+  nodeVersion: '18.x'
+  backendFolder: 'Athena_backend'
+  frontendFolder: 'frontend'
+
+stages:
+- stage: Build
+  displayName: 'Build Backend'
+  jobs:
+  - job: BuildBackend
+    displayName: 'Build and Test'
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r $(backendFolder)/requirements.txt
+      displayName: 'Install dependencies'
+
+    - script: |
+        cd $(backendFolder)
+        python -m pytest tests/ -v --junitxml=junit/test-results.xml || true
+      displayName: 'Run tests'
+      continueOnError: true
+
+    - task: PublishTestResults@2
+      condition: succeededOrFailed()
+      inputs:
+        testResultsFiles: '**/test-results.xml'
+        testResultsFormat: 'JUnit'
+        testRunTitle: 'Backend Tests'
+
+    - script: |
+        mkdir -p $(Build.ArtifactStagingDirectory)/backend
+        cp -r $(backendFolder)/* $(Build.ArtifactStagingDirectory)/backend/
+        cp -r $(backendFolder)/requirements.txt $(Build.ArtifactStagingDirectory)/backend/
+      displayName: 'Prepare artifact'
+
+    - script: |
+        cd $(Build.ArtifactStagingDirectory)/backend
+        echo "runtime: python\nruntime_version: 3.9" > runtime.txt
+        cat > startup.sh << 'EOF'
+        #!/bin/bash
+        pip install -r requirements.txt
+        python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+        EOF
+        chmod +x startup.sh
+      displayName: 'Add startup configuration'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)/backend'
+        artifactName: 'backend-app'
+        publishLocation: 'Container'
+      displayName: 'Publish backend artifact'

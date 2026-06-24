@@ -53,16 +53,19 @@ def _compute_generation_flags(summary: List[Dict[str, Any]], checkpoint: Dict[st
             artifact_types.intersection({"BRONZE_GENERATION", "BRONZE_SCRIPTS", "SFTP_BRONZE_GENERATION"})
             or any("bronze" in stage for stage in stages)
             or checkpoint.get("bronze_generation_status") == "COMPLETED"
+            or checkpoint.get("bronze_generation_results")
         ),
         "silver_generation_completed": bool(
             artifact_types.intersection({"SILVER_GENERATION", "SILVER_SCRIPTS", "SFTP_SILVER_GENERATION"})
             or any("silver" in stage for stage in stages)
             or checkpoint.get("silver_generation_status") == "COMPLETED"
+            or checkpoint.get("silver_generation_results")
         ),
         "gold_generation_completed": bool(
             artifact_types.intersection({"GOLD_GENERATION", "GOLD_SCRIPTS", "SFTP_GOLD_GENERATION"})
             or any("gold" in stage for stage in stages)
             or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
+            or checkpoint.get("gold_generation_results")
         ),
         "schema_discovery_completed": bool(
             "SFTP_SCHEMA_SNAPSHOT" in artifact_types

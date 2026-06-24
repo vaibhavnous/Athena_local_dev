@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, FileText, Play, RefreshCcw, RotateCcw, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Play, RefreshCcw, RotateCcw, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
 import { getPhaseGroups, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
@@ -99,6 +99,7 @@ function PipelineMonitor() {
 
   const failureSummary = useMemo(() => buildFailureSummary(activeRun), [activeRun])
   const stageConfirmation = activeRun?.stage_confirmation || null
+  const stageScriptReview = useMemo(() => buildStageScriptReview(activeRun), [activeRun])
 
   if (!activeRun) {
     return (
@@ -235,6 +236,49 @@ function PipelineMonitor() {
     if (!activeRun?.id) return
     setActiveRun(activeRun.id)
     navigate('/app/hitl')
+  }
+
+  const handleCopyScript = async (script) => {
+    try {
+      await navigator.clipboard.writeText(formatScriptBody(script))
+      addNotification({
+        type: 'success',
+        title: 'Script copied',
+        message: `${script.title} was copied to the clipboard.`,
+        duration: 3000,
+      })
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Copy failed',
+        message: error?.message || 'Unable to copy the script.',
+        duration: 4000,
+      })
+    }
+  }
+
+  const handleDownloadScript = (script) => {
+    try {
+      const body = formatScriptBody(script)
+      const blob = new Blob([body], { type: 'text/plain;charset=utf-8' })
+      const url = window.URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      const fallbackName = `${script.layer}_${script.title || 'script'}`.replace(/[^\w.-]+/g, '_')
+      const fileName = script.script_path?.split(/[\\/]/).pop() || `${fallbackName}.py`
+      anchor.href = url
+      anchor.download = fileName
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Download failed',
+        message: error?.message || 'Unable to download the script.',
+        duration: 4000,
+      })
+    }
   }
 
   return (
@@ -432,7 +476,7 @@ function PipelineMonitor() {
 
       {isStageConfirmationPaused && stageConfirmation?.awaiting_confirmation && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 px-6 backdrop-blur-sm">
-          <div className="w-full max-w-[670px] overflow-hidden rounded-[26px] border border-[#24344d] bg-[#131d2f] shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
+          <div className="max-h-[92vh] w-full max-w-[980px] overflow-hidden rounded-[26px] border border-[#24344d] bg-[#131d2f] shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
             <div className="flex items-start gap-5 px-8 py-8">
               <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-[20px] bg-emerald-500/12 text-emerald-400">
                 <CheckCircle2 size={28} />
@@ -445,13 +489,69 @@ function PipelineMonitor() {
               </div>
             </div>
 
-            <div className="border-t border-[#27374f] px-8 py-6">
+            <div className="max-h-[calc(92vh-132px)] overflow-y-auto border-t border-[#27374f] px-8 py-6">
               <div className="rounded-[20px] border border-[#29456d] bg-[#16233b] px-6 py-5">
                 <div className="text-sm text-[#8ea2c5]">Next stage</div>
                 <div className="mt-1 text-[17px] font-semibold text-white">
                   {stageConfirmation.next_stage_label || 'Next Stage'}
                 </div>
               </div>
+
+              {stageScriptReview && (
+                <div className="mt-5 rounded-[20px] border border-[#29456d] bg-[#0b1424] p-4">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                        <Code2 size={15} className="text-[#7fb0ff]" />
+                        Review {stageScriptReview.label} before continuing
+                      </div>
+                      <div className="mt-1 text-xs text-[#8ea2c5]">
+                        Copy or download the generated script, then continue to {stageConfirmation.next_stage_label || 'the next stage'}.
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => navigate(`/app/runs/${activeRun.id}`)}
+                      className="rounded-lg border border-[#34547f] px-3 py-2 text-xs font-semibold text-[#bcd4ff] transition-colors hover:bg-[#132849]"
+                    >
+                      Open Scripts Tab
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    {stageScriptReview.scripts.map((script) => (
+                      <div key={script.ui_key} className="rounded-2xl border border-[#22304b] bg-[#101a2b] p-3">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-semibold text-white">{script.title}</div>
+                            <div className="mt-0.5 truncate text-[11px] text-[#7d8daa]">{script.target_table || script.source_table || script.script_path || '-'}</div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleCopyScript(script)}
+                              className="inline-flex items-center gap-1 rounded-md border border-[#2d4263] px-2 py-1 text-[11px] font-semibold text-[#aab8d0] hover:border-[#3f82ff] hover:text-white"
+                            >
+                              <Copy size={11} />
+                              Copy
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDownloadScript(script)}
+                              className="inline-flex items-center gap-1 rounded-md border border-[#2d4263] px-2 py-1 text-[11px] font-semibold text-[#aab8d0] hover:border-[#3f82ff] hover:text-white"
+                            >
+                              <Download size={11} />
+                              Download
+                            </button>
+                          </div>
+                        </div>
+                        <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-xl border border-[#22304b] bg-[#08111f] p-3 text-xs leading-relaxed text-[#c9d5e8]">
+                          {formatScriptBody(script)}
+                        </pre>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="mt-6 text-center text-[15px] text-[#aeb8ca]">
                 Do you want to proceed to the next stage?
@@ -638,6 +738,63 @@ function formatTimeAgo(dateStr) {
   if (hours > 0) return `${hours}h ${minutes % 60}m ago`
   if (minutes > 0) return `${minutes}m ago`
   return `${seconds}s ago`
+}
+
+function buildStageScriptReview(run) {
+  const completedLayer = String(run?.stage_confirmation?.last_completed_stage_key || '').toLowerCase()
+  if (!['bronze', 'silver', 'gold'].includes(completedLayer)) return null
+
+  const scripts = normalizeScripts(run, completedLayer)
+  if (!scripts.length) return null
+
+  return {
+    layer: completedLayer,
+    label: `${completedLayer.charAt(0).toUpperCase()}${completedLayer.slice(1)} scripts`,
+    scripts,
+  }
+}
+
+function normalizeScripts(run, layer) {
+  const bundle = run?.[layer] || {}
+  const rows = []
+  const seen = new Set()
+
+  for (const script of bundle?.scripts || []) {
+    const scriptRunId = script.run_id || bundle?.run_id
+    if (scriptRunId && String(scriptRunId) !== String(run.id || run.run_id)) continue
+
+    const dimensionBody = script.dimension_script_body || script.dimension_body || ''
+    const key = [
+      layer,
+      script.script_path || script.target_table || script.source_table || script.table || script.kpi_name,
+      script.dimension_script_path || script.dimension_path || '',
+    ].join('|')
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    rows.push({
+      ...script,
+      ui_key: key,
+      layer,
+      title:
+        script.table ||
+        script.kpi_name ||
+        script.target_table ||
+        script.script_path?.split(/[\\/]/).pop() ||
+        `${layer} script`,
+      body: script.script_body || '',
+      dimension_body: dimensionBody,
+      dimension_script_path: script.dimension_script_path || script.dimension_path || '',
+    })
+  }
+
+  return rows
+}
+
+function formatScriptBody(script) {
+  const body = script?.body || '# Script body is not available.'
+  if (!script?.dimension_body) return body
+  return `${body}\n\n# ---------------- Gold dimension script ----------------\n\n${script.dimension_body}`
 }
 
 export default PipelineMonitor

@@ -183,6 +183,21 @@ def test_get_sftp_run_context_handles_script_loader_failure(monkeypatch):
     assert context["gold"] == {"generated_at": None, "scripts": []}
 
 
+def test_generation_flags_treat_checkpoint_script_results_as_completed():
+    flags = sftp_runtime._compute_generation_flags(
+        [],
+        {
+            "bronze_generation_results": [{"script_body": "bronze"}],
+            "silver_generation_results": [{"script_body": "silver"}],
+            "gold_generation_results": [{"script_body": "gold"}],
+        },
+    )
+
+    assert flags["bronze_generation_completed"] is True
+    assert flags["silver_generation_completed"] is True
+    assert flags["gold_generation_completed"] is True
+
+
 def test_build_sftp_display_name_uses_discovered_entities():
     name = sftp_runtime.build_sftp_display_name(
         {

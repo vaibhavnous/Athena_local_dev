@@ -7,13 +7,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from utilis.logger import PIPELINE_LOG_PATH, logger
 from api import utils as api_utils
+from utilis.logger import PIPELINE_LOG_PATH, logger
 
 
-# -------------------------
-# ✅ Helper: timestamp parse
-# -------------------------
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
         return None
@@ -23,9 +20,6 @@ def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
         return None
 
 
-# -------------------------
-# ✅ Tail lines (optimized)
-# -------------------------
 def tail_lines(path: Path, limit: int) -> List[str]:
     if limit <= 0 or not path.exists():
         return []
@@ -35,9 +29,7 @@ def tail_lines(path: Path, limit: int) -> List[str]:
         position = handle.tell()
         buffer = bytearray()
         newline_count = 0
-
-        # limit total read to avoid huge memory usage
-        max_bytes = 2 * 1024 * 1024  # 2MB cap
+        max_bytes = 2 * 1024 * 1024
         total_read = 0
 
         while position > 0 and newline_count <= limit and total_read < max_bytes:
@@ -52,91 +44,100 @@ def tail_lines(path: Path, limit: int) -> List[str]:
     return buffer.decode("utf-8", errors="ignore").splitlines()[-limit:]
 
 
-# -------------------------
-# ✅ Main log reader
-# -------------------------
+def _duration_from_message(message: Any) -> Optional[float]:
+    match = re.search(r"duration_seconds=([0-9.]+)", str(message))
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _event_type_from_message(message: Any) -> Optional[str]:
+    normalized_message = str(message or "").strip().upper()
+    if normalized_message.startswith("START"):
+        return "stage_start"
+    if normalized_message.startswith("END"):
+        return "stage_end"
+    return None
+
+
+def _log_from_line(run_id: str, line: str, since_dt: Optional[datetime]) -> Optional[Dict[str, Any]]:
+    if f'"run_id":"{run_id}"' not in line and f'"run_id": "{run_id}"' not in line:
+        return None
+
+    try:
+        item = api_utils.json_loads(line)
+    except Exception:
+        return None
+
+    if str(item.get("run_id") or "") != run_id:
+        return None
+
+    logged_at_raw = item.get("timestamp") or item.get("logged_at")
+    logged_at_dt = _parse_ts(logged_at_raw)
+    if since_dt and logged_at_dt and logged_at_dt <= since_dt:
+        return None
+
+    message = item.get("message", "")
+    event_type = item.get("event_type") or _event_type_from_message(message)
+    duration_seconds = item.get("duration_seconds")
+    if duration_seconds is None:
+        duration_seconds = _duration_from_message(message)
+
+    stage = item.get("stage") or item.get("node") or item.get("module")
+    step_name = item.get("step_name") or item.get("funcName")
+    stable_log_id = hashlib.sha256(
+        f"{run_id}|{logged_at_raw}|{stage}|{step_name}|{message}".encode("utf-8")
+    ).hexdigest()
+
+    return {
+        "log_id": stable_log_id,
+        "run_id": run_id,
+        "notebook_name": item.get("node") or item.get("module"),
+        "stage": stage,
+        "step_name": step_name,
+        "log_level": str(item.get("level") or "INFO").upper(),
+        "message": message,
+        "duration_seconds": duration_seconds,
+        "event_type": event_type,
+        "logged_at": logged_at_raw,
+    }
+
+
+def _collect_logs(run_id: str, raw_lines: List[str], since_dt: Optional[datetime]) -> List[Dict[str, Any]]:
+    logs: List[Dict[str, Any]] = []
+    for line in raw_lines:
+        parsed = _log_from_line(run_id, line, since_dt)
+        if parsed:
+            logs.append(parsed)
+    return logs
+
+
 def read_logs(
     run_id: str,
     limit: int = 1000,
     since: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     log_path = PIPELINE_LOG_PATH
-
     if not log_path.exists():
         return []
 
-    # ✅ reduce over-read size
-    raw_lines = tail_lines(log_path, min(max(limit * 2, 500), 2000))
-
-    logs: List[Dict[str, Any]] = []
-
+    safe_limit = max(1, min(int(limit or 1000), 5000))
     since_dt = _parse_ts(since) if since else None
 
-    for line in raw_lines:
+    raw_lines = tail_lines(log_path, min(max(safe_limit * 3, 1000), 5000))
+    logs = _collect_logs(run_id, raw_lines, since_dt)
 
-        # ✅ FAST FILTER before JSON parsing
-        if f'"run_id":"{run_id}"' not in line and f'"run_id": "{run_id}"' not in line:
-            continue
-
+    # Older runs can fall outside the recent tail. On initial load, scan the
+    # full local log file before telling the UI that no logs exist.
+    if not logs and not since:
         try:
-            item = api_utils.json_loads(line)
+            all_lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            logs = _collect_logs(run_id, all_lines, since_dt)
         except Exception:
-            # optional debug log (kept quiet for performance)
-            continue
+            logger.exception("Failed to scan full pipeline log file for run_id=%s", run_id)
+            return []
 
-        if str(item.get("run_id") or "") != run_id:
-            continue
-
-        logged_at_raw = item.get("timestamp") or item.get("logged_at")
-        logged_at_dt = _parse_ts(logged_at_raw)
-
-        # ✅ correct timestamp filtering
-        if since_dt and logged_at_dt and logged_at_dt <= since_dt:
-            continue
-
-        message = item.get("message", "")
-        event_type = item.get("event_type")
-
-        # ✅ derive event type if missing
-        if not event_type:
-            normalized_message = str(message).strip().upper()
-            if normalized_message.startswith("START"):
-                event_type = "stage_start"
-            elif normalized_message.startswith("END"):
-                event_type = "stage_end"
-
-        # ✅ optimized duration extraction
-        duration_seconds = item.get("duration_seconds")
-        if duration_seconds is None and "duration_seconds=" in str(message):
-            match = re.search(r"duration_seconds=([0-9.]+)", str(message))
-            if match:
-                duration_seconds = float(match.group(1))
-
-        stage = item.get("stage") or item.get("node") or item.get("module")
-        step_name = item.get("step_name") or item.get("funcName")
-
-        # ✅ stable but lighter hash
-        stable_log_id = hashlib.sha256(
-            f"{run_id}|{logged_at_raw}|{stage}|{step_name}|{message}".encode("utf-8")
-        ).hexdigest()
-
-        logs.append(
-            {
-                "log_id": stable_log_id,
-                "run_id": run_id,
-                "notebook_name": item.get("node") or item.get("module"),
-                "stage": stage,
-                "step_name": step_name,
-                "log_level": item.get("level", "INFO"),
-                "message": message,
-                "duration_seconds": duration_seconds,
-                "event_type": event_type,
-                "logged_at": logged_at_raw,
-            }
-        )
-
-        # ✅ EARLY EXIT (major performance win)
-        if len(logs) >= limit:
-            break
-
-    return logs
+    return logs[-safe_limit:]

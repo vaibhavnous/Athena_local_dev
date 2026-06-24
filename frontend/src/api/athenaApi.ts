@@ -22,7 +22,7 @@ api.interceptors.request.use(
 api.interceptors.response.use(
   (response) => response.data,
   (error) => {
-    const message = error.response?.data?.message || error.message || 'Network error'
+    const message = error.response?.data?.message || error.response?.data?.detail || error.message || 'Network error'
     const normalized = new Error(message) as any
     normalized.status = error.response?.status
     normalized.data = error.response?.data

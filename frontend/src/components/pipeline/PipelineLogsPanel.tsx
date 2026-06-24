@@ -6,8 +6,12 @@ import useAthenaStore from '../../store/useAthenaStore'
 
 const LOG_LEVELS = ['ALL', 'INFO', 'WARNING', 'ERROR', 'DEBUG'] as const
 
-function levelBadgeClass(level: string) {
-  switch (level) {
+function normalizeLevel(level?: string | null) {
+  return String(level || 'INFO').toUpperCase()
+}
+
+function levelBadgeClass(level?: string | null) {
+  switch (normalizeLevel(level)) {
     case 'ERROR':   return 'bg-red-500/20 text-red-300'
     case 'WARNING': return 'bg-yellow-500/20 text-yellow-300'
     case 'DEBUG':   return 'bg-purple-500/20 text-purple-300'
@@ -36,6 +40,20 @@ function formatStageLabel(stage?: string | null) {
   if (normalized === 'Sftp Gate1') return 'SFTP KPI Review'
   if (normalized === 'Sftp Gate2') return 'SFTP Feed Review'
   return normalized
+}
+
+function formatLogTime(value?: string | null, mode: 'time' | 'dateTime' = 'time') {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return mode === 'dateTime' ? date.toLocaleString() : date.toLocaleTimeString()
+}
+
+function formatDuration(value: unknown) {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric)) return null
+  return `${numeric.toFixed(2)}s`
 }
 
 interface Props {
@@ -68,7 +86,7 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
   const uniqueStages = ['ALL', ...Array.from(stageSet as Set<string>)]
 
   const filteredLogs = logs.filter((log) => {
-    if (filterLevel !== 'ALL' && log.log_level !== filterLevel) return false
+    if (filterLevel !== 'ALL' && normalizeLevel(log.log_level) !== filterLevel) return false
     if (filterStage !== 'ALL' && formatStageLabel(log.stage) !== filterStage) return false
     if (
       searchQuery &&
@@ -229,10 +247,10 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
                       >
                         <div className="flex items-center gap-2 text-xs">
                           <span className="text-gray-500 font-mono flex-shrink-0">
-                            {new Date(log.logged_at).toLocaleTimeString()}
+                            {formatLogTime(log.logged_at)}
                           </span>
                           <span className={`px-2 py-0.5 rounded text-xs font-semibold flex-shrink-0 ${levelBadgeClass(log.log_level)}`}>
-                            {log.log_level || 'INFO'}
+                            {normalizeLevel(log.log_level)}
                           </span>
                           {eventLabel(log.event_type) && (
                             <span className={`px-2 py-0.5 rounded text-xs font-semibold flex-shrink-0 ${eventBadgeClass(log.event_type)}`}>
@@ -240,11 +258,11 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
                             </span>
                           )}
                           {log.stage && <span className="text-gray-300">{formatStageLabel(log.stage)}</span>}
-                          {log.duration_seconds != null && (
-                            <span className="text-gray-500 font-mono">{log.duration_seconds.toFixed(2)}s</span>
+                          {formatDuration(log.duration_seconds) && (
+                            <span className="text-gray-500 font-mono">{formatDuration(log.duration_seconds)}</span>
                           )}
                           <span className="text-gray-500">-</span>
-                          <span className="text-gray-300 truncate">{log.message}</span>
+                          <span className="text-gray-300 truncate">{log.message || '-'}</span>
                         </div>
                       </div>
                     ))}
@@ -288,13 +306,13 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
               <div className="p-6 space-y-4">
                 <DetailRow label="Timestamp">
                   <span className="text-sm text-gray-200 font-mono">
-                    {new Date(selectedLog.logged_at).toLocaleString()}
+                    {formatLogTime(selectedLog.logged_at, 'dateTime')}
                   </span>
                 </DetailRow>
 
                 <DetailRow label="Level">
                   <span className={`inline-block px-3 py-1 rounded text-sm font-semibold ${levelBadgeClass(selectedLog.log_level)}`}>
-                    {selectedLog.log_level || 'INFO'}
+                    {normalizeLevel(selectedLog.log_level)}
                   </span>
                 </DetailRow>
 
@@ -318,17 +336,17 @@ export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
                   </DetailRow>
                 )}
 
-                {selectedLog.duration_seconds != null && (
+                {formatDuration(selectedLog.duration_seconds) && (
                   <DetailRow label="Duration">
                     <span className="text-sm text-gray-200 font-mono">
-                      {selectedLog.duration_seconds.toFixed(2)}s
+                      {formatDuration(selectedLog.duration_seconds)}
                     </span>
                   </DetailRow>
                 )}
 
                 <DetailRow label="Message">
                   <pre className="text-sm text-gray-200 whitespace-pre-wrap font-mono leading-relaxed">
-                    {selectedLog.message}
+                    {selectedLog.message || '-'}
                   </pre>
                 </DetailRow>
 

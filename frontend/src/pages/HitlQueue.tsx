@@ -55,15 +55,7 @@ function HitlQueue() {
 
   const reviewRuns = useMemo(
     () =>
-      runs.filter((run) => {
-        const gate = Number(run?.next_gate || 0)
-        return (
-          gate >= 1 &&
-          gate <= 5 &&
-          String(run?.status || '').toUpperCase() !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
-          !run?.stage_confirmation?.awaiting_confirmation
-        )
-      }),
+      runs.filter(isReviewPausedRun),
     [runs]
   )
 
@@ -89,7 +81,7 @@ function HitlQueue() {
   const REVIEWER_ID = 'reviewer@nousinfo.com'
   const currentRun = runs.find((run) => run.id === selectedRunId) || (selectedRunDetail?.id === selectedRunId ? selectedRunDetail : null)
   const gateToReview = Number(currentRun?.next_gate || 0)
-  const isReviewableRun = gateToReview >= 1 && gateToReview <= 5
+  const isReviewableRun = isReviewPausedRun(currentRun)
   const isGate2 = gateToReview === 2
   const isGate3 = gateToReview === 3
   const isGate4 = gateToReview === 4
@@ -118,8 +110,7 @@ function HitlQueue() {
         const detail = await getRun(activeRunId)
         if (cancelled || !detail?.id) return
 
-        const gate = Number(detail?.next_gate || 0)
-        if (gate < 1 || gate > 5) return
+        if (!isReviewPausedRun(detail)) return
 
         const alreadyKnown = runs.some((run) => run.id === detail.id)
         if (alreadyKnown) updateRun(detail.id, detail)
@@ -148,6 +139,10 @@ function HitlQueue() {
       try {
         const detail = await getRun(selectedRunId)
         if (cancelled || !detail?.id) return
+        if (!isReviewPausedRun(detail)) {
+          setSelectedRunId(null)
+          return
+        }
 
         const alreadyKnown = runs.some((run) => run.id === detail.id)
         if (alreadyKnown) updateRun(detail.id, detail)
@@ -346,7 +341,7 @@ function HitlQueue() {
   const filteredQueue = useMemo(() => {
     if (statusFilter === 'All') return queue
     return queue.filter((item) => {
-      const decision = localDecisions[item.queue_id || item.id] || item.decision
+      const decision = localDecisions[reviewItemKey(item)] || item.decision
       if (statusFilter === 'Pending') return !decision
       return decision === statusFilter
     })
@@ -354,7 +349,7 @@ function HitlQueue() {
 
   const kpiCounts = useMemo(() => ({
     total: queue.length,
-    pending: queue.filter((item) => !localDecisions[item.queue_id || item.id] && !item.decision).length,
+    pending: queue.filter((item) => !localDecisions[reviewItemKey(item)] && !item.decision).length,
     approved: Object.values(localDecisions).filter((value) => value === 'APPROVED').length,
     edited: Object.values(localDecisions).filter((value) => value === 'EDITED').length,
     rejected: Object.values(localDecisions).filter((value) => value === 'REJECTED').length
@@ -362,12 +357,13 @@ function HitlQueue() {
 
   const selectedTableCount = (tableReview?.nominated_tables || []).filter((table) => selectedTables[tableReviewKey(table)]).length
   const availableSftpFeeds = getSftpFeeds(tableReview)
+  const availableTableReviews = tableReview?.nominated_tables || []
   const selectedFeedCount = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length
   const totalFeedCount = availableSftpFeeds.length
   const bronzeReviewFeeds = bronzeReview?.bronze_review_artifact?.feeds || []
   const silverReviewItems = silverReview?.silver_review_artifact?.items || []
   const gateReviewReady = isGate4 ? bronzeReviewFeeds.length > 0 : isGate5 ? silverReviewItems.length > 0 : false
-  const allKpisDecided = queue.length > 0 && queue.every((item) => localDecisions[item.queue_id || item.id] || item.decision)
+  const allKpisDecided = queue.length > 0 && queue.every((item) => localDecisions[reviewItemKey(item)] || item.decision)
   const canSubmitReview = isGate2
     ? (isSftpRun ? totalFeedCount > 0 : (tableReview?.nominated_tables || []).length > 0)
     : isGate3
@@ -411,17 +407,38 @@ function HitlQueue() {
   const handleAutoApproveAll = () => {
     const next = {}
     queue.forEach((item) => {
-      if (!item.decision) next[item.id] = 'APPROVED'
+      if (!item.decision) next[reviewItemKey(item)] = 'APPROVED'
     })
     setLocalDecisions((prev) => ({ ...prev, ...next }))
   }
 
   const handleSelectAllTables = () => {
-    const next = {}
-    for (const table of tableReview?.nominated_tables || []) {
-      next[tableReviewKey(table)] = true
+    setSelectedTables((prev) => {
+      const next = { ...prev }
+      for (const table of availableTableReviews) {
+        next[tableReviewKey(table)] = true
+      }
+      return next
+    })
+  }
+
+  const handleClearAllTables = () => {
+    setSelectedTables((prev) => {
+      const next = { ...prev }
+      for (const table of availableTableReviews) {
+        delete next[tableReviewKey(table)]
+      }
+      return next
+    })
+  }
+
+  const handleToggleAllTables = () => {
+    const allSelected = availableTableReviews.length > 0 && availableTableReviews.every((table) => selectedTables[tableReviewKey(table)])
+    if (allSelected) {
+      handleClearAllTables()
+    } else {
+      handleSelectAllTables()
     }
-    setSelectedTables(next)
   }
 
   const handleSelectAllFeeds = () => {
@@ -485,17 +502,15 @@ function HitlQueue() {
       setSubmitting(true)
       try {
         await submitEnrichmentReview(selectedRunId, gate3Decision === 'APPROVED')
-        const refreshed = gate3Decision === 'APPROVED'
-          ? await waitForRunGate(selectedRunId, updateRun, 4)
-          : await getRun(selectedRunId)
+        const refreshed = await getRun(selectedRunId)
         updateRun(selectedRunId, refreshed)
         setEnrichmentReview(null)
         addNotification({
           type: 'success',
           title: `${gate3Name} Submitted`,
-          message: gate3Decision === 'APPROVED' && Number(refreshed?.next_gate || 0) === 4
-            ? `${gate3Name} approved. Bronze scripts are generated and ready for ${gate4Name}.`
-            : 'Enrichment review was submitted. Pipeline is still processing.',
+          message: gate3Decision === 'APPROVED'
+            ? `${gate3Name} approved. Bronze generation is running in the background.`
+            : 'Enrichment review was rejected and the run remains paused for rework.',
           duration: 5000
         })
         returnToMonitor(selectedRunId)
@@ -555,7 +570,7 @@ function HitlQueue() {
       return
     }
 
-    const missingDecisions = queue.filter((item) => !localDecisions[item.queue_id || item.id] && !item.decision)
+    const missingDecisions = queue.filter((item) => !localDecisions[reviewItemKey(item)] && !item.decision)
     if (missingDecisions.length > 0) {
       addNotification({
         type: 'amber',
@@ -571,7 +586,7 @@ function HitlQueue() {
 
     try {
       const decisions = queue.map((item) => {
-        const key = item.queue_id || item.id
+        const key = reviewItemKey(item)
         const decision = localDecisions[key] || item.decision
         if (!decision) return null
         const edited = editedKpis[key]
@@ -643,7 +658,7 @@ function HitlQueue() {
 
           <div className="flex flex-wrap items-center gap-2">
             <button
-              onClick={isGate3 ? () => setGate3Decision('APPROVED') : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleSelectAllTables) : handleAutoApproveAll}
+              onClick={isGate3 ? () => setGate3Decision('APPROVED') : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleToggleAllTables) : handleAutoApproveAll}
               className="inline-flex items-center gap-2 rounded-xl border border-[#294766] bg-[#1b2a3f] px-4 py-2 text-sm font-semibold text-[#c6d2e8] transition-colors hover:bg-[#223550]"
             >
               <CheckCircle size={15} className="text-[#19c37d]" />
@@ -887,11 +902,11 @@ function HitlQueue() {
           ) : (
             filteredQueue.map((kpi) => (
               <KpiReviewCard
-                key={kpi.queue_id || kpi.id}
-                kpi={{ ...kpi, ...(editedKpis[kpi.queue_id || kpi.id] || {}) }}
-                localDecision={localDecisions[kpi.queue_id || kpi.id]}
-                rejectionReason={rejectionReasons[kpi.queue_id || kpi.id]}
-                onApprove={(id) => id ? handleApprove(id) : handleClearDecision(kpi.queue_id || kpi.id)}
+                key={reviewItemKey(kpi)}
+                kpi={{ ...kpi, ...(editedKpis[reviewItemKey(kpi)] || {}) }}
+                localDecision={localDecisions[reviewItemKey(kpi)]}
+                rejectionReason={rejectionReasons[reviewItemKey(kpi)]}
+                onApprove={(id) => id ? handleApprove(id) : handleClearDecision(reviewItemKey(kpi))}
                 onEdit={handleEdit}
                 onReject={handleReject}
               />
@@ -978,7 +993,7 @@ function HitlQueue() {
           </div>
 
           <button
-            onClick={isGate3 ? () => setGate3Decision('APPROVED') : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleSelectAllTables) : handleAutoApproveAll}
+            onClick={isGate3 ? () => setGate3Decision('APPROVED') : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleToggleAllTables) : handleAutoApproveAll}
             className="flex items-center justify-center gap-2 px-4 py-3 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/25 text-accent-green text-sm font-semibold rounded-xl transition-colors"
           >
             <CheckCircle size={15} />
@@ -1075,6 +1090,7 @@ function HitlQueue() {
 }
 
 function mapHitlRow(row) {
+  const decision = normalizeReviewDecision(row.decision) || normalizeReviewDecision(row.gate_status)
   return {
     id: row.queue_id || row.id,
     queue_id: row.queue_id || row.id,
@@ -1093,7 +1109,7 @@ function mapHitlRow(row) {
     kpi_detail: row.kpi_detail || {},
     modified_detail: row.modified_detail || null,
     gate_status: row.gate_status,
-    decision: row.decision || (row.gate_status !== 'PENDING' ? row.gate_status : null),
+    decision,
     reviewer_id: row.reviewer_id,
     rejection_reason: row.rejection_reason,
     auto_approved: row.auto_approved === true || row.auto_approved === 'true',
@@ -1101,6 +1117,15 @@ function mapHitlRow(row) {
     decided_at: row.decided_at,
     timeout_at: row.timeout_at
   }
+}
+
+function normalizeReviewDecision(value) {
+  const normalized = String(value || '').toUpperCase()
+  return ['APPROVED', 'REJECTED', 'EDITED'].includes(normalized) ? normalized : null
+}
+
+function reviewItemKey(item) {
+  return item?.queue_id || item?.id || item?.item_id
 }
 
 function normalizeSourceValue(source) {
@@ -1135,6 +1160,21 @@ function reviewPayloadMatchesRun(payload, runId, source) {
   return true
 }
 
+function hasReviewGate(run) {
+  const gate = Number(run?.next_gate || 0)
+  return gate >= 1 && gate <= 5
+}
+
+function isReviewPausedRun(run) {
+  const status = String(run?.status || '').toUpperCase()
+  return (
+    hasReviewGate(run) &&
+    !run?.stage_confirmation?.awaiting_confirmation &&
+    status !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
+    ['HITL_WAIT', 'PAUSED_FOR_HITL'].includes(status)
+  )
+}
+
 function CountRow({ label, value, color, pulse }) {
   return (
     <div className="flex items-center justify-between">
@@ -1157,7 +1197,11 @@ function StatTile({ label, value }) {
 }
 
 function tableReviewKey(table) {
-  return [table.database_name, table.schema_name, table.table_name].filter(Boolean).join('.')
+  const database = table.database_name || table.database || table.catalog || table.table_catalog
+  const schema = table.schema_name || table.schema || table.table_schema
+  const tableName = table.table_name || table.name || table.entity || table.table
+  const qualified = [database, schema, tableName].filter(Boolean).join('.')
+  return qualified || String(table.id || table.key || table.full_name || table.table_id || JSON.stringify(table))
 }
 
 function sftpFeedKey(feed) {

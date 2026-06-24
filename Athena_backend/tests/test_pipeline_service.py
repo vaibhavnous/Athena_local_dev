@@ -31,6 +31,22 @@ def test_next_status_derives_database_and_file_source_defaults():
     assert pipeline_service._next_status("done", pending_gate1=False, file_source=True) == "done"
 
 
+def test_minimum_stage_runtime_uses_env(monkeypatch):
+    from services import pipeline_runtime
+
+    monkeypatch.setenv("ATHENA_MIN_STAGE_RUNTIME_SECONDS", "2.5")
+
+    assert pipeline_runtime._minimum_stage_runtime_seconds() == 2.5
+
+
+def test_minimum_stage_runtime_falls_back_for_bad_env(monkeypatch):
+    from services import pipeline_runtime
+
+    monkeypatch.setenv("ATHENA_MIN_STAGE_RUNTIME_SECONDS", "bad")
+
+    assert pipeline_runtime._minimum_stage_runtime_seconds() == 4.0
+
+
 def test_run_pipeline_background_database_flow_saves_completed(monkeypatch):
     saved = {}
 
@@ -191,6 +207,242 @@ def test_database_failed_stage_key_uses_context_fallback(monkeypatch):
     result = pipeline_service.database_failed_stage_key("run-5", {})
 
     assert result == "silver"
+
+
+def test_run_context_preserves_stage_confirmation_status_after_bronze(monkeypatch):
+    from services import pipeline_runtime
+
+    checkpoint = {
+        "run_id": "run-bronze",
+        "source": "database",
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "stage_confirmation_enabled": True,
+        "last_completed_stage_key": "bronze",
+        "last_completed_stage_label": "Bronze Generation",
+        "next_stage_key": "silver",
+        "next_stage_label": "Silver Generation",
+        "bronze_generation_status": "COMPLETED",
+        "enrichment_review_status": "COMPLETED",
+        "enrichment_review_artifact": {"approved_from_checkpoint": True},
+    }
+
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "fetch_run_summary",
+        lambda run_id: [{"stage": "bronze", "artifact_type": "BRONZE_GENERATION"}],
+    )
+    monkeypatch.setattr(pipeline_runtime, "get_pending_items", lambda run_id, gate: [])
+    monkeypatch.setattr(pipeline_runtime, "get_completed_items", lambda run_id, gate: [])
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "fetch_json_artifact",
+        lambda run_id, artifact: {"enrichment_artifact": {}} if artifact == "GATE3_APPROVED_ENRICHMENT" else {},
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_bronze_scripts",
+        lambda run_id, checkpoint=None: {"scripts": [{"script_body": "print('bronze')"}]},
+    )
+    monkeypatch.setattr(pipeline_runtime, "load_silver_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+    monkeypatch.setattr(pipeline_runtime, "load_gold_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+
+    context = pipeline_runtime.get_run_context("run-bronze")
+
+    assert context["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
+    assert context["stage_confirmation"]["last_completed_stage_key"] == "bronze"
+    assert context["stage_confirmation"]["next_stage_key"] == "silver"
+    assert context["bronze"]["scripts"][0]["script_body"] == "print('bronze')"
+
+
+def test_run_context_converts_existing_pause_before_review_gate_to_hitl_wait(monkeypatch):
+    from services import pipeline_runtime
+
+    checkpoint = {
+        "run_id": "run-gate3",
+        "source": "database",
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "stage_confirmation_enabled": True,
+        "last_completed_stage_key": "enrichment",
+        "last_completed_stage_label": "Semantic Enrichment",
+        "next_stage_key": "gate3",
+        "next_stage_label": "Enrichment Review",
+        "enriched_metadata": {"columns": [{"semantic_type": "MEASURE"}]},
+    }
+
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(pipeline_runtime, "fetch_run_summary", lambda run_id: [])
+    monkeypatch.setattr(pipeline_runtime, "get_pending_items", lambda run_id, gate: [])
+    monkeypatch.setattr(pipeline_runtime, "get_completed_items", lambda run_id, gate: [])
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "fetch_json_artifact",
+        lambda run_id, artifact: {},
+    )
+
+    context = pipeline_runtime.get_run_context("run-gate3")
+
+    assert context["status"] == "HITL_WAIT"
+    assert context["next_gate"] == 3
+    assert context["stage_confirmation"] is None
+    assert "Enrichment Review is pending" in context["resume_message"]
+
+
+def test_run_context_suppresses_stage_confirmation_when_background_stage_active(monkeypatch):
+    from services import pipeline_runtime
+
+    checkpoint = {
+        "run_id": "run-active-enrichment",
+        "source": "database",
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "background_stage": "enrichment",
+        "stage_confirmation_enabled": True,
+        "last_completed_stage_key": "profiling",
+        "next_stage_key": "enrichment",
+        "next_stage_label": "Semantic Enrichment",
+    }
+
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(pipeline_runtime, "fetch_run_summary", lambda run_id: [])
+    monkeypatch.setattr(pipeline_runtime, "get_pending_items", lambda run_id, gate: [])
+    monkeypatch.setattr(pipeline_runtime, "get_completed_items", lambda run_id, gate: [])
+    monkeypatch.setattr(pipeline_runtime, "fetch_json_artifact", lambda run_id, artifact: {})
+
+    context = pipeline_runtime.get_run_context("run-active-enrichment")
+
+    assert context["stage_confirmation"] is None
+    assert context["current_pipeline_step"]["key"] == "enrichment"
+
+
+def test_run_context_advances_stale_silver_stage_confirmation(monkeypatch):
+    from services import pipeline_runtime
+
+    checkpoint = {
+        "run_id": "run-silver-ready",
+        "source": "database",
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "stage_confirmation_enabled": True,
+        "last_completed_stage_key": "bronze",
+        "last_completed_stage_label": "Bronze Generation",
+        "next_stage_key": "silver",
+        "next_stage_label": "Silver Generation",
+        "bronze_generation_status": "COMPLETED",
+        "silver_generation_status": "COMPLETED",
+        "enrichment_review_status": "COMPLETED",
+        "enrichment_review_artifact": {"approved_from_checkpoint": True},
+    }
+
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(pipeline_runtime, "fetch_run_summary", lambda run_id: [])
+    monkeypatch.setattr(pipeline_runtime, "get_pending_items", lambda run_id, gate: [])
+    monkeypatch.setattr(pipeline_runtime, "get_completed_items", lambda run_id, gate: [])
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "fetch_json_artifact",
+        lambda run_id, artifact: {"enrichment_artifact": {}} if artifact == "GATE3_APPROVED_ENRICHMENT" else {},
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_bronze_scripts",
+        lambda run_id, checkpoint=None: {"scripts": [{"script_body": "print('bronze')"}]},
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_silver_scripts",
+        lambda run_id, checkpoint=None: {"scripts": [{"script_body": "print('silver')"}]},
+    )
+    monkeypatch.setattr(pipeline_runtime, "load_gold_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+
+    context = pipeline_runtime.get_run_context("run-silver-ready")
+
+    assert context["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
+    assert context["stage_confirmation"]["last_completed_stage_key"] == "silver"
+    assert context["stage_confirmation"]["next_stage_key"] == "gold"
+    assert context["silver"]["scripts"][0]["script_body"] == "print('silver')"
+
+
+def test_run_context_clears_stale_stage_confirmation_when_gold_complete(monkeypatch):
+    from services import pipeline_runtime
+
+    checkpoint = {
+        "run_id": "run-gold-ready",
+        "source": "database",
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "stage_confirmation_enabled": True,
+        "last_completed_stage_key": "silver",
+        "last_completed_stage_label": "Silver Generation",
+        "next_stage_key": "gold",
+        "next_stage_label": "Gold Generation",
+        "silver_generation_status": "COMPLETED",
+        "gold_generation_status": "COMPLETED",
+        "enrichment_review_status": "COMPLETED",
+        "enrichment_review_artifact": {"approved_from_checkpoint": True},
+    }
+
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(pipeline_runtime, "fetch_run_summary", lambda run_id: [])
+    monkeypatch.setattr(pipeline_runtime, "get_pending_items", lambda run_id, gate: [])
+    monkeypatch.setattr(pipeline_runtime, "get_completed_items", lambda run_id, gate: [])
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "fetch_json_artifact",
+        lambda run_id, artifact: {"enrichment_artifact": {}} if artifact == "GATE3_APPROVED_ENRICHMENT" else {},
+    )
+    monkeypatch.setattr(pipeline_runtime, "load_bronze_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_silver_scripts",
+        lambda run_id, checkpoint=None: {"scripts": [{"script_body": "print('silver')"}]},
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_gold_scripts",
+        lambda run_id, checkpoint=None: {"scripts": [{"script_body": "print('gold')"}]},
+    )
+
+    context = pipeline_runtime.get_run_context("run-gold-ready")
+
+    assert context["status"] == "PIPELINE_COMPLETED"
+    assert context["stage_confirmation"] is None
+    assert context["gold"]["scripts"][0]["script_body"] == "print('gold')"
+
+
+@pytest.mark.parametrize(
+    ("start_stage", "expected_gate"),
+    [
+        ("kpis", "gate1"),
+        ("nomination", "gate2"),
+        ("enrichment", "gate3"),
+    ],
+)
+def test_database_continue_skips_stage_confirmation_before_review_gates(monkeypatch, start_stage, expected_gate):
+    from services import pipeline_runtime
+
+    visited = []
+    saved_states = []
+
+    def fake_runner(stage_key):
+        def _run(state):
+            visited.append(stage_key)
+            if stage_key == expected_gate:
+                return {"status": "HITL_WAIT", f"{stage_key}_status": "PENDING"}
+            return {"status": "RUNNING"}
+
+        return _run
+
+    monkeypatch.setattr(pipeline_runtime, "_database_stage_runner", fake_runner)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved_states.append(dict(state)))
+
+    result = pipeline_runtime.continue_database_pipeline(
+        "run-review",
+        start_stage_key=start_stage,
+        state={"run_id": "run-review", "stage_confirmation_enabled": True},
+    )
+
+    assert visited == [start_stage, expected_gate]
+    assert result["status"] == "HITL_WAIT"
+    assert result["last_completed_stage_key"] == expected_gate
+    assert all(state.get("status") != "PAUSED_FOR_STAGE_CONFIRMATION" for state in saved_states)
 
 
 def test_job_done_callback_marks_failure_and_cleans_registry(monkeypatch):

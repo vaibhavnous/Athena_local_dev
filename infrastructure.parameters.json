@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "eastus"
+    },
+    "projectName": {
+      "value": "athena"
+    },
+    "environment": {
+      "value": "dev"
+    },
+    "sqlConnectionString": {
+      "value": "Server=YOUR_SQL_SERVER;Database=YOUR_DB;User Id=YOUR_USER;Password=YOUR_PASSWORD;"
+    },
+    "apiKey": {
+      "value": "YOUR_API_KEY_HERE"
+    }
+  }
+}

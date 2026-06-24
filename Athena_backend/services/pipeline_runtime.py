@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -37,6 +38,15 @@ DATABASE_STAGE_SEQUENCE = [
 ]
 
 DATABASE_STAGE_LABELS = dict(DATABASE_STAGE_SEQUENCE)
+
+
+def _minimum_stage_runtime_seconds() -> float:
+    raw = os.getenv("ATHENA_MIN_STAGE_RUNTIME_SECONDS", "4")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning("Invalid ATHENA_MIN_STAGE_RUNTIME_SECONDS=%r; using 4 seconds", raw)
+        return 4.0
 
 
 def _bundle_cache_token(path: Path) -> Optional[str]:
@@ -99,6 +109,10 @@ def _database_next_stage_key(stage_key: str) -> Optional[str]:
     if index < 0 or index + 1 >= len(DATABASE_STAGE_SEQUENCE):
         return None
     return DATABASE_STAGE_SEQUENCE[index + 1][0]
+
+
+def _is_database_review_gate(stage_key: Optional[str]) -> bool:
+    return str(stage_key or "") in {"gate1", "gate2", "gate3"}
 
 
 def _pause_for_stage_confirmation(
@@ -204,12 +218,26 @@ def continue_database_pipeline(
 
     current_stage_key = start_stage_key
     while current_stage_key:
+        stage_started_at = time.monotonic()
+        if stage_confirmation_enabled:
+            running_state = {
+                **working_state,
+                "run_id": run_id,
+                "status": "RUNNING",
+                "background_stage": current_stage_key,
+                "awaiting_stage_confirmation": False,
+                "resume_message": f"{DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key)} is running.",
+            }
+            save_checkpoint_state(run_id, running_state)
+            working_state = running_state
+
         runner = _database_stage_runner(current_stage_key)
         result = runner(working_state)
         if not isinstance(result, dict):
             raise ValueError(f"Stage {current_stage_key} returned an invalid state.")
 
         working_state = {**working_state, **result, "run_id": run_id}
+        working_state["background_stage"] = None
         working_state["awaiting_stage_confirmation"] = False
         working_state["last_completed_stage_key"] = current_stage_key
         working_state["last_completed_stage_label"] = DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key)
@@ -222,7 +250,15 @@ def continue_database_pipeline(
         if str(working_state.get("status") or "").upper() in {"HITL_WAIT", "PAUSED_FOR_HITL"}:
             return working_state
 
-        if stage_confirmation_enabled and working_state.get("next_stage_key"):
+        if (
+            stage_confirmation_enabled
+            and working_state.get("next_stage_key")
+            and not _is_database_review_gate(working_state.get("next_stage_key"))
+        ):
+            elapsed = time.monotonic() - stage_started_at
+            remaining = _minimum_stage_runtime_seconds() - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
             return _pause_for_stage_confirmation(
                 working_state,
                 run_id=run_id,
@@ -968,18 +1004,34 @@ def build_pipeline_steps(
         or checkpoint_status in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
     )
 
-    # Assign states: COMPLETE, RUNNING only while the backend is actively
-    # processing, otherwise keep incomplete steps pending until a gate/runtime
-    # explicitly marks one active.
-    first_incomplete_seen = False
-    for step in steps:
-        if step["complete"]:
-            step["state"] = "COMPLETED"
-        elif pipeline_is_active and not first_incomplete_seen:
-            step["state"] = "RUNNING"
-            first_incomplete_seen = True
-        else:
-            step["state"] = "PENDING"
+    active_stage_key = str(checkpoint.get("background_stage") or "")
+
+    if active_stage_key:
+        active_index = next((index for index, step in enumerate(steps) if step.get("key") == active_stage_key), None)
+        for index, step in enumerate(steps):
+            if active_index is not None and index < active_index:
+                step["complete"] = True
+                step["state"] = "COMPLETED"
+            elif step.get("key") == active_stage_key:
+                step["complete"] = False
+                step["state"] = "RUNNING"
+            elif step["complete"]:
+                step["state"] = "COMPLETED"
+            else:
+                step["state"] = "PENDING"
+    else:
+        # Assign states: COMPLETE, RUNNING only while the backend is actively
+        # processing, otherwise keep incomplete steps pending until a gate/runtime
+        # explicitly marks one active.
+        first_incomplete_seen = False
+        for step in steps:
+            if step["complete"]:
+                step["state"] = "COMPLETED"
+            elif pipeline_is_active and not first_incomplete_seen:
+                step["state"] = "RUNNING"
+                first_incomplete_seen = True
+            else:
+                step["state"] = "PENDING"
 
     # If pipeline failed, mark the failed step
     if checkpoint.get("status") == "FAILED":
@@ -1045,7 +1097,7 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         or checkpoint.get("human_table_decision") == "COMPLETED"
         or checkpoint.get("enrichment_review_status") in {"COMPLETED", "PENDING"}
     )
-    if downstream_progress_exists:
+    if downstream_progress_exists and completed_gate1:
         pending_gate1 = []
 
     # For SFTP runs, the feed review replaces table nomination.
@@ -1059,17 +1111,17 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         row.get("artifact_type") in {"BRONZE_GENERATION", "BRONZE_SCRIPTS"}
         or str(row.get("stage", "")).lower().startswith("bronze")
         for row in summary
-    ) or checkpoint.get("bronze_generation_status") == "COMPLETED"
+    ) or checkpoint.get("bronze_generation_status") == "COMPLETED" or bool(checkpoint.get("bronze_generation_results"))
     silver_generation_completed = any(
         row.get("artifact_type") in {"SILVER_GENERATION", "SILVER_SCRIPTS"}
         or str(row.get("stage", "")).lower().startswith("silver")
         for row in summary
-    ) or checkpoint.get("silver_generation_status") == "COMPLETED"
+    ) or checkpoint.get("silver_generation_status") == "COMPLETED" or bool(checkpoint.get("silver_generation_results"))
     gold_generation_completed = any(
         row.get("artifact_type") in {"GOLD_GENERATION", "GOLD_SCRIPTS"}
         or str(row.get("stage", "")).lower().startswith("gold")
         for row in summary
-    ) or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
+    ) or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED") or bool(checkpoint.get("gold_generation_results"))
     bronze = load_bronze_scripts(run_id, checkpoint) if gate3_payload or bronze_generation_completed else {"generated_at": None, "scripts": []}
     silver = load_silver_scripts(run_id, checkpoint) if silver_generation_completed else {"generated_at": None, "scripts": []}
     gold = load_gold_scripts(run_id, checkpoint) if gold_generation_completed else {"generated_at": None, "scripts": []}
@@ -1089,6 +1141,48 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
             join_key_columns.append(column)
         if column.get("is_measure"):
             measure_columns.append(column)
+
+    known_stage_completion = {
+        "gate1": bool(completed_gate1 and not pending_gate1),
+        "gate2": bool(certified_tables),
+        "enrichment": bool(enriched_payload or checkpoint.get("semantic_enrichment_status") == "COMPLETED"),
+        "gate3": bool(gate3_payload),
+        "bronze": bool(bronze_generation_completed),
+        "silver": bool(silver_generation_completed),
+        "gold": bool(gold_generation_completed),
+    }
+
+    def _known_stage_completed(stage_key: Optional[str]) -> bool:
+        return bool(known_stage_completion.get(str(stage_key or "")))
+
+    def _latest_known_completed_stage_at_or_after(stage_key: Optional[str]) -> Optional[str]:
+        start_index = _database_stage_index(str(stage_key or ""))
+        if start_index < 0:
+            return None
+        latest_stage_key = None
+        for candidate_key, _ in DATABASE_STAGE_SEQUENCE[start_index:]:
+            if _known_stage_completed(candidate_key):
+                latest_stage_key = candidate_key
+        return latest_stage_key
+
+    def _stage_confirmation_after(completed_stage_key: str) -> Optional[Dict[str, Any]]:
+        next_stage_key = _database_next_stage_key(completed_stage_key)
+        if not next_stage_key or _known_stage_completed(next_stage_key) or _is_database_review_gate(next_stage_key):
+            return None
+        completed_stage_label = DATABASE_STAGE_LABELS.get(completed_stage_key, completed_stage_key)
+        next_stage_label = DATABASE_STAGE_LABELS.get(next_stage_key, next_stage_key)
+        return {
+            "enabled": bool(checkpoint.get("stage_confirmation_enabled")),
+            "awaiting_confirmation": True,
+            "last_completed_stage_key": completed_stage_key,
+            "last_completed_stage_label": completed_stage_label,
+            "next_stage_key": next_stage_key,
+            "next_stage_label": next_stage_label,
+            "resume_message": (
+                f"{completed_stage_label} finished successfully. "
+                f"Confirm before continuing to {next_stage_label}."
+            ),
+        }
 
     next_gate = None
     resume_message = None
@@ -1126,7 +1220,45 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         resume_message = "No stored state was found for this run ID."
 
     stage_confirmation = None
-    if checkpoint.get("status") == "PAUSED_FOR_STAGE_CONFIRMATION":
+    active_background_stage = bool(checkpoint.get("background_stage"))
+    paused_for_stage_confirmation = (
+        checkpoint.get("status") == "PAUSED_FOR_STAGE_CONFIRMATION"
+        and not active_background_stage
+    )
+    paused_before_review_gate = False
+    stale_stage_confirmation_completed = False
+    if paused_for_stage_confirmation:
+        target_stage_key = str(checkpoint.get("next_stage_key") or "")
+        if target_stage_key and _known_stage_completed(target_stage_key):
+            stale_stage_confirmation_completed = True
+            completed_stage_key = _latest_known_completed_stage_at_or_after(target_stage_key)
+            next_stage_key = _database_next_stage_key(completed_stage_key) if completed_stage_key else None
+            if next_stage_key and _is_database_review_gate(next_stage_key):
+                paused_before_review_gate = True
+                gate_map = {"gate1": 1, "gate2": 2, "gate3": 3}
+                next_gate = gate_map.get(str(next_stage_key))
+                resume_message = (
+                    f"{DATABASE_STAGE_LABELS.get(next_stage_key, next_stage_key)} "
+                    "is pending. Review the generated artifacts before continuing."
+                )
+            elif completed_stage_key and next_stage_key:
+                stage_confirmation = _stage_confirmation_after(completed_stage_key)
+                if stage_confirmation:
+                    resume_message = stage_confirmation["resume_message"]
+        elif target_stage_key and _is_database_review_gate(target_stage_key):
+            paused_before_review_gate = True
+
+    if paused_before_review_gate:
+        gate_map = {"gate1": 1, "gate2": 2, "gate3": 3}
+        review_stage_key = str(checkpoint.get("next_stage_key") or "")
+        if not next_gate:
+            next_gate = gate_map.get(review_stage_key)
+        if not resume_message:
+            resume_message = (
+                f"{checkpoint.get('next_stage_label') or DATABASE_STAGE_LABELS.get(review_stage_key, 'Review')} "
+                "is pending. Review the generated artifacts before continuing."
+            )
+    elif paused_for_stage_confirmation and not stage_confirmation and not stale_stage_confirmation_completed:
         stage_confirmation = {
             "enabled": bool(checkpoint.get("stage_confirmation_enabled")),
             "awaiting_confirmation": True,
@@ -1139,13 +1271,27 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
             resume_message = checkpoint.get("resume_message")
 
     status = checkpoint.get("status") or checkpoint.get("table_nomination_status") or checkpoint.get("enrichment_review_status") or "UNKNOWN"
-    if checkpoint.get("bronze_generation_status") == "COMPLETED":
+    if paused_before_review_gate:
+        status = "HITL_WAIT"
+    elif stale_stage_confirmation_completed and not stage_confirmation:
         status = "PIPELINE_COMPLETED"
-    if gate3_payload and bronze_generation_completed:
+    can_promote_to_completed = str(status or "").upper() not in {
+        "HITL_WAIT",
+        "PAUSED_FOR_HITL",
+        "PAUSED_FOR_STAGE_CONFIRMATION",
+        "PROCESSING",
+        "RUNNING",
+        "SUBMITTED",
+        "FAILED",
+        "ABORTED",
+    }
+    if can_promote_to_completed and checkpoint.get("bronze_generation_status") == "COMPLETED":
         status = "PIPELINE_COMPLETED"
-    if silver_generation_completed:
+    if can_promote_to_completed and gate3_payload and bronze_generation_completed:
         status = "PIPELINE_COMPLETED"
-    if gold_generation_completed:
+    if can_promote_to_completed and silver_generation_completed:
+        status = "PIPELINE_COMPLETED"
+    if can_promote_to_completed and gold_generation_completed:
         status = "PIPELINE_COMPLETED"
     pipeline_steps = build_pipeline_steps(
         source=str(checkpoint.get("source") or "database"),

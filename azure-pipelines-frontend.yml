@@ -1,0 +1,66 @@
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - frontend/**
+    - azure-pipelines-frontend.yml
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  nodeVersion: '18.x'
+  frontendFolder: 'frontend'
+  buildFolder: '$(frontendFolder)/build'
+
+stages:
+- stage: Build
+  displayName: 'Build Frontend'
+  jobs:
+  - job: BuildFrontend
+    displayName: 'Build React App'
+    steps:
+    - task: NodeTool@0
+      inputs:
+        versionSpec: '$(nodeVersion)'
+      displayName: 'Install Node.js'
+
+    - script: |
+        cd $(frontendFolder)
+        npm ci
+      displayName: 'Install dependencies'
+
+    - script: |
+        cd $(frontendFolder)
+        npm run build
+      displayName: 'Build React app'
+      env:
+        CI: true
+        REACT_APP_API_BASE_URL: $(REACT_APP_API_BASE_URL)
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        pathToPublish: '$(buildFolder)'
+        artifactName: 'frontend-app'
+        publishLocation: 'Container'
+      displayName: 'Publish frontend artifact'
+
+    - script: |
+        cat > $(buildFolder)/web.config << 'EOF'
+        <?xml version="1.0" encoding="utf-8"?>
+        <configuration>
+          <system.webServer>
+            <rewrite>
+              <rules>
+                <rule name="SPA" stopProcessing="true">
+                  <match url="^(?!.*\.(js|css|png|gif|ico|jpg|jpeg|svg|woff|ttf|eot|woff2)$).*$" />
+                  <action type="Rewrite" url="/index.html" />
+                </rule>
+              </rules>
+            </rewrite>
+          </system.webServer>
+        </configuration>
+        EOF
+      displayName: 'Add web.config for routing'

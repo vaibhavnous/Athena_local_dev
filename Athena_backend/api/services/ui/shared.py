@@ -11,17 +11,17 @@ from api import utils as api_utils
 
 def status_from_context(context: Dict[str, Any]) -> str:
     checkpoint = context.get("checkpoint") or {}
-    if str(checkpoint.get("status") or "").upper() == "PAUSED_FOR_STAGE_CONFIRMATION":
-        return "PAUSED_FOR_STAGE_CONFIRMATION"
-    if context.get("pending_gate1") or context.get("next_gate") in {1, 2, 3, 4, 5}:
-        return "HITL_WAIT"
     if checkpoint.get("background_stage"):
         return "RUNNING"
     status = str(context.get("status") or "UNKNOWN")
+    if status in {"RUNNING", "PROCESSING", "PENDING", "SUBMITTED", "IN_PROGRESS"}:
+        return "RUNNING"
+    if status == "PAUSED_FOR_STAGE_CONFIRMATION" or (context.get("stage_confirmation") or {}).get("awaiting_confirmation"):
+        return "PAUSED_FOR_STAGE_CONFIRMATION"
+    if context.get("pending_gate1") or context.get("next_gate") in {1, 2, 3, 4, 5}:
+        return "HITL_WAIT"
     if status in {"UNKNOWN", "NOT_FOUND"}:
         return "NOT_FOUND"
-    if status in {"RUNNING", "PROCESSING", "PENDING"}:
-        return "RUNNING"
     if status == "HITL_WAIT":
         return "HITL_WAIT"
     if status == "ABORTED":

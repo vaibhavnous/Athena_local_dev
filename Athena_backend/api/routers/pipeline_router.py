@@ -16,7 +16,6 @@ from api.services.pipeline_service import (
 )
 from api.services.ui_service import ui_run
 from services.pipeline_runtime import (
-    continue_database_pipeline,
     load_checkpoint_state,
     save_checkpoint_state,
     submit_background,
@@ -181,20 +180,36 @@ def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]
             detail="Stage-by-stage confirmation is not enabled for file-source runs yet.",
         )
 
-    result = continue_database_pipeline(
+    stage_key = str(next_stage_key)
+    auto_advance = bool(payload.auto_advance)
+    resumed_state = {
+        **checkpoint,
+        "run_id": run_id,
+        "status": "PROCESSING",
+        "background_stage": stage_key,
+        "awaiting_stage_confirmation": False,
+        "stage_confirmation_enabled": not auto_advance,
+        "resume_message": f"{stage_key} is running.",
+    }
+    save_checkpoint_state(run_id, resumed_state)
+
+    submit_background(
         run_id,
-        start_stage_key=str(next_stage_key),
-        state=checkpoint,
-        auto_advance=bool(payload.auto_advance),
+        stage_key,
+        continue_database_pipeline_job,
+        run_id,
+        stage_key,
+        resumed_state,
+        auto_advance,
     )
 
-    logger.info("Stage continued", extra={"run_id": run_id, "stage": next_stage_key})
+    logger.info("Stage continuation submitted", extra={"run_id": run_id, "stage": stage_key})
 
     return {
         "run_id": run_id,
-        "status": result.get("status") or "RUNNING",
-        "next_stage_key": result.get("next_stage_key"),
-        "resume_message": result.get("resume_message"),
+        "status": "SUBMITTED",
+        "next_stage_key": stage_key,
+        "resume_message": resumed_state["resume_message"],
     }
 
 

@@ -8,11 +8,19 @@ import Sidebar from './Sidebar'
 import Topbar from './Topbar'
 import useAthenaStore from '../../store/useAthenaStore'
 import usePipelineSocket from '../../hooks/usePipelineSocket'
-import { getRun, getRuns } from '../../api/athenaApi'
+import {
+  fetchKpiReviews,
+  getBronzeReview,
+  getEnrichmentReviews,
+  getPipelineKpis,
+  getRun,
+  getRuns,
+  getSilverReview,
+  getTableReviews
+} from '../../api/athenaApi'
 import { getGateDisplayName, getPhaseGroups } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
-const REVIEW_READY_NOTIFICATIONS_KEY = 'athena.reviewReadyNotifications'
 
 function loadJsonMap(key) {
   if (typeof window === 'undefined') return {}
@@ -50,31 +58,14 @@ function AppShell() {
     setActiveRun,
     setServerOnline,
     activeRunId,
-    serverOnline,
     addNotification
   } = useAthenaStore()
   usePipelineSocket()
 
-  const lastOnlineRef = useRef<boolean | null>(null)
   const runsRequestInFlightRef = useRef(false)
   const pausedDetailKeyRef = useRef<string | null>(null)
   const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadJsonMap(PAUSED_BANNER_DISMISSALS_KEY))
-  const [reviewReadyNotifications, setReviewReadyNotifications] = useState(() => loadJsonMap(REVIEW_READY_NOTIFICATIONS_KEY))
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
-
-  useEffect(() => {
-    if (lastOnlineRef.current === serverOnline) return
-    lastOnlineRef.current = serverOnline
-
-    if (!serverOnline) {
-      addNotification({
-        type: 'amber',
-        title: 'FastAPI offline',
-        message: 'Backend API at http://localhost:8000 is not reachable. Start the server to see live runs/logs.',
-        duration: 6000
-      })
-    }
-  }, [addNotification, serverOnline])
 
   useEffect(() => {
     let cancelled = false
@@ -100,7 +91,7 @@ function AppShell() {
 
         setRuns(backendRuns)
         if (!activeRunId && backendRuns.length > 0) {
-          const resumable = backendRuns.find((run) => [1, 2, 3, 4, 5].includes(Number(run?.next_gate || 0)))
+          const resumable = backendRuns.find(isReviewPausedRun)
           setActiveRun((resumable || backendRuns[0]).id)
         }
       } catch (error) {
@@ -123,13 +114,7 @@ function AppShell() {
 
   const pausedRun = useMemo(
     () =>
-      (runs || []).find(
-        (run) =>
-          run.id === activeRunId &&
-          String(run?.status || '').toUpperCase() !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
-          !run?.stage_confirmation?.awaiting_confirmation &&
-          [1, 2, 3, 4, 5].includes(Number(run?.next_gate || 0))
-      ) || null,
+      (runs || []).find((run) => run.id === activeRunId && isReviewPausedRun(run)) || null,
     [activeRunId, runs]
   )
 
@@ -177,8 +162,11 @@ function AppShell() {
               (step) => step?.key === expectedGateKey && String(step?.state || '').toUpperCase() === 'HITL_WAIT'
             )
           : false
+        const reviewDataReady = isReviewPausedRun(detail) && gateStepReady
+          ? await isReviewDataReadyForGate(detail.id || pausedRunId, detailGate, detail?.source)
+          : false
 
-        if (detailGate === expectedGate && gateStepReady) {
+        if (detailGate === expectedGate && gateStepReady && reviewDataReady) {
           setPausedRunDetail(detail)
         } else {
           setPausedRunDetail((current) => (current && `${current.id}:${Number(current.next_gate || 0)}` === pausedBannerKey ? current : null))
@@ -214,7 +202,7 @@ function AppShell() {
 
   useEffect(() => {
     const pausedKeys = (runs || [])
-      .filter((run) => [1, 2, 3, 4, 5].includes(Number(run?.next_gate || 0)))
+      .filter(isReviewPausedRun)
       .map((run) => `${run.id}:${Number(run.next_gate || 0)}`)
     if (!pausedKeys.length) return
     setDismissedPausedBanners((current) => {
@@ -224,33 +212,7 @@ function AppShell() {
       if (changed) persistJsonMap(PAUSED_BANNER_DISMISSALS_KEY, next)
       return changed ? next : current
     })
-    setReviewReadyNotifications((current) => {
-      const activeKeys = new Set(pausedKeys)
-      const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
-      const changed = Object.keys(next).length !== Object.keys(current).length
-      if (changed) persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
-      return changed ? next : current
-    })
   }, [runs])
-
-  useEffect(() => {
-    if (!pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return
-    if (reviewReadyNotifications[pausedBannerKey]) return
-
-    addNotification({
-      type: 'amber',
-      title: `${pausedRunSummary.gateLabel} ready for review`,
-      message: pausedRunSummary.resumeMessage,
-      duration: 6000,
-    })
-
-    setReviewReadyNotifications((current) => {
-      if (current[pausedBannerKey]) return current
-      const next = { ...current, [pausedBannerKey]: true }
-      persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
-      return next
-    })
-  }, [addNotification, pausedBannerKey, pausedRunDetail, pausedRunSummary, reviewReadyNotifications])
 
   const isPausedBannerVisible = Boolean(
     pausedRun &&
@@ -381,6 +343,68 @@ function formatTimeAgo(value) {
   if (hours > 0) return `${hours}h ago`
   if (minutes > 0) return `${minutes}m ago`
   return 'just now'
+}
+
+function hasReviewGate(run) {
+  const gate = Number(run?.next_gate || 0)
+  return gate >= 1 && gate <= 5
+}
+
+function isReviewPausedRun(run) {
+  const status = String(run?.status || '').toUpperCase()
+  return (
+    hasReviewGate(run) &&
+    !run?.stage_confirmation?.awaiting_confirmation &&
+    status !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
+    ['HITL_WAIT', 'PAUSED_FOR_HITL'].includes(status)
+  )
+}
+
+async function isReviewDataReadyForGate(runId, gate, source) {
+  if (!runId || !gate) return false
+
+  try {
+    if (gate === 1) {
+      const review = await fetchKpiReviews(runId)
+      if (Array.isArray(review?.kpis) && review.kpis.length > 0) return true
+
+      const fallback = await getPipelineKpis(runId)
+      return Array.isArray(fallback?.kpis) && fallback.kpis.length > 0
+    }
+
+    if (gate === 2) {
+      const review = await getTableReviews(runId)
+      const isFileSource = source === 'sftp' || source === 'adls_gen2'
+      if (isFileSource) {
+        return Boolean(review?.candidate_feed) || Boolean((review?.candidate_feeds || []).length)
+      }
+      return Boolean((review?.nominated_tables || []).length)
+    }
+
+    if (gate === 3) {
+      const review = await getEnrichmentReviews(runId)
+      return Boolean(
+        (review?.enriched_columns || []).length ||
+        (review?.enriched_joins || []).length ||
+        (review?.feed_semantic_summary || []).length ||
+        Object.keys(review?.enriched_metadata || {}).length
+      )
+    }
+
+    if (gate === 4) {
+      const review = await getBronzeReview(runId)
+      return Boolean((review?.bronze_review_artifact?.feeds || []).length)
+    }
+
+    if (gate === 5) {
+      const review = await getSilverReview(runId)
+      return Boolean((review?.silver_review_artifact?.items || []).length)
+    }
+  } catch (error) {
+    console.warn('[AppShell] Review gate data is not ready yet', error)
+  }
+
+  return false
 }
 
 /** Individual toast card */
