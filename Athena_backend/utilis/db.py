@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import os
 import json
 import hashlib
 import time
 import socket
-import pyodbc
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
@@ -61,6 +62,18 @@ SQL_CONNECT_RETRIES = max(1, int(os.getenv("ATHENA_SQL_CONNECT_RETRIES", "3")))
 SQL_CONNECT_RETRY_DELAY_SECONDS = float(os.getenv("ATHENA_SQL_CONNECT_RETRY_DELAY_SECONDS", "1"))
 SQL_TCP_PROBE_TIMEOUT_SECONDS = float(os.getenv("ATHENA_SQL_TCP_PROBE_TIMEOUT_SECONDS", "5"))
 NETWORK_ERROR_MARKERS = ("08S01", "10060", "10061", "10054", "08001")
+
+
+def _get_pyodbc():
+    try:
+        import pyodbc
+
+        return pyodbc
+    except Exception as exc:
+        raise RuntimeError(
+            "pyodbc is unavailable. Ensure the Azure App Service image has unixODBC "
+            "and Microsoft ODBC Driver 17 or 18 for SQL Server installed."
+        ) from exc
 
 
 def artifact_storage_fingerprint(fingerprint: str, artifact_type: str) -> str:
@@ -159,6 +172,7 @@ def _connect_with_retry(
     port: int,
     role: str,
 ) -> pyodbc.Connection:
+    pyodbc = _get_pyodbc()
     last_exc = None
     endpoint_error = _probe_sql_endpoint(host, port, SQL_TCP_PROBE_TIMEOUT_SECONDS) if host else None
     if endpoint_error:
@@ -219,6 +233,7 @@ def build_source_jdbc_url(database_name: Optional[str] = None) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def get_pipeline_connection() -> pyodbc.Connection:
+    pyodbc = _get_pyodbc()
     db_conf = config["azure_sql"]
     missing = [
         env_name
@@ -270,6 +285,7 @@ def get_pipeline_connection() -> pyodbc.Connection:
 # ─────────────────────────────────────────────────────────────
 
 def get_client_connection(database_name: Optional[str] = None) -> pyodbc.Connection:
+    pyodbc = _get_pyodbc()
     db_conf = config["azure_sql"]
     missing = [
         env_name
