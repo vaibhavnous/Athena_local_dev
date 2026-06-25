@@ -32,6 +32,51 @@ function stableStringify(value: unknown): string {
   }
 }
 
+function hasUsefulRunDetail(run: any): boolean {
+  return Boolean(
+    (Array.isArray(run?.stages) && run.stages.length > 0) ||
+      (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length > 0) ||
+      run?.stage_confirmation ||
+      Number(run?.next_gate || 0) > 0 ||
+      run?.bronze ||
+      run?.silver ||
+      run?.gold
+  )
+}
+
+function mergeRunPreservingDetail(existing: any, incoming: any): any {
+  if (!existing) return incoming
+  if (!incoming) return existing
+
+  const incomingHasDetail = hasUsefulRunDetail(incoming)
+  const existingHasDetail = hasUsefulRunDetail(existing)
+  const merged = { ...existing, ...incoming }
+
+  if (existingHasDetail && !incomingHasDetail) {
+    for (const key of [
+      'stages',
+      'pipeline_steps',
+      'stage_confirmation',
+      'next_gate',
+      'resume_message',
+      'bronze',
+      'silver',
+      'gold',
+      'script_counts',
+      'kpis',
+      'nominated_tables',
+      'certified_tables',
+      'enriched_metadata',
+      'enriched_columns',
+      'enriched_joins',
+    ]) {
+      if (existing[key] !== undefined) merged[key] = existing[key]
+    }
+  }
+
+  return merged
+}
+
 interface Notification {
   id: number
   type: string
@@ -112,16 +157,20 @@ const useAthenaStore = create<AthenaState>((set, get) => ({
   setRuns: (runs) =>
     set((state) => {
       const backendRuns = Array.isArray(runs) ? runs : []
+      const existingById = new Map(state.runs.map((run) => [run.id, run]))
       const activeRunId = state.activeRunId
       const activeExisting =
         activeRunId ? state.runs.find((run) => run.id === activeRunId) || null : null
       const activePresentInBackend =
         !!activeRunId && backendRuns.some((run) => run.id === activeRunId)
+      const mergedBackendRuns = backendRuns.map((run) =>
+        mergeRunPreservingDetail(existingById.get(run.id), run)
+      )
 
       const mergedRuns =
         activeExisting && !activePresentInBackend
-          ? [activeExisting, ...backendRuns.filter((run) => run.id !== activeExisting.id)]
-          : backendRuns
+          ? [activeExisting, ...mergedBackendRuns.filter((run) => run.id !== activeExisting.id)]
+          : mergedBackendRuns
 
       const nextActiveRunId =
         activeRunId && mergedRuns.some((run) => run.id === activeRunId)
@@ -150,7 +199,7 @@ const useAthenaStore = create<AthenaState>((set, get) => ({
       const currentRun = state.runs.find((run) => run.id === runId)
       if (!currentRun) return state
 
-      const nextRun = { ...currentRun, ...updates }
+      const nextRun = mergeRunPreservingDetail(currentRun, updates)
       if (stableStringify(currentRun) === stableStringify(nextRun)) {
         return state
       }

@@ -5,7 +5,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Co
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
 import { getPhaseGroups, getPipelineSteps, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
-import { abortRun, continueStage, getRun, getRuns, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
+import { abortRun, continueStage, getRun, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
 const MIN_STAGE_VISIBLE_MS = 60000
 const PHASE_AUTO_SWITCH_DELAY_MS = 4000
@@ -391,6 +391,78 @@ function PipelineMonitor() {
   const [autoAdvanceStages, setAutoAdvanceStages] = useState(false)
   const [stageConfirmSubmitting, setStageConfirmSubmitting] = useState(false)
   const [failureActionSubmitting, setFailureActionSubmitting] = useState('')
+  const [scriptBundles, setScriptBundles] = useState(null)
+  const [selectedScriptLayer, setSelectedScriptLayer] = useState('bronze')
+  const [selectedScriptKey, setSelectedScriptKey] = useState('')
+
+  useEffect(() => {
+    if (!activeRun?.id) {
+      setScriptBundles(null)
+      setSelectedScriptKey('')
+      return
+    }
+
+    let cancelled = false
+    const loadScripts = async () => {
+      try {
+        const payload = await getRunScripts(activeRun.id)
+        if (cancelled) return
+        setScriptBundles(payload)
+        updateRun(activeRun.id, {
+          bronze: payload?.bronze,
+          silver: payload?.silver,
+          gold: payload?.gold,
+        })
+      } catch (error) {
+        if (!cancelled && !isTimeoutError(error)) {
+          console.warn('[PipelineMonitor] Failed to load run scripts', error)
+        }
+      }
+    }
+
+    loadScripts()
+    const timer = window.setInterval(loadScripts, 10000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [activeRun?.id, updateRun])
+
+  const monitorRunWithScripts = useMemo(() => {
+    if (!monitorRun || !scriptBundles) return monitorRun
+    return {
+      ...monitorRun,
+      bronze: scriptBundles.bronze || monitorRun.bronze,
+      silver: scriptBundles.silver || monitorRun.silver,
+      gold: scriptBundles.gold || monitorRun.gold,
+    }
+  }, [monitorRun, scriptBundles])
+
+  const scriptLayerCounts = useMemo(() => ({
+    bronze: normalizeScripts(monitorRunWithScripts, 'bronze').length,
+    silver: normalizeScripts(monitorRunWithScripts, 'silver').length,
+    gold: normalizeScripts(monitorRunWithScripts, 'gold').length,
+  }), [monitorRunWithScripts])
+
+  const selectedLayerScripts = useMemo(
+    () => normalizeScripts(monitorRunWithScripts, selectedScriptLayer),
+    [monitorRunWithScripts, selectedScriptLayer]
+  )
+
+  useEffect(() => {
+    if (!selectedLayerScripts.length) {
+      setSelectedScriptKey('')
+      return
+    }
+    if (!selectedLayerScripts.some((script) => script.ui_key === selectedScriptKey)) {
+      setSelectedScriptKey(selectedLayerScripts[0].ui_key)
+    }
+  }, [selectedLayerScripts, selectedScriptKey])
+
+  const selectedScript =
+    selectedLayerScripts.find((script) => script.ui_key === selectedScriptKey) ||
+    selectedLayerScripts[0] ||
+    null
 
   useEffect(() => {
     if (!isFailedRun) {
@@ -402,7 +474,7 @@ function PipelineMonitor() {
 
   const failureSummary = useMemo(() => buildFailureSummary(monitorRun), [monitorRun])
   const stageConfirmation = monitorRun?.stage_confirmation || null
-  const stageScriptReview = useMemo(() => buildStageScriptReview(monitorRun), [monitorRun])
+  const stageScriptReview = useMemo(() => buildStageScriptReview(monitorRunWithScripts), [monitorRunWithScripts])
 
   if (!activeRun) {
     return (
@@ -746,6 +818,81 @@ function PipelineMonitor() {
                 </div>
               )
             })}
+          </div>
+          <div className="border-t border-[#253044] bg-[#0b1120] p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-white">Generated Scripts</div>
+                <div className="mt-1 text-xs text-[#7d8daa]">Click Bronze, Silver, or Gold to preview generated artifacts.</div>
+              </div>
+              <button
+                onClick={() => navigate(`/app/runs/${activeRun.id}`)}
+                className="rounded-lg border border-[#34547f] px-3 py-2 text-xs font-semibold text-[#bcd4ff] transition-colors hover:bg-[#132849]"
+              >
+                Full View
+              </button>
+            </div>
+
+            <div className="mb-3 grid grid-cols-3 gap-2">
+              {['bronze', 'silver', 'gold'].map((layer) => (
+                <button
+                  key={layer}
+                  type="button"
+                  onClick={() => setSelectedScriptLayer(layer)}
+                  className={`rounded-xl border px-3 py-2 text-left transition-colors ${
+                    selectedScriptLayer === layer
+                      ? 'border-[#3f82ff] bg-[#102144] text-white'
+                      : 'border-[#253044] bg-[#080e1d] text-[#aeb8ca] hover:border-[#34547f]'
+                  }`}
+                >
+                  <div className="text-xs font-semibold capitalize">{layer}</div>
+                  <div className="mt-1 text-[11px] text-[#7d8daa]">{scriptLayerCounts[layer]} scripts</div>
+                </button>
+              ))}
+            </div>
+
+            {selectedScript ? (
+              <div className="rounded-2xl border border-[#253044] bg-[#080e1d] p-3">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <select
+                    value={selectedScript.ui_key}
+                    onChange={(event) => setSelectedScriptKey(event.target.value)}
+                    className="min-w-0 flex-1 rounded-lg border border-[#253044] bg-[#101827] px-3 py-2 text-xs text-white outline-none"
+                  >
+                    {selectedLayerScripts.map((script) => (
+                      <option key={script.ui_key} value={script.ui_key}>
+                        {script.title}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleCopyScript(selectedScript)}
+                      className="inline-flex items-center gap-1 rounded-md border border-[#2d4263] px-2 py-1 text-[11px] font-semibold text-[#aab8d0] hover:border-[#3f82ff] hover:text-white"
+                    >
+                      <Copy size={11} />
+                      Copy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadScript(selectedScript)}
+                      className="inline-flex items-center gap-1 rounded-md border border-[#2d4263] px-2 py-1 text-[11px] font-semibold text-[#aab8d0] hover:border-[#3f82ff] hover:text-white"
+                    >
+                      <Download size={11} />
+                      Download
+                    </button>
+                  </div>
+                </div>
+                <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-xl border border-[#22304b] bg-[#050b16] p-3 text-[11px] leading-relaxed text-[#c9d5e8]">
+                  {formatScriptBody(selectedScript)}
+                </pre>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-dashed border-[#253044] bg-[#080e1d] px-4 py-5 text-sm text-[#8a9ab7]">
+                No {selectedScriptLayer} scripts loaded yet. They will appear here when generation completes.
+              </div>
+            )}
           </div>
         </section>
 

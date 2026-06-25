@@ -6,7 +6,14 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException
 
 from api.services.ui_service import ui_run, ui_run_summary
-from services.pipeline_runtime import BACKGROUND_EXECUTOR, list_runs
+from services.pipeline_runtime import (
+    BACKGROUND_EXECUTOR,
+    list_runs,
+    load_bronze_scripts,
+    load_checkpoint_state,
+    load_gold_scripts,
+    load_silver_scripts,
+)
 from utilis.logger import logger
 
 router = APIRouter()
@@ -114,3 +121,22 @@ def run_detail(run_id: str) -> Dict[str, Any]:
             extra={"run_id": run_id},
         )
         raise HTTPException(status_code=503, detail="Failed to fetch run")
+
+
+@router.get("/run-scripts/{run_id}")
+def run_scripts(run_id: str) -> Dict[str, Any]:
+    try:
+        checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+        return {
+            "run_id": run_id,
+            "bronze": load_bronze_scripts(run_id, checkpoint),
+            "silver": load_silver_scripts(run_id, checkpoint),
+            "gold": load_gold_scripts(run_id, checkpoint),
+        }
+    except Exception:
+        logger.error(
+            "Failed to fetch run scripts",
+            exc_info=True,
+            extra={"run_id": run_id},
+        )
+        raise HTTPException(status_code=503, detail="Failed to fetch run scripts")

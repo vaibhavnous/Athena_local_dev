@@ -414,9 +414,21 @@ function hasReviewGate(run) {
   return gate >= 1 && gate <= 5
 }
 
+function hasRenderableRunDetail(run) {
+  return Boolean(
+    (Array.isArray(run?.stages) && run.stages.length > 0) ||
+    (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length > 0) ||
+    run?.stage_confirmation ||
+    run?.bronze ||
+    run?.silver ||
+    run?.gold
+  )
+}
+
 function isReviewPausedRun(run) {
   const status = String(run?.status || '').toUpperCase()
   return (
+    hasRenderableRunDetail(run) &&
     hasReviewGate(run) &&
     !run?.stage_confirmation?.awaiting_confirmation &&
     status !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
