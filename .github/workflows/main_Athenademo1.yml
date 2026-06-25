@@ -141,7 +141,7 @@ jobs:
           done
 
           echo "Waiting for Kudu deployment completion..."
-          for poll in {1..60}; do
+          for poll in {1..180}; do
             curl -fsS -u "$KUDU_USER:$KUDU_PASS" "$KUDU_URL/api/deployments/latest" -o /tmp/kudu-latest.json || true
             cat /tmp/kudu-latest.json || true
             status="$(python - <<'PY'
@@ -158,12 +158,14 @@ jobs:
             fi
             if [ "$status" = "3" ]; then
               echo "Kudu deployment failed."
+              curl -fsS -u "$KUDU_USER:$KUDU_PASS" "$KUDU_URL/api/deployments/latest/log" || true
               exit 1
             fi
             sleep 10
           done
 
           echo "Kudu deployment did not complete in time."
+          curl -fsS -u "$KUDU_USER:$KUDU_PASS" "$KUDU_URL/api/deployments/latest/log" || true
           exit 1
 
       - name: Verify deployed backend artifact
