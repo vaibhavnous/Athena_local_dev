@@ -7,11 +7,14 @@ from pathlib import Path
 
 from logtail import LogtailHandler
 
+DEFAULT_PIPELINE_LOG_PATH = (
+    Path("/home/site/logs/pipeline_logs.json")
+    if Path("/home/site").exists()
+    else Path(__file__).resolve().parents[1] / "pipeline_logs.json"
+)
+
 PIPELINE_LOG_PATH = Path(
-    os.environ.get(
-        "ATHENA_PIPELINE_LOG_FILE",
-        Path(__file__).resolve().parents[1] / "pipeline_logs.json",
-    )
+    os.environ.get("ATHENA_PIPELINE_LOG_FILE", DEFAULT_PIPELINE_LOG_PATH)
 ).resolve()
 
 

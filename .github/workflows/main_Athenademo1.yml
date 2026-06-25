@@ -61,6 +61,7 @@ jobs:
             --exclude 'tests' \
             --exclude 'uploads' \
             --exclude 'generated_code' \
+            --exclude 'pipeline_logs.json' \
             --exclude 'pipeline_logs.json.localbackup' \
             Athena_backend/ deploy/Athena_backend/
           chmod +x deploy/Athena_backend/startup.sh
