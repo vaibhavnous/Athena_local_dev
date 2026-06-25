@@ -12,7 +12,11 @@ client = TestClient(app)
 def test_health_endpoint():
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "athena-fastapi"}
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "athena-fastapi"
+    assert body["embeddings"]["ready"] is False
+    assert body["embeddings"]["reason"] == "ATHENA_ENABLE_EMBEDDINGS is disabled"
 
 
 def test_pipeline_run_requires_brd_text_for_database_source():
