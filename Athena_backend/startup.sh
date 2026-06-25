@@ -7,6 +7,12 @@ echo "PWD: $(pwd)"
 echo "Python: $(python --version 2>&1)"
 echo "Port: ${PORT:-8000}"
 
+SITE_PACKAGES="/home/site/wwwroot/.python_packages/lib/site-packages"
+if [ -d "${SITE_PACKAGES}" ]; then
+  export PYTHONPATH="${SITE_PACKAGES}:${PYTHONPATH:-}"
+  echo "Using bundled site-packages: ${SITE_PACKAGES}"
+fi
+
 if [ -d "/home/site/wwwroot/antenv" ]; then
   echo "Activating Oryx virtual environment..."
   . /home/site/wwwroot/antenv/bin/activate
