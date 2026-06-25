@@ -14,7 +14,7 @@ on:
 
 concurrency:
   group: backend-appservice-athenademo1-production
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   AZURE_WEBAPP_NAME: Athenademo1
@@ -66,45 +66,94 @@ jobs:
             Athena_backend/ deploy/Athena_backend/
           chmod +x deploy/Athena_backend/startup.sh
 
+      - name: Build Kudu credentials
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import os
+          import xml.etree.ElementTree as ET
+
+          root = ET.fromstring(os.environ["PUBLISH_PROFILE"])
+          profiles = [
+              p for p in root.findall("publishProfile")
+              if p.get("publishMethod") in {"ZipDeploy", "MSDeploy"}
+          ]
+          profile = profiles[0] if profiles else root.find("publishProfile")
+          publish_url = (profile.get("publishUrl") or "").strip()
+          if not publish_url.startswith("https://"):
+              publish_url = f"https://{publish_url}"
+          print(f"KUDU_URL={publish_url.rstrip('/')}")
+          print(f"KUDU_USER={profile.get('userName') or ''}")
+          print(f"KUDU_PASS={profile.get('userPWD') or ''}")
+          PY
+
+      - name: Create backend zip package
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: deploy/Athena_backend
+        run: zip -qr ../backend.zip .
+
       - name: Wait for any previous App Service deployment lock
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: sleep 60
+        run: sleep 90
 
-      - name: Deploy to Azure App Service (attempt 1)
-        id: deploy_attempt_1
+      - name: Deploy backend with Kudu ZIP deploy
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        continue-on-error: true
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: ./deploy/Athena_backend
+        run: |
+          set -euo pipefail
 
-      - name: Wait before deploy retry 2
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.deploy_attempt_1.outcome == 'failure'
-        run: sleep 120
+          for attempt in 1 2 3; do
+            echo "ZIP deploy attempt ${attempt}/3"
+            response_file="/tmp/kudu-deploy-${attempt}.json"
+            status="$(curl -sS -u "$KUDU_USER:$KUDU_PASS" \
+              -o "$response_file" \
+              -w "%{http_code}" \
+              --connect-timeout 30 \
+              --max-time 120 \
+              -X POST \
+              --data-binary @deploy/backend.zip \
+              "$KUDU_URL/api/zipdeploy?isAsync=true" || true)"
+            echo "Kudu ZIP deploy returned HTTP ${status}"
+            cat "$response_file" || true
 
-      - name: Deploy to Azure App Service (attempt 2)
-        id: deploy_attempt_2
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.deploy_attempt_1.outcome == 'failure'
-        continue-on-error: true
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: ./deploy/Athena_backend
+            if [ "$status" = "200" ] || [ "$status" = "202" ]; then
+              break
+            fi
 
-      - name: Wait before deploy retry 3
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.deploy_attempt_1.outcome == 'failure' && steps.deploy_attempt_2.outcome == 'failure'
-        run: sleep 180
+            if [ "$attempt" = "3" ]; then
+              echo "Kudu ZIP deploy did not accept the package."
+              exit 1
+            fi
 
-      - name: Deploy to Azure App Service (attempt 3)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.deploy_attempt_1.outcome == 'failure' && steps.deploy_attempt_2.outcome == 'failure'
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: ./deploy/Athena_backend
+            sleep $((attempt * 120))
+          done
+
+          echo "Waiting for Kudu deployment completion..."
+          for poll in {1..60}; do
+            curl -fsS -u "$KUDU_USER:$KUDU_PASS" "$KUDU_URL/api/deployments/latest" -o /tmp/kudu-latest.json || true
+            cat /tmp/kudu-latest.json || true
+            status="$(python - <<'PY'
+          import json
+          try:
+              print(json.load(open('/tmp/kudu-latest.json')).get('status', ''))
+          except Exception:
+              print('')
+          PY
+          )"
+            if [ "$status" = "4" ]; then
+              echo "Kudu deployment completed successfully."
+              exit 0
+            fi
+            if [ "$status" = "3" ]; then
+              echo "Kudu deployment failed."
+              exit 1
+            fi
+            sleep 10
+          done
+
+          echo "Kudu deployment did not complete in time."
+          exit 1
 
       - name: Health check
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
