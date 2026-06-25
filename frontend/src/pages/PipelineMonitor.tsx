@@ -8,6 +8,7 @@ import { getPhaseGroups, getPipelineSteps, statusTone, summarizeRunSource } from
 import { abortRun, continueStage, getRun, getRuns, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
 const MIN_STAGE_VISIBLE_MS = 60000
+const PHASE_AUTO_SWITCH_DELAY_MS = 4000
 const STAGE_TERMINAL_STATES = new Set(['COMPLETED', 'FAILED', 'HITL_WAIT'])
 
 function isTimeoutError(error) {
@@ -34,6 +35,7 @@ function PipelineMonitor() {
   )
   const actualPhases = useMemo(() => getPhaseGroups(activeRun, actualSteps), [activeRun, actualSteps])
   const phases = useMemo(() => getPhaseGroups(activeRun, displaySteps), [activeRun, displaySteps])
+  const shouldDebouncePhaseSwitch = ['adls_gen2', 'sftp'].includes(String(activeRun?.source || '').toLowerCase())
 
   useEffect(() => {
     return () => {
@@ -261,22 +263,122 @@ function PipelineMonitor() {
     }
   }, [activeRun?.id, updateRun, setServerOnline])
 
-  const defaultExpandedPhase = useMemo(() => {
+  const actualPhaseIndex = useMemo(() => {
     const sourcePhases = actualPhases?.length ? actualPhases : phases
-    if (!sourcePhases?.length) return 'phase-1'
-    const activePhase = sourcePhases.find((phase) =>
+    if (!sourcePhases?.length) return 0
+    const activeIndex = sourcePhases.findIndex((phase) =>
+      phase.steps.some((step) => ['RUNNING', 'HITL_WAIT'].includes(step.state))
+    )
+    if (activeIndex >= 0) return activeIndex
+    const firstIncompleteIndex = sourcePhases.findIndex((phase) => phase.completed < phase.total)
+    if (firstIncompleteIndex >= 0) return firstIncompleteIndex
+    return Math.max(0, sourcePhases.length - 1)
+  }, [actualPhases, phases])
+
+  const [visiblePhaseIndex, setVisiblePhaseIndex] = useState(actualPhaseIndex)
+  const previousVisibleRunIdRef = useRef<string | null>(null)
+  const visiblePhaseTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (visiblePhaseTimerRef.current !== null) {
+      window.clearTimeout(visiblePhaseTimerRef.current)
+      visiblePhaseTimerRef.current = null
+    }
+
+    if (!activeRun?.id || !shouldDebouncePhaseSwitch) {
+      setVisiblePhaseIndex(actualPhaseIndex)
+      return
+    }
+
+    const runChanged = previousVisibleRunIdRef.current !== activeRun.id
+    if (runChanged) {
+      previousVisibleRunIdRef.current = activeRun.id
+      setVisiblePhaseIndex(actualPhaseIndex)
+      return
+    }
+
+    if (visiblePhaseIndex === actualPhaseIndex) return
+
+    visiblePhaseTimerRef.current = window.setTimeout(() => {
+      setVisiblePhaseIndex((current) => {
+        if (current === actualPhaseIndex) return current
+        return current + Math.sign(actualPhaseIndex - current)
+      })
+      visiblePhaseTimerRef.current = null
+    }, PHASE_AUTO_SWITCH_DELAY_MS)
+
+    return () => {
+      if (visiblePhaseTimerRef.current !== null) {
+        window.clearTimeout(visiblePhaseTimerRef.current)
+        visiblePhaseTimerRef.current = null
+      }
+    }
+  }, [activeRun?.id, actualPhaseIndex, shouldDebouncePhaseSwitch, visiblePhaseIndex])
+
+  const displayPhases = useMemo(() => {
+    if (!shouldDebouncePhaseSwitch) return phases
+    return phases.map((phase, index) => {
+      if (index <= visiblePhaseIndex) return phase
+      return {
+        ...phase,
+        completed: 0,
+        status: 'Pending',
+        steps: phase.steps.map((step) => ({
+          ...step,
+          state: 'PENDING',
+          complete: false,
+        })),
+      }
+    })
+  }, [phases, shouldDebouncePhaseSwitch, visiblePhaseIndex])
+
+  const defaultExpandedPhase = useMemo(() => {
+    if (!displayPhases?.length) return 'phase-1'
+    const activePhase = displayPhases.find((phase) =>
       phase.steps.some((step) => ['RUNNING', 'HITL_WAIT'].includes(step.state))
     )
     if (activePhase) return activePhase.id
-    const firstIncomplete = sourcePhases.find((phase) => phase.completed < phase.total)
-    return firstIncomplete?.id || sourcePhases[0].id
-  }, [actualPhases, phases])
+    const firstIncomplete = displayPhases.find((phase) => phase.completed < phase.total)
+    return firstIncomplete?.id || displayPhases[displayPhases.length - 1].id
+  }, [displayPhases])
 
   const [expandedPhase, setExpandedPhase] = useState(defaultExpandedPhase)
+  const autoExpandedPhaseRef = useRef(defaultExpandedPhase)
+  const previousRunIdRef = useRef<string | null>(null)
+  const phaseSwitchTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
-    setExpandedPhase(defaultExpandedPhase)
-  }, [defaultExpandedPhase, activeRun?.id])
+    if (!activeRun?.id || !defaultExpandedPhase) return
+
+    if (phaseSwitchTimerRef.current !== null) {
+      window.clearTimeout(phaseSwitchTimerRef.current)
+      phaseSwitchTimerRef.current = null
+    }
+
+    const runChanged = previousRunIdRef.current !== activeRun.id
+    if (runChanged || !shouldDebouncePhaseSwitch) {
+      previousRunIdRef.current = activeRun.id
+      autoExpandedPhaseRef.current = defaultExpandedPhase
+      setExpandedPhase(defaultExpandedPhase)
+      return
+    }
+
+    if (autoExpandedPhaseRef.current === defaultExpandedPhase) return
+
+    const nextPhase = defaultExpandedPhase
+    phaseSwitchTimerRef.current = window.setTimeout(() => {
+      autoExpandedPhaseRef.current = nextPhase
+      setExpandedPhase(nextPhase)
+      phaseSwitchTimerRef.current = null
+    }, PHASE_AUTO_SWITCH_DELAY_MS)
+
+    return () => {
+      if (phaseSwitchTimerRef.current !== null) {
+        window.clearTimeout(phaseSwitchTimerRef.current)
+        phaseSwitchTimerRef.current = null
+      }
+    }
+  }, [defaultExpandedPhase, activeRun?.id, shouldDebouncePhaseSwitch])
 
   const monitorRun = activeRun
   const runLabel = summarizeRunSource(monitorRun)
@@ -600,7 +702,7 @@ function PipelineMonitor() {
       <div className="grid min-h-0 flex-1 gap-5 xl:grid-cols-[520px_minmax(0,1fr)]">
         <section className="min-h-0 overflow-hidden rounded-lg border border-[#253044] bg-[#080e1d]">
           <div className="divide-y divide-[#253044]">
-            {phases.map((phase, index) => {
+            {displayPhases.map((phase, index) => {
               const expanded = expandedPhase === phase.id
               const tone = statusTone(phase.status)
               return (

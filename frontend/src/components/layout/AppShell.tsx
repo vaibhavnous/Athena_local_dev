@@ -22,6 +22,8 @@ import { getGateDisplayName, getPhaseGroups } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
 const PAUSED_BANNER_DELAY_MS = 2500
+const REVIEW_READY_NOTIFICATIONS_KEY = 'athena.reviewReadyNotifications'
+const REVIEW_READY_NOTIFICATION_DELAY_MS = 3000
 
 function loadJsonMap(key) {
   if (typeof window === 'undefined') return {}
@@ -65,8 +67,8 @@ function AppShell() {
 
   const runsRequestInFlightRef = useRef(false)
   const pausedDetailKeyRef = useRef<string | null>(null)
-  const announcedPausedBannerKeysRef = useRef<Record<string, true>>({})
   const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadJsonMap(PAUSED_BANNER_DISMISSALS_KEY))
+  const [reviewReadyNotifications, setReviewReadyNotifications] = useState(() => loadJsonMap(REVIEW_READY_NOTIFICATIONS_KEY))
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
   const [readyPausedBannerKey, setReadyPausedBannerKey] = useState<string | null>(null)
 
@@ -218,6 +220,8 @@ function AppShell() {
       resumeMessage: bannerRun.resume_message || 'Pipeline progress is saved. Resume review when you are ready.',
     }
   }, [pausedRun, pausedRunDetail])
+  const pausedGateLabel = pausedRunSummary?.gateLabel || ''
+  const pausedResumeMessage = pausedRunSummary?.resumeMessage || ''
 
   useEffect(() => {
     const pausedKeys = (runs || [])
@@ -231,22 +235,47 @@ function AppShell() {
       if (changed) persistJsonMap(PAUSED_BANNER_DISMISSALS_KEY, next)
       return changed ? next : current
     })
+    setReviewReadyNotifications((current) => {
+      const activeKeys = new Set(pausedKeys)
+      const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
+      const changed = Object.keys(next).length !== Object.keys(current).length
+      if (changed) persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
+      return changed ? next : current
+    })
   }, [runs])
 
   useEffect(() => {
-    if (!pausedRun || !pausedRunSummary || !pausedBannerKey) return
+    if (!pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return
     if (readyPausedBannerKey !== pausedBannerKey) return
-    if (dismissedPausedBanners[pausedBannerKey]) return
-    if (announcedPausedBannerKeysRef.current[pausedBannerKey]) return
+    if (reviewReadyNotifications[pausedBannerKey]) return
 
-    announcedPausedBannerKeysRef.current[pausedBannerKey] = true
-    addNotification({
-      type: 'amber',
-      title: `${pausedRunSummary.gateLabel} Ready`,
-      message: `${pausedRun.brd_filename || pausedRun.id} is waiting for review.`,
-      duration: 4500,
-    })
-  }, [addNotification, dismissedPausedBanners, pausedBannerKey, pausedRun, pausedRunSummary, readyPausedBannerKey])
+    const timer = window.setTimeout(() => {
+      addNotification({
+        type: 'amber',
+        title: `${pausedGateLabel} ready for review`,
+        message: pausedResumeMessage,
+        duration: 6000,
+      })
+
+      setReviewReadyNotifications((current) => {
+        if (current[pausedBannerKey]) return current
+        const next = { ...current, [pausedBannerKey]: true }
+        persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
+        return next
+      })
+    }, REVIEW_READY_NOTIFICATION_DELAY_MS)
+
+    return () => window.clearTimeout(timer)
+  }, [
+    addNotification,
+    pausedBannerKey,
+    pausedRunDetail,
+    pausedGateLabel,
+    pausedResumeMessage,
+    pausedRunSummary,
+    readyPausedBannerKey,
+    reviewReadyNotifications,
+  ])
 
   const isPausedBannerVisible = Boolean(
     pausedRun &&
