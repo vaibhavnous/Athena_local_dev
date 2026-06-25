@@ -1,0 +1,1 @@
+{"brd_text":"Demo smoke test BRD. Extract KPIs for policy count, premium amount, claim count, claim amount, and loss ratio. Pause at review gates.","provider":"azure_openai","use_domain_kb":false,"source":"database","stage_confirmation_enabled":true}

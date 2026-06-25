@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,16 +37,25 @@ jobs:
           cache: 'pip'
           cache-dependency-path: 'Athena_backend/requirements.txt'
 
+      - name: Restore bundled backend dependencies
+        id: backend-deps-cache
+        uses: actions/cache@v4
+        with:
+          path: deploy/Athena_backend/.python_packages
+          key: backend-python-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('Athena_backend/requirements.txt') }}
+
       - name: Install backend dependencies
-        working-directory: ./Athena_backend
+        if: steps.backend-deps-cache.outputs.cache-hit != 'true'
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest
+          python -m pip install --no-compile --target deploy/Athena_backend/.python_packages/lib/site-packages -r Athena_backend/requirements.txt
 
       - name: Run backend tests
         if: github.event_name == 'push'
         working-directory: ./Athena_backend
+        env:
+          PYTHONPATH: ${{ github.workspace }}/deploy/Athena_backend/.python_packages/lib/site-packages
         run: |
           python -m pytest tests/test_api_main.py -v || true
 
@@ -65,12 +74,6 @@ jobs:
             --exclude 'pipeline_logs.json.localbackup' \
             Athena_backend/ deploy/Athena_backend/
           chmod +x deploy/Athena_backend/startup.sh
-
-      - name: Bundle backend dependencies
-        run: |
-          python -m pip install \
-            --target deploy/Athena_backend/.python_packages/lib/site-packages \
-            -r Athena_backend/requirements.txt
 
       - name: Validate backend artifact
         run: |
@@ -113,7 +116,7 @@ jobs:
 
       - name: Wait for any previous App Service deployment lock
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: sleep 90
+        run: sleep 20
 
       - name: Deploy backend with Kudu ZIP deploy
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -204,10 +207,10 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           echo "Waiting for app to be ready..."
-          for attempt in {1..30}; do
+          for attempt in {1..12}; do
             : > /tmp/health-body.txt
-            status="$(curl -sS -o /tmp/health-body.txt -w "%{http_code}" --connect-timeout 10 --max-time 30 "${{ env.AZURE_WEBAPP_URL }}/health" || true)"
-            echo "Attempt ${attempt}/30 returned HTTP ${status}"
+            status="$(curl -sS -o /tmp/health-body.txt -w "%{http_code}" --connect-timeout 5 --max-time 15 "${{ env.AZURE_WEBAPP_URL }}/health" || true)"
+            echo "Attempt ${attempt}/12 returned HTTP ${status}"
             if [ "$status" = "200" ]; then
               cat /tmp/health-body.txt
               exit 0
@@ -215,7 +218,7 @@ jobs:
             if [ -s /tmp/health-body.txt ]; then
               cat /tmp/health-body.txt
             fi
-            sleep 20
+            sleep 10
           done
           echo "Backend did not become healthy in time."
           exit 1
