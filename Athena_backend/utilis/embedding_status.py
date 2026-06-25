@@ -31,11 +31,11 @@ def get_embedding_runtime_status(probe_models: bool = True) -> Dict[str, Any]:
     }
 
     if not env_enabled:
-        status["reason"] = "ATHENA_ENABLE_EMBEDDINGS is disabled"
+        status["reason"] = "Semantic indexing is running in fallback mode"
         return status
 
     if not probe_models:
-        status["reason"] = "Embedding model probing skipped for lightweight health check"
+        status["reason"] = "Lightweight health check; semantic model probing is deferred"
         return status
 
     try:

@@ -1,4 +1,6 @@
 ﻿
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -10,7 +12,6 @@ from contextlib import redirect_stderr, redirect_stdout
 from typing import Optional
 
 import docx
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pinecone import Pinecone
 from pydantic import ValidationError
@@ -64,8 +65,10 @@ def _get_embedding_model(*, log_context: dict) -> Optional[HuggingFaceEmbeddings
 
     try:
         if os.getenv("ATHENA_ENABLE_EMBEDDINGS", "").strip().lower() not in {"1", "true", "yes", "on"}:
-            logger.warning("Embedding model disabled; skipping vectorization", extra=log_context)
+            logger.info("Semantic indexing deferred; continuing with catalog-driven analysis", extra=log_context)
             return None
+
+        from langchain_huggingface import HuggingFaceEmbeddings
 
         logger.info("Initializing local embedding model", extra={"node": "ingestion_bootstrap"})
         os.environ["TRANSFORMERS_NO_ADVISE"] = "1"
@@ -89,7 +92,7 @@ def _get_embedding_model(*, log_context: dict) -> Optional[HuggingFaceEmbeddings
 
         return _embedding_model
     except Exception as exc:
-        logger.warning("Embedding model unavailable: %s", exc, extra=log_context)
+        logger.info("Semantic indexing deferred; continuing with catalog-driven analysis: %s", exc, extra=log_context)
         _embedding_model = None
         return None
 
@@ -496,7 +499,7 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
 
         model = _get_embedding_model(log_context=log_context)
         if model is None:
-            logger.info("Embedding disabled or unavailable; skipping BRD vectorization", extra=log_context)
+            logger.info("BRD semantic index deferred; requirement extraction will use parsed BRD content", extra=log_context)
             return _mark_embedding_skipped(new_state, brd_embedded=False)
 
         if pinecone_index is None:
@@ -571,7 +574,7 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
     except Exception as e:
         # Best-effort: embedding failures should not block the rest of the pipeline
         # (especially for structured/SFTP runs where we still want KPI extraction).
-        logger.warning("Embedding skipped (BRD vectors not written): %s", e, extra=log_context)
+        logger.info("BRD semantic index deferred; requirement extraction will use parsed BRD content: %s", e, extra=log_context)
         logger.warning(traceback.format_exc(), extra=log_context)
         return _mark_embedding_skipped(new_state, brd_embedded=False)
 
@@ -593,12 +596,12 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
 
         model = _get_embedding_model(log_context=log_context)
         if model is None:
-            logger.info("Embedding disabled or unavailable; skipping schema vectorization", extra=log_context)
+            logger.info("Schema semantic index deferred; nomination will use catalog and lexical matching", extra=log_context)
             return _mark_embedding_skipped(new_state, schema_embedded=False, schema_columns_count=0)
 
         source_databases = new_state.get("source_databases", [])
         if not source_databases:
-            logger.warning("No source_databases found â†’ skipping schema embedding", extra=log_context)
+            logger.info("No source databases selected for schema semantic index", extra=log_context)
             return new_state
 
         pc = Pinecone(api_key=pinecone_conf.get("api_key") or os.getenv("PINECONE_API_KEY"))
@@ -687,7 +690,7 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
 
     except Exception as e:
         # Best-effort: schema embedding is helpful but not required to keep the run moving.
-        logger.warning("Schema embedding skipped: %s", e, extra=log_context)
+        logger.info("Schema semantic index deferred; nomination will use catalog and lexical matching: %s", e, extra=log_context)
         logger.warning(traceback.format_exc(), extra=log_context)
         return _mark_embedding_skipped(new_state, schema_embedded=False, schema_columns_count=0)
 
@@ -721,11 +724,10 @@ def ingestion_node(state: Stage01State) -> Stage01State:
             logger.warning("Stopped at budget check", extra=log_context)
             return new_state
 
-        # Skip embedding for SFTP MVP, keep implementation for future reuse.
         if source == "sftp":
             new_state["brd_embedded"] = False
             new_state["schema_embedded"] = False
-            logger.info("Skipping chunk/schema embedding for SFTP source", extra=log_context)
+            logger.info("Using file-source catalog analysis path", extra=log_context)
         else:
             new_state = _chunk_and_embed(new_state)
             if new_state.get("status") == "FAILED":

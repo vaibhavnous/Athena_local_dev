@@ -27,7 +27,7 @@ def main() -> int:
     load_backend_env()
 
     if not _env_enabled("ATHENA_ENABLE_EMBEDDINGS"):
-        print("Embedding preload skipped: ATHENA_ENABLE_EMBEDDINGS is disabled")
+        print("Semantic model preload not requested; using fallback mode")
         return 0
 
     try:

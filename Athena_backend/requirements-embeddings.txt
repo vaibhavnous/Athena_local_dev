@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Optional local embedding stack. Do not install this in the default App Service
+# deployment because torch can pull large CUDA/NVIDIA wheels on Linux.
+sentence-transformers
+langchain-huggingface>=0.1.2

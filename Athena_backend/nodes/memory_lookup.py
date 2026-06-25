@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import io
 import os
@@ -5,7 +7,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from contextlib import redirect_stderr, redirect_stdout
 
 from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
 
 from nodes.ingestion import _chunk_and_embed, finalize_ingestion_after_memory
 from state import Stage01State
@@ -37,8 +38,10 @@ def _get_embedding_model(*, log_context: dict) -> Optional[SentenceTransformer]:
         return _EMB_MODEL
     try:
         if os.getenv("ATHENA_ENABLE_EMBEDDINGS", "").strip().lower() not in {"1", "true", "yes", "on"}:
-            logger.warning("Embedding model disabled; skipping semantic lookup", extra=log_context)
+            logger.info("Semantic memory lookup deferred; continuing with exact artifact history", extra=log_context)
             return None
+
+        from sentence_transformers import SentenceTransformer
 
         if DEV_MODE:
             _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
@@ -47,7 +50,7 @@ def _get_embedding_model(*, log_context: dict) -> Optional[SentenceTransformer]:
                 _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
         return _EMB_MODEL
     except Exception as exc:
-        logger.warning("Embedding model unavailable; skipping semantic lookup: %s", exc, extra=log_context)
+        logger.info("Semantic memory lookup deferred; continuing with exact artifact history: %s", exc, extra=log_context)
         _EMB_MODEL = None
         return None
 

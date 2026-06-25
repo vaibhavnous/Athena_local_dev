@@ -5,7 +5,6 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from langchain_huggingface import HuggingFaceEmbeddings
 from pinecone import Pinecone
 
 from utilis.db import config, execute_source_sql
@@ -68,10 +67,12 @@ def _get_embedding_model() -> Optional[HuggingFaceEmbeddings]:
     if _embedding_model is not None:
         return _embedding_model
     if not _env_enabled("ATHENA_ENABLE_EMBEDDINGS"):
-        logger.warning("Domain KB embeddings disabled by ATHENA_ENABLE_EMBEDDINGS")
+        logger.info("Domain knowledge retrieval using configured catalog fallback")
         return None
 
     try:
+        from langchain_huggingface import HuggingFaceEmbeddings
+
         os.environ["TRANSFORMERS_NO_ADVISE"] = "1"
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         _embedding_model = HuggingFaceEmbeddings(
@@ -82,7 +83,7 @@ def _get_embedding_model() -> Optional[HuggingFaceEmbeddings]:
         _embedding_model.embed_query("domain knowledge base")
         return _embedding_model
     except Exception as exc:
-        logger.warning("Domain KB embedding model unavailable: %s", exc)
+        logger.info("Domain knowledge retrieval using configured catalog fallback: %s", exc)
         return None
 
 

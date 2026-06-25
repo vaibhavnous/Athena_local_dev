@@ -11,7 +11,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pinecone import Pinecone
 
-from nodes.ingestion import _embedding_model
+from nodes.ingestion import _get_embedding_model
 from state import Stage01State
 from schema import KPISchema, KPISchemaItem, DerivationType
 from utilis.logger import logger
@@ -82,13 +82,17 @@ def _resolve_source_databases(state: Stage01State) -> List[str]:
 
 
 def _fetch_relevant_schema(brd_text: str, source_databases: List[str], top_k: int = 10) -> List[Dict[str, Any]]:
-    if not brd_text.strip() or not source_databases or _embedding_model is None:
+    if not brd_text.strip() or not source_databases:
+        return []
+
+    model = _get_embedding_model(log_context={"node": "kpi_extraction"})
+    if model is None:
         return []
 
     try:
         pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
         index = pc.Index("metadata")
-        query_vector = _embedding_model.embed_query(brd_text[:4000])
+        query_vector = model.embed_query(brd_text[:4000])
         results = index.query(
             vector=query_vector,
             top_k=top_k,

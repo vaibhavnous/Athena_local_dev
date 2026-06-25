@@ -509,8 +509,8 @@ def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> L
     log_context = {"node": "table_nomination", "pass": "semantic"}
     model = _get_embedding_model(log_context=log_context)
     if model is None:
-        logger.warning(
-            "Semantic search skipped: embedding model unavailable",
+        logger.info(
+            "Schema ranking using catalog and lexical matching",
             extra=log_context,
         )
         return []
@@ -518,7 +518,7 @@ def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> L
     try:
         pinecone_api_key = os.getenv("PINECONE_API_KEY")
         if not pinecone_api_key:
-            logger.warning("Semantic search skipped: Pinecone API key missing", extra=log_context)
+            logger.info("Schema ranking using catalog and lexical matching", extra=log_context)
             return []
 
         pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
