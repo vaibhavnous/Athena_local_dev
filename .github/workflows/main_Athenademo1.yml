@@ -65,9 +65,41 @@ jobs:
             Athena_backend/ deploy/Athena_backend/
           chmod +x deploy/Athena_backend/startup.sh
 
-      - name: Deploy to Azure App Service
+      - name: Wait for any previous App Service deployment lock
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: azure/webapps-deploy@v2
+        run: sleep 60
+
+      - name: Deploy to Azure App Service (attempt 1)
+        id: deploy_attempt_1
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: ./deploy/Athena_backend
+
+      - name: Wait before deploy retry 2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.deploy_attempt_1.outcome == 'failure'
+        run: sleep 120
+
+      - name: Deploy to Azure App Service (attempt 2)
+        id: deploy_attempt_2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.deploy_attempt_1.outcome == 'failure'
+        continue-on-error: true
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: ./deploy/Athena_backend
+
+      - name: Wait before deploy retry 3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.deploy_attempt_1.outcome == 'failure' && steps.deploy_attempt_2.outcome == 'failure'
+        run: sleep 180
+
+      - name: Deploy to Azure App Service (attempt 3)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.deploy_attempt_1.outcome == 'failure' && steps.deploy_attempt_2.outcome == 'failure'
+        uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
