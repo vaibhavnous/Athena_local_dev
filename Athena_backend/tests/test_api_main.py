@@ -239,7 +239,7 @@ def test_runs_returns_empty_list_on_timeout(monkeypatch):
             raise FutureTimeoutError()
 
     class StubExecutor:
-        def submit(self, fn):
+        def submit(self, fn, *args, **kwargs):
             return StubFuture()
 
     monkeypatch.setattr("api.routers.runs_router.BACKGROUND_EXECUTOR", StubExecutor())
@@ -256,7 +256,7 @@ def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
             return [{"run_id": "good-run"}, {"run_id": None}, {"run_id": "bad-run"}]
 
     class StubExecutor:
-        def submit(self, fn):
+        def submit(self, fn, *args, **kwargs):
             return StubFuture()
 
     def fake_summary(run_id):
