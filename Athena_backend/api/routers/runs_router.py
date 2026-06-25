@@ -1,5 +1,6 @@
 import os
-from concurrent.futures import TimeoutError as FutureTimeoutError
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException
@@ -9,6 +10,39 @@ from services.pipeline_runtime import BACKGROUND_EXECUTOR, list_runs
 from utilis.logger import logger
 
 router = APIRouter()
+RUN_SUMMARY_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_SUMMARY_WORKERS", "2"))))
+
+
+def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = str(row.get("run_id") or row.get("id") or "")
+    return {
+        "id": run_id,
+        "run_id": run_id,
+        "brd_filename": row.get("brd_filename") or run_id,
+        "source": row.get("source") or "database",
+        "status": row.get("status") or "UNKNOWN",
+        "provider": row.get("provider") or "azure_openai",
+        "deployment": row.get("deployment"),
+        "started_at": row.get("started_at") or row.get("last_activity"),
+        "completed_at": row.get("completed_at"),
+        "cache_hit": "NONE",
+        "cache_score": 0,
+        "extraction_path": "ATHENA_GRAPH",
+        "total_tokens": 0,
+        "total_cost": 0,
+        "stages": [],
+        "next_gate": None,
+        "resume_message": None,
+        "stage_confirmation": None,
+        "failed_stage_key": None,
+        "failed_stage_label": None,
+        "error": row.get("error"),
+        "updated_at": row.get("updated_at") or row.get("last_activity"),
+        "script_counts": {"bronze": 0, "silver": 0, "gold": 0},
+        "sftp_entity": row.get("sftp_entity"),
+        "source_row_count": row.get("source_row_count"),
+        "source_columns": row.get("source_columns") or [],
+    }
 
 
 # -------------------------
@@ -20,6 +54,7 @@ def runs() -> List[Dict[str, Any]]:
         # ✅ configurable timeout with safe minimum
         timeout_seconds = max(1, int(os.getenv("ATHENA_RUNS_ENDPOINT_TIMEOUT_SECONDS", "5")))
         run_limit = max(1, min(100, int(os.getenv("ATHENA_RUNS_LIST_LIMIT", "25"))))
+        deadline = time.monotonic() + timeout_seconds
 
         logger.debug("Fetching runs list", extra={"timeout_seconds": timeout_seconds, "limit": run_limit})
 
@@ -33,15 +68,25 @@ def runs() -> List[Dict[str, Any]]:
             if not run_id:
                 continue  # ✅ safety against malformed data
 
+            if time.monotonic() >= deadline:
+                logger.warning("GET /runs summary budget exhausted; returning fallback summary", extra={"run_id": run_id})
+                results.append(_fallback_run_summary(row))
+                continue
+
             try:
-                results.append(ui_run_summary(run_id))
+                remaining = max(0.1, deadline - time.monotonic())
+                summary_future = RUN_SUMMARY_EXECUTOR.submit(ui_run_summary, run_id)
+                results.append(summary_future.result(timeout=remaining))
+            except FutureTimeoutError:
+                logger.warning("GET /runs summary timed out; returning fallback summary", extra={"run_id": run_id})
+                results.append(_fallback_run_summary(row))
             except Exception:
                 # ✅ prevent single failure from breaking endpoint
                 logger.warning(
                     "Failed to build run summary",
                     extra={"run_id": run_id},
                 )
-                continue
+                results.append(_fallback_run_summary(row))
 
         return results
 

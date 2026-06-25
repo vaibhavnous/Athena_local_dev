@@ -1,3 +1,5 @@
+import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import uuid
 from pathlib import Path
 from typing import Any, Dict
@@ -23,6 +25,41 @@ from services.pipeline_runtime import (
 from utilis.logger import logger
 
 router = APIRouter()
+RUN_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_STATUS_WORKERS", "2"))))
+
+
+def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    checkpoint = checkpoint or {}
+    result_state = str(checkpoint.get("status") or status or "RUNNING")
+    return {
+        "run_id": run_id,
+        "status": result_state,
+        "state": {
+            "life_cycle_state": (
+                "TERMINATED"
+                if result_state in {"SUCCESS", "FAILED", "ABORTED", "PIPELINE_COMPLETED", "COMPLETED"}
+                else "RUNNING"
+            ),
+            "result_state": result_state,
+        },
+        "run": {
+            "id": run_id,
+            "run_id": run_id,
+            "status": result_state,
+            "source": checkpoint.get("source") or "database",
+            "brd_filename": checkpoint.get("brd_filename") or run_id,
+            "provider": checkpoint.get("provider") or "azure_openai",
+            "deployment": checkpoint.get("deployment"),
+            "stages": [],
+            "next_gate": checkpoint.get("next_gate"),
+            "resume_message": checkpoint.get("resume_message"),
+            "stage_confirmation": checkpoint.get("stage_confirmation"),
+            "failed_stage_key": checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key"),
+            "failed_stage_label": checkpoint.get("failed_stage_label"),
+            "error": checkpoint.get("error"),
+            "updated_at": checkpoint.get("updated_at") or checkpoint.get("checkpoint_at"),
+        },
+    }
 
 
 # -------------------------
@@ -119,7 +156,16 @@ async def upload_brd(file: UploadFile = File(...)) -> Dict[str, Any]:
 def pipeline_status(run_id: str) -> Dict[str, Any]:
 
     try:
-        run = ui_run(run_id)
+        timeout_seconds = max(1, int(os.getenv("ATHENA_STATUS_ENDPOINT_TIMEOUT_SECONDS", "5")))
+        future = RUN_STATUS_EXECUTOR.submit(ui_run, run_id)
+        run = future.result(timeout=timeout_seconds)
+    except FutureTimeoutError:
+        logger.warning("Pipeline status hydration timed out; returning fallback status", extra={"run_id": run_id})
+        try:
+            checkpoint = load_checkpoint_state(run_id) or {}
+        except Exception:
+            checkpoint = {}
+        return _fallback_status_payload(run_id, checkpoint=checkpoint)
     except Exception:
         logger.error("Failed to fetch pipeline status", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to fetch run status")

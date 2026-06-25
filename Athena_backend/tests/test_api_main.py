@@ -270,7 +270,10 @@ def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
     response = client.get("/runs")
 
     assert response.status_code == 200
-    assert response.json() == [{"run_id": "good-run", "status": "SUCCESS"}]
+    payload = response.json()
+    assert payload[0] == {"run_id": "good-run", "status": "SUCCESS"}
+    assert payload[1]["run_id"] == "bad-run"
+    assert payload[1]["status"] == "UNKNOWN"
 
 
 def test_run_detail_returns_503_on_failure(monkeypatch):
