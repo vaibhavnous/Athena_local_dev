@@ -243,6 +243,118 @@ def _dummy_rdbms_dataframe() -> pd.DataFrame:
     )
 
 
+def _demo_adls_frames() -> Dict[str, pd.DataFrame]:
+    return {
+        "transactions": pd.DataFrame(
+            [
+                {
+                    "transaction_id": "TXN-1001",
+                    "employee_id": "EMP-001",
+                    "machine_id": "ATM-001",
+                    "transaction_amount": 1240.50,
+                    "transaction_ts": "2026-06-24T09:15:00",
+                    "currency_code": "USD",
+                    "region": "south",
+                },
+                {
+                    "transaction_id": "TXN-1002",
+                    "employee_id": "EMP-002",
+                    "machine_id": "ATM-002",
+                    "transaction_amount": 875.25,
+                    "transaction_ts": "2026-06-24T10:42:00",
+                    "currency_code": "USD",
+                    "region": "west",
+                },
+            ]
+        ),
+        "employee": pd.DataFrame(
+            [
+                {
+                    "employee_id": "EMP-001",
+                    "employee_name": "Avery Stone",
+                    "department": "Operations",
+                    "region": "south",
+                    "hire_date": "2023-04-17",
+                    "active_flag": True,
+                },
+                {
+                    "employee_id": "EMP-002",
+                    "employee_name": "Maya Chen",
+                    "department": "Field Services",
+                    "region": "west",
+                    "hire_date": "2022-09-08",
+                    "active_flag": True,
+                },
+            ]
+        ),
+    }
+
+
+def _build_demo_adls_source_state(new_state: Dict[str, Any], reason: str) -> pd.DataFrame:
+    frames = []
+    local_paths = []
+    file_mappings = []
+    discovered_entities = []
+    source_root = ADLS_SOURCE_ROOT.strip("/")
+
+    for entity, dataframe_entity in _demo_adls_frames().items():
+        raw_frame = dataframe_entity.copy()
+        raw_frame["__entity"] = entity
+        frames.append(raw_frame)
+        discovered_entities.append(entity)
+
+        local_dir = (
+            Path(__file__).resolve().parents[1]
+            / "uploads"
+            / "adls"
+            / ADLS_VENDOR_NAME
+            / entity
+        )
+        local_dir.mkdir(parents=True, exist_ok=True)
+        local_file = local_dir / f"{entity}_demo.csv"
+        dataframe_entity.to_csv(local_file, index=False)
+        local_paths.append(str(local_file))
+
+        remote_path = f"/{source_root}/{entity}/{local_file.name}".replace("//", "/")
+        entity_abfss_path = _abfss_path(f"{source_root}/{entity}/")
+        file_mappings.append(
+            {
+                "local_file_path": str(local_file),
+                "remote_path": remote_path,
+                "databricks_source_path": entity_abfss_path,
+                "entity": entity,
+                "vendor": ADLS_VENDOR_NAME,
+                "source": "adls_gen2",
+                "demo_fallback": True,
+            }
+        )
+
+    new_state["file_path"] = local_paths[0]
+    new_state["sftp_files"] = local_paths
+    new_state["source_file_mappings"] = file_mappings
+    new_state["databricks_source_path"] = _abfss_path(source_root.rstrip("/") + "/")
+    new_state["sftp_entity"] = "auto"
+    new_state["vendor"] = ADLS_VENDOR_NAME
+    new_state["adls_demo_fallback"] = True
+    new_state["adls_live_ingestion_error"] = reason
+    new_state["candidate_feeds"] = [
+        {
+            "feed_id": f"{ADLS_VENDOR_NAME}_{entity}",
+            "vendor": ADLS_VENDOR_NAME,
+            "entity": entity,
+            "source": "adls_gen2",
+            "status": "DISCOVERED",
+            "format": "csv",
+            "file_name": f"{entity}_demo.csv",
+            "remote_path": f"/{source_root}/{entity}".replace("//", "/"),
+            "databricks_source_path": _abfss_path(f"{source_root}/{entity}/"),
+            "cloud_path": _abfss_path(f"{source_root}/{entity}/"),
+        }
+        for entity in discovered_entities
+    ]
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
 def source_ingestion_node(state: Stage01State) -> Stage01State:
     new_state: Dict[str, Any] = dict(state)
     source = str(new_state.get("source") or "").lower()
@@ -309,34 +421,66 @@ def source_ingestion_node(state: Stage01State) -> Stage01State:
                 extra={**log_context, "event_type": "stage_start", "sftp_entity": sftp_entity},
             )
             try:
-                from azure.identity import DefaultAzureCredential
-                from azure.storage.filedatalake import DataLakeServiceClient
-            except Exception as exc:
-                raise RuntimeError(
-                    "Missing ADLS dependencies. Install `azure-identity` and `azure-storage-file-datalake`."
-                ) from exc
+                try:
+                    from azure.identity import DefaultAzureCredential
+                    from azure.storage.filedatalake import DataLakeServiceClient
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Missing ADLS dependencies. Install `azure-identity` and `azure-storage-file-datalake`."
+                    ) from exc
 
-            credential = DefaultAzureCredential()
-            service_client = DataLakeServiceClient(account_url=ADLS_ACCOUNT_URL, credential=credential)
-            fs = service_client.get_file_system_client(ADLS_FILE_SYSTEM)
+                credential = DefaultAzureCredential()
+                service_client = DataLakeServiceClient(account_url=ADLS_ACCOUNT_URL, credential=credential)
+                fs = service_client.get_file_system_client(ADLS_FILE_SYSTEM)
 
-            child_dirs, direct_files = _discover_adls_child_paths(fs)
-            frames = []
-            local_paths = []
-            discovered_entities = []
-            file_mappings = []
+                child_dirs, direct_files = _discover_adls_child_paths(fs)
+                frames = []
+                local_paths = []
+                discovered_entities = []
+                file_mappings = []
 
-            if child_dirs:
-                for entity_path in child_dirs:
-                    entity_name = Path(entity_path).name
-                    dataframe_entity, payloads = _read_adls_folder(fs, entity_path)
-                    dataframe_entity = dataframe_entity.copy()
-                    dataframe_entity["__entity"] = entity_name
-                    frames.append(dataframe_entity)
-                    discovered_entities.append(entity_name)
-                    entity_abfss_path = _abfss_path(entity_path.rstrip("/") + "/")
+                if child_dirs:
+                    for entity_path in child_dirs:
+                        entity_name = Path(entity_path).name
+                        dataframe_entity, payloads = _read_adls_folder(fs, entity_path)
+                        dataframe_entity = dataframe_entity.copy()
+                        dataframe_entity["__entity"] = entity_name
+                        frames.append(dataframe_entity)
+                        discovered_entities.append(entity_name)
+                        entity_abfss_path = _abfss_path(entity_path.rstrip("/") + "/")
 
-                    for remote_path, raw_content in payloads:
+                        for remote_path, raw_content in payloads:
+                            local_dir = (
+                                Path(__file__).resolve().parents[1]
+                                / "uploads"
+                                / "adls"
+                                / ADLS_VENDOR_NAME
+                                / entity_name
+                            )
+                            local_dir.mkdir(parents=True, exist_ok=True)
+                            local_file = local_dir / Path(remote_path).name
+                            local_file.write_bytes(raw_content)
+                            local_paths.append(str(local_file))
+                            file_mappings.append(
+                                {
+                                    "local_file_path": str(local_file),
+                                    "remote_path": "/" + str(remote_path).lstrip("/"),
+                                    "databricks_source_path": entity_abfss_path,
+                                    "entity": entity_name,
+                                    "vendor": ADLS_VENDOR_NAME,
+                                    "source": "adls_gen2",
+                                }
+                            )
+                elif direct_files:
+                    entity_name = Path(ADLS_SOURCE_ROOT).name or "adls_source"
+                    entity_abfss_path = _abfss_path(ADLS_SOURCE_ROOT.rstrip("/") + "/")
+                    for remote_path in direct_files:
+                        dataframe_entity, raw_content = _read_adls_file(fs, remote_path)
+                        dataframe_entity = dataframe_entity.copy()
+                        dataframe_entity["__entity"] = entity_name
+                        frames.append(dataframe_entity)
+                        discovered_entities.append(entity_name)
+
                         local_dir = (
                             Path(__file__).resolve().parents[1]
                             / "uploads"
@@ -358,68 +502,45 @@ def source_ingestion_node(state: Stage01State) -> Stage01State:
                                 "source": "adls_gen2",
                             }
                         )
-            elif direct_files:
-                entity_name = Path(ADLS_SOURCE_ROOT).name or "adls_source"
-                entity_abfss_path = _abfss_path(ADLS_SOURCE_ROOT.rstrip("/") + "/")
-                for remote_path in direct_files:
-                    dataframe_entity, raw_content = _read_adls_file(fs, remote_path)
-                    dataframe_entity = dataframe_entity.copy()
-                    dataframe_entity["__entity"] = entity_name
-                    frames.append(dataframe_entity)
-                    discovered_entities.append(entity_name)
+                else:
+                    raise FileNotFoundError(
+                        f"No supported files found in adls://{ADLS_FILE_SYSTEM}/{ADLS_SOURCE_ROOT}"
+                    )
 
-                    local_dir = (
-                        Path(__file__).resolve().parents[1]
-                        / "uploads"
-                        / "adls"
-                        / ADLS_VENDOR_NAME
-                        / entity_name
-                    )
-                    local_dir.mkdir(parents=True, exist_ok=True)
-                    local_file = local_dir / Path(remote_path).name
-                    local_file.write_bytes(raw_content)
-                    local_paths.append(str(local_file))
-                    file_mappings.append(
-                        {
-                            "local_file_path": str(local_file),
-                            "remote_path": "/" + str(remote_path).lstrip("/"),
-                            "databricks_source_path": entity_abfss_path,
-                            "entity": entity_name,
-                            "vendor": ADLS_VENDOR_NAME,
-                            "source": "adls_gen2",
-                        }
-                    )
-            else:
-                raise FileNotFoundError(
-                    f"No supported files found in adls://{ADLS_FILE_SYSTEM}/{ADLS_SOURCE_ROOT}"
+                dataframe = pd.concat(frames, ignore_index=True, sort=False)
+                new_state["file_path"] = local_paths[0]
+                new_state["sftp_files"] = local_paths
+                new_state["source_file_mappings"] = file_mappings
+                new_state["databricks_source_path"] = _abfss_path(ADLS_SOURCE_ROOT.rstrip("/") + "/")
+                new_state["sftp_entity"] = "auto"
+                new_state["vendor"] = ADLS_VENDOR_NAME
+                new_state["candidate_feeds"] = [
+                    {
+                        "feed_id": f"{ADLS_VENDOR_NAME}_{entity}",
+                        "vendor": ADLS_VENDOR_NAME,
+                        "entity": entity,
+                        "source": "adls_gen2",
+                        "status": "DISCOVERED",
+                        "remote_path": f"/{ADLS_SOURCE_ROOT.strip('/')}/{entity}".replace("//", "/"),
+                        "databricks_source_path": _abfss_path(f"{ADLS_SOURCE_ROOT.strip('/')}/{entity}/"),
+                        "cloud_path": _abfss_path(f"{ADLS_SOURCE_ROOT.strip('/')}/{entity}/"),
+                    }
+                    for entity in discovered_entities
+                ]
+            except Exception as exc:
+                logger.warning(
+                    "ADLS live ingestion failed; using demo fallback data: %s",
+                    exc,
+                    extra={**log_context, "event_type": "demo_fallback"},
                 )
-
-            dataframe = pd.concat(frames, ignore_index=True, sort=False)
-            new_state["file_path"] = local_paths[0]
-            new_state["sftp_files"] = local_paths
-            new_state["source_file_mappings"] = file_mappings
-            new_state["databricks_source_path"] = _abfss_path(ADLS_SOURCE_ROOT.rstrip("/") + "/")
-            new_state["sftp_entity"] = "auto"
-            new_state["vendor"] = ADLS_VENDOR_NAME
-            new_state["candidate_feeds"] = [
-                {
-                    "feed_id": f"{ADLS_VENDOR_NAME}_{entity}",
-                    "vendor": ADLS_VENDOR_NAME,
-                    "entity": entity,
-                    "source": "adls_gen2",
-                    "status": "DISCOVERED",
-                    "remote_path": f"/{ADLS_SOURCE_ROOT.strip('/')}/{entity}".replace("//", "/"),
-                    "databricks_source_path": _abfss_path(f"{ADLS_SOURCE_ROOT.strip('/')}/{entity}/"),
-                    "cloud_path": _abfss_path(f"{ADLS_SOURCE_ROOT.strip('/')}/{entity}/"),
-                }
-                for entity in discovered_entities
-            ]
+                dataframe = _build_demo_adls_source_state(new_state, str(exc))
         elif source == "rdbms":
             dataframe = _dummy_rdbms_dataframe()
         else:
             raise ValueError("Unsupported source. Expected 'sftp', 'adls_gen2', or 'rdbms'.")
 
         new_state["data"] = dataframe
+        new_state["status"] = "IN_PROGRESS"
         new_state["source_ingestion_status"] = "COMPLETED"
         new_state["source_row_count"] = len(dataframe)
         new_state["source_columns"] = list(dataframe.columns)
