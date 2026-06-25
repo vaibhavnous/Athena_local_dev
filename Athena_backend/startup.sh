@@ -3,27 +3,14 @@ set -e
 
 echo "========== Athena backend startup =========="
 echo "Timestamp: $(date -u)"
-echo "User: $(whoami)"
 echo "PWD: $(pwd)"
 echo "Python: $(python --version 2>&1)"
 echo "Port: ${PORT:-8000}"
-
-echo "Top-level files:"
-ls -la
-
-echo "API package:"
-ls -la api || true
-
-echo "Selected environment flags:"
-env | sort | grep -E '^(AZURE_SQL_HOST|AZURE_SQL_PIPELINE_DATABASE|AZURE_SQL_SOURCE_HOST|AZURE_SQL_SOURCE_DATABASE|AZURE_OPENAI_ENDPOINT|AZURE_OPENAI_DEPLOYMENT|ATHENA_CORS_ORIGINS|PINECONE_INDEX_NAME|ADLS_ACCOUNT_URL|SCM_DO_BUILD_DURING_DEPLOYMENT|PORT)=' || true
 
 if [ -d "/home/site/wwwroot/antenv" ]; then
   echo "Activating Oryx virtual environment..."
   . /home/site/wwwroot/antenv/bin/activate
 fi
-
-echo "Installed package checks:"
-python -m pip show fastapi uvicorn pyodbc azure-identity azure-storage-file-datalake pinecone || true
 
 echo "Import smoke test:"
 python - <<'PY'

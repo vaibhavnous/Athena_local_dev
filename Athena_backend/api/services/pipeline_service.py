@@ -18,8 +18,6 @@ from services.pipeline_runtime import (
     start_pipeline,
     submit_background,
 )
-from services.sftp_runtime import start_sftp_pipeline
-from source_ingestion_pipeline import build_source_ingestion_graph
 from utilis.db import get_pending_items
 from utilis.logger import logger
 
@@ -33,6 +31,8 @@ ACTIVE_STATUSES = {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
 
 @lru_cache(maxsize=1)
 def source_ingestion_graph():
+    from source_ingestion_pipeline import build_source_ingestion_graph
+
     return build_source_ingestion_graph()
 
 
@@ -105,6 +105,8 @@ def run_pipeline_background(
         logger.info("Pipeline background job started run_id=%s source=%s", run_id, source)
         existing_checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
         if api_utils.is_file_source(source):
+            from services.sftp_runtime import start_sftp_pipeline
+
             result = start_sftp_pipeline(
                 run_id=run_id,
                 brd_text=brd_text,
