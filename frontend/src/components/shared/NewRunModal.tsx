@@ -275,7 +275,11 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
 
     try {
       if (uploadedFile) {
-        await uploadBrd(uploadedFile)
+        try {
+          await uploadBrd(uploadedFile)
+        } catch (uploadError) {
+          console.warn('[NewRunModal] BRD upload failed; continuing with parsed text', uploadError)
+        }
       }
 
       const normalizedSftpEntity = normalizeFileEntity(form.source, form.sftpEntity)
@@ -329,7 +333,9 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
     } catch (submitError) {
       console.error('[NewRunModal] Failed to start run', submitError)
       const message =
-        submitError?.data?.message || submitError?.message || 'Failed to start the pipeline run.'
+        submitError?.code === 'ECONNABORTED' || /timeout/i.test(submitError?.message || '')
+          ? 'Backend did not start the run within 90 seconds. Check the API service and database connection.'
+          : submitError?.data?.message || submitError?.message || 'Failed to start the pipeline run.'
       setError(message)
     } finally {
       setLoading(false)

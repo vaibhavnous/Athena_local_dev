@@ -17,7 +17,7 @@ from langgraph.graph import StateGraph
 from langchain_core.messages import HumanMessage, SystemMessage
 from pinecone import Pinecone
 
-from nodes.ingestion import _embedding_model
+from nodes.ingestion import _get_embedding_model
 from nodes.req_extraction import get_llm
 from schema import NominationItem, NominationSchema
 from state import Stage01State
@@ -506,18 +506,26 @@ def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> L
     if not kpi_queries:
         return []
 
-    if _embedding_model is None:
+    log_context = {"node": "table_nomination", "pass": "semantic"}
+    model = _get_embedding_model(log_context=log_context)
+    if model is None:
         logger.warning(
-            "Semantic search skipped: embedding model not initialized",
-            extra={"node": "table_nomination", "pass": "semantic"},
+            "Semantic search skipped: embedding model unavailable",
+            extra=log_context,
         )
         return []
 
     try:
+        pinecone_api_key = os.getenv("PINECONE_API_KEY")
+        if not pinecone_api_key:
+            logger.warning("Semantic search skipped: Pinecone API key missing", extra=log_context)
+            return []
+
         pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-        index = pc.Index("metadata")
+        schema_index_name = os.getenv("PINECONE_SCHEMA_INDEX_NAME") or "metadata"
+        index = pc.Index(schema_index_name)
     except Exception as e:
-        logger.error(f"Pinecone init failed: {e}", extra={"node": "table_nomination", "pass": "semantic"})
+        logger.error(f"Pinecone init failed: {e}", extra=log_context)
         return []
 
     table_map: Dict[str, Dict[str, Any]] = {}
@@ -525,7 +533,7 @@ def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> L
 
     for kpi_query in kpi_queries:
         try:
-            query_vector = _embedding_model.embed_query(kpi_query)
+            query_vector = model.embed_query(kpi_query)
             results = index.query(
                 vector=query_vector,
                 top_k=30,
@@ -533,7 +541,7 @@ def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> L
                 namespace="schema",
             )
         except Exception as e:
-            logger.error(f"Pinecone query failed: {e}", extra={"node": "table_nomination", "pass": "semantic"})
+            logger.error(f"Pinecone query failed: {e}", extra=log_context)
             continue
 
         matches = getattr(results, "matches", None)

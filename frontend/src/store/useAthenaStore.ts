@@ -24,6 +24,14 @@ function persistHitlSourceRunIds(mapping: Record<string, string>) {
   }
 }
 
+function stableStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 interface Notification {
   id: number
   type: string
@@ -115,12 +123,19 @@ const useAthenaStore = create<AthenaState>((set, get) => ({
           ? [activeExisting, ...backendRuns.filter((run) => run.id !== activeExisting.id)]
           : backendRuns
 
+      const nextActiveRunId =
+        activeRunId && mergedRuns.some((run) => run.id === activeRunId)
+          ? activeRunId
+          : mergedRuns[0]?.id || null
+
+      const runsUnchanged = stableStringify(state.runs) === stableStringify(mergedRuns)
+      if (runsUnchanged && state.activeRunId === nextActiveRunId) {
+        return state
+      }
+
       return {
         runs: mergedRuns,
-        activeRunId:
-          activeRunId && mergedRuns.some((run) => run.id === activeRunId)
-            ? activeRunId
-            : mergedRuns[0]?.id || null,
+        activeRunId: nextActiveRunId,
       }
     }),
 
@@ -131,13 +146,24 @@ const useAthenaStore = create<AthenaState>((set, get) => ({
     })),
 
   updateRun: (runId, updates) =>
-    set((state) => ({
-      runs: state.runs.map((run) =>
-        run.id === runId ? { ...run, ...updates } : run
-      ),
-    })),
+    set((state) => {
+      const currentRun = state.runs.find((run) => run.id === runId)
+      if (!currentRun) return state
 
-  setActiveRun: (runId) => set({ activeRunId: runId }),
+      const nextRun = { ...currentRun, ...updates }
+      if (stableStringify(currentRun) === stableStringify(nextRun)) {
+        return state
+      }
+
+      return {
+        runs: state.runs.map((run) =>
+          run.id === runId ? nextRun : run
+        ),
+      }
+    }),
+
+  setActiveRun: (runId) =>
+    set((state) => (state.activeRunId === runId ? state : { activeRunId: runId })),
 
   updateStageStatus: (runId, stageId, updates) =>
     set((state) => ({
@@ -224,7 +250,8 @@ const useAthenaStore = create<AthenaState>((set, get) => ({
 
   setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
 
-  setServerOnline: (online) => set({ serverOnline: online }),
+  setServerOnline: (online) =>
+    set((state) => (state.serverOnline === online ? state : { serverOnline: online })),
 
   dismissDemoBanner: () => set({ demoModeBannerDismissed: true }),
 

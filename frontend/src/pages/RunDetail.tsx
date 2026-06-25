@@ -230,7 +230,7 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
 
     setSubmittingGate2(true)
     try {
-      await submitTableReviews(run.id, isSftpRun ? ['sftp-feed-approved'] : approvedItems)
+      await submitTableReviews(run.id, approvedItems)
       const refreshed = await getRun(run.id)
       onRunRefresh(refreshed)
       addNotification({

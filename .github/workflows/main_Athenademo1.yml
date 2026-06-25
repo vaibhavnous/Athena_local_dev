@@ -74,13 +74,16 @@ jobs:
         run: |
           echo "Waiting for app to be ready..."
           for attempt in {1..30}; do
-            status="$(curl -sS -o /tmp/health-body.txt -w "%{http_code}" --max-time 20 "${{ env.AZURE_WEBAPP_URL }}/health" || true)"
+            : > /tmp/health-body.txt
+            status="$(curl -sS -o /tmp/health-body.txt -w "%{http_code}" --connect-timeout 10 --max-time 30 "${{ env.AZURE_WEBAPP_URL }}/health" || true)"
             echo "Attempt ${attempt}/30 returned HTTP ${status}"
             if [ "$status" = "200" ]; then
               cat /tmp/health-body.txt
               exit 0
             fi
-            cat /tmp/health-body.txt || true
+            if [ -s /tmp/health-body.txt ]; then
+              cat /tmp/health-body.txt
+            fi
             sleep 20
           done
           echo "Backend did not become healthy in time."

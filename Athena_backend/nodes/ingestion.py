@@ -120,6 +120,24 @@ def _mark_failed(state: Stage01State, error: str) -> Stage01State:
     return state
 
 
+def _mark_embedding_skipped(
+    state: Stage01State,
+    *,
+    brd_embedded: Optional[bool] = None,
+    schema_embedded: Optional[bool] = None,
+    schema_columns_count: Optional[int] = None,
+) -> Stage01State:
+    updates = {}
+    if brd_embedded is not None:
+        updates["brd_embedded"] = brd_embedded
+    if schema_embedded is not None:
+        updates["schema_embedded"] = schema_embedded
+    if schema_columns_count is not None:
+        updates["schema_columns_count"] = schema_columns_count
+    state.update(updates)
+    return state
+
+
 def _build_context_text_from_data(data: object) -> str:
     columns = getattr(data, "columns", None)
     if columns is None:
@@ -478,7 +496,8 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
 
         model = _get_embedding_model(log_context=log_context)
         if model is None:
-            raise Exception("Embedding model not available")
+            logger.info("Embedding disabled or unavailable; skipping BRD vectorization", extra=log_context)
+            return _mark_embedding_skipped(new_state, brd_embedded=False)
 
         if pinecone_index is None:
             raise Exception("Pinecone not initialized")
@@ -544,6 +563,7 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
         index.upsert(vectors=pinecone_vectors, namespace=namespace)
 
         log_context["namespace"] = namespace
+        new_state["brd_embedded"] = True
         logger.info("Safe upsert completed", extra=log_context)
         logger.info("END: _chunk_and_embed", extra=log_context)
         return new_state
@@ -553,10 +573,9 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
         # (especially for structured/SFTP runs where we still want KPI extraction).
         logger.warning("Embedding skipped (BRD vectors not written): %s", e, extra=log_context)
         logger.warning(traceback.format_exc(), extra=log_context)
-        new_state.update({
-            "brd_embedded": False,
-        })
-        return new_state
+        return _mark_embedding_skipped(new_state, brd_embedded=False)
+
+
 def _embed_schema_metadata(state: Stage01State) -> Stage01State:
     new_state = state.copy()
     run_id = new_state.get("run_id", "unknown")
@@ -574,7 +593,8 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
 
         model = _get_embedding_model(log_context=log_context)
         if model is None:
-            raise Exception("Embedding model not available")
+            logger.info("Embedding disabled or unavailable; skipping schema vectorization", extra=log_context)
+            return _mark_embedding_skipped(new_state, schema_embedded=False, schema_columns_count=0)
 
         source_databases = new_state.get("source_databases", [])
         if not source_databases:
@@ -648,7 +668,7 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
 
         if not all_vectors:
             logger.warning("No schema vectors generated", extra=log_context)
-            return new_state
+            return _mark_embedding_skipped(new_state, schema_embedded=False, schema_columns_count=0)
 
         logger.info(f"Upserting {len(all_vectors)} schema vectors", extra=log_context)
 
@@ -660,6 +680,8 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
 
         index.upsert(vectors=all_vectors, namespace=namespace)
 
+        new_state["schema_embedded"] = True
+        new_state["schema_columns_count"] = len(all_vectors)
         logger.info("END: _embed_schema_metadata", extra=log_context)
         return new_state
 
@@ -667,10 +689,7 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
         # Best-effort: schema embedding is helpful but not required to keep the run moving.
         logger.warning("Schema embedding skipped: %s", e, extra=log_context)
         logger.warning(traceback.format_exc(), extra=log_context)
-        new_state.update({
-            "schema_embedded": False,
-        })
-        return new_state
+        return _mark_embedding_skipped(new_state, schema_embedded=False, schema_columns_count=0)
 
 def ingestion_node(state: Stage01State) -> Stage01State:
     new_state = _copy_state(state)

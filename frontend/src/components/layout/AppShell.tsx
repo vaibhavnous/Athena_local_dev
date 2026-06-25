@@ -21,6 +21,7 @@ import {
 import { getGateDisplayName, getPhaseGroups } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
+const PAUSED_BANNER_DELAY_MS = 2500
 
 function loadJsonMap(key) {
   if (typeof window === 'undefined') return {}
@@ -64,8 +65,10 @@ function AppShell() {
 
   const runsRequestInFlightRef = useRef(false)
   const pausedDetailKeyRef = useRef<string | null>(null)
+  const announcedPausedBannerKeysRef = useRef<Record<string, true>>({})
   const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadJsonMap(PAUSED_BANNER_DISMISSALS_KEY))
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
+  const [readyPausedBannerKey, setReadyPausedBannerKey] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -112,11 +115,11 @@ function AppShell() {
     }
   }, [activeRunId, addNotification, setRuns, setActiveRun, setServerOnline])
 
-  const pausedRun = useMemo(
-    () =>
-      (runs || []).find((run) => run.id === activeRunId && isReviewPausedRun(run)) || null,
-    [activeRunId, runs]
-  )
+  const pausedRun = useMemo(() => {
+    const pausedRuns = (runs || []).filter(isReviewPausedRun)
+    if (!pausedRuns.length) return null
+    return pausedRuns.find((run) => run.id === activeRunId) || pausedRuns[0]
+  }, [activeRunId, runs])
 
   const pausedRunId = pausedRun?.id || null
   const pausedRunGate = Number(pausedRun?.next_gate || 0)
@@ -126,6 +129,7 @@ function AppShell() {
     if (!pausedRunId || !pausedBannerKey) {
       pausedDetailKeyRef.current = null
       setPausedRunDetail(null)
+      setReadyPausedBannerKey(null)
       return
     }
 
@@ -184,6 +188,21 @@ function AppShell() {
     }
   }, [pausedBannerKey, pausedRunGate, pausedRunId])
 
+  useEffect(() => {
+    if (!pausedRunDetail || !pausedBannerKey) {
+      setReadyPausedBannerKey(null)
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      setReadyPausedBannerKey(pausedBannerKey)
+    }, PAUSED_BANNER_DELAY_MS)
+
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [pausedBannerKey, pausedRunDetail])
+
   const pausedRunSummary = useMemo(() => {
     const bannerRun = pausedRunDetail || pausedRun
     if (!bannerRun) return null
@@ -214,10 +233,26 @@ function AppShell() {
     })
   }, [runs])
 
+  useEffect(() => {
+    if (!pausedRun || !pausedRunSummary || !pausedBannerKey) return
+    if (readyPausedBannerKey !== pausedBannerKey) return
+    if (dismissedPausedBanners[pausedBannerKey]) return
+    if (announcedPausedBannerKeysRef.current[pausedBannerKey]) return
+
+    announcedPausedBannerKeysRef.current[pausedBannerKey] = true
+    addNotification({
+      type: 'amber',
+      title: `${pausedRunSummary.gateLabel} Ready`,
+      message: `${pausedRun.brd_filename || pausedRun.id} is waiting for review.`,
+      duration: 4500,
+    })
+  }, [addNotification, dismissedPausedBanners, pausedBannerKey, pausedRun, pausedRunSummary, readyPausedBannerKey])
+
   const isPausedBannerVisible = Boolean(
     pausedRun &&
     pausedRunDetail &&
     pausedBannerKey &&
+    readyPausedBannerKey === pausedBannerKey &&
     !dismissedPausedBanners[pausedBannerKey]
   )
 
@@ -366,9 +401,11 @@ async function isReviewDataReadyForGate(runId, gate, source) {
   try {
     if (gate === 1) {
       const review = await fetchKpiReviews(runId)
+      if (Array.isArray(review) && review.length > 0) return true
       if (Array.isArray(review?.kpis) && review.kpis.length > 0) return true
 
       const fallback = await getPipelineKpis(runId)
+      if (Array.isArray(fallback) && fallback.length > 0) return true
       return Array.isArray(fallback?.kpis) && fallback.kpis.length > 0
     }
 
@@ -387,7 +424,13 @@ async function isReviewDataReadyForGate(runId, gate, source) {
         (review?.enriched_columns || []).length ||
         (review?.enriched_joins || []).length ||
         (review?.feed_semantic_summary || []).length ||
-        Object.keys(review?.enriched_metadata || {}).length
+        Object.keys(review?.enriched_metadata || {}).length ||
+        Object.keys(review?.semantic_counts || {}).length ||
+        (review?.pii_columns || []).length ||
+        (review?.join_key_columns || []).length ||
+        (review?.measure_columns || []).length ||
+        review?.resume_message ||
+        Number(review?.next_gate || 0) === 3
       )
     }
 

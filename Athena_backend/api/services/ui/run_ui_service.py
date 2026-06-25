@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from services.pipeline_runtime import fetch_json_artifact
+from services.pipeline_runtime import (
+    apply_waiting_stage_state,
+    build_pipeline_steps,
+    fetch_json_artifact,
+    fetch_run_summary,
+    load_checkpoint_state,
+)
 from utilis.logger import logger
 
 from api import utils as api_utils
@@ -15,6 +21,252 @@ from api.services.kpi_service import (
 )
 from api.services.ui.shared import display_run_name, failed_stage_key, get_run_data, status_from_context
 from api.services.ui.stage_ui_service import summary_stage_list, ui_stages
+
+
+def _file_generation_flags(summary: List[Dict[str, Any]], checkpoint: Dict[str, Any]) -> Dict[str, bool]:
+    artifact_types = {str(row.get("artifact_type") or "").upper() for row in summary if isinstance(row, dict)}
+    stages = [str(row.get("stage") or "").lower() for row in summary if isinstance(row, dict)]
+    return {
+        "bronze_generation_completed": bool(
+            artifact_types.intersection({"BRONZE_GENERATION", "BRONZE_SCRIPTS", "SFTP_BRONZE_GENERATION"})
+            or any("bronze" in stage for stage in stages)
+            or checkpoint.get("bronze_generation_status") == "COMPLETED"
+            or checkpoint.get("bronze_generation_results")
+        ),
+        "silver_generation_completed": bool(
+            artifact_types.intersection({"SILVER_GENERATION", "SILVER_SCRIPTS", "SFTP_SILVER_GENERATION"})
+            or any("silver" in stage for stage in stages)
+            or checkpoint.get("silver_generation_status") == "COMPLETED"
+            or checkpoint.get("silver_generation_results")
+        ),
+        "gold_generation_completed": bool(
+            artifact_types.intersection({"GOLD_GENERATION", "GOLD_SCRIPTS", "SFTP_GOLD_GENERATION"})
+            or any("gold" in stage for stage in stages)
+            or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
+            or checkpoint.get("gold_generation_results")
+        ),
+        "schema_discovery_completed": bool(
+            "SFTP_SCHEMA_SNAPSHOT" in artifact_types
+            or checkpoint.get("metadata_status") == "COMPLETED"
+        ),
+        "column_profiling_completed": bool(
+            "SFTP_COLUMN_PROFILING" in artifact_types
+            or checkpoint.get("column_profiling_status") == "COMPLETED"
+        ),
+    }
+
+
+def _file_display_name(checkpoint: Dict[str, Any]) -> str:
+    source = str(checkpoint.get("source") or "sftp").lower()
+    prefix = "adls" if source == "adls_gen2" else "sftp"
+    vendor = str(checkpoint.get("vendor") or "Vendor1")
+    candidate_feeds = checkpoint.get("candidate_feeds") if isinstance(checkpoint.get("candidate_feeds"), list) else []
+    discovered_entities = sorted(
+        {
+            str(feed.get("entity") or "").lower()
+            for feed in candidate_feeds
+            if isinstance(feed, dict) and str(feed.get("entity") or "").strip()
+        }
+    )
+    if len(discovered_entities) > 1:
+        return f"{prefix}:{vendor}:{'+'.join(discovered_entities)}"
+    entity = str(checkpoint.get("sftp_entity") or "transactions").lower()
+    if entity == "both":
+        return f"{prefix}:{vendor}:employee+transactions"
+    return f"{prefix}:{vendor}:{entity}"
+
+
+def _file_next_gate_and_message(
+    *,
+    gate1_decision: Any,
+    gate2_decision: Any,
+    gate3_decision: str,
+    gate4_decision: str,
+    gate5_decision: str,
+    feed_review_ready: bool,
+    source_ingestion_completed: bool,
+    semantic_enrichment_completed: bool,
+    bronze_review_ready: bool,
+    silver_review_ready: bool,
+    gate3_payload: Dict[str, Any],
+    column_profiling_completed: bool,
+    schema_discovery_completed: bool,
+) -> Dict[str, Any]:
+    next_gate = None
+    resume_message = None
+    if gate1_decision in {None, ""}:
+        next_gate = 1
+        resume_message = "KPI Review is pending. Review KPI items before continuing."
+    elif gate1_decision == "APPROVED" and gate2_decision in {None, ""}:
+        if not source_ingestion_completed:
+            resume_message = "Source ingestion is in progress. Feed review will open when source discovery completes."
+        elif not feed_review_ready:
+            resume_message = "Feed discovery is in progress. Feed review will open when discovery completes."
+        else:
+            next_gate = 2
+            resume_message = "Feed Review is pending. Review discovered feeds before continuing."
+    elif gate2_decision == "APPROVED":
+        if semantic_enrichment_completed and gate3_decision not in {"APPROVED", "REJECTED"}:
+            next_gate = 3
+            resume_message = "Enrichment Review is pending. Review semantic enrichment before continuing."
+        elif (gate3_decision == "APPROVED" or gate3_payload) and bronze_review_ready and gate4_decision not in {"APPROVED", "REJECTED"}:
+            next_gate = 4
+            resume_message = "Bronze Review is pending. Review Bronze plan before ingestion."
+        elif gate4_decision == "APPROVED" and silver_review_ready and gate5_decision not in {"APPROVED", "REJECTED"}:
+            next_gate = 5
+            resume_message = "Silver Review is pending. Review Silver plan before execution."
+        elif gate5_decision == "APPROVED":
+            resume_message = "Silver Review is complete."
+        elif gate4_decision == "APPROVED":
+            resume_message = "Bronze Review is complete."
+        elif gate3_decision == "APPROVED" or gate3_payload:
+            resume_message = "Semantic enrichment is approved."
+        elif column_profiling_completed:
+            resume_message = "Schema discovery and column profiling are complete."
+        elif schema_discovery_completed:
+            resume_message = "Schema discovery is complete. Column profiling is in progress."
+        else:
+            resume_message = "Feed Review is complete."
+    elif gate1_decision == "REJECTED":
+        resume_message = "KPI Review was rejected."
+    elif gate2_decision == "REJECTED":
+        resume_message = "Feed Review was rejected."
+    elif gate3_decision == "REJECTED":
+        resume_message = "Enrichment Review was rejected."
+    elif gate4_decision == "REJECTED":
+        resume_message = "Bronze Review was rejected."
+    elif gate5_decision == "REJECTED":
+        resume_message = "Silver Review was rejected."
+    return {"next_gate": next_gate, "resume_message": resume_message}
+
+
+def _file_status(
+    *,
+    checkpoint: Dict[str, Any],
+    next_gate: Optional[int],
+    gate5_decision: str,
+    gold_generation_completed: bool,
+    silver_generation_completed: bool,
+    gate1_decision: Any,
+    gate2_decision: Any,
+    source_ingestion_completed: bool,
+    feed_review_ready: bool,
+) -> str:
+    status = checkpoint.get("status") or "UNKNOWN"
+    if next_gate:
+        return "HITL_WAIT"
+    if checkpoint.get("background_stage"):
+        return "RUNNING"
+    if gate1_decision == "APPROVED" and gate2_decision in {None, ""} and (not source_ingestion_completed or not feed_review_ready):
+        return "RUNNING"
+    if gate5_decision == "APPROVED" or gold_generation_completed:
+        return "PIPELINE_COMPLETED"
+    if silver_generation_completed and gate5_decision not in {"APPROVED", "REJECTED"}:
+        return "HITL_WAIT"
+    return status
+
+
+def _file_source_summary_context(run_id: str, checkpoint: Dict[str, Any], summary: List[Dict[str, Any]]) -> Dict[str, Any]:
+    artifact_types = {
+        str(row.get("artifact_type") or "").upper()
+        for row in summary
+        if isinstance(row, dict)
+    }
+    gate1_decision = (checkpoint.get("gate1") or {}).get("decision")
+    gate2_decision = (checkpoint.get("gate2") or {}).get("decision")
+    gate3_decision = str(checkpoint.get("enrichment_review_decision") or "").upper()
+    gate4_decision = str((checkpoint.get("gate4") or {}).get("decision") or checkpoint.get("bronze_review_decision") or "").upper()
+    gate5_decision = str((checkpoint.get("gate5") or {}).get("decision") or checkpoint.get("silver_review_decision") or "").upper()
+    candidate_feed = checkpoint.get("candidate_feed") if isinstance(checkpoint.get("candidate_feed"), dict) else {}
+    candidate_feeds = checkpoint.get("candidate_feeds") if isinstance(checkpoint.get("candidate_feeds"), list) else []
+    source_ingestion_completed = checkpoint.get("source_ingestion_status") == "COMPLETED"
+    feed_review_ready = bool(candidate_feeds) or bool(candidate_feed)
+
+    generation_flags = _file_generation_flags(summary, checkpoint)
+    semantic_enrichment_completed = bool(
+        "ENRICHED_METADATA" in artifact_types
+        or checkpoint.get("semantic_enrichment_status") == "COMPLETED"
+        or checkpoint.get("enriched_metadata")
+    )
+    gate3_payload = (
+        checkpoint.get("enrichment_review_artifact")
+        if isinstance(checkpoint.get("enrichment_review_artifact"), dict)
+        else {}
+    )
+    bronze_review_ready = bool(checkpoint.get("bronze_review_artifact") or checkpoint.get("bronze_generation_results"))
+    silver_review_ready = bool(checkpoint.get("silver_review_artifact") or checkpoint.get("silver_generation_results"))
+
+    gate_state = _file_next_gate_and_message(
+        gate1_decision=gate1_decision,
+        gate2_decision=gate2_decision,
+        gate3_decision=gate3_decision,
+        gate4_decision=gate4_decision,
+        gate5_decision=gate5_decision,
+        feed_review_ready=feed_review_ready,
+        source_ingestion_completed=source_ingestion_completed,
+        semantic_enrichment_completed=semantic_enrichment_completed,
+        bronze_review_ready=bronze_review_ready,
+        silver_review_ready=silver_review_ready,
+        gate3_payload=gate3_payload,
+        column_profiling_completed=generation_flags["column_profiling_completed"],
+        schema_discovery_completed=generation_flags["schema_discovery_completed"],
+    )
+    next_gate = gate_state["next_gate"]
+
+    status = _file_status(
+        checkpoint=checkpoint,
+        next_gate=next_gate,
+        gate5_decision=gate5_decision,
+        gold_generation_completed=generation_flags["gold_generation_completed"],
+        silver_generation_completed=generation_flags["silver_generation_completed"],
+        gate1_decision=gate1_decision,
+        gate2_decision=gate2_decision,
+        source_ingestion_completed=source_ingestion_completed,
+        feed_review_ready=feed_review_ready,
+    )
+
+    pipeline_steps = build_pipeline_steps(
+        source=str(checkpoint.get("source") or "sftp").lower(),
+        checkpoint=checkpoint,
+        summary=summary,
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={"summary_only": True} if semantic_enrichment_completed else {},
+        gate3_payload=gate3_payload,
+        bronze_generation_completed=generation_flags["bronze_generation_completed"],
+        silver_generation_completed=generation_flags["silver_generation_completed"],
+        gold_generation_completed=generation_flags["gold_generation_completed"],
+    )
+    waiting_gate_key = f"gate{next_gate}" if next_gate in {1, 2, 3, 4, 5} else None
+    pipeline_steps = apply_waiting_stage_state(pipeline_steps, waiting_gate_key)
+
+    return {
+        "checkpoint": checkpoint,
+        "summary": summary,
+        "status": status,
+        "pipeline_steps": pipeline_steps,
+        "next_gate": next_gate,
+        "resume_message": gate_state["resume_message"],
+        "stage_confirmation": None,
+        "display_name": _file_display_name(checkpoint),
+        "sftp_entity": checkpoint.get("sftp_entity") or "transactions",
+        "source_row_count": checkpoint.get("source_row_count"),
+        "source_columns": checkpoint.get("source_columns") if isinstance(checkpoint.get("source_columns"), list) else [],
+        "bronze": {"generated_at": None, "scripts": []},
+        "silver": {"generated_at": None, "scripts": []},
+        "gold": {"generated_at": None, "scripts": []},
+    }
+
+
+def _summary_run_data(run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+    checkpoint = load_checkpoint_state(run_id) or {}
+    summary = fetch_run_summary(run_id)
+    if api_utils.is_file_source(checkpoint.get("source")):
+        context = _file_source_summary_context(run_id, checkpoint, summary)
+        return checkpoint, context, summary, checkpoint
+    return get_run_data(run_id)
 
 
 def build_kpis(run_id: str, checkpoint: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -162,7 +414,7 @@ def build_ui_payload(
 
 
 def ui_run_summary(run_id: str) -> Dict[str, Any]:
-    _, context, summary, checkpoint = get_run_data(run_id)
+    _, context, summary, checkpoint = _summary_run_data(run_id)
     status = status_from_context(context)
     run_failed_stage_key = failed_stage_key(checkpoint, context.get("pipeline_steps") or [])
     failed_stage_label = api_utils.stage_label_from_key(run_failed_stage_key, checkpoint.get("source"))

@@ -105,10 +105,10 @@ export function getPipelineSteps(run) {
   return [] as PipelineStep[]
 }
 
-export function getPhaseGroups(run) {
+export function getPhaseGroups(run, stepsOverride?) {
   const sourceType = isFileSource(run) ? 'file' : 'database'
   const templates = PIPELINE_PHASE_TEMPLATES[sourceType]
-  const steps = getPipelineSteps(run)
+  const steps = Array.isArray(stepsOverride) ? stepsOverride : getPipelineSteps(run)
   const byKey = new Map<string, PipelineStep>(steps.map((step) => [step.key, step]))
 
   return templates.map((phase) => {

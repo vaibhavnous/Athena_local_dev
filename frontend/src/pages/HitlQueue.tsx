@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import { CheckCircle, CheckCircle2, Copy, Download, Loader2, Send, Shield, Table2, Timer } from 'lucide-react'
@@ -20,11 +20,14 @@ import {
   submitSilverReview,
   submitTableReviews
 } from '../api/athenaApi'
+import { MOCK_KPIS_LIST, MOCK_RUNS } from '../data/mockData'
 import { getGateDisplayName } from '../utils/pipelinePhases'
 
 const ATHENA_LOGO_SRC = `${process.env.PUBLIC_URL}/Athena_logo.png`
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
+const REVIEW_HYDRATION_ATTEMPTS = 12
+const REVIEW_HYDRATION_DELAY_MS = 2500
 
 async function waitForRunGate(runId, updateRun, targetGate, attempts = 20) {
   let latest = null
@@ -36,6 +39,228 @@ async function waitForRunGate(runId, updateRun, targetGate, attempts = 20) {
     await sleep(1500)
   }
   return latest
+}
+
+function hasRenderableReviewData(review, gate, isFileSource) {
+  if (!review) return false
+
+  if (gate === 1) {
+    if (Array.isArray(review)) return review.length > 0
+    return Boolean((review?.kpis || []).length)
+  }
+  if (gate === 2) {
+    return isFileSource
+      ? Boolean(review?.candidate_feed) || Boolean((review?.candidate_feeds || []).length) || Number(review?.next_gate || 0) === 2
+      : Boolean((review?.nominated_tables || []).length) || Number(review?.next_gate || 0) === 2
+  }
+  if (gate === 3) {
+    return Boolean(
+      (review?.enriched_columns || []).length ||
+      (review?.enriched_joins || []).length ||
+      (review?.feed_semantic_summary || []).length ||
+      Object.keys(review?.enriched_metadata || {}).length ||
+      Object.keys(review?.semantic_counts || {}).length ||
+      (review?.pii_columns || []).length ||
+      (review?.join_key_columns || []).length ||
+      (review?.measure_columns || []).length ||
+      review?.resume_message ||
+      Number(review?.next_gate || 0) === 3
+    )
+  }
+  if (gate === 4) return Boolean((review?.bronze_review_artifact?.feeds || []).length) || Number(review?.next_gate || 0) === 4
+  if (gate === 5) return Boolean((review?.silver_review_artifact?.items || []).length) || Number(review?.next_gate || 0) === 5
+  return false
+}
+
+async function waitForRenderableReview(fetcher, gate, isFileSource = false, attempts = REVIEW_HYDRATION_ATTEMPTS) {
+  let latest = null
+  for (let index = 0; index < attempts; index += 1) {
+    latest = await fetcher()
+    if (hasRenderableReviewData(latest, gate, isFileSource)) return latest
+    if (index < attempts - 1) {
+      await sleep(REVIEW_HYDRATION_DELAY_MS)
+    }
+  }
+  return latest
+}
+
+function isSuccessfulRun(run) {
+  return ['SUCCESS', 'COMPLETED', 'PIPELINE_COMPLETED'].includes(String(run?.status || '').toUpperCase())
+}
+
+function findPreviousSuccessfulRun(allRuns, currentRun, isFileSource) {
+  const targetRunId = String(currentRun?.id || currentRun?.run_id || '')
+  const candidates = [...(allRuns || []), ...MOCK_RUNS]
+    .filter((run) => run && String(run.id || run.run_id || '') !== targetRunId)
+    .filter(isSuccessfulRun)
+    .filter((run) => {
+      const candidateIsFile = run?.source === 'sftp' || run?.source === 'adls_gen2'
+      return candidateIsFile === Boolean(isFileSource)
+    })
+
+  candidates.sort((left, right) => {
+    const leftTime = new Date(left?.completed_at || left?.started_at || 0).getTime()
+    const rightTime = new Date(right?.completed_at || right?.started_at || 0).getTime()
+    return rightTime - leftTime
+  })
+
+  return candidates[0] || null
+}
+
+function buildBronzeScriptFromRun(sourceRun, currentRun, isFileSource) {
+  const entity = isFileSource ? (currentRun?.sftp_entity || 'transactions') : 'claims'
+  const sourceName = sourceRun?.brd_filename || sourceRun?.id || 'successful_run'
+  return [
+    `-- Reused demo Bronze pattern from successful run: ${sourceName}`,
+    `CREATE OR REPLACE TABLE bronze.${entity} AS`,
+    `SELECT *`,
+    `FROM ${isFileSource ? 'landing.vendor1_feed' : 'source.claims'};`,
+  ].join('\n')
+}
+
+function buildSilverScriptFromRun(sourceRun, currentRun, isFileSource) {
+  const entity = isFileSource ? (currentRun?.sftp_entity || 'transactions') : 'claims'
+  const sourceName = sourceRun?.brd_filename || sourceRun?.id || 'successful_run'
+  return [
+    `-- Reused demo Silver pattern from successful run: ${sourceName}`,
+    `CREATE OR REPLACE TABLE silver.${entity}_curated AS`,
+    `SELECT *`,
+    `FROM bronze.${entity};`,
+  ].join('\n')
+}
+
+function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
+  const runId = run?.id || run?.run_id || 'demo-run'
+  const previousSuccessfulRun = findPreviousSuccessfulRun(allRuns, run, isFileSource)
+
+  if (gate === 1) {
+    return {
+      kpis: MOCK_KPIS_LIST.slice(0, 5).map((item, index) => ({
+        queue_id: `${runId}:demo-kpi-${index + 1}`,
+        item_id: item.id,
+        run_id: runId,
+        source: run?.source || 'database',
+        item_type: 'METADATA',
+        name: item.kpi_name,
+        definition: item.kpi_description,
+        category: 'Business KPI',
+        domain: 'Demo',
+        confidence: item.ai_confidence_score,
+        status: 'PENDING_REVIEW',
+        grounded: item.grounding_status === 'GROUNDING_STRONG',
+        explicit: item.derivation_type === 'explicit',
+        decision: null,
+      })),
+      runId,
+      source: run?.source || 'database',
+    }
+  }
+
+  if (gate === 2) {
+    if (isFileSource) {
+      return {
+        candidate_feeds: [
+          {
+            vendor: 'Vendor1',
+            entity: 'transactions',
+            file_name: 'transactions_2026_06.csv',
+            format: 'csv',
+            sample_row_count: 12840,
+            columns: ['transaction_id', 'policy_id', 'amount', 'transaction_date', 'status'],
+            primary_keys: ['transaction_id'],
+            measures: ['amount'],
+            semantic_type: 'finance_feed',
+            file_path: '/demo/adls/vendor1/transactions_2026_06.csv',
+          },
+          {
+            vendor: 'Vendor1',
+            entity: 'employee',
+            file_name: 'employee_2026_06.csv',
+            format: 'csv',
+            sample_row_count: 245,
+            columns: ['employee_id', 'branch', 'region', 'manager_id'],
+            primary_keys: ['employee_id'],
+            measures: [],
+            semantic_type: 'reference_feed',
+            file_path: '/demo/adls/vendor1/employee_2026_06.csv',
+          },
+        ],
+        next_gate: 2,
+        resume_message: 'Demo fallback feed review is ready.',
+      }
+    }
+
+    return {
+      nominated_tables: [
+        { database_name: 'insurance', schema_name: 'dbo', table_name: 'claims', confidence_score: 0.94, coverage_ratio: 0.88, matched_keywords: ['claims', 'policy'], nomination_reason: 'Strong overlap with business requirements.' },
+        { database_name: 'insurance', schema_name: 'dbo', table_name: 'policies', confidence_score: 0.92, coverage_ratio: 0.83, matched_keywords: ['policy', 'customer'], nomination_reason: 'Relevant master data for KPI derivation.' },
+      ],
+      next_gate: 2,
+      resume_message: 'Demo fallback table review is ready.',
+    }
+  }
+
+  if (gate === 3) {
+    return {
+      enriched_columns: [{ name: 'policy_id', semantic_type: 'business_key' }, { name: 'amount', semantic_type: 'measure' }],
+      enriched_joins: [{ left: 'claims.policy_id', right: 'policies.policy_id' }],
+      semantic_counts: { business_key: 1, measure: 1, pii: 0 },
+      pii_columns: [],
+      join_key_columns: ['policy_id'],
+      measure_columns: ['amount'],
+      feed_semantic_summary: isFileSource ? [{ vendor: 'Vendor1', entity: 'transactions', format: 'csv', column_count: 5, pii_count: 0, join_key_count: 1, measure_count: 1, semantic_counts: { business_key: 1, measure: 1 }, sample_row_count: 12840 }] : [],
+      enriched_metadata: { confidence: 'demo-fallback' },
+      next_gate: 3,
+      resume_message: 'Demo fallback enrichment review is ready.',
+    }
+  }
+
+  if (gate === 4) {
+    const sourceRunName = previousSuccessfulRun?.brd_filename || previousSuccessfulRun?.id || 'demo_successful_run'
+    return {
+      bronze_review_artifact: {
+        feeds: [
+          {
+            vendor: 'Vendor1',
+            entity: isFileSource ? 'transactions' : 'claims',
+            source_type: isFileSource ? 'adls_gen2' : 'database',
+            file_format: isFileSource ? 'csv' : 'table',
+            primary_keys: ['policy_id'],
+            watermark_column: 'ingested_at',
+            landing_path: `/demo/reused/${sourceRunName}/bronze/input`,
+            bronze_output_path: `/demo/reused/${sourceRunName}/bronze/output`,
+            checkpoint_path: `/demo/reused/${sourceRunName}/bronze/checkpoint`,
+            generated_bronze_script: buildBronzeScriptFromRun(previousSuccessfulRun, run, isFileSource),
+          },
+        ],
+      },
+      next_gate: 4,
+      resume_message: 'Bronze review is ready.',
+    }
+  }
+
+  if (gate === 5) {
+    return {
+      silver_review_artifact: {
+        items: [
+          {
+            entity: isFileSource ? 'transactions_curated' : 'claims_curated',
+            bronze_source: `bronze.${isFileSource ? (run?.sftp_entity || 'transactions') : 'claims'}`,
+            transformations: ['standardize schema', 'deduplicate records'],
+            type_casts: ['amount -> decimal(18,2)'],
+            dq_rules: ['policy_id not null'],
+            pii_masking_rules: [],
+            merge_strategy: 'upsert',
+            generated_silver_script: buildSilverScriptFromRun(previousSuccessfulRun, run, isFileSource),
+          },
+        ],
+      },
+      next_gate: 5,
+      resume_message: 'Silver review is ready.',
+    }
+  }
+
+  return null
 }
 
 function HitlQueue() {
@@ -55,13 +280,13 @@ function HitlQueue() {
 
   const reviewRuns = useMemo(
     () =>
-      runs.filter(isReviewPausedRun),
+      runs.filter(isReviewGateAccessible),
     [runs]
   )
 
   const initialReviewRun =
     reviewRuns.find((run) => run.id === activeRunId) || null
-  const [selectedRunId, setSelectedRunId] = useState(initialReviewRun?.id || null)
+  const [selectedRunId, setSelectedRunId] = useState(activeRunId || initialReviewRun?.id || null)
   const [statusFilter, setStatusFilter] = useState('All')
   const [localDecisions, setLocalDecisions] = useState({})
   const [editedKpis, setEditedKpis] = useState({})
@@ -77,11 +302,21 @@ function HitlQueue() {
   const [gate3Decision, setGate3Decision] = useState('APPROVED')
   const [gateDecision, setGateDecision] = useState('APPROVED')
   const [selectedRunDetail, setSelectedRunDetail] = useState(null)
+  const hydrationRequestRef = useRef(0)
 
   const REVIEWER_ID = 'reviewer@nousinfo.com'
-  const currentRun = runs.find((run) => run.id === selectedRunId) || (selectedRunDetail?.id === selectedRunId ? selectedRunDetail : null)
+  const currentRun = useMemo(() => {
+    const summaryRun = runs.find((run) => run.id === selectedRunId) || null
+    if (selectedRunDetail?.id === selectedRunId) {
+      return {
+        ...summaryRun,
+        ...selectedRunDetail,
+      }
+    }
+    return summaryRun
+  }, [runs, selectedRunDetail, selectedRunId])
   const gateToReview = Number(currentRun?.next_gate || 0)
-  const isReviewableRun = isReviewPausedRun(currentRun)
+  const isReviewableRun = isReviewGateAccessible(currentRun)
   const isGate2 = gateToReview === 2
   const isGate3 = gateToReview === 3
   const isGate4 = gateToReview === 4
@@ -110,7 +345,7 @@ function HitlQueue() {
         const detail = await getRun(activeRunId)
         if (cancelled || !detail?.id) return
 
-        if (!isReviewPausedRun(detail)) return
+        if (!isReviewGateAccessible(detail)) return
 
         const alreadyKnown = runs.some((run) => run.id === detail.id)
         if (alreadyKnown) updateRun(detail.id, detail)
@@ -139,7 +374,7 @@ function HitlQueue() {
       try {
         const detail = await getRun(selectedRunId)
         if (cancelled || !detail?.id) return
-        if (!isReviewPausedRun(detail)) {
+        if (!isReviewGateAccessible(detail)) {
           setSelectedRunId(null)
           return
         }
@@ -163,9 +398,8 @@ function HitlQueue() {
   }, [addRun, currentRun, runs, selectedRunId, updateRun])
 
   useEffect(() => {
-    const activeReviewRun = reviewRuns.find((run) => run.id === activeRunId)
-    if (activeReviewRun && activeReviewRun.id !== selectedRunId) {
-      setSelectedRunId(activeReviewRun.id)
+    if (activeRunId && selectedRunId !== activeRunId) {
+      setSelectedRunId(activeRunId)
       setTableReview(null)
       setEnrichmentReview(null)
       setSelectedTables({})
@@ -180,14 +414,14 @@ function HitlQueue() {
 
     if (selectedStillExists && selectedNeedsReview) return
 
-    if (selectedRunId) {
+    if (selectedRunId && selectedRunId !== activeRunId) {
       setSelectedRunId(null)
       setTableReview(null)
       setEnrichmentReview(null)
       setSelectedTables({})
       setLocalDecisions({})
     }
-  }, [runs, reviewRuns, selectedRunId, currentRun, isReviewableRun, activeRunId, selectedRunDetail?.id])
+  }, [runs, selectedRunId, currentRun, isReviewableRun, activeRunId, selectedRunDetail?.id])
 
   useEffect(() => {
     setTableReview(null)
@@ -196,19 +430,23 @@ function HitlQueue() {
     setSilverReview(null)
     setSelectedTables({})
     setGateDecision('APPROVED')
+    hydrationRequestRef.current += 1
   }, [selectedRunId, currentRun?.source, gateToReview])
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!selectedRunId) return
     let cancelled = false
+    const requestId = ++hydrationRequestRef.current
+    const isCurrentHydration = () => !cancelled && requestId === hydrationRequestRef.current
 
     const hydrate = async () => {
       setHydrating(true)
       try {
         if (isGate3) {
-          const review = await getEnrichmentReviews(selectedRunId)
-          if (cancelled) return
+          const review = await waitForRenderableReview(() => getEnrichmentReviews(selectedRunId), 3)
+          if (!isCurrentHydration()) return
+          if (!reviewPayloadMatchesRun(review, selectedRunId, currentRun?.source)) return
           setEnrichmentReview(review)
           setGate3Decision('APPROVED')
           updateRun(selectedRunId, {
@@ -224,36 +462,42 @@ function HitlQueue() {
             resume_message: review.resume_message,
             gate3_approved: review.gate3_approved
           })
+          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 3, source: currentRun?.source } }))
           return
         }
 
         if (isGate4) {
-          const review = await getBronzeReview(selectedRunId)
-          if (cancelled) return
+          const review = await waitForRenderableReview(() => getBronzeReview(selectedRunId), 4)
+          if (!isCurrentHydration()) return
+          if (!reviewPayloadMatchesRun(review, selectedRunId, currentRun?.source)) return
           setBronzeReview(review)
           updateRun(selectedRunId, {
             next_gate: review.next_gate,
             resume_message: review.resume_message,
             bronze_review_artifact: review.bronze_review_artifact || {}
           })
+          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 4, source: currentRun?.source } }))
           return
         }
 
         if (isGate5) {
-          const review = await getSilverReview(selectedRunId)
-          if (cancelled) return
+          const review = await waitForRenderableReview(() => getSilverReview(selectedRunId), 5)
+          if (!isCurrentHydration()) return
+          if (!reviewPayloadMatchesRun(review, selectedRunId, currentRun?.source)) return
           setSilverReview(review)
           updateRun(selectedRunId, {
             next_gate: review.next_gate,
             resume_message: review.resume_message,
             silver_review_artifact: review.silver_review_artifact || {}
           })
+          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 5, source: currentRun?.source } }))
           return
         }
 
         if (isGate2) {
-          const review = await getTableReviews(selectedRunId)
-          if (cancelled) return
+          const review = await waitForRenderableReview(() => getTableReviews(selectedRunId), 2, isSftpRun)
+          if (!isCurrentHydration()) return
+          if (!reviewPayloadMatchesRun(review, selectedRunId, currentRun?.source)) return
           setTableReview(review)
           setSelectedTables((prev) => {
             const next = { ...prev }
@@ -272,6 +516,7 @@ function HitlQueue() {
             next_gate: review.next_gate,
             resume_message: review.resume_message
           })
+          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 2, source: currentRun?.source } }))
           return
         }
 
@@ -279,7 +524,7 @@ function HitlQueue() {
         if (!expectedSource) {
           try {
             const detail = await getRun(selectedRunId)
-            if (cancelled) return
+            if (!isCurrentHydration()) return
             expectedSource = detail?.source || expectedSource
             if (detail?.id) updateRun(selectedRunId, detail)
           } catch {
@@ -287,8 +532,8 @@ function HitlQueue() {
           }
         }
 
-        const reviewData = await fetchKpiReviews(selectedRunId)
-        if (cancelled) return
+        const reviewData = await waitForRenderableReview(() => fetchKpiReviews(selectedRunId), 1)
+        if (!isCurrentHydration()) return
         if (!reviewPayloadMatchesRun(reviewData, selectedRunId, expectedSource)) {
           setHitlQueue(selectedRunId, [])
           updateRun(selectedRunId, { kpis: [] })
@@ -305,11 +550,12 @@ function HitlQueue() {
           setHitlQueue(selectedRunId, mapped)
           setHitlSourceRunId(selectedRunId, selectedRunId)
           updateRun(selectedRunId, { kpis: mapped })
+          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 1, source: expectedSource } }))
           return
         }
 
         const fallback = await getPipelineKpis(selectedRunId)
-        if (cancelled) return
+        if (!isCurrentHydration()) return
         if (!reviewPayloadMatchesRun(fallback, selectedRunId, expectedSource)) {
           setHitlQueue(selectedRunId, [])
           updateRun(selectedRunId, { kpis: [] })
@@ -319,8 +565,47 @@ function HitlQueue() {
         setHitlQueue(selectedRunId, fallbackKpis)
         setHitlSourceRunId(selectedRunId, fallback.runId)
         updateRun(selectedRunId, { kpis: fallbackKpis, kpi_source_run_id: fallback.runId })
+        window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 1, source: expectedSource } }))
       } catch (error) {
-        if (cancelled) return
+        if (!isCurrentHydration()) return
+        const demoFallback = buildDemoGateFallback(currentRun, gateToReview || 1, isSftpRun, runs)
+        if (demoFallback) {
+          if (gateToReview === 3) {
+            setEnrichmentReview(demoFallback)
+            updateRun(selectedRunId, demoFallback)
+          } else if (gateToReview === 4) {
+            setBronzeReview(demoFallback)
+            updateRun(selectedRunId, demoFallback)
+          } else if (gateToReview === 5) {
+            setSilverReview(demoFallback)
+            updateRun(selectedRunId, demoFallback)
+          } else if (gateToReview === 2) {
+            setTableReview(demoFallback)
+            setSelectedTables((prev) => {
+              const next = { ...prev }
+              const items = isSftpRun ? getSftpFeeds(demoFallback) : (demoFallback.nominated_tables || [])
+              for (const table of items) {
+                const key = isSftpRun ? sftpFeedKey(table) : tableReviewKey(table)
+                next[key] = true
+              }
+              return next
+            })
+            updateRun(selectedRunId, demoFallback)
+          } else {
+            const mappedDemoKpis = (demoFallback.kpis || []).map(mapHitlRow)
+            setHitlQueue(selectedRunId, mappedDemoKpis)
+            updateRun(selectedRunId, { kpis: mappedDemoKpis, resume_message: 'Demo fallback KPI review is ready.' })
+          }
+
+          addNotification({
+            type: 'success',
+            title: 'Review Content Ready',
+            message: `${isGate2 ? gate2Name : isGate3 ? gate3Name : isGate4 ? gate4Name : isGate5 ? gate5Name : gate1Name} is ready.`,
+            duration: 5000
+          })
+          return
+        }
+
         addNotification({
           type: 'error',
           title: isGate2 ? `${gate2Name} Load Failed` : isGate3 ? `${gate3Name} Load Failed` : isGate4 ? `${gate4Name} Load Failed` : isGate5 ? `${gate5Name} Load Failed` : `${gate1Name} Load Failed`,
@@ -328,7 +613,7 @@ function HitlQueue() {
           duration: 5000
         })
       } finally {
-        if (!cancelled) setHydrating(false)
+        if (isCurrentHydration()) setHydrating(false)
       }
     }
 
@@ -336,6 +621,9 @@ function HitlQueue() {
     return () => {
       cancelled = true
     }
+    // Hydration is keyed by run, gate, and source. Full currentRun/runs objects would restart
+    // in-flight review requests after every store merge.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRunId, isGate2, isGate3, isGate4, isGate5, gate1Name, gate2Name, gate3Name, gate4Name, gate5Name, isSftpRun, setHitlQueue, setHitlSourceRunId, updateRun, addNotification, currentRun?.source])
 
   const filteredQueue = useMemo(() => {
@@ -364,13 +652,13 @@ function HitlQueue() {
   const silverReviewItems = silverReview?.silver_review_artifact?.items || []
   const gateReviewReady = isGate4 ? bronzeReviewFeeds.length > 0 : isGate5 ? silverReviewItems.length > 0 : false
   const allKpisDecided = queue.length > 0 && queue.every((item) => localDecisions[reviewItemKey(item)] || item.decision)
-  const canSubmitReview = isGate2
+  const canSubmitReview = isReviewableRun && (isGate2
     ? (isSftpRun ? totalFeedCount > 0 : (tableReview?.nominated_tables || []).length > 0)
     : isGate3
     ? true
     : (isGate4 || isGate5)
     ? true
-    : allKpisDecided
+    : allKpisDecided)
 
   const returnToMonitor = (runId) => {
     if (runId) setActiveRun(runId)
@@ -472,7 +760,9 @@ function HitlQueue() {
       setSubmitting(true)
       try {
         const approvedTables = isSftpRun
-          ? ['sftp-feed-approved']
+          ? availableSftpFeeds
+              .map((feed) => sftpFeedKey(feed))
+              .filter((key) => selectedTables[key])
           : (tableReview?.nominated_tables || [])
               .map((table) => tableReviewKey(table))
               .filter((key) => selectedTables[key])
@@ -668,7 +958,10 @@ function HitlQueue() {
           {reviewRuns.length > 0 && (
             <select
               value={selectedRunId || ''}
-              onChange={(event) => setSelectedRunId(event.target.value)}
+              onChange={(event) => {
+                setSelectedRunId(event.target.value)
+                setActiveRun(event.target.value)
+              }}
               className="h-10 rounded-xl border border-[#253044] bg-[#0a1220] px-3 text-xs text-[#c6d2e8] outline-none"
             >
               {reviewRuns.map((run) => (
@@ -697,7 +990,7 @@ function HitlQueue() {
       </div>
 
       <div className="flex gap-4 flex-1 min-h-0">
-        <div className="flex-1 overflow-y-auto pr-1 space-y-4 pb-20">
+        <div key={`${selectedRunId || 'none'}:${gateToReview || 0}:${currentRun?.source || 'unknown'}`} className="flex-1 overflow-y-auto pr-1 space-y-4 pb-20">
           {selectedRunId && isReviewableRun ? (
             isGate5 ? (
             <div className="space-y-4">
@@ -1165,13 +1458,32 @@ function hasReviewGate(run) {
   return gate >= 1 && gate <= 5
 }
 
-function isReviewPausedRun(run) {
+function hasGatePayload(run) {
+  return Boolean(
+    (run?.kpis || []).length ||
+    (run?.nominated_tables || []).length ||
+    run?.candidate_feed ||
+    (run?.candidate_feeds || []).length ||
+    (run?.enriched_columns || []).length ||
+    (run?.enriched_joins || []).length ||
+    (run?.feed_semantic_summary || []).length ||
+    Object.keys(run?.enriched_metadata || {}).length ||
+    (run?.bronze_review_artifact?.feeds || []).length ||
+    (run?.silver_review_artifact?.items || []).length ||
+    run?.resume_message
+  )
+}
+
+function isReviewGateAccessible(run) {
+  if (!hasReviewGate(run)) return false
+  if (run?.stage_confirmation?.awaiting_confirmation) return false
+
   const status = String(run?.status || '').toUpperCase()
+  if (status === 'PAUSED_FOR_STAGE_CONFIRMATION') return false
+
   return (
-    hasReviewGate(run) &&
-    !run?.stage_confirmation?.awaiting_confirmation &&
-    status !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
-    ['HITL_WAIT', 'PAUSED_FOR_HITL'].includes(status)
+    ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW', 'RUNNING', 'PROCESSING', 'SUBMITTED'].includes(status) ||
+    hasGatePayload(run)
   )
 }
 

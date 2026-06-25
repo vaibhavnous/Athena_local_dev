@@ -1,22 +1,192 @@
 // @ts-nocheck
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Play, RefreshCcw, RotateCcw, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
-import { getPhaseGroups, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
+import { getPhaseGroups, getPipelineSteps, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
 import { abortRun, continueStage, getRun, getRuns, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
+
+const MIN_STAGE_VISIBLE_MS = 60000
+const STAGE_TERMINAL_STATES = new Set(['COMPLETED', 'FAILED', 'HITL_WAIT'])
+
+function isTimeoutError(error) {
+  return error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '')
+}
 
 function PipelineMonitor() {
   const navigate = useNavigate()
   const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline, addNotification, addRun } = useAthenaStore()
   const activeRun = runs.find((run) => run.id === activeRunId) || runs[0] || null
-  const phases = useMemo(() => getPhaseGroups(activeRun), [activeRun])
+  const runsRequestInFlightRef = useRef(false)
+  const activeRunRequestInFlightRef = useRef(false)
+  const runningStepSinceRef = useRef<Record<string, number>>({})
+  const stepHoldTimersRef = useRef<Record<string, number>>({})
+  const [stepStateOverrides, setStepStateOverrides] = useState<Record<string, string>>({})
+  const actualSteps = useMemo(() => getPipelineSteps(activeRun), [activeRun])
+  const displaySteps = useMemo(
+    () =>
+      actualSteps.map((step) => ({
+        ...step,
+        state: stepStateOverrides[step.key] || step.state,
+      })),
+    [actualSteps, stepStateOverrides]
+  )
+  const actualPhases = useMemo(() => getPhaseGroups(activeRun, actualSteps), [activeRun, actualSteps])
+  const phases = useMemo(() => getPhaseGroups(activeRun, displaySteps), [activeRun, displaySteps])
+
+  useEffect(() => {
+    return () => {
+      for (const timerId of Object.values(stepHoldTimersRef.current)) {
+        window.clearTimeout(timerId)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    for (const timerId of Object.values(stepHoldTimersRef.current)) {
+      window.clearTimeout(timerId)
+    }
+    stepHoldTimersRef.current = {}
+    runningStepSinceRef.current = {}
+    setStepStateOverrides({})
+
+    if (!activeRun) return
+
+    const now = Date.now()
+    for (const step of actualSteps) {
+      if (step.state === 'RUNNING' && !runningStepSinceRef.current[step.key]) {
+        runningStepSinceRef.current[step.key] = now
+      }
+    }
+
+    return () => {
+      for (const timerId of Object.values(stepHoldTimersRef.current)) {
+        window.clearTimeout(timerId)
+      }
+      stepHoldTimersRef.current = {}
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRun?.id])
+
+  useEffect(() => {
+    if (!activeRun) {
+      setStepStateOverrides({})
+      return
+    }
+
+    const now = Date.now()
+    const activeStepKeys = new Set(actualSteps.map((step) => step.key))
+    const stepIndexByKey = new Map(actualSteps.map((step, index) => [step.key, index]))
+    const actualActiveIndex = actualSteps.reduce((latest, step, index) => {
+      return ['RUNNING', 'HITL_WAIT'].includes(step.state) ? Math.max(latest, index) : latest
+    }, -1)
+
+    for (const key of Object.keys(stepHoldTimersRef.current)) {
+      if (!activeStepKeys.has(key)) {
+        window.clearTimeout(stepHoldTimersRef.current[key])
+        delete stepHoldTimersRef.current[key]
+      }
+    }
+
+    setStepStateOverrides((current) => {
+      const next = { ...current }
+      let changed = false
+
+      for (const step of actualSteps) {
+        const runningSince = runningStepSinceRef.current[step.key]
+
+        if (step.state === 'RUNNING') {
+          if (!runningSince) {
+            runningStepSinceRef.current[step.key] = now
+          }
+          if (next[step.key]) {
+            delete next[step.key]
+            changed = true
+          }
+          if (stepHoldTimersRef.current[step.key]) {
+            window.clearTimeout(stepHoldTimersRef.current[step.key])
+            delete stepHoldTimersRef.current[step.key]
+          }
+          continue
+        }
+
+        if (runningSince && STAGE_TERMINAL_STATES.has(step.state)) {
+          const stepIndex = stepIndexByKey.get(step.key) ?? -1
+          if (actualActiveIndex > stepIndex) {
+            delete runningStepSinceRef.current[step.key]
+            if (next[step.key]) {
+              delete next[step.key]
+              changed = true
+            }
+            if (stepHoldTimersRef.current[step.key]) {
+              window.clearTimeout(stepHoldTimersRef.current[step.key])
+              delete stepHoldTimersRef.current[step.key]
+            }
+            continue
+          }
+
+          const remaining = Math.max(0, MIN_STAGE_VISIBLE_MS - (now - runningSince))
+          if (remaining > 0) {
+            if (next[step.key] !== 'RUNNING') {
+              next[step.key] = 'RUNNING'
+              changed = true
+            }
+            if (!stepHoldTimersRef.current[step.key]) {
+              stepHoldTimersRef.current[step.key] = window.setTimeout(() => {
+                delete runningStepSinceRef.current[step.key]
+                delete stepHoldTimersRef.current[step.key]
+                setStepStateOverrides((latest) => {
+                  if (!latest[step.key]) return latest
+                  const updated = { ...latest }
+                  delete updated[step.key]
+                  return updated
+                })
+              }, remaining)
+            }
+            continue
+          }
+        }
+
+        delete runningStepSinceRef.current[step.key]
+        if (next[step.key]) {
+          delete next[step.key]
+          changed = true
+        }
+        if (stepHoldTimersRef.current[step.key]) {
+          window.clearTimeout(stepHoldTimersRef.current[step.key])
+          delete stepHoldTimersRef.current[step.key]
+        }
+      }
+
+      for (const key of Object.keys(next)) {
+        if (!activeStepKeys.has(key)) {
+          delete next[key]
+          changed = true
+        }
+      }
+
+      return changed ? next : current
+    })
+  }, [activeRun, actualSteps])
 
   useEffect(() => {
     let cancelled = false
+    let timer: number | null = null
+
+    const scheduleNext = (delay = 8000) => {
+      if (!cancelled) {
+        timer = window.setTimeout(refreshRuns, delay)
+      }
+    }
 
     const refreshRuns = async () => {
+      if (runsRequestInFlightRef.current) {
+        scheduleNext()
+        return
+      }
+
+      runsRequestInFlightRef.current = true
       try {
         const data = await getRuns()
         if (!cancelled && Array.isArray(data)) {
@@ -24,24 +194,45 @@ function PipelineMonitor() {
           setServerOnline(true)
         }
       } catch (error) {
-        if (!cancelled) setServerOnline(false)
-        if (!cancelled) console.warn('[PipelineMonitor] Failed to refresh runs', error)
+        if (!cancelled) {
+          if (!isTimeoutError(error)) {
+            setServerOnline(false)
+            console.warn('[PipelineMonitor] Failed to refresh runs', error)
+          } else {
+            console.debug('[PipelineMonitor] Runs refresh timed out; keeping existing data')
+          }
+        }
+      } finally {
+        runsRequestInFlightRef.current = false
+        scheduleNext()
       }
     }
 
     refreshRuns()
-    const timer = window.setInterval(refreshRuns, 8000)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      if (timer !== null) window.clearTimeout(timer)
     }
   }, [setRuns, setServerOnline])
 
   useEffect(() => {
     if (!activeRun?.id) return
     let cancelled = false
+    let timer: number | null = null
+
+    const scheduleNext = (delay = 5000) => {
+      if (!cancelled) {
+        timer = window.setTimeout(refreshActiveRun, delay)
+      }
+    }
 
     const refreshActiveRun = async () => {
+      if (activeRunRequestInFlightRef.current) {
+        scheduleNext()
+        return
+      }
+
+      activeRunRequestInFlightRef.current = true
       try {
         const data = await getRun(activeRun.id)
         if (!cancelled) {
@@ -49,28 +240,37 @@ function PipelineMonitor() {
           setServerOnline(true)
         }
       } catch (error) {
-        if (!cancelled) setServerOnline(false)
-        if (!cancelled) console.warn('[PipelineMonitor] Failed to refresh active run', error)
+        if (!cancelled) {
+          if (!isTimeoutError(error)) {
+            setServerOnline(false)
+            console.warn('[PipelineMonitor] Failed to refresh active run', error)
+          } else {
+            console.debug('[PipelineMonitor] Active run refresh timed out; keeping existing data')
+          }
+        }
+      } finally {
+        activeRunRequestInFlightRef.current = false
+        scheduleNext()
       }
     }
 
     refreshActiveRun()
-    const timer = window.setInterval(refreshActiveRun, 5000)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      if (timer !== null) window.clearTimeout(timer)
     }
   }, [activeRun?.id, updateRun, setServerOnline])
 
   const defaultExpandedPhase = useMemo(() => {
-    if (!phases?.length) return 'phase-1'
-    const activePhase = phases.find((phase) =>
+    const sourcePhases = actualPhases?.length ? actualPhases : phases
+    if (!sourcePhases?.length) return 'phase-1'
+    const activePhase = sourcePhases.find((phase) =>
       phase.steps.some((step) => ['RUNNING', 'HITL_WAIT'].includes(step.state))
     )
     if (activePhase) return activePhase.id
-    const firstIncomplete = phases.find((phase) => phase.completed < phase.total)
-    return firstIncomplete?.id || phases[0].id
-  }, [phases])
+    const firstIncomplete = sourcePhases.find((phase) => phase.completed < phase.total)
+    return firstIncomplete?.id || sourcePhases[0].id
+  }, [actualPhases, phases])
 
   const [expandedPhase, setExpandedPhase] = useState(defaultExpandedPhase)
 
@@ -78,12 +278,13 @@ function PipelineMonitor() {
     setExpandedPhase(defaultExpandedPhase)
   }, [defaultExpandedPhase, activeRun?.id])
 
-  const runLabel = summarizeRunSource(activeRun)
-  const activeTone = statusTone(activeRun?.status)
-  const isFailedRun = String(activeRun?.status || '').toUpperCase() === 'FAILED'
+  const monitorRun = activeRun
+  const runLabel = summarizeRunSource(monitorRun)
+  const activeTone = statusTone(monitorRun?.status)
+  const isFailedRun = String(monitorRun?.status || '').toUpperCase() === 'FAILED'
   const isStageConfirmationPaused =
-    String(activeRun?.status || '').toUpperCase() === 'PAUSED_FOR_STAGE_CONFIRMATION' ||
-    Boolean(activeRun?.stage_confirmation?.awaiting_confirmation)
+    String(monitorRun?.status || '').toUpperCase() === 'PAUSED_FOR_STAGE_CONFIRMATION' ||
+    Boolean(monitorRun?.stage_confirmation?.awaiting_confirmation)
   const [dismissedFailureBannerFor, setDismissedFailureBannerFor] = useState<string | null>(null)
   const [autoAdvanceStages, setAutoAdvanceStages] = useState(false)
   const [stageConfirmSubmitting, setStageConfirmSubmitting] = useState(false)
@@ -97,9 +298,9 @@ function PipelineMonitor() {
     }
   }, [activeRun?.id, dismissedFailureBannerFor, isFailedRun])
 
-  const failureSummary = useMemo(() => buildFailureSummary(activeRun), [activeRun])
-  const stageConfirmation = activeRun?.stage_confirmation || null
-  const stageScriptReview = useMemo(() => buildStageScriptReview(activeRun), [activeRun])
+  const failureSummary = useMemo(() => buildFailureSummary(monitorRun), [monitorRun])
+  const stageConfirmation = monitorRun?.stage_confirmation || null
+  const stageScriptReview = useMemo(() => buildStageScriptReview(monitorRun), [monitorRun])
 
   if (!activeRun) {
     return (
@@ -286,7 +487,7 @@ function PipelineMonitor() {
       <div className="mb-7 flex flex-col gap-4">
         <div className="flex min-h-[72px] items-center justify-between rounded-xl border border-[#1d2940] bg-[#09111f] px-5">
           <div className="min-w-0 pr-4 text-[14px] font-semibold tracking-[0.12em] text-[#8ea0c3]">
-            <span className="truncate">Pipeline - {runLabel} - Run ID - {activeRun.id}</span>
+            <span className="truncate">Pipeline - {runLabel} - Run ID - {monitorRun.id}</span>
           </div>
           <div className="flex flex-shrink-0 items-center gap-3">
             <div className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-[12px] font-semibold ${
@@ -301,12 +502,12 @@ function PipelineMonitor() {
                 : 'border-[#253044] bg-[#0b1120] text-slate-300'
             }`}>
               <span className="h-2 w-2 rounded-full bg-current" />
-              {String(activeRun.status || 'Waiting').replace(/_/g, ' ')}
+              {String(monitorRun.status || 'Waiting').replace(/_/g, ' ')}
             </div>
           </div>
         </div>
 
-        {isFailedRun && dismissedFailureBannerFor !== activeRun.id && (
+        {isFailedRun && dismissedFailureBannerFor !== monitorRun.id && (
           <div className="rounded-2xl border border-red-500/35 bg-[#17111d] px-6 py-5 shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
             <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div className="flex min-w-0 items-start gap-4">
@@ -317,7 +518,7 @@ function PipelineMonitor() {
                 <div className="flex flex-wrap items-center gap-3 text-sm">
                   <div className="flex min-w-0 items-center gap-2 font-semibold text-white">
                     <FileText size={15} className="text-[#b8c3d9]" />
-                    <span className="max-w-[420px] truncate">{activeRun.brd_filename || 'BRD File Name'}</span>
+                    <span className="max-w-[420px] truncate">{monitorRun.brd_filename || 'BRD File Name'}</span>
                   </div>
                   <span className="rounded-lg border border-red-500/35 bg-red-500/12 px-2.5 py-1 text-xs font-semibold text-red-400">
                     Failed
@@ -325,9 +526,9 @@ function PipelineMonitor() {
                   <span className="text-[#d4d9e5]">at `{failureSummary.failedStage}`</span>
                   <span className="text-[#9da7bb]">{failureSummary.progressLabel}</span>
                 </div>
-                {activeRun?.error && (
+                {monitorRun?.error && (
                   <div className="mt-2 max-w-[920px] truncate text-sm text-red-300/90">
-                    {activeRun.error}
+                    {monitorRun.error}
                   </div>
                 )}
                 <div className="mt-2 flex items-center gap-2 text-sm text-[#9da7bb]">
@@ -363,7 +564,7 @@ function PipelineMonitor() {
                 {failureActionSubmitting === 'restart' ? 'Restarting...' : 'Restart'}
               </button>
               <button
-                onClick={() => setDismissedFailureBannerFor(activeRun.id)}
+                onClick={() => setDismissedFailureBannerFor(monitorRun.id)}
                 className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#2e394d] bg-transparent text-[#8d96a9] transition-colors hover:bg-white/5 hover:text-white"
                 aria-label="Dismiss failure banner"
               >
@@ -464,7 +665,7 @@ function PipelineMonitor() {
                 : 'border-[#253044] bg-[#0b1120] text-slate-300'
             }`}>
               <span className="h-2 w-2 rounded-full bg-current" />
-              {String(activeRun.status || 'Waiting').replace(/_/g, ' ')}
+              {String(monitorRun.status || 'Waiting').replace(/_/g, ' ')}
             </div>
           </div>
 

@@ -104,6 +104,7 @@ DEV_MODE=false
 ATHENA_MIN_STAGE_RUNTIME_SECONDS=4
 ATHENA_PIPELINE_JOB_TIMEOUT_SECONDS=3600
 ATHENA_RUNS_ENDPOINT_TIMEOUT_SECONDS=5
+ATHENA_RUNS_LIST_LIMIT=25
 ATHENA_SQL_QUERY_TIMEOUT_SECONDS=5
 ATHENA_BACKGROUND_WORKERS=2
 ATHENA_SQL_CONNECT_RETRIES=3
@@ -149,6 +150,28 @@ Optional embedding gate:
 ```text
 ATHENA_ENABLE_EMBEDDINGS=true
 ```
+
+Optional embedding cache settings for deployed App Service:
+
+```text
+HF_HOME=/home/site/huggingface
+SENTENCE_TRANSFORMERS_HOME=/home/site/huggingface
+ATHENA_EMBEDDING_PRELOAD_REQUIRED=false
+```
+
+Recommended production behavior:
+
+- Set `ATHENA_ENABLE_EMBEDDINGS=true`
+- Set `HF_HOME` and `SENTENCE_TRANSFORMERS_HOME` to a persistent path
+- Keep `ATHENA_EMBEDDING_PRELOAD_REQUIRED=false` for first rollout so the app stays up if Hugging Face download fails
+- After the cache is warmed successfully, switch `ATHENA_EMBEDDING_PRELOAD_REQUIRED=true` if you want startup to fail hard when embeddings are unavailable
+
+Verification after deployment:
+
+- `GET /health`
+- Confirm `embeddings.ready=true`
+- Confirm `embeddings.env_enabled=true`
+- If `ready=false`, inspect `embeddings.reason`, `sentence_transformer_error`, and `langchain_embedding_error`
 
 ## 4. Optional ADLS Settings
 

@@ -19,10 +19,11 @@ def runs() -> List[Dict[str, Any]]:
     try:
         # ✅ configurable timeout with safe minimum
         timeout_seconds = max(1, int(os.getenv("ATHENA_RUNS_ENDPOINT_TIMEOUT_SECONDS", "5")))
+        run_limit = max(1, min(100, int(os.getenv("ATHENA_RUNS_LIST_LIMIT", "25"))))
 
-        logger.debug("Fetching runs list", extra={"timeout_seconds": timeout_seconds})
+        logger.debug("Fetching runs list", extra={"timeout_seconds": timeout_seconds, "limit": run_limit})
 
-        future = BACKGROUND_EXECUTOR.submit(list_runs)
+        future = BACKGROUND_EXECUTOR.submit(list_runs, run_limit)
         rows = future.result(timeout=timeout_seconds)
 
         results: List[Dict[str, Any]] = []

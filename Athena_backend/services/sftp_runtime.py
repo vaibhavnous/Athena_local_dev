@@ -358,7 +358,7 @@ def start_sftp_pipeline(
 
 
 def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
-    logger.info("Building file-source run context run_id=%s", run_id)
+    logger.debug("Building file-source run context run_id=%s", run_id)
     try:
         checkpoint = _safe_dict(load_checkpoint_state(run_id))
         summary = fetch_run_summary(run_id)

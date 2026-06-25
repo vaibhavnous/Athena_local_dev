@@ -51,11 +51,6 @@ stages:
           - script: |
               mkdir -p $(Build.ArtifactStagingDirectory)/backend
               cp -r $(backendFolder)/* $(Build.ArtifactStagingDirectory)/backend/
-              cat > $(Build.ArtifactStagingDirectory)/backend/startup.sh << 'EOF'
-              #!/bin/bash
-              pip install -r requirements.txt
-              python -m uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}
-              EOF
               chmod +x $(Build.ArtifactStagingDirectory)/backend/startup.sh
             displayName: 'Prepare backend artifact'
 

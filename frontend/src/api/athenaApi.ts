@@ -5,11 +5,18 @@ const API_BASE_URL = getApiBaseUrl()
 
 const api = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 60000,
+  timeout: 15000,
   headers: {
     'Content-Type': 'application/json'
   }
 })
+
+const READ_TIMEOUT = 15000
+const RUNS_TIMEOUT = 30000
+const REVIEW_TIMEOUT = 90000
+const WRITE_TIMEOUT = 90000
+const UPLOAD_TIMEOUT = 45000
+const LOG_TIMEOUT = 10000
 
 // Request interceptor
 api.interceptors.request.use(
@@ -23,6 +30,7 @@ api.interceptors.response.use(
   (error) => {
     const message = error.response?.data?.message || error.response?.data?.detail || error.message || 'Network error'
     const normalized = new Error(message) as any
+    normalized.code = error.code
     normalized.status = error.response?.status
     normalized.data = error.response?.data
     return Promise.reject(normalized)
@@ -43,48 +51,49 @@ export const startRun = (payload: {
   devMode?: boolean
   use_domain_kb?: boolean
   stage_confirmation_enabled?: boolean
-}) => api.post('/pipeline/run', payload)
+}) => api.post('/pipeline/run', payload, { timeout: WRITE_TIMEOUT })
 
 export const uploadBrd = (file: File) => {
   const formData = new FormData()
   formData.append('file', file)
   return api.post('/pipeline/upload-brd', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' }
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: UPLOAD_TIMEOUT,
   })
 }
 
-export const getRunStatus = (runId: string) => api.get(`/pipeline/${runId}/status`)
+export const getRunStatus = (runId: string) => api.get(`/pipeline/${runId}/status`, { timeout: READ_TIMEOUT })
 
-export const getPipelineKpis = (runId: string) => api.get(`/kpi-reviews/${runId}`)
+export const getPipelineKpis = (runId: string) => api.get(`/kpi-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 
-export const getRuns = () => api.get('/runs')
+export const getRuns = () => api.get('/runs', { timeout: RUNS_TIMEOUT })
 
-export const getRun = (runId: string) => api.get(`/runs/${runId}`)
-export const getTableReviews = (runId: string) => api.get(`/table-reviews/${runId}`)
+export const getRun = (runId: string) => api.get(`/runs/${runId}`, { timeout: RUNS_TIMEOUT })
+export const getTableReviews = (runId: string) => api.get(`/table-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 export const submitTableReviews = (runId: string, approvedTables: string[]) =>
-  api.post(`/table-reviews/${runId}`, { approved_tables: approvedTables })
-export const getEnrichmentReviews = (runId: string) => api.get(`/enrichment-reviews/${runId}`)
+  api.post(`/table-reviews/${runId}`, { approved_tables: approvedTables }, { timeout: WRITE_TIMEOUT })
+export const getEnrichmentReviews = (runId: string) => api.get(`/enrichment-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 export const submitEnrichmentReview = (runId: string, approve: boolean) =>
-  api.post(`/enrichment-reviews/${runId}`, { approve })
+  api.post(`/enrichment-reviews/${runId}`, { approve }, { timeout: WRITE_TIMEOUT })
 
-export const getBronzeReview = (runId: string) => api.get(`/bronze-reviews/${runId}`)
+export const getBronzeReview = (runId: string) => api.get(`/bronze-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 
 export const submitBronzeReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE') =>
-  api.post(`/bronze-reviews/${runId}`, { action })
+  api.post(`/bronze-reviews/${runId}`, { action }, { timeout: WRITE_TIMEOUT })
 
-export const getSilverReview = (runId: string) => api.get(`/silver-reviews/${runId}`)
+export const getSilverReview = (runId: string) => api.get(`/silver-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 
 export const submitSilverReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE') =>
-  api.post(`/silver-reviews/${runId}`, { action })
+  api.post(`/silver-reviews/${runId}`, { action }, { timeout: WRITE_TIMEOUT })
 
-export const abortRun = (runId: string) => api.post(`/pipeline/${runId}/abort`)
+export const abortRun = (runId: string) => api.post(`/pipeline/${runId}/abort`, undefined, { timeout: WRITE_TIMEOUT })
 export const continueStage = (runId: string, autoAdvance = false) =>
-  api.post(`/pipeline/${runId}/continue-stage`, { auto_advance: autoAdvance })
-export const retryFailedStage = (runId: string) => api.post(`/pipeline/${runId}/retry-failed-stage`)
-export const resumeFromFailure = (runId: string) => api.post(`/pipeline/${runId}/resume-from-failure`)
-export const restartRun = (runId: string) => api.post(`/pipeline/${runId}/restart`)
+  api.post(`/pipeline/${runId}/continue-stage`, { auto_advance: autoAdvance }, { timeout: WRITE_TIMEOUT })
+export const retryFailedStage = (runId: string) => api.post(`/pipeline/${runId}/retry-failed-stage`, undefined, { timeout: WRITE_TIMEOUT })
+export const resumeFromFailure = (runId: string) => api.post(`/pipeline/${runId}/resume-from-failure`, undefined, { timeout: WRITE_TIMEOUT })
+export const restartRun = (runId: string) => api.post(`/pipeline/${runId}/restart`, undefined, { timeout: WRITE_TIMEOUT })
 
-export const getHitlQueue = (runId: string) => api.get(`/hitl/${runId}`)
+export const getHitlQueue = (runId: string) => api.get(`/hitl/${runId}`, { timeout: READ_TIMEOUT })
 
 export const submitDecisions = (
   runId: string,
@@ -95,7 +104,7 @@ export const submitDecisions = (
     notes?: string
     edited_definition?: string
   }>
-) => api.post(`/hitl/${runId}/decisions`, { decisions })
+) => api.post(`/hitl/${runId}/decisions`, { decisions }, { timeout: WRITE_TIMEOUT })
 
 export const getKpis = (params: {
   domain?: string
@@ -103,38 +112,38 @@ export const getKpis = (params: {
   run_id?: string
   date_from?: string
   date_to?: string
-} = {}) => api.get('/kpis', { params })
+} = {}) => api.get('/kpis', { params, timeout: READ_TIMEOUT })
 
-export const getCostAnalytics = () => api.get('/analytics/cost')
+export const getCostAnalytics = () => api.get('/analytics/cost', { timeout: READ_TIMEOUT })
 
-export const getSettings = () => api.get('/settings')
+export const getSettings = () => api.get('/settings', { timeout: READ_TIMEOUT })
 
-export const saveSettings = (data: object) => api.put('/settings', data)
+export const saveSettings = (data: object) => api.put('/settings', data, { timeout: WRITE_TIMEOUT })
 
 // ── Database Configurations ───────────────────────────────────────────────────
-export const getConfigurations = () => api.get('/configurations')
-export const createConfiguration = (data: object) => api.post('/configurations', data)
-export const updateConfiguration = (id: string | number, data: object) => api.put(`/configurations/${id}`, data)
-export const deleteConfiguration = (id: string | number) => api.delete(`/configurations/${id}`)
+export const getConfigurations = () => api.get('/configurations', { timeout: READ_TIMEOUT })
+export const createConfiguration = (data: object) => api.post('/configurations', data, { timeout: WRITE_TIMEOUT })
+export const updateConfiguration = (id: string | number, data: object) => api.put(`/configurations/${id}`, data, { timeout: WRITE_TIMEOUT })
+export const deleteConfiguration = (id: string | number) => api.delete(`/configurations/${id}`, { timeout: WRITE_TIMEOUT })
 
 // ── HITL KPI Review — KPI Reviews ─────────────────────────────────────────────
 export const fetchKpiReviews = (runId: string, status: string | null = null) =>
-  api.get(`/kpi-reviews/${runId}`, { params: status ? { status } : {} })
+  api.get(`/kpi-reviews/${runId}`, { params: status ? { status } : {}, timeout: REVIEW_TIMEOUT })
 
 export const approveKpi = (queueId: string, reviewerId: string) =>
-  api.post(`/kpi-reviews/${queueId}/approve`, { reviewer_id: reviewerId })
+  api.post(`/kpi-reviews/${queueId}/approve`, { reviewer_id: reviewerId }, { timeout: WRITE_TIMEOUT })
 
 export const rejectKpi = (queueId: string, reviewerId: string, rejectionReason: string) =>
   api.post(`/kpi-reviews/${queueId}/reject`, {
     reviewer_id: reviewerId,
     rejection_reason: rejectionReason
-  })
+  }, { timeout: WRITE_TIMEOUT })
 
 export const modifyKpi = (queueId: string, reviewerId: string, editedContent: object) =>
   api.post(`/kpi-reviews/${queueId}/modify`, {
     reviewer_id: reviewerId,
     edited_content: editedContent
-  })
+  }, { timeout: WRITE_TIMEOUT })
 
 export const bulkKpiAction = (
   runId: string,
@@ -146,7 +155,7 @@ export const bulkKpiAction = (
     reviewer_id: reviewerId,
     action,
     rejection_reason: rejectionReason
-  })
+  }, { timeout: WRITE_TIMEOUT })
 
 // ── Pipeline Logs ─────────────────────────────────────────────────────────────
 
@@ -155,25 +164,25 @@ export const bulkKpiAction = (
  * pipeline_execution_logs Databricks table.
  */
 export const initiateLogsDiscovery = (databricksRunId: string) =>
-  api.post(`/logs/discover/${databricksRunId}`)
+  api.post(`/logs/discover/${databricksRunId}`, undefined, { timeout: WRITE_TIMEOUT })
 
 /**
  * Poll for discovery status.
  * Returns { status: 'discovering'|'completed'|'failed', runId?: string, error?: string }
  */
 export const getLogsDiscoveryStatus = (databricksRunId: string) =>
-  api.get(`/logs/discover/${databricksRunId}/status`)
+  api.get(`/logs/discover/${databricksRunId}/status`, { timeout: READ_TIMEOUT })
 
 /**
  * Fetch all logs for a discovered run_id UUID.
  */
 export const getPipelineLogs = (runId: string, limit = 1000) =>
-  api.get(`/logs/${runId}`, { params: { limit } })
+  api.get(`/logs/${runId}`, { params: { limit }, timeout: LOG_TIMEOUT })
 
 /**
  * Fetch logs written after sinceTimestamp (for incremental polling).
  */
 export const getPipelineLogsSinceWithLimit = (runId: string, sinceTimestamp: string, limit = 300) =>
-  api.get(`/logs/${runId}/since/${encodeURIComponent(sinceTimestamp)}`, { params: { limit } })
+  api.get(`/logs/${runId}/since/${encodeURIComponent(sinceTimestamp)}`, { params: { limit }, timeout: LOG_TIMEOUT })
 
 export default api
