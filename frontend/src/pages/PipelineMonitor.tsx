@@ -15,6 +15,10 @@ function isTimeoutError(error) {
   return error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '')
 }
 
+function isTransientReadError(error) {
+  return isTimeoutError(error) || Number(error?.status) === 503
+}
+
 function PipelineMonitor() {
   const navigate = useNavigate()
   const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline, addNotification, addRun } = useAthenaStore()
@@ -197,7 +201,7 @@ function PipelineMonitor() {
         }
       } catch (error) {
         if (!cancelled) {
-          if (!isTimeoutError(error)) {
+          if (!isTransientReadError(error)) {
             setServerOnline(false)
             console.warn('[PipelineMonitor] Failed to refresh runs', error)
           } else {
@@ -243,7 +247,7 @@ function PipelineMonitor() {
         }
       } catch (error) {
         if (!cancelled) {
-          if (!isTimeoutError(error)) {
+          if (!isTransientReadError(error)) {
             setServerOnline(false)
             console.warn('[PipelineMonitor] Failed to refresh active run', error)
           } else {
@@ -394,6 +398,7 @@ function PipelineMonitor() {
   const [scriptBundles, setScriptBundles] = useState(null)
   const [selectedScriptLayer, setSelectedScriptLayer] = useState('bronze')
   const [selectedScriptKey, setSelectedScriptKey] = useState('')
+  const [scriptsFullViewOpen, setScriptsFullViewOpen] = useState(false)
 
   useEffect(() => {
     if (!activeRun?.id) {
@@ -613,6 +618,15 @@ function PipelineMonitor() {
     navigate('/app/hitl')
   }
 
+  const handleOpenScriptsFullView = (preferredLayer = selectedScriptLayer) => {
+    const nextLayer =
+      scriptLayerCounts[preferredLayer] > 0
+        ? preferredLayer
+        : ['bronze', 'silver', 'gold'].find((layer) => scriptLayerCounts[layer] > 0) || preferredLayer
+    setSelectedScriptLayer(nextLayer)
+    setScriptsFullViewOpen(true)
+  }
+
   const handleCopyScript = async (script) => {
     try {
       await navigator.clipboard.writeText(formatScriptBody(script))
@@ -826,7 +840,8 @@ function PipelineMonitor() {
                 <div className="mt-1 text-xs text-[#7d8daa]">Click Bronze, Silver, or Gold to preview generated artifacts.</div>
               </div>
               <button
-                onClick={() => navigate(`/app/runs/${activeRun.id}`)}
+                type="button"
+                onClick={() => handleOpenScriptsFullView()}
                 className="rounded-lg border border-[#34547f] px-3 py-2 text-xs font-semibold text-[#bcd4ff] transition-colors hover:bg-[#132849]"
               >
                 Full View
@@ -924,6 +939,126 @@ function PipelineMonitor() {
         </section>
       </div>
 
+      {scriptsFullViewOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-6 backdrop-blur-sm">
+          <div className="flex max-h-[92vh] w-full max-w-[1180px] flex-col overflow-hidden rounded-[26px] border border-[#24344d] bg-[#0b1120] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+            <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[#22304b] px-6 py-5">
+              <div>
+                <div className="flex items-center gap-2 text-lg font-semibold text-white">
+                  <Code2 size={18} className="text-[#7fb0ff]" />
+                  Generated Scripts
+                </div>
+                <div className="mt-1 text-xs text-[#8ea2c5]">
+                  {runLabel || activeRun.id} - Bronze, Silver, and Gold artifacts for the selected run.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setScriptsFullViewOpen(false)}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[#2d4263] text-[#aab8d0] transition-colors hover:border-[#3f82ff] hover:text-white"
+                aria-label="Close scripts full view"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="grid min-h-0 flex-1 gap-0 overflow-hidden lg:grid-cols-[300px_minmax(0,1fr)]">
+              <aside className="min-h-0 overflow-y-auto border-b border-[#22304b] bg-[#080e1d] p-4 lg:border-b-0 lg:border-r">
+                <div className="mb-4 grid grid-cols-3 gap-2">
+                  {['bronze', 'silver', 'gold'].map((layer) => (
+                    <button
+                      key={layer}
+                      type="button"
+                      onClick={() => setSelectedScriptLayer(layer)}
+                      className={`rounded-xl border px-3 py-2 text-left transition-colors ${
+                        selectedScriptLayer === layer
+                          ? 'border-[#3f82ff] bg-[#102144] text-white'
+                          : 'border-[#253044] bg-[#0b1120] text-[#aeb8ca] hover:border-[#34547f]'
+                      }`}
+                    >
+                      <div className="text-xs font-semibold capitalize">{layer}</div>
+                      <div className="mt-1 text-[11px] text-[#7d8daa]">{scriptLayerCounts[layer]} scripts</div>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="space-y-2">
+                  {selectedLayerScripts.length ? (
+                    selectedLayerScripts.map((script) => (
+                      <button
+                        key={script.ui_key}
+                        type="button"
+                        onClick={() => setSelectedScriptKey(script.ui_key)}
+                        className={`w-full rounded-xl border px-3 py-3 text-left transition-colors ${
+                          selectedScript?.ui_key === script.ui_key
+                            ? 'border-[#3f82ff] bg-[#102144]'
+                            : 'border-[#253044] bg-[#0b1120] hover:border-[#34547f]'
+                        }`}
+                      >
+                        <div className="break-words text-sm font-semibold text-white">{script.title}</div>
+                        <div className="mt-1 break-all text-[11px] text-[#7d8daa]">
+                          {script.target_table || script.source_table || script.script_path || '-'}
+                        </div>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-[#253044] px-4 py-6 text-center text-xs text-[#8a9ab7]">
+                      No {selectedScriptLayer} scripts loaded yet.
+                    </div>
+                  )}
+                </div>
+              </aside>
+
+              <main className="flex min-h-0 flex-col overflow-hidden bg-[#050b16]">
+                {selectedScript ? (
+                  <>
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#22304b] px-5 py-4">
+                      <div className="min-w-0">
+                        <div className="break-words text-sm font-semibold text-white">{selectedScript.title}</div>
+                        <div className="mt-1 break-all text-xs text-[#7d8daa]">
+                          {selectedScript.script_path || selectedScript.target_table || selectedScript.source_table || selectedScript.layer}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleCopyScript(selectedScript)}
+                          className="inline-flex items-center gap-2 rounded-lg border border-[#2d4263] px-3 py-2 text-xs font-semibold text-[#aab8d0] hover:border-[#3f82ff] hover:text-white"
+                        >
+                          <Copy size={13} />
+                          Copy
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadScript(selectedScript)}
+                          className="inline-flex items-center gap-2 rounded-lg border border-[#2d4263] px-3 py-2 text-xs font-semibold text-[#aab8d0] hover:border-[#3f82ff] hover:text-white"
+                        >
+                          <Download size={13} />
+                          Download
+                        </button>
+                      </div>
+                    </div>
+                    <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap p-5 text-xs leading-relaxed text-[#c9d5e8]">
+                      {formatScriptBody(selectedScript)}
+                    </pre>
+                  </>
+                ) : (
+                  <div className="flex min-h-[360px] flex-1 items-center justify-center p-8 text-center">
+                    <div>
+                      <Code2 size={28} className="mx-auto text-[#3f82ff]" />
+                      <div className="mt-3 text-sm font-semibold text-white">No script selected</div>
+                      <div className="mt-1 text-xs text-[#8a9ab7]">
+                        Generated scripts will appear here when the backend artifact endpoint returns them.
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </main>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isStageConfirmationPaused && stageConfirmation?.awaiting_confirmation && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 px-6 backdrop-blur-sm">
           <div className="max-h-[92vh] w-full max-w-[980px] overflow-hidden rounded-[26px] border border-[#24344d] bg-[#131d2f] shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
@@ -960,10 +1095,11 @@ function PipelineMonitor() {
                       </div>
                     </div>
                     <button
-                      onClick={() => navigate(`/app/runs/${activeRun.id}`)}
+                      type="button"
+                      onClick={() => handleOpenScriptsFullView(stageScriptReview.layer)}
                       className="rounded-lg border border-[#34547f] px-3 py-2 text-xs font-semibold text-[#bcd4ff] transition-colors hover:bg-[#132849]"
                     >
-                      Open Scripts Tab
+                      Open Full Script View
                     </button>
                   </div>
 

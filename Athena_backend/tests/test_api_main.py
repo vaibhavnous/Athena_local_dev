@@ -276,16 +276,20 @@ def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
     assert payload[1]["status"] == "UNKNOWN"
 
 
-def test_run_detail_returns_503_on_failure(monkeypatch):
+def test_run_detail_returns_fallback_on_failure(monkeypatch):
     monkeypatch.setattr(
         "api.routers.runs_router.ui_run",
         lambda run_id, include_scripts=True: (_ for _ in ()).throw(RuntimeError("boom")),
     )
+    monkeypatch.setattr("api.routers.runs_router.load_checkpoint_state", lambda run_id: {"status": "RUNNING"})
 
     response = client.get("/runs/run-123")
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Failed to fetch run"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_id"] == "run-123"
+    assert payload["status"] == "RUNNING"
+    assert payload["checkpoint"] == {"status": "RUNNING"}
 
 
 def test_settings_roundtrip():

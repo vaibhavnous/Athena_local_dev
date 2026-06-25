@@ -18,6 +18,7 @@ from utilis.logger import logger
 
 router = APIRouter()
 RUN_SUMMARY_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_SUMMARY_WORKERS", "2"))))
+RUN_DETAIL_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_DETAIL_WORKERS", "2"))))
 
 
 def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -49,6 +50,36 @@ def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "sftp_entity": row.get("sftp_entity"),
         "source_row_count": row.get("source_row_count"),
         "source_columns": row.get("source_columns") or [],
+    }
+
+
+def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    checkpoint = checkpoint or {}
+    return {
+        **_fallback_run_summary(
+            {
+                "run_id": run_id,
+                "brd_filename": checkpoint.get("brd_filename"),
+                "source": checkpoint.get("source"),
+                "status": checkpoint.get("status"),
+                "provider": checkpoint.get("provider"),
+                "deployment": checkpoint.get("deployment"),
+                "error": checkpoint.get("error"),
+                "updated_at": checkpoint.get("updated_at") or checkpoint.get("checkpoint_at"),
+                "sftp_entity": checkpoint.get("sftp_entity"),
+                "source_row_count": checkpoint.get("source_row_count"),
+                "source_columns": checkpoint.get("source_columns"),
+            }
+        ),
+        "checkpoint": checkpoint,
+        "stage_confirmation": checkpoint.get("stage_confirmation"),
+        "next_gate": checkpoint.get("next_gate"),
+        "resume_message": checkpoint.get("resume_message"),
+        "candidate_feed": checkpoint.get("candidate_feed"),
+        "candidate_feeds": checkpoint.get("candidate_feeds") or [],
+        "bronze": {"generated_at": None, "scripts": []},
+        "silver": {"generated_at": None, "scripts": []},
+        "gold": {"generated_at": None, "scripts": []},
     }
 
 
@@ -112,15 +143,27 @@ def runs() -> List[Dict[str, Any]]:
 @router.get("/runs/{run_id}")
 def run_detail(run_id: str) -> Dict[str, Any]:
     try:
-        return ui_run(run_id, include_scripts=True)
-
+        timeout_seconds = max(1, int(os.getenv("ATHENA_RUN_DETAIL_TIMEOUT_SECONDS", "8")))
+        future = RUN_DETAIL_EXECUTOR.submit(ui_run, run_id, include_scripts=True)
+        return future.result(timeout=timeout_seconds)
+    except FutureTimeoutError:
+        logger.warning("GET /runs/{run_id} detail timed out; returning fallback detail", extra={"run_id": run_id})
+        try:
+            checkpoint = load_checkpoint_state(run_id) or {}
+        except Exception:
+            checkpoint = {}
+        return _fallback_run_detail(run_id, checkpoint)
     except Exception:
         logger.error(
             "Failed to fetch run detail",
             exc_info=True,
             extra={"run_id": run_id},
         )
-        raise HTTPException(status_code=503, detail="Failed to fetch run")
+        try:
+            checkpoint = load_checkpoint_state(run_id) or {}
+        except Exception:
+            checkpoint = {}
+        return _fallback_run_detail(run_id, checkpoint)
 
 
 @router.get("/run-scripts/{run_id}")
