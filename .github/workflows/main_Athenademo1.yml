@@ -12,6 +12,10 @@ on:
       - 'Athena_backend/**'
       - '.github/workflows/main_Athenademo1.yml'
 
+concurrency:
+  group: backend-appservice-athenademo1-production
+  cancel-in-progress: false
+
 env:
   AZURE_WEBAPP_NAME: Athenademo1
   AZURE_WEBAPP_URL: 'https://athenademo1-a6awbcchgxcchraj.southindia-01.azurewebsites.net'
