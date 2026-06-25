@@ -47,8 +47,9 @@ def _persist_file_feed_registry(feeds: List[Dict[str, Any]], status: str = "DISC
 
     db_conf = config["azure_sql"]
     schema = db_conf["pipeline_schema"]
-    conn = get_pipeline_connection()
+    conn = None
     try:
+        conn = get_pipeline_connection()
         cursor = conn.cursor()
         for feed in feeds:
             entry = _normalize_feed_registry_entry(feed, status=status)
@@ -111,7 +112,8 @@ def _persist_file_feed_registry(feeds: List[Dict[str, Any]], status: str = "DISC
     except Exception as exc:
         logger.warning("SFTP feed registry persistence skipped: %s", exc)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def _mark_registry_feeds_approved(feeds: List[Dict[str, Any]]) -> None:
@@ -119,8 +121,9 @@ def _mark_registry_feeds_approved(feeds: List[Dict[str, Any]]) -> None:
         return
     db_conf = config["azure_sql"]
     schema = db_conf["pipeline_schema"]
-    conn = get_pipeline_connection()
+    conn = None
     try:
+        conn = get_pipeline_connection()
         cursor = conn.cursor()
         approved_at = datetime.now(timezone.utc).isoformat()
         for feed in feeds:
@@ -138,7 +141,8 @@ def _mark_registry_feeds_approved(feeds: List[Dict[str, Any]]) -> None:
     except Exception as exc:
         logger.warning("SFTP feed approval persistence skipped: %s", exc)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def sftp_gate1_node(state: Stage01State) -> Stage01State:

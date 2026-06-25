@@ -4,7 +4,7 @@ import sys
 import types
 from pathlib import Path
 
-from sftp_nodes import source_ingestion
+from sftp_nodes import governance, source_ingestion
 from services import sftp_runtime
 
 
@@ -90,6 +90,21 @@ def test_adls_source_ingestion_uses_demo_fallback_when_live_read_fails(monkeypat
     assert all(feed["source"] == "adls_gen2" for feed in result["candidate_feeds"])
     assert all(Path(path).exists() for path in result["sftp_files"])
     assert result["source_row_count"] == 4
+
+
+def test_feed_registry_persistence_skips_connection_failures(monkeypatch):
+    monkeypatch.setattr(
+        governance,
+        "get_pipeline_connection",
+        lambda: (_ for _ in ()).throw(RuntimeError("sql firewall")),
+    )
+
+    governance._persist_file_feed_registry(
+        [{"feed_id": "Vendor1_Deposit", "vendor": "Vendor1", "entity": "Deposit", "source": "adls_gen2"}]
+    )
+    governance._mark_registry_feeds_approved(
+        [{"feed_id": "Vendor1_Deposit", "vendor": "Vendor1", "entity": "Deposit"}]
+    )
 
 
 def test_safe_fetch_returns_empty_dict_on_error(monkeypatch):
