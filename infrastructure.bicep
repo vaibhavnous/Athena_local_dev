@@ -1,15 +1,31 @@
 param location string = resourceGroup().location
 param projectName string = 'athena'
 param environment string = 'dev'
-param keyVaultName string = '${projectName}-kv-${environment}'
 param appServicePlanName string = '${projectName}-asp-${environment}'
 param combinedAppName string = '${projectName}-combined-${environment}'
 param appInsightsName string = '${projectName}-ai-${environment}'
 
+// SQL Configuration
 @secure()
-param sqlConnectionString string
+param sqlHost string
 @secure()
-param apiKey string
+param sqlUsername string
+@secure()
+param sqlPassword string
+param sqlDatabase string = 'metadata'
+param sqlSchema string = 'metadata'
+
+// Azure Services Configuration
+param corsSites string = 'http://localhost:3000'
+@secure()
+param pineconeApiKey string = ''
+param adlsAccountUrl string = ''
+param adlsFileSystem string = ''
+param athenaLlmProvider string = 'azure_openai'
+param azureOpenaiDeployment string = ''
+@secure()
+param azureOpenaiApiKey string = ''
+param azureOpenaiEndpoint string = ''
 
 // Application Insights
 resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
@@ -36,40 +52,7 @@ resource appServicePlan 'Microsoft.Web/serverfarms@2021-02-01' = {
   }
 }
 
-// Key Vault
-resource keyVault 'Microsoft.KeyVault/vaults@2021-06-01-preview' = {
-  name: keyVaultName
-  location: location
-  properties: {
-    enabledForDeployment: true
-    enabledForTemplateDeployment: true
-    enableSoftDelete: true
-    softDeleteRetentionInDays: 90
-    tenantId: subscription().tenantId
-    sku: {
-      family: 'A'
-      name: 'standard'
-    }
-    accessPolicies: []
-  }
-}
 
-// Key Vault Secrets
-resource kvSecretSqlConn 'Microsoft.KeyVault/vaults/secrets@2021-06-01-preview' = {
-  parent: keyVault
-  name: 'sql-connection-string'
-  properties: {
-    value: sqlConnectionString
-  }
-}
-
-resource kvSecretApiKey 'Microsoft.KeyVault/vaults/secrets@2021-06-01-preview' = {
-  parent: keyVault
-  name: 'api-key'
-  properties: {
-    value: apiKey
-  }
-}
 
 // Combined App Service (Python FastAPI + React Static Files)
 resource combinedApp 'Microsoft.Web/sites@2021-02-01' = {
@@ -108,12 +91,57 @@ resource combinedApp 'Microsoft.Web/sites@2021-02-01' = {
           name: 'LOG_LEVEL'
           value: 'INFO'
         }
-      ]
-      connectionStrings: [
         {
-          name: 'SqlConnection'
-          connectionString: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=sql-connection-string)'
-          type: 'SQLServer'
+          name: 'AZURE_SQL_HOST'
+          value: sqlHost
+        }
+        {
+          name: 'AZURE_SQL_USERNAME'
+          value: sqlUsername
+        }
+        {
+          name: 'AZURE_SQL_PASSWORD'
+          value: sqlPassword
+        }
+        {
+          name: 'AZURE_SQL_PIPELINE_DATABASE'
+          value: sqlDatabase
+        }
+        {
+          name: 'AZURE_SQL_PIPELINE_SCHEMA'
+          value: sqlSchema
+        }
+        {
+          name: 'ATHENA_CORS_ORIGINS'
+          value: corsSites
+        }
+        {
+          name: 'PINECONE_API_KEY'
+          value: pineconeApiKey
+        }
+        {
+          name: 'ADLS_ACCOUNT_URL'
+          value: adlsAccountUrl
+        }
+        {
+          name: 'ADLS_FILE_SYSTEM'
+          value: adlsFileSystem
+        }
+        {
+          name: 'ATHENA_LLM_PROVIDER'
+          value: athenaLlmProvider
+        }
+        {
+          name: 'AZURE_OPENAI_DEPLOYMENT'
+          value: azureOpenaiDeployment
+        }
+        {
+          name: 'AZURE_OPENAI_API_KEY'
+          value: azureOpenaiApiKey
+        }
+        {
+          name: 'AZURE_OPENAI_ENDPOINT'
+          value: azureOpenaiEndpoint
         }
       ]
     }
@@ -121,25 +149,7 @@ resource combinedApp 'Microsoft.Web/sites@2021-02-01' = {
   }
 }
 
-// Combined App Service - enable Key Vault access
-resource combinedAppKeyVaultAccess 'Microsoft.KeyVault/vaults/accessPolicies@2021-06-01-preview' = {
-  parent: keyVault
-  name: 'add'
-  properties: {
-    accessPolicies: [
-      {
-        tenantId: subscription().tenantId
-        objectId: combinedApp.identity.principalId
-        permissions: {
-          secrets: [
-            'get'
-            'list'
-          ]
-        }
-      }
-    ]
-  }
-}
+
 
 // Deployment Slot (staging) - for zero-downtime deployments
 resource combinedStagingSlot 'Microsoft.Web/sites/slots@2021-02-01' = {
@@ -172,12 +182,63 @@ resource combinedStagingSlot 'Microsoft.Web/sites/slots@2021-02-01' = {
           name: 'LOG_LEVEL'
           value: 'INFO'
         }
+        {
+          name: 'AZURE_SQL_HOST'
+          value: sqlHost
+        }
+        {
+          name: 'AZURE_SQL_USERNAME'
+          value: sqlUsername
+        }
+        {
+          name: 'AZURE_SQL_PASSWORD'
+          value: sqlPassword
+        }
+        {
+          name: 'AZURE_SQL_PIPELINE_DATABASE'
+          value: sqlDatabase
+        }
+        {
+          name: 'AZURE_SQL_PIPELINE_SCHEMA'
+          value: sqlSchema
+        }
+        {
+          name: 'ATHENA_CORS_ORIGINS'
+          value: corsSites
+        }
+        {
+          name: 'PINECONE_API_KEY'
+          value: pineconeApiKey
+        }
+        {
+          name: 'ADLS_ACCOUNT_URL'
+          value: adlsAccountUrl
+        }
+        {
+          name: 'ADLS_FILE_SYSTEM'
+          value: adlsFileSystem
+        }
+        {
+          name: 'ATHENA_LLM_PROVIDER'
+          value: athenaLlmProvider
+        }
+        {
+          name: 'AZURE_OPENAI_DEPLOYMENT'
+          value: azureOpenaiDeployment
+        }
+        {
+          name: 'AZURE_OPENAI_API_KEY'
+          value: azureOpenaiApiKey
+        }
+        {
+          name: 'AZURE_OPENAI_ENDPOINT'
+          value: azureOpenaiEndpoint
+        }
       ]
     }
   }
 }
 
 output combinedAppName string = combinedApp.name
-output keyVaultName string = keyVault.name
 output appInsightsInstrumentationKey string = appInsights.properties.InstrumentationKey
 output combinedDefaultHostname string = combinedApp.properties.defaultHostName

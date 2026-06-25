@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from services.pipeline_runtime import get_run_context, load_checkpoint_state
-from services.sftp_runtime import build_sftp_display_name, get_sftp_run_context
 from utilis.logger import logger
 
 from api import utils as api_utils
@@ -35,6 +34,8 @@ def status_from_context(context: Dict[str, Any]) -> str:
 
 def display_run_name(checkpoint: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> str:
     if api_utils.is_file_source(checkpoint.get("source")):
+        from services.sftp_runtime import build_sftp_display_name
+
         return (context or {}).get("display_name") or build_sftp_display_name(checkpoint)
     return checkpoint.get("brd_filename") or "athena_brd.txt"
 
@@ -57,11 +58,12 @@ def failed_stage_key(checkpoint: Dict[str, Any], pipeline_steps: List[Dict[str, 
 
 def get_run_data(run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     checkpoint_hint = load_checkpoint_state(run_id) or {}
-    context = (
-        get_sftp_run_context(run_id)
-        if api_utils.is_file_source(checkpoint_hint.get("source"))
-        else get_run_context(run_id)
-    )
+    if api_utils.is_file_source(checkpoint_hint.get("source")):
+        from services.sftp_runtime import get_sftp_run_context
+
+        context = get_sftp_run_context(run_id)
+    else:
+        context = get_run_context(run_id)
     summary = context.get("summary") or []
     checkpoint = context.get("checkpoint") or checkpoint_hint
     logger.debug("Loaded run UI data run_id=%s source=%s", run_id, checkpoint.get("source"))

@@ -1,8 +1,7 @@
 import axios from 'axios'
+import { getApiBaseUrl } from './baseUrl'
 
-// Use an explicit IPv4 loopback by default. Some Windows setups resolve
-// `localhost` to IPv6 (::1) first, which will fail if the backend only binds IPv4.
-const API_BASE_URL = (process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+const API_BASE_URL = getApiBaseUrl()
 
 const api = axios.create({
   baseURL: API_BASE_URL,
