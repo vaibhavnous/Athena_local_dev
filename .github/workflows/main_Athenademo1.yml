@@ -79,6 +79,7 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: ./deploy/Athena_backend
+          startup-command: bash startup.sh
 
       - name: Wait before deploy retry 2
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.deploy_attempt_1.outcome == 'failure'
@@ -93,6 +94,7 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: ./deploy/Athena_backend
+          startup-command: bash startup.sh
 
       - name: Wait before deploy retry 3
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.deploy_attempt_1.outcome == 'failure' && steps.deploy_attempt_2.outcome == 'failure'
@@ -105,6 +107,7 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: ./deploy/Athena_backend
+          startup-command: bash startup.sh
 
       - name: Health check
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -125,6 +128,44 @@ jobs:
           done
           echo "Backend did not become healthy in time."
           exit 1
+
+      - name: Collect App Service diagnostics
+        if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        run: |
+          python - <<'PY' > /tmp/kudu-env.sh
+          import os
+          import shlex
+          import xml.etree.ElementTree as ET
+
+          root = ET.fromstring(os.environ["PUBLISH_PROFILE"])
+          profiles = [
+              p for p in root.findall("publishProfile")
+              if p.get("publishMethod") in {"ZipDeploy", "MSDeploy"}
+          ]
+          profile = profiles[0] if profiles else root.find("publishProfile")
+          publish_url = (profile.get("publishUrl") or "").strip()
+          if not publish_url.startswith("https://"):
+              publish_url = f"https://{publish_url}"
+          publish_url = publish_url.rstrip("/")
+          print(f"KUDU_URL={shlex.quote(publish_url)}")
+          print(f"KUDU_USER={shlex.quote(profile.get('userName') or '')}")
+          print(f"KUDU_PASS={shlex.quote(profile.get('userPWD') or '')}")
+          PY
+
+          . /tmp/kudu-env.sh
+
+          echo "::group::Latest Kudu deployment log"
+          curl -fsS -u "$KUDU_USER:$KUDU_PASS" "$KUDU_URL/api/deployments/latest/log" || true
+          echo "::endgroup::"
+
+          echo "::group::Runtime startup inspection"
+          curl -fsS -u "$KUDU_USER:$KUDU_PASS" \
+            -H "Content-Type: application/json" \
+            -d '{"command":"pwd; ls -la; test -f startup.sh && sed -n \"1,120p\" startup.sh; test -f Procfile && cat Procfile; python --version; ls -la antenv/bin/python antenv/bin/gunicorn antenv/bin/uvicorn 2>&1; tail -n 200 /home/LogFiles/default_docker.log 2>/dev/null || true; find /home/LogFiles -maxdepth 2 -type f | tail -n 20","dir":"/home/site/wwwroot"}' \
+            "$KUDU_URL/api/command" || true
+          echo "::endgroup::"
 
       - name: Upload deployment artifact
         uses: actions/upload-artifact@v4
