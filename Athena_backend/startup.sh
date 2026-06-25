@@ -25,14 +25,14 @@ if [ -n "${HF_HOME:-}" ]; then
   echo "HF_HOME: ${HF_HOME}"
 fi
 
-if [ "${ATHENA_ENABLE_EMBEDDINGS,,}" = "true" ] || [ "${ATHENA_ENABLE_EMBEDDINGS}" = "1" ] || [ "${ATHENA_ENABLE_EMBEDDINGS,,}" = "yes" ] || [ "${ATHENA_ENABLE_EMBEDDINGS,,}" = "on" ]; then
+if [ "${ATHENA_PRELOAD_EMBEDDINGS,,}" = "true" ] || [ "${ATHENA_PRELOAD_EMBEDDINGS}" = "1" ] || [ "${ATHENA_PRELOAD_EMBEDDINGS,,}" = "yes" ] || [ "${ATHENA_PRELOAD_EMBEDDINGS,,}" = "on" ]; then
   echo "Preloading embedding model cache..."
   if ! python scripts/preload_embeddings.py; then
-    echo "Embedding preload failed and strict mode is enabled; aborting startup."
+    echo "Embedding preload failed and ATHENA_EMBEDDING_PRELOAD_REQUIRED is enabled; aborting startup."
     exit 1
   fi
 else
-  echo "Embedding preload skipped at startup; ATHENA_ENABLE_EMBEDDINGS=${ATHENA_ENABLE_EMBEDDINGS:-false}"
+  echo "Embedding preload skipped at startup; ATHENA_PRELOAD_EMBEDDINGS=${ATHENA_PRELOAD_EMBEDDINGS:-false}"
 fi
 
 echo "Import smoke test:"

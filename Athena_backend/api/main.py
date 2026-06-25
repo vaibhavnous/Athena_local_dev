@@ -22,7 +22,7 @@ from utilis.logger import logger
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Athena API service started")
-    embedding_status = get_embedding_runtime_status()
+    embedding_status = get_embedding_runtime_status(probe_models=False)
     log_fn = logger.info if embedding_status.get("ready") else logger.warning
     log_fn(
         "Embedding runtime status | env_enabled=%s pinecone=%s sentence_transformer=%s langchain_embedding=%s ready=%s",
@@ -70,7 +70,7 @@ async def health_check():
     return {
         "status": "ok",
         "service": "athena-fastapi",
-        "embeddings": get_embedding_runtime_status(),
+        "embeddings": get_embedding_runtime_status(probe_models=False),
     }
 
 

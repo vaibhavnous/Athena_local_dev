@@ -18,7 +18,7 @@ def _env_enabled(name: str, default: str = "false") -> bool:
 
 
 @lru_cache(maxsize=1)
-def get_embedding_runtime_status() -> Dict[str, Any]:
+def get_embedding_runtime_status(probe_models: bool = True) -> Dict[str, Any]:
     load_backend_env()
 
     env_enabled = _env_enabled("ATHENA_ENABLE_EMBEDDINGS")
@@ -32,6 +32,10 @@ def get_embedding_runtime_status() -> Dict[str, Any]:
 
     if not env_enabled:
         status["reason"] = "ATHENA_ENABLE_EMBEDDINGS is disabled"
+        return status
+
+    if not probe_models:
+        status["reason"] = "Embedding model probing skipped for lightweight health check"
         return status
 
     try:
