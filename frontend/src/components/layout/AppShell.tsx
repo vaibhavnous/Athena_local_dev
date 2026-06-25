@@ -21,6 +21,8 @@ import {
 import { getGateDisplayName, getPhaseGroups } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
+const REVIEW_READY_NOTIFICATIONS_KEY = 'athena.reviewReadyNotifications'
+const REVIEW_READY_NOTIFICATION_DELAY_MS = 3000
 
 function loadJsonMap(key) {
   if (typeof window === 'undefined') return {}
@@ -65,6 +67,7 @@ function AppShell() {
   const runsRequestInFlightRef = useRef(false)
   const pausedDetailKeyRef = useRef<string | null>(null)
   const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadJsonMap(PAUSED_BANNER_DISMISSALS_KEY))
+  const [reviewReadyNotifications, setReviewReadyNotifications] = useState(() => loadJsonMap(REVIEW_READY_NOTIFICATIONS_KEY))
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
 
   useEffect(() => {
@@ -199,6 +202,8 @@ function AppShell() {
       resumeMessage: bannerRun.resume_message || 'Pipeline progress is saved. Resume review when you are ready.',
     }
   }, [pausedRun, pausedRunDetail])
+  const pausedGateLabel = pausedRunSummary?.gateLabel || ''
+  const pausedResumeMessage = pausedRunSummary?.resumeMessage || ''
 
   useEffect(() => {
     const pausedKeys = (runs || [])
@@ -212,7 +217,45 @@ function AppShell() {
       if (changed) persistJsonMap(PAUSED_BANNER_DISMISSALS_KEY, next)
       return changed ? next : current
     })
+    setReviewReadyNotifications((current) => {
+      const activeKeys = new Set(pausedKeys)
+      const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
+      const changed = Object.keys(next).length !== Object.keys(current).length
+      if (changed) persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
+      return changed ? next : current
+    })
   }, [runs])
+
+  useEffect(() => {
+    if (!pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return
+    if (reviewReadyNotifications[pausedBannerKey]) return
+
+    const timer = window.setTimeout(() => {
+      addNotification({
+        type: 'amber',
+        title: `${pausedGateLabel} ready for review`,
+        message: pausedResumeMessage,
+        duration: 6000,
+      })
+
+      setReviewReadyNotifications((current) => {
+        if (current[pausedBannerKey]) return current
+        const next = { ...current, [pausedBannerKey]: true }
+        persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
+        return next
+      })
+    }, REVIEW_READY_NOTIFICATION_DELAY_MS)
+
+    return () => window.clearTimeout(timer)
+  }, [
+    addNotification,
+    pausedBannerKey,
+    pausedRunDetail,
+    pausedGateLabel,
+    pausedResumeMessage,
+    pausedRunSummary,
+    reviewReadyNotifications,
+  ])
 
   const isPausedBannerVisible = Boolean(
     pausedRun &&

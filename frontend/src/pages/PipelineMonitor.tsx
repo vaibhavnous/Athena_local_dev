@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Play, RefreshCcw, RotateCcw, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
@@ -7,11 +7,14 @@ import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
 import { getPhaseGroups, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
 import { abortRun, continueStage, getRun, getRuns, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
+const PHASE_AUTO_SWITCH_DELAY_MS = 4000
+
 function PipelineMonitor() {
   const navigate = useNavigate()
   const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline, addNotification, addRun } = useAthenaStore()
   const activeRun = runs.find((run) => run.id === activeRunId) || runs[0] || null
   const phases = useMemo(() => getPhaseGroups(activeRun), [activeRun])
+  const shouldDebouncePhaseSwitch = ['adls_gen2', 'sftp'].includes(String(activeRun?.source || '').toLowerCase())
 
   useEffect(() => {
     let cancelled = false
@@ -62,21 +65,121 @@ function PipelineMonitor() {
     }
   }, [activeRun?.id, updateRun, setServerOnline])
 
+  const actualPhaseIndex = useMemo(() => {
+    if (!phases?.length) return 0
+    const activeIndex = phases.findIndex((phase) =>
+      phase.steps.some((step) => ['RUNNING', 'HITL_WAIT'].includes(step.state))
+    )
+    if (activeIndex >= 0) return activeIndex
+    const firstIncompleteIndex = phases.findIndex((phase) => phase.completed < phase.total)
+    if (firstIncompleteIndex >= 0) return firstIncompleteIndex
+    return Math.max(0, phases.length - 1)
+  }, [phases])
+
+  const [visiblePhaseIndex, setVisiblePhaseIndex] = useState(actualPhaseIndex)
+  const previousVisibleRunIdRef = useRef<string | null>(null)
+  const visiblePhaseTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (visiblePhaseTimerRef.current !== null) {
+      window.clearTimeout(visiblePhaseTimerRef.current)
+      visiblePhaseTimerRef.current = null
+    }
+
+    if (!activeRun?.id || !shouldDebouncePhaseSwitch) {
+      setVisiblePhaseIndex(actualPhaseIndex)
+      return
+    }
+
+    const runChanged = previousVisibleRunIdRef.current !== activeRun.id
+    if (runChanged) {
+      previousVisibleRunIdRef.current = activeRun.id
+      setVisiblePhaseIndex(actualPhaseIndex)
+      return
+    }
+
+    if (visiblePhaseIndex === actualPhaseIndex) return
+
+    visiblePhaseTimerRef.current = window.setTimeout(() => {
+      setVisiblePhaseIndex((current) => {
+        if (current === actualPhaseIndex) return current
+        return current + Math.sign(actualPhaseIndex - current)
+      })
+      visiblePhaseTimerRef.current = null
+    }, PHASE_AUTO_SWITCH_DELAY_MS)
+
+    return () => {
+      if (visiblePhaseTimerRef.current !== null) {
+        window.clearTimeout(visiblePhaseTimerRef.current)
+        visiblePhaseTimerRef.current = null
+      }
+    }
+  }, [activeRun?.id, actualPhaseIndex, shouldDebouncePhaseSwitch, visiblePhaseIndex])
+
+  const displayPhases = useMemo(() => {
+    if (!shouldDebouncePhaseSwitch) return phases
+    return phases.map((phase, index) => {
+      if (index <= visiblePhaseIndex) return phase
+      return {
+        ...phase,
+        completed: 0,
+        status: 'Pending',
+        steps: phase.steps.map((step) => ({
+          ...step,
+          state: 'PENDING',
+          complete: false,
+        })),
+      }
+    })
+  }, [phases, shouldDebouncePhaseSwitch, visiblePhaseIndex])
+
   const defaultExpandedPhase = useMemo(() => {
-    if (!phases?.length) return 'phase-1'
-    const activePhase = phases.find((phase) =>
+    if (!displayPhases?.length) return 'phase-1'
+    const activePhase = displayPhases.find((phase) =>
       phase.steps.some((step) => ['RUNNING', 'HITL_WAIT'].includes(step.state))
     )
     if (activePhase) return activePhase.id
-    const firstIncomplete = phases.find((phase) => phase.completed < phase.total)
-    return firstIncomplete?.id || phases[0].id
-  }, [phases])
+    const firstIncomplete = displayPhases.find((phase) => phase.completed < phase.total)
+    return firstIncomplete?.id || displayPhases[displayPhases.length - 1].id
+  }, [displayPhases])
 
   const [expandedPhase, setExpandedPhase] = useState(defaultExpandedPhase)
+  const autoExpandedPhaseRef = useRef(defaultExpandedPhase)
+  const previousRunIdRef = useRef<string | null>(null)
+  const phaseSwitchTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
-    setExpandedPhase(defaultExpandedPhase)
-  }, [defaultExpandedPhase, activeRun?.id])
+    if (!activeRun?.id || !defaultExpandedPhase) return
+
+    if (phaseSwitchTimerRef.current !== null) {
+      window.clearTimeout(phaseSwitchTimerRef.current)
+      phaseSwitchTimerRef.current = null
+    }
+
+    const runChanged = previousRunIdRef.current !== activeRun.id
+    if (runChanged || !shouldDebouncePhaseSwitch) {
+      previousRunIdRef.current = activeRun.id
+      autoExpandedPhaseRef.current = defaultExpandedPhase
+      setExpandedPhase(defaultExpandedPhase)
+      return
+    }
+
+    if (autoExpandedPhaseRef.current === defaultExpandedPhase) return
+
+    const nextPhase = defaultExpandedPhase
+    phaseSwitchTimerRef.current = window.setTimeout(() => {
+      autoExpandedPhaseRef.current = nextPhase
+      setExpandedPhase(nextPhase)
+      phaseSwitchTimerRef.current = null
+    }, PHASE_AUTO_SWITCH_DELAY_MS)
+
+    return () => {
+      if (phaseSwitchTimerRef.current !== null) {
+        window.clearTimeout(phaseSwitchTimerRef.current)
+        phaseSwitchTimerRef.current = null
+      }
+    }
+  }, [defaultExpandedPhase, activeRun?.id, shouldDebouncePhaseSwitch])
 
   const runLabel = summarizeRunSource(activeRun)
   const activeTone = statusTone(activeRun?.status)
@@ -399,7 +502,7 @@ function PipelineMonitor() {
       <div className="grid min-h-0 flex-1 gap-5 xl:grid-cols-[520px_minmax(0,1fr)]">
         <section className="min-h-0 overflow-hidden rounded-lg border border-[#253044] bg-[#080e1d]">
           <div className="divide-y divide-[#253044]">
-            {phases.map((phase, index) => {
+            {displayPhases.map((phase, index) => {
               const expanded = expandedPhase === phase.id
               const tone = statusTone(phase.status)
               return (
