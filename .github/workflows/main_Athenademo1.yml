@@ -50,11 +50,6 @@ jobs:
         run: |
           mkdir -p deploy/Athena_backend
           cp -r Athena_backend/* deploy/Athena_backend/
-          cat > deploy/Athena_backend/startup.sh << 'EOF'
-          #!/bin/bash
-          pip install -r requirements.txt
-          python -m uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}
-          EOF
           chmod +x deploy/Athena_backend/startup.sh
 
       - name: Deploy to Azure App Service
