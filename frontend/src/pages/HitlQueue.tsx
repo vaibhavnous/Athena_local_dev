@@ -84,6 +84,26 @@ async function waitForRenderableReview(fetcher, gate, isFileSource = false, atte
   return latest
 }
 
+function hasGoldScripts(run) {
+  return Boolean(
+    (run?.gold?.scripts || []).length ||
+    run?.gold_generation_completed ||
+    String(run?.gold_generation_status || '').toUpperCase().startsWith('COMPLETED')
+  )
+}
+
+async function waitForGoldScripts(runId, updateRun, attempts = 24) {
+  let latest = null
+  for (let index = 0; index < attempts; index += 1) {
+    latest = await getRun(runId)
+    updateRun(runId, latest)
+    if (hasGoldScripts(latest)) return latest
+    if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
+    await sleep(1500)
+  }
+  return latest
+}
+
 function isSuccessfulRun(run) {
   return ['SUCCESS', 'COMPLETED', 'PIPELINE_COMPLETED'].includes(String(run?.status || '').toUpperCase())
 }
@@ -842,13 +862,19 @@ function HitlQueue() {
       setSubmitting(true)
       try {
         await submitSilverReview(selectedRunId, gateDecision)
-        const refreshed = await getRun(selectedRunId)
+        const refreshed = gateDecision === 'APPROVED'
+          ? await waitForGoldScripts(selectedRunId, updateRun)
+          : await getRun(selectedRunId)
         updateRun(selectedRunId, refreshed)
         setSilverReview(null)
         addNotification({
           type: 'success',
           title: `${gate5Name} Submitted`,
-          message: 'Silver review was submitted. Pipeline is resuming.',
+          message: gateDecision === 'APPROVED' && hasGoldScripts(refreshed)
+            ? 'Silver approved. Gold scripts are now ready.'
+            : gateDecision === 'APPROVED'
+            ? 'Silver approved. Gold generation is still processing.'
+            : 'Silver review was submitted. Pipeline is resuming.',
           duration: 5000
         })
         returnToMonitor(selectedRunId)
@@ -1170,13 +1196,13 @@ function HitlQueue() {
                             <h3 className="text-base font-bold text-text-primary break-all">{key}</h3>
                           </div>
                           <div className="flex items-center gap-2 text-xs text-text-tertiary flex-wrap mt-2">
-                            <span>Confidence {Number(table.confidence_score || 0).toFixed(3)}</span>
+                            <span>Match confidence {Number(table.confidence_score || 0).toFixed(3)}</span>
                             <span className="opacity-40">-</span>
-                            <span>Coverage {Number(table.coverage_ratio || 0).toFixed(3)}</span>
+                            <span>Business coverage {Number(table.coverage_ratio || 0).toFixed(3)}</span>
                             {(table.matched_keywords || []).length > 0 && (
                               <>
                                 <span className="opacity-40">-</span>
-                                <span>{(table.matched_keywords || []).join(', ')}</span>
+                                <span>{formatSemanticSignalLabel(table)}</span>
                               </>
                             )}
                           </div>
@@ -1410,6 +1436,13 @@ function mapHitlRow(row) {
     decided_at: row.decided_at,
     timeout_at: row.timeout_at
   }
+}
+
+function formatSemanticSignalLabel(table) {
+  const signalCount = Array.isArray(table?.matched_keywords) ? table.matched_keywords.length : 0
+  if (signalCount <= 0) return 'Semantic signals available'
+  if (signalCount === 1) return '1 semantic signal detected'
+  return `${signalCount} semantic signals detected`
 }
 
 function normalizeReviewDecision(value) {

@@ -35,6 +35,25 @@ async function waitForRunGate(runId, targetGate, attempts = 20) {
   return latest
 }
 
+function hasGoldScripts(run) {
+  return Boolean(
+    (run?.gold?.scripts || []).length ||
+    run?.gold_generation_completed ||
+    String(run?.gold_generation_status || '').toUpperCase().startsWith('COMPLETED')
+  )
+}
+
+async function waitForGoldScripts(runId, attempts = 24) {
+  let latest = null
+  for (let index = 0; index < attempts; index += 1) {
+    latest = await getRun(runId)
+    if (hasGoldScripts(latest)) return latest
+    if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
+    await sleep(1500)
+  }
+  return latest
+}
+
 function RunDetail() {
   const { runId } = useParams()
   const navigate = useNavigate()
@@ -384,11 +403,11 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
                         <div className="min-w-0 flex-1">
                           <div className="text-sm text-gray-200 font-medium break-all">{key}</div>
                           <div className="flex gap-3 flex-wrap mt-1 text-[11px] text-gray-500">
-                            <span>Confidence: {Number(table.confidence_score || 0).toFixed(3)}</span>
-                            <span>Lexical: {Number(table.lexical_score || 0).toFixed(3)}</span>
-                            <span>Semantic: {Number(table.semantic_score || 0).toFixed(3)}</span>
+                            <span>Match confidence: {Number(table.confidence_score || 0).toFixed(3)}</span>
+                            <span>Business alignment: {Number((table.semantic_score ?? table.confidence_score) || 0).toFixed(3)}</span>
+                            <span>Schema alignment: {Number((table.lexical_score ?? table.coverage_ratio) || 0).toFixed(3)}</span>
                             {(table.matched_columns || []).length > 0 && (
-                              <span>Matched columns: {(table.matched_columns || []).length}</span>
+                              <span>Matched schema fields: {(table.matched_columns || []).length}</span>
                             )}
                           </div>
                           {table.nomination_reason && (
@@ -983,6 +1002,8 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
       const refreshed =
         !isStageScriptConfirmation && reviewLayer === 'bronze' && action === 'APPROVED'
           ? await waitForRunGate(run.id, 5)
+          : !isStageScriptConfirmation && reviewLayer === 'silver' && action === 'APPROVED'
+          ? await waitForGoldScripts(run.id)
           : await getRun(run.id)
 
       onRunRefresh(refreshed)
@@ -999,8 +1020,10 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
             ? `Continuing to ${stageConfirmation?.next_stage_label || 'the next stage'}.`
             : reviewLayer === 'bronze' && action === 'APPROVED' && Number(refreshed?.next_gate || 0) === 5
             ? `Bronze approved. Silver scripts are now ready.`
+            : reviewLayer === 'silver' && action === 'APPROVED' && hasGoldScripts(refreshed)
+            ? 'Silver approved. Gold scripts are now ready.'
             : reviewLayer === 'silver' && action === 'APPROVED'
-            ? 'Silver approved. Gold scripts will appear when generation completes.'
+            ? 'Silver approved. Gold generation is still processing.'
             : 'Script review decision submitted.',
         duration: 4500
       })
