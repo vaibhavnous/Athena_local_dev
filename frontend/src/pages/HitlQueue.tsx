@@ -40,6 +40,22 @@ async function waitForRunGate(runId, updateRun, targetGate, attempts = 20) {
   return latest
 }
 
+async function waitForRunToLeaveGate(runId, updateRun, currentGate, attempts = 12) {
+  let latest = null
+  for (let index = 0; index < attempts; index += 1) {
+    latest = await getRun(runId)
+    updateRun(runId, latest)
+    const nextGate = Number(latest?.next_gate || 0)
+    const status = String(latest?.status || '').toUpperCase()
+    if (status === 'FAILED') return latest
+    if (nextGate !== Number(currentGate || 0) || ['RUNNING', 'PROCESSING', 'SUBMITTED'].includes(status)) {
+      return latest
+    }
+    await sleep(1500)
+  }
+  return latest
+}
+
 function hasRenderableReviewData(review, gate, isFileSource) {
   if (!review) return false
 
@@ -822,8 +838,14 @@ function HitlQueue() {
               .map((table) => tableReviewKey(table))
               .filter((key) => selectedTables[key])
         await submitTableReviews(selectedRunId, approvedTables)
-        const refreshed = await getRun(selectedRunId)
-        updateRun(selectedRunId, { ...refreshed, status: refreshed?.status || 'RUNNING' })
+        updateRun(selectedRunId, {
+          id: selectedRunId,
+          status: 'PROCESSING',
+          next_gate: 0,
+          resume_message: `${gate2Name} submitted. Metadata discovery is starting.`,
+        })
+        const refreshed = await waitForRunToLeaveGate(selectedRunId, updateRun, 2)
+        updateRun(selectedRunId, { ...refreshed, status: refreshed?.status || 'PROCESSING' })
         setTableReview(null)
         setSelectedTables({})
         addNotification({
@@ -1701,7 +1723,7 @@ function tableReviewKey(table) {
   const database = table.database_name || table.database || table.catalog || table.table_catalog
   const schema = table.schema_name || table.schema || table.table_schema
   const tableName = table.table_name || table.name || table.entity || table.table
-  const qualified = [database, schema, tableName].filter(Boolean).join('.')
+  const qualified = tableName ? `${database || ''}.${schema || ''}.${tableName || ''}` : ''
   return qualified || String(table.id || table.key || table.full_name || table.table_id || JSON.stringify(table))
 }
 
