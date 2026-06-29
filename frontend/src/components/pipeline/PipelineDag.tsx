@@ -2,6 +2,7 @@
 import React from 'react'
 import { motion } from 'framer-motion'
 import { Loader2, AlertCircle, Users, Clock, CheckCircle2 } from 'lucide-react'
+import { formatPipelineStepLabel } from '../../utils/pipelinePhases'
 
 /**
  * PipelineDag — renders a DAG of pipeline stages with animated connectors.
@@ -43,7 +44,7 @@ function PipelineDag({ stages = [], onStageClick, compact = false, layout = 'hor
               {/* Stage Name - Centered under bubble */}
               <div style={{ width: compact ? '84px' : '112px' }} className="text-center">
                 <p style={{ fontSize: compact ? '10px' : '11px' }} className="font-medium text-text-secondary leading-snug break-words">
-                  {stage.name.replace(/Stage \d+ — /, '')}
+                  {formatPipelineStepLabel(stage.name, stage.key)}
                 </p>
               </div>
             </div>
@@ -89,7 +90,7 @@ function VerticalPipelineDag({ stages = [], onStageClick, compact = false }) {
               {/* Stage Name - Left aligned */}
               <div className="flex-1">
                 <p style={{ fontSize: '11px' }} className="font-medium text-text-secondary leading-snug break-words">
-                  {stage.name.replace(/Stage \d+ — /, '')}
+                  {formatPipelineStepLabel(stage.name, stage.key)}
                 </p>
                 {stage.status && (
                   <p style={{ fontSize: '9.6px', marginTop: '3.2px' }} className="text-text-tertiary">
@@ -160,7 +161,7 @@ function HorizontalBubbleNode({ stage, index, onClick, compact = false }) {
         ${onClick ? 'cursor-pointer hover:scale-110' : ''}
         ${isPending ? 'opacity-50' : 'opacity-100'}
       `}
-      title={stage.name}
+      title={formatPipelineStepLabel(stage.name, stage.key)}
       whileHover={onClick ? { scale: 1.1 } : {}}
     >
       {/* Running pulse border animation */}

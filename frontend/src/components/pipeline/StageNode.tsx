@@ -12,6 +12,7 @@ import {
   Clock
 } from 'lucide-react'
 import StatusBadge from '../shared/StatusBadge'
+import { formatPipelineStepLabel } from '../../utils/pipelinePhases'
 
 const ICON_MAP = {
   FileText,
@@ -32,6 +33,7 @@ const ICON_MAP = {
  */
 function StageNode({ stage, onClick, compact = false }) {
   const Icon = ICON_MAP[stage.icon] || FileText
+  const stageName = formatPipelineStepLabel(stage.name || stage.label, stage.key)
   const status = String(stage.status || stage.state || '').toUpperCase()
   const isRunning = status === 'RUNNING'
   const isHitlWait = status === 'HITL_WAIT' || status === 'PAUSED_FOR_HITL'
@@ -124,7 +126,7 @@ function StageNode({ stage, onClick, compact = false }) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <span className={`font-medium leading-tight ${compact ? 'text-xs' : 'text-sm'} ${isPending ? 'text-gray-600' : 'text-gray-200'}`}>
-              {stage.name}
+              {stageName}
             </span>
             <StatusBadge status={stage.status || stage.state} size="sm" />
           </div>

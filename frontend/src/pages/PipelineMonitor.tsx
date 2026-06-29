@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Play, RefreshCcw, RotateCcw, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
-import { getPhaseGroups, getPipelineSteps, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
+import { formatPipelineStepLabel, getPhaseGroups, getPipelineSteps, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
 import { abortRun, continueStage, getRun, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
 const MIN_STAGE_VISIBLE_MS = 60000
@@ -1194,8 +1194,7 @@ function buildFailureSummary(run) {
   const failedStageLabel =
     run?.failed_stage_label ||
     run?.failed_stage_key ||
-    failedStep?.label ||
-    failedStep?.name ||
+    formatPipelineStepLabel(failedStep?.label || failedStep?.name, failedStep?.key) ||
     failedStep?.key ||
     failedStep?.id ||
     'stage_unknown'

@@ -15,6 +15,16 @@ function normalizeState(value: string | undefined) {
   return state || 'PENDING'
 }
 
+export function formatPipelineStepLabel(label?: string, key?: string) {
+  const normalizedKey = String(key || '').toLowerCase()
+  const cleanLabel = String(label || '').replace(/Stage \d+ — /, '').trim()
+  const normalizedLabel = cleanLabel.toLowerCase()
+
+  if (normalizedKey === 'ingestion' || normalizedLabel === 'ingestion') return 'BRD Ingest'
+  if (normalizedKey === 'nomination' || normalizedLabel === 'nomination') return 'Table Nomination'
+  return cleanLabel || fallbackStepLabel(normalizedKey)
+}
+
 export function getGateDisplayName(gate: number, sourceType?: string) {
   if (gate === 1) return 'KPI Review'
   if (gate === 2) return ['sftp', 'adls_gen2'].includes(String(sourceType || '').toLowerCase()) ? 'Feed Review' : 'Table Review'
@@ -89,6 +99,7 @@ export function getPipelineSteps(run) {
   if (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length) {
     return run.pipeline_steps.map((step) => ({
       ...step,
+      label: formatPipelineStepLabel(step.label, step.key),
       detail: step.detail || buildStepDetail(run, step.key, normalizeState(step.state), step.detail),
       state: normalizeState(step.state),
     })) as PipelineStep[]
@@ -96,7 +107,7 @@ export function getPipelineSteps(run) {
   if (Array.isArray(run?.stages) && run.stages.length) {
     return run.stages.map((stage) => ({
       key: stage.key,
-      label: stage.name || fallbackStepLabel(stage.key),
+      label: formatPipelineStepLabel(stage.name, stage.key),
       detail: stage.error || buildStepDetail(run, stage.key, normalizeState(stage.status), ''),
       state: normalizeState(stage.status),
       complete: normalizeState(stage.status) === 'COMPLETED',
