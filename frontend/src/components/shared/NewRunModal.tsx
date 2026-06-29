@@ -3,13 +3,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowLeft,
-  BookOpen,
   ChevronDown,
   FileText,
   Loader2,
   Play,
   Upload,
-  X,
 } from 'lucide-react'
 import * as mammoth from 'mammoth'
 import { startRun, uploadBrd } from '../../api/athenaApi'
@@ -62,12 +60,6 @@ const SOURCE_OPTIONS = [
 
 const DATA_LAKE_OPTIONS = [
   { id: 'adls_gen2', label: 'ADLS' },
-]
-
-const PROVIDER_OPTIONS = [
-  { id: 'azure_openai', label: 'Azure OpenAI' },
-  { id: 'openai', label: 'OpenAI' },
-  { id: 'anthropic', label: 'Anthropic' },
 ]
 
 const DATABASE_OPTIONS = {
@@ -362,46 +354,37 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
             className="fixed inset-0 z-50 overflow-y-auto"
           >
             <div className="mx-auto flex min-h-full w-full items-start justify-center px-6 py-12">
-              <div className="w-full max-w-[468px]">
+              <div className="w-full max-w-[1317px]">
                 <div className="mb-5 flex items-start justify-between">
-                  <div className="flex items-start gap-3">
+                  <div className="flex items-start gap-4">
                     <button
                       type="button"
                       onClick={handleClose}
-                      className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-md border border-[#2a374e] bg-[#172131] text-slate-300 transition-colors hover:bg-[#1a2537] hover:text-white"
+                      className="mt-0.5 flex h-11 w-11 items-center justify-center rounded-[10px] border border-[#233047] bg-[#111a2b] text-slate-300 transition-colors hover:bg-[#172131] hover:text-white"
                     >
-                      <ArrowLeft size={12} />
+                      <ArrowLeft size={20} />
                     </button>
                     <div>
-                      <h2 className="text-[16px] font-semibold leading-none text-white">New Pipeline Run</h2>
-                      <p className="mt-1 text-[10px] text-[#9fb1ca]">
+                      <h2 className="text-[28px] font-semibold leading-tight text-white">New Pipeline Run</h2>
+                      <p className="mt-1 text-[15px] text-[#b5c3da]">
                         {isFileSource(form.source)
                           ? 'Upload or paste a BRD, then configure the file source.'
                           : 'Upload or paste a BRD to extract KPIs.'}
                       </p>
                     </div>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={handleClose}
-                    disabled={loading}
-                    className="flex h-7 w-7 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-[#172131] hover:text-white"
-                  >
-                    <X size={12} />
-                  </button>
                 </div>
 
-              <div className="rounded-lg border border-[#243149] bg-[#141c2a] shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
+              <div className="overflow-hidden rounded-xl border border-[#223047] bg-[#111827] shadow-[0_22px_60px_rgba(0,0,0,0.32)]">
                 <form onSubmit={handleSubmit}>
-                  <div className="px-[18px] py-5">
-                      <div className="space-y-5">
+                  <div className="grid min-h-[684px] lg:grid-cols-2">
+                    <div className="space-y-5 px-[21px] py-6">
                         <Field label="Project Name" required>
                           <input
                             value={form.projectName}
                             onChange={(event) => setForm((current) => ({ ...current, projectName: event.target.value }))}
                             placeholder="Enter project name..."
-                            className="modal-input h-7 rounded-md border-[#26344b] bg-[#0d1422] px-3 text-[11px] text-white placeholder:text-[#6f84a4]"
+                            className="modal-input h-[60px] rounded-[10px] border-[#26344b] bg-[#070d1a] px-4 text-[18px] text-white placeholder:text-[#b8c5db]"
                           />
                         </Field>
 
@@ -410,13 +393,15 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                             value={form.projectDescription}
                             onChange={(event) => setForm((current) => ({ ...current, projectDescription: event.target.value }))}
                             placeholder="Briefly describe the project..."
-                            className="modal-input min-h-[58px] resize-none rounded-md border-[#26344b] bg-[#0d1422] px-3 py-2 text-[11px] text-white placeholder:text-[#6f84a4]"
+                            className="modal-input min-h-[107px] resize-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-4 py-4 text-[18px] text-white placeholder:text-[#b8c5db]"
                           />
                         </Field>
 
                         <>
                           <div>
-                            <label className="modal-label">BRD Document *</label>
+                            <label className="mb-2 block text-[16px] font-semibold leading-tight text-slate-100">
+                              BRD Document <span className="text-[#ff5c57]">*</span>
+                            </label>
                             <div
                               onDragOver={(event) => {
                                 event.preventDefault()
@@ -425,12 +410,12 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                               onDragLeave={() => setIsDragging(false)}
                               onDrop={handleDrop}
                               onClick={() => fileInputRef.current?.click()}
-                              className={`mt-2 cursor-pointer rounded-lg border border-dashed px-4 py-9 text-center transition-all ${
+                              className={`mt-2 flex min-h-[108px] cursor-pointer items-center rounded-[14px] border border-dashed px-[17px] py-4 transition-all ${
                                 isDragging
                                   ? 'border-[#4f89f2] bg-[#12203a]'
                                   : form.fileName
                                   ? 'border-emerald-400/30 bg-emerald-500/8'
-                                  : 'border-[#2b3950] bg-[#141c2a] hover:border-[#4f89f2]/40 hover:bg-[#172131]'
+                                  : 'border-[#566174] bg-[#111827] hover:border-[#4f89f2]/50 hover:bg-[#172131]'
                               }`}
                             >
                               <input
@@ -441,17 +426,23 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                 onChange={handleFileInput}
                               />
                               {form.fileName ? (
-                                <div className="flex items-center justify-center gap-2 text-emerald-300">
-                                  <FileText size={18} />
-                                  <span className="text-sm font-medium">{form.fileName}</span>
+                                <div className="flex items-center gap-4 text-emerald-300">
+                                  <span className="flex h-12 w-12 items-center justify-center rounded-[10px] border border-emerald-400/20 bg-emerald-400/10">
+                                    <FileText size={22} />
+                                  </span>
+                                  <span className="text-[18px] font-semibold">{form.fileName}</span>
                                 </div>
                               ) : (
-                                <div>
-                                  <Upload size={18} className="mx-auto text-slate-400" />
-                                  <p className="mt-3 text-[11px] text-slate-200">
-                                    Drop `.txt` or `.docx` here, or <span className="text-accent-blue">browse</span>
+                                <div className="flex items-center gap-4">
+                                  <span className="flex h-12 w-12 items-center justify-center rounded-[10px] border border-[#26344b] bg-[#0b1220] text-slate-300">
+                                    <Upload size={24} />
+                                  </span>
+                                  <div>
+                                  <p className="text-[20px] font-semibold leading-tight text-white">
+                                    Drop .txt or .docx here, or <span className="text-[#3f82ff]">browse</span>
                                   </p>
-                                  <p className="mt-1 text-[10px] text-[#8ba0bf]">Max 5 MB</p>
+                                  <p className="mt-1 text-[16px] text-[#b5c3da]">Max 5 MB</p>
+                                  </div>
                                 </div>
                               )}
                             </div>
@@ -459,13 +450,13 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
 
                           <div className="flex items-center gap-3">
                             <div className="h-px flex-1 bg-[#26344b]" />
-                            <span className="text-[10px] text-[#8ba0bf]">or paste text</span>
+                            <span className="text-[15px] font-semibold text-[#9fb1ca]">or paste text</span>
                             <div className="h-px flex-1 bg-[#26344b]" />
                           </div>
 
                           <Field label="BRD Text" required>
                             <textarea
-                              className="modal-input min-h-[104px] resize-none rounded-md border-[#26344b] bg-[#0d1422] px-3 py-2 text-[11px] text-white placeholder:text-[#6f84a4]"
+                              className="modal-input min-h-[162px] resize-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-4 py-4 text-[18px] text-white placeholder:text-[#b8c5db]"
                               placeholder="Paste your Business Requirements Document here..."
                               value={form.brdText}
                               onChange={(event) =>
@@ -474,10 +465,17 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                             />
                           </Field>
                         </>
+                    </div>
 
-                        <div ref={sourceSectionRef} className="rounded-md border border-[#243149] bg-[#151f2d] p-3">
-                          <div className="space-y-3">
-                            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-white">Source Connection</div>
+                    <div ref={sourceSectionRef} className="border-t border-[#223047] px-[22px] py-6 lg:border-l lg:border-t-0">
+                      <div className="space-y-6">
+                        <div>
+                          <h3 className="text-[24px] font-semibold leading-tight text-white">Run Configuration</h3>
+                          <p className="mt-1 text-[15px] text-[#b5c3da]">Select the source and AI settings for this run.</p>
+                        </div>
+
+                        <div className="space-y-4">
+                          <div className="text-[16px] font-semibold text-white">Source Connection</div>
 
                             <Field label="Connection Type" required compact>
                               <ModalSelect
@@ -496,7 +494,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                 <Field label="Database Type" required compact>
                                   <div className="relative">
                                     <select
-                                      className="modal-input h-8 w-full appearance-none rounded-md border-[#26344b] bg-[#0d1422] px-3 pr-8 text-[11px] font-semibold text-white"
+                                      className="modal-input h-[60px] w-full appearance-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-5 pr-12 text-[18px] text-white"
                                       value={form.databaseType}
                                       onChange={(event) => {
                                         const databaseType = event.target.value
@@ -508,16 +506,16 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                       }}
                                     >
                                       <option value="" disabled>Select type...</option>
-                                      <option value="azure_sql">Azure SQL</option>
+                                      <option value="azure_sql">Azure SQL DB</option>
                                       <option value="postgresql">PostgreSQL</option>
                                     </select>
-                                    <ChevronDown size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-white" />
+                                    <ChevronDown size={21} className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white" />
                                   </div>
                                 </Field>
                                 <Field label="Database Name" compact>
                                   <div className="relative">
                                     <select
-                                      className="modal-input h-8 w-full appearance-none rounded-md border-[#26344b] bg-[#0d1422] px-3 pr-8 text-[11px] font-semibold text-white"
+                                      className="modal-input h-[60px] w-full appearance-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-5 pr-12 text-[18px] text-white"
                                       value={form.databaseName}
                                       onChange={(event) =>
                                         setForm((current) => ({ ...current, databaseName: event.target.value }))
@@ -529,7 +527,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                         </option>
                                       ))}
                                     </select>
-                                    <ChevronDown size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-white" />
+                                    <ChevronDown size={21} className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white" />
                                   </div>
                                 </Field>
                               </>
@@ -549,24 +547,24 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                   />
                                 </Field>
 
-                                <div className="rounded-md border border-[#26344b] bg-[#0d1422] px-3 py-3">
-                                  <div className="text-[11px] font-semibold text-white">ADLS Source</div>
-                                  <div className="mt-2 grid gap-2 text-[10px] text-[#9fb1ca]">
-                                    <div className="rounded border border-[#1e2a3d] bg-[#101827] px-2.5 py-2">
+                                <div className="rounded-[10px] border border-[#26344b] bg-[#070d1a] px-4 py-4">
+                                  <div className="text-[16px] font-semibold text-white">ADLS Source</div>
+                                  <div className="mt-3 grid gap-2 text-[13px] text-[#9fb1ca]">
+                                    <div className="rounded border border-[#1e2a3d] bg-[#101827] px-3 py-2.5">
                                       <div className="text-[#6f84a4]">Account</div>
                                       <div className="mt-1 break-all font-mono text-white">https://atheastorage.dfs.core.windows.net</div>
                                     </div>
                                     <div className="grid grid-cols-2 gap-2">
-                                      <div className="rounded border border-[#1e2a3d] bg-[#101827] px-2.5 py-2">
+                                      <div className="rounded border border-[#1e2a3d] bg-[#101827] px-3 py-2.5">
                                         <div className="text-[#6f84a4]">File system</div>
                                         <div className="mt-1 font-mono text-white">ADLS_FILE_SYSTEM</div>
                                       </div>
-                                      <div className="rounded border border-[#1e2a3d] bg-[#101827] px-2.5 py-2">
+                                      <div className="rounded border border-[#1e2a3d] bg-[#101827] px-3 py-2.5">
                                         <div className="text-[#6f84a4]">Root</div>
                                         <div className="mt-1 font-mono text-white">ADLS_SOURCE_ROOT</div>
                                       </div>
                                     </div>
-                                    <div className="rounded border border-[#1e2a3d] bg-[#101827] px-2.5 py-2">
+                                    <div className="rounded border border-[#1e2a3d] bg-[#101827] px-3 py-2.5">
                                       <div className="text-[#6f84a4]">Mode</div>
                                       <div className="mt-1 text-white">Auto-discover folders and files</div>
                                     </div>
@@ -574,89 +572,6 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                 </div>
                               </div>
                             )}
-                          </div>
-                        </div>
-
-                        {form.source === 'database' && (
-                          <label className="flex h-10 items-center gap-3 rounded-md border border-[#243149] bg-[#151f2d] px-3 text-[11px] font-semibold text-white">
-                            <input
-                              type="checkbox"
-                              checked={!!form.useDomainKb}
-                              onChange={(event) =>
-                                setForm((current) => ({ ...current, useDomainKb: event.target.checked }))
-                              }
-                              className="h-4 w-4 accent-[#3f82ff]"
-                            />
-                            <BookOpen size={13} className="text-slate-300" />
-                            <span>Use Domain Knowledge Base</span>
-                          </label>
-                        )}
-
-                        {form.source === 'database' && (
-                          <label className="flex items-center gap-3 rounded-md border border-[#243149] bg-[#151f2d] px-3 py-3 text-[11px] font-semibold text-white">
-                            <input
-                              type="checkbox"
-                              checked={!!form.stageConfirmationEnabled}
-                              onChange={(event) =>
-                                setForm((current) => ({ ...current, stageConfirmationEnabled: event.target.checked }))
-                              }
-                              className="h-4 w-4 accent-[#3f82ff]"
-                            />
-                            <span>Ask before moving to every next stage</span>
-                          </label>
-                        )}
-
-                        <div>
-                          <div className="space-y-3">
-                            <div>
-                              <label className="modal-label">LLM Provider</label>
-                              <div className="mt-2 grid grid-cols-3 gap-2">
-                                {PROVIDER_OPTIONS.map((option) => {
-                                  const active = form.provider === option.id
-                                  return (
-                                    <button
-                                      key={option.id}
-                                      type="button"
-                                      onClick={() => setForm((current) => ({ ...current, provider: option.id }))}
-                                      className={`h-8 rounded-md border px-2 text-[10px] font-medium transition-colors ${
-                                        active
-                                          ? 'border-[#4585f5] bg-[#2453a6] text-white'
-                                          : 'border-[#26344b] bg-[#0d1422] text-[#a6b6cf] hover:text-white'
-                                      }`}
-                                    >
-                                      {option.label}
-                                    </button>
-                                  )
-                                })}
-                              </div>
-                            </div>
-
-                            <Field label="Azure Endpoint" compact>
-                              <input
-                                className="modal-input h-8 rounded-md border-[#26344b] bg-[#0d1422] px-3 text-[11px] text-white"
-                                placeholder="https://athena-openai.openai.azure.com/"
-                                value={settings.azure_endpoint || ''}
-                                readOnly
-                              />
-                            </Field>
-
-                            <Field label="Deployment Name" compact>
-                              <input
-                                className="modal-input h-8 rounded-md border-[#26344b] bg-[#0d1422] px-3 text-[11px] text-white"
-                                value={form.deployment}
-                                onChange={(event) => setForm((current) => ({ ...current, deployment: event.target.value }))}
-                                placeholder="gpt-4o-athena"
-                              />
-                            </Field>
-
-                            <div className="grid grid-cols-2 gap-3">
-                              <Field label="Budget (USD)" compact>
-                                <input className="modal-input h-8 rounded-md border-[#26344b] bg-[#0d1422] px-3 text-[11px] text-white" value={settings.budget} readOnly />
-                              </Field>
-                              <Field label="Max KPIs" compact>
-                                <input className="modal-input h-8 rounded-md border-[#26344b] bg-[#0d1422] px-3 text-[11px] text-white" value={settings.maxKpis} readOnly />
-                              </Field>
-                            </div>
                           </div>
                         </div>
 
@@ -668,28 +583,28 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                       </div>
                   </div>
 
-                  <div className="flex items-center gap-2 border-t border-[#243149] px-[18px] py-3">
+                  <div className="flex items-center gap-4 border-t border-[#223047] px-[21px] py-4">
                     <button
                       type="button"
                       onClick={handleClose}
                       disabled={loading}
-                      className="inline-flex h-8 flex-1 items-center justify-center rounded-md border border-[#26344b] bg-[#2a3443] px-4 text-[11px] font-semibold text-slate-200 transition-colors hover:bg-[#263142] hover:text-white disabled:opacity-50"
+                      className="inline-flex h-[59px] flex-1 items-center justify-center rounded-[10px] bg-[#202b3a] px-4 text-[17px] font-semibold text-slate-100 transition-colors hover:bg-[#263142] hover:text-white disabled:opacity-50"
                     >
                       Cancel
                     </button>
                     <button
                       type="submit"
                       disabled={loading || !form.brdText.trim()}
-                      className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md bg-[#3f7df0] px-4 text-[11px] font-semibold text-white transition-colors hover:bg-[#4f89f2] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-[59px] flex-1 items-center justify-center gap-3 rounded-[10px] bg-[#315da8] px-4 text-[17px] font-semibold text-white transition-colors hover:bg-[#3f72cc] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {loading ? (
                         <>
-                          <Loader2 size={13} className="animate-spin" />
+                          <Loader2 size={18} className="animate-spin" />
                           Starting...
                         </>
                       ) : (
                         <>
-                          <Play size={13} />
+                          <Play size={18} />
                           Start Run
                         </>
                       )}
@@ -709,8 +624,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
 function Field({ label, required = false, compact = false, children }) {
   return (
     <div>
-      <label className={`modal-label ${compact ? '' : 'mb-2'}`}>
-        {label} {required ? '*' : ''}
+      <label className={`mb-2 block text-[16px] font-semibold leading-tight text-slate-100 ${compact ? '' : ''}`}>
+        {label} {required ? <span className="text-[#ff5c57]">*</span> : null}
       </label>
       {children}
     </div>
@@ -735,31 +650,31 @@ function ModalSelect({
       <button
         type="button"
         onClick={() => setOpenSelect(open ? null : id)}
-        className={`flex h-8 w-full items-center justify-between rounded-md border bg-[#0d1422] px-3 text-left text-[11px] font-semibold text-white transition-colors ${
-          open ? 'border-[#4585f5] ring-1 ring-[#4585f5]' : activeBorder ? 'border-[#4585f5]' : 'border-[#26344b] hover:border-[#4585f5]/70'
+        className={`flex h-[60px] w-full items-center justify-between rounded-[10px] border bg-[#070d1a] px-5 text-left text-[18px] text-white transition-colors ${
+          open ? 'border-[#4585f5] ring-1 ring-[#4585f5]' : activeBorder ? 'border-[#26344b]' : 'border-[#26344b] hover:border-[#4585f5]/70'
         }`}
       >
-        <span className={selected ? 'text-white' : 'text-[#6f84a4]'}>
+        <span className={selected ? 'text-white' : 'text-[#b8c5db]'}>
           {selected?.label || placeholder}
         </span>
-        <ChevronDown size={15} className={`text-white transition-transform ${open ? 'rotate-180' : ''}`} />
+        <ChevronDown size={21} className={`text-white transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
 
       {open && (
-        <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-[80] overflow-hidden rounded-md border border-[#4585f5] bg-[#070d1a] shadow-[0_16px_36px_rgba(0,0,0,0.45)]">
+        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[80] overflow-hidden rounded-[10px] border border-[#4585f5] bg-[#070d1a] shadow-[0_16px_36px_rgba(0,0,0,0.45)]">
           <button
             type="button"
             disabled
-            className="block h-8 w-full cursor-default px-3 text-left text-[10px] font-medium text-[#6f84a4]"
+            className="block h-10 w-full cursor-default px-5 text-left text-[14px] font-medium text-[#6f84a4]"
           >
             {placeholder}
           </button>
           {options.map((option) => (
             <button
-              key={option.id}
-              type="button"
-              onClick={() => onChange(option.id)}
-              className={`block h-9 w-full px-3 text-left text-[11px] font-semibold transition-colors ${
+            key={option.id}
+            type="button"
+            onClick={() => onChange(option.id)}
+              className={`block h-11 w-full px-5 text-left text-[16px] font-semibold transition-colors ${
                 option.id === value ? 'bg-[#1b2a45] text-white' : 'bg-[#070d1a] text-white hover:bg-[#172131]'
               }`}
             >
