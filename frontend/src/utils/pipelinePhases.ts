@@ -21,6 +21,8 @@ export function formatPipelineStepLabel(label?: string, key?: string) {
   const normalizedLabel = cleanLabel.toLowerCase()
 
   if (normalizedKey === 'ingestion' || normalizedLabel === 'ingestion') return 'BRD Ingest'
+  if (normalizedKey === 'requirements' || normalizedLabel === 'req extract') return 'Requirement Extraction'
+  if (normalizedKey === 'kpis' || normalizedLabel === 'kpi extract') return 'KPI Extraction'
   if (normalizedKey === 'nomination' || normalizedLabel === 'nomination') return 'Table Nomination'
   return cleanLabel || fallbackStepLabel(normalizedKey)
 }
