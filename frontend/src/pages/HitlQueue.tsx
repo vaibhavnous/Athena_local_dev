@@ -2,10 +2,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
-import { CheckCircle, CheckCircle2, Copy, Download, Loader2, PlusCircle, Send, Shield, Table2, Timer } from 'lucide-react'
+import { AlertTriangle, CheckCircle, CheckCircle2, Copy, Database, Download, Inbox, Loader2, PlusCircle, Send, Shield, Table2, Timer } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import KpiReviewCard from '../components/hitl/KpiReviewCard'
 import EditKpiModal from '../components/hitl/EditKpiModal'
+import SemanticReviewCard from '../components/hitl/SemanticReviewCard'
 import {
   getBronzeReview,
   getEnrichmentReviews,
@@ -315,6 +316,9 @@ function HitlQueue() {
   const [tableReview, setTableReview] = useState(null)
   const [selectedTables, setSelectedTables] = useState({})
   const [enrichmentReview, setEnrichmentReview] = useState(null)
+  const [semanticDecisions, setSemanticDecisions] = useState({})
+  const [semanticRejectionReasons, setSemanticRejectionReasons] = useState({})
+  const [semanticValidationError, setSemanticValidationError] = useState('')
   const [bronzeReview, setBronzeReview] = useState(null)
   const [silverReview, setSilverReview] = useState(null)
   const [gate3Decision, setGate3Decision] = useState('APPROVED')
@@ -444,6 +448,9 @@ function HitlQueue() {
   useEffect(() => {
     setTableReview(null)
     setEnrichmentReview(null)
+    setSemanticDecisions({})
+    setSemanticRejectionReasons({})
+    setSemanticValidationError('')
     setBronzeReview(null)
     setSilverReview(null)
     setSelectedTables({})
@@ -668,6 +675,15 @@ function HitlQueue() {
   const totalFeedCount = availableSftpFeeds.length
   const bronzeReviewFeeds = bronzeReview?.bronze_review_artifact?.feeds || []
   const silverReviewItems = silverReview?.silver_review_artifact?.items || []
+  const semanticReviewItems = useMemo(
+    () => toAthenaSemanticItems(enrichmentReview, isSftpRun, selectedRunId),
+    [enrichmentReview, isSftpRun, selectedRunId]
+  )
+  const pendingSemanticReviewItems = semanticReviewItems.filter((item) => {
+    const key = semanticReviewItemKey(item)
+    return !semanticDecisions[key] && !item.decision
+  })
+  const allSemanticReviewed = semanticReviewItems.length > 0 && pendingSemanticReviewItems.length === 0
   const gateReviewReady = isGate4 ? bronzeReviewFeeds.length > 0 : isGate5 ? silverReviewItems.length > 0 : false
   const allKpisDecided = queue.length > 0 && queue.every((item) => localDecisions[reviewItemKey(item)] || item.decision)
   const canSubmitReview = isReviewableRun && (isGate2
@@ -716,6 +732,27 @@ function HitlQueue() {
       if (!item.decision) next[reviewItemKey(item)] = 'APPROVED'
     })
     setLocalDecisions((prev) => ({ ...prev, ...next }))
+  }
+
+  const handleApproveSemanticItem = (id) => {
+    setSemanticValidationError('')
+    setSemanticDecisions((prev) => ({ ...prev, [id]: 'APPROVED' }))
+  }
+
+  const handleRejectSemanticItem = (id, reason) => {
+    setSemanticValidationError('')
+    setSemanticRejectionReasons((prev) => ({ ...prev, [id]: reason || 'Rejected by reviewer' }))
+    setSemanticDecisions((prev) => ({ ...prev, [id]: 'REJECTED' }))
+  }
+
+  const handleAutoApproveSemanticItems = () => {
+    const next = {}
+    semanticReviewItems.forEach((item) => {
+      const key = semanticReviewItemKey(item)
+      if (!semanticDecisions[key] && !item.decision) next[key] = 'APPROVED'
+    })
+    setSemanticValidationError('')
+    setSemanticDecisions((prev) => ({ ...prev, ...next }))
   }
 
   const handleSelectAllTables = () => {
@@ -807,16 +844,28 @@ function HitlQueue() {
     }
 
     if (isGate3) {
+      if (!allSemanticReviewed) {
+        setSemanticValidationError('Please review all semantic enrichment items before continuing.')
+        return
+      }
+
       setSubmitting(true)
       try {
-        await submitEnrichmentReview(selectedRunId, gate3Decision === 'APPROVED')
+        const hasRejectedSemanticItem = semanticReviewItems.some((item) => {
+          const key = semanticReviewItemKey(item)
+          return (semanticDecisions[key] || item.decision) === 'REJECTED'
+        })
+        await submitEnrichmentReview(selectedRunId, !hasRejectedSemanticItem)
         const refreshed = await getRun(selectedRunId)
         updateRun(selectedRunId, refreshed)
         setEnrichmentReview(null)
+        setSemanticDecisions({})
+        setSemanticRejectionReasons({})
+        setSemanticValidationError('')
         addNotification({
           type: 'success',
           title: `${gate3Name} Submitted`,
-          message: gate3Decision === 'APPROVED'
+          message: !hasRejectedSemanticItem
             ? `${gate3Name} approved. Bronze generation is running in the background.`
             : 'Enrichment review was rejected and the run remains paused for rework.',
           duration: 5000
@@ -1109,67 +1158,85 @@ function HitlQueue() {
               </button>
             </div>
             ) : isGate3 ? (
-            <div className="space-y-4">
-              <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
-                <div className="flex items-center justify-between gap-3 mb-4">
+            <div className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-bg-border bg-bg-card shadow-2xl">
+              <div className="flex shrink-0 flex-col gap-4 border-b border-bg-border bg-bg-base/50 p-6 md:flex-row md:items-center md:justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-blue/15">
+                    <Database size={20} className="text-accent-blue" />
+                  </div>
                   <div>
-                    <h3 className="text-base font-bold text-text-primary">{isSftpRun ? 'File Schema Enrichment Summary' : 'Enrichment Summary'}</h3>
-                    <p className="text-sm text-text-secondary mt-1">{enrichmentReview?.resume_message || 'Review enriched metadata and approve or reject it.'}</p>
+                    <h2 className="text-xl font-bold text-text-primary">Enrichment Review</h2>
+                    <p className="text-sm text-text-secondary">
+                      Review semantic enrichment for {semanticReviewItems.length} item{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
+                    </p>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <StatTile label="Columns" value={(enrichmentReview?.enriched_columns || []).length} />
-                  <StatTile label="Joins" value={(enrichmentReview?.enriched_joins || []).length} />
-                  <StatTile label="PII Columns" value={(enrichmentReview?.pii_columns || []).length} />
-                  <StatTile label="Join Keys" value={(enrichmentReview?.join_key_columns || []).length} />
-                </div>
+                <button
+                  type="button"
+                  onClick={handleAutoApproveSemanticItems}
+                  className="btn-secondary flex items-center gap-2 text-sm"
+                >
+                  <CheckCircle size={14} className="text-accent-green" />
+                  Auto-Approve Pending
+                </button>
               </div>
 
-              {isSftpRun && Array.isArray(enrichmentReview?.feed_semantic_summary) && enrichmentReview.feed_semantic_summary.length > 0 && (
-                <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
-                  <h3 className="text-base font-bold text-text-primary mb-3">Per Feed Breakdown</h3>
-                  <div className="space-y-3">
-                    {enrichmentReview.feed_semantic_summary.map((feed, index) => (
-                      <FileSemanticFeedCard key={`${feed.feed_id || feed.entity || index}`} feed={feed} />
-                    ))}
+              <div className="flex-1 space-y-4 overflow-y-auto bg-bg-base/20 p-6">
+                {semanticReviewItems.length === 0 ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-4 py-16 text-center">
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full bg-bg-hover">
+                      <Inbox size={28} className="text-text-tertiary" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-text-primary">No Items Available</p>
+                      <p className="mt-1 text-sm text-text-secondary">
+                        The pipeline did not return any items for semantic review.
+                      </p>
+                    </div>
                   </div>
-                </div>
-              )}
-
-              <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
-                <h3 className="text-base font-bold text-text-primary mb-3">Semantic Types</h3>
-                <div className="flex flex-wrap gap-2">
-                  {Object.entries(enrichmentReview?.semantic_counts || {}).map(([key, value]) => (
-                    <span key={key} className="px-3 py-1 rounded-full text-xs font-medium bg-bg-border text-text-secondary border border-bg-border">
-                      {key}: {value}
-                    </span>
-                  ))}
-                </div>
+                ) : (
+                  semanticReviewItems.map((item) => {
+                    const key = semanticReviewItemKey(item)
+                    return (
+                      <SemanticReviewCard
+                        key={key}
+                        item={item}
+                        localDecision={semanticDecisions[key]}
+                        rejectionReason={semanticRejectionReasons[key]}
+                        onApprove={handleApproveSemanticItem}
+                        onReject={handleRejectSemanticItem}
+                      />
+                    )
+                  })
+                )}
               </div>
 
-              <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
-                <h3 className="text-base font-bold text-text-primary mb-3">Decision</h3>
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setGate3Decision('APPROVED')}
-                    className={`flex-1 px-4 py-3 rounded-lg border text-sm font-semibold transition-colors ${
-                      gate3Decision === 'APPROVED'
-                        ? 'bg-accent-green/15 border-accent-green/30 text-accent-green'
-                        : 'border-bg-border text-text-secondary hover:border-gray-600'
-                    }`}
-                  >
-                    Approve Enrichment
-                  </button>
-                  <button
-                    onClick={() => setGate3Decision('REJECTED')}
-                    className={`flex-1 px-4 py-3 rounded-lg border text-sm font-semibold transition-colors ${
-                      gate3Decision === 'REJECTED'
-                        ? 'bg-accent-red/15 border-accent-red/30 text-accent-red'
-                        : 'border-bg-border text-text-secondary hover:border-gray-600'
-                    }`}
-                  >
-                    Reject Enrichment
-                  </button>
+              <div className="flex shrink-0 flex-col gap-3 border-t border-bg-border bg-bg-base/50 px-6 pb-5 pt-4">
+                {semanticValidationError && (
+                  <div className="flex items-center gap-2 rounded-lg border border-accent-red/30 bg-accent-red/10 px-3 py-2 text-sm text-accent-red">
+                    <AlertTriangle size={14} />
+                    <span>{semanticValidationError}</span>
+                  </div>
+                )}
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <p className="text-sm text-text-secondary">
+                    <span className="font-medium text-text-primary">
+                      {semanticReviewItems.length - pendingSemanticReviewItems.length}
+                    </span>{' '}
+                    / {semanticReviewItems.length} items reviewed
+                  </p>
+                  <div className="flex gap-3">
+                    <button type="button" onClick={() => returnToMonitor(selectedRunId)} className="btn-secondary">
+                      Pause Pipeline
+                    </button>
+                    <button
+                      onClick={handleSubmit}
+                      disabled={!allSemanticReviewed || submitting}
+                      className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {submitting ? 'Saving...' : 'Submit Decisions & Resume'}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1356,7 +1423,7 @@ function HitlQueue() {
         </div>
       </div>
 
-      {canSubmitReview && (
+      {canSubmitReview && !isGate3 && (
         <motion.div
           initial={{ y: 80, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
@@ -1452,6 +1519,79 @@ function mapHitlRow(row) {
     decided_at: row.decided_at,
     timeout_at: row.timeout_at
   }
+}
+
+function normalizeSemanticColumns(columns = []) {
+  return (columns || []).map((column, index) => {
+    if (typeof column === 'string') {
+      return {
+        column_name: column,
+        suggested_display_name: column,
+        semantic_type: 'DIMENSION',
+        business_description: '',
+        enrichment_source: 'semantic_enrichment',
+        is_measure: false,
+        is_dimension: true,
+        is_pii_candidate: false,
+      }
+    }
+
+    return {
+      column_name: column.column_name || column.name || column.column || `column_${index + 1}`,
+      suggested_display_name:
+        column.suggested_display_name || column.display_name || column.column_name || column.name || column.column || `Column ${index + 1}`,
+      semantic_type: column.semantic_type || column.type || 'DIMENSION',
+      business_description:
+        column.business_description || column.description || column.summary || column.nomination_reason || '',
+      enrichment_source: column.enrichment_source || column.source || 'semantic_enrichment',
+      is_measure: !!column.is_measure,
+      is_dimension: !!column.is_dimension,
+      is_pii_candidate: !!(column.is_pii_candidate || column.is_pii),
+    }
+  })
+}
+
+function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
+  if (!enrichmentReview) return []
+  const feeds = enrichmentReview.feed_semantic_summary || []
+
+  if (isSftpRun && feeds.length > 0) {
+    return feeds.map((feed, index) => ({
+      queue_id: feed.queue_id || `${runId || 'run'}-semantic-feed-${index}`,
+      item_id: feed.feed_id || feed.entity || feed.table_name || `Feed ${index + 1}`,
+      item_type: 'ENRICHMENT',
+      item_detail: {
+        table_name: feed.feed_id || feed.entity || feed.table_name || `Feed ${index + 1}`,
+        columns: normalizeSemanticColumns(feed.enriched_columns || feed.columns || feed.semantic_columns || []),
+      },
+      decision: feed.decision,
+      reviewer_id: feed.reviewer_id,
+      rejection_reason: feed.rejection_reason,
+      queued_at: feed.queued_at,
+      decided_at: feed.decided_at,
+    }))
+  }
+
+  return [
+    {
+      queue_id: enrichmentReview.queue_id || `${runId || 'run'}-semantic-enrichment`,
+      item_id: enrichmentReview.entity || enrichmentReview.table_name || 'Semantic Enrichment',
+      item_type: 'ENRICHMENT',
+      item_detail: {
+        table_name: enrichmentReview.entity || enrichmentReview.table_name || 'Semantic Enrichment',
+        columns: normalizeSemanticColumns(enrichmentReview.enriched_columns || []),
+      },
+      decision: enrichmentReview.decision,
+      reviewer_id: enrichmentReview.reviewer_id,
+      rejection_reason: enrichmentReview.rejection_reason,
+      queued_at: enrichmentReview.queued_at,
+      decided_at: enrichmentReview.decided_at,
+    },
+  ]
+}
+
+function semanticReviewItemKey(item) {
+  return item?.queue_id || item?.id || item?.item_id
 }
 
 function formatSemanticSignalLabel(table) {
@@ -1646,6 +1786,7 @@ function SftpFeedReviewBody({ feed }) {
   )
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function FileSemanticFeedCard({ feed }) {
   const semanticCounts = Object.entries(feed?.semantic_counts || {})
   return (
