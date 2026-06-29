@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
-import { CheckCircle, CheckCircle2, Copy, Download, Loader2, Send, Shield, Table2, Timer } from 'lucide-react'
+import { CheckCircle, CheckCircle2, Copy, Download, Loader2, PlusCircle, Send, Shield, Table2, Timer } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import KpiReviewCard from '../components/hitl/KpiReviewCard'
 import EditKpiModal from '../components/hitl/EditKpiModal'
@@ -22,8 +22,6 @@ import {
 } from '../api/athenaApi'
 import { MOCK_KPIS_LIST, MOCK_RUNS } from '../data/mockData'
 import { getGateDisplayName } from '../utils/pipelinePhases'
-
-const ATHENA_LOGO_SRC = `${process.env.PUBLIC_URL}/Athena_logo.png`
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const REVIEW_HYDRATION_ATTEMPTS = 12
@@ -950,37 +948,55 @@ function HitlQueue() {
 
   return (
     <div className="flex flex-col h-full gap-4">
-      <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] shadow-[0_20px_80px_rgba(0,0,0,0.25)]">
-        <div className="flex items-center justify-between gap-4 px-6 py-5">
+      <div className="overflow-hidden rounded-[16px] border border-[#1d2940] bg-[#0f1829] shadow-[0_20px_80px_rgba(0,0,0,0.28)]">
+        <div className="flex flex-col gap-4 px-8 py-9 md:flex-row md:items-center md:justify-between">
           <div className="flex min-w-0 items-center gap-4">
-            <img src={ATHENA_LOGO_SRC} alt="Athena" className="h-12 w-12 flex-shrink-0 object-contain" />
+            <div className="flex h-[52px] w-[52px] flex-shrink-0 items-center justify-center rounded-[10px] border border-[#5a3d13] bg-[#3a2a16] text-[#f4a912]">
+              <Shield size={25} strokeWidth={2.2} />
+            </div>
             <div className="min-w-0">
-              <h1 className="text-[18px] font-bold text-white">
-                {isGate5 ? gate5Name : isGate4 ? gate4Name : isGate3 ? gate3Name : isGate2 ? gate2Name : gate1Name}
+              <h1 className="text-[26px] font-extrabold leading-tight text-white">
+                Action Required: {isGate5 ? gate5Name : isGate4 ? gate4Name : isGate3 ? gate3Name : isGate2 ? gate2Name : gate1Name}
               </h1>
-              <p className="mt-0.5 text-sm text-[#95a3bf]">
+              <p className="mt-1 text-[18px] font-medium leading-snug text-[#b9c1cf]">
                 {isGate5
-                  ? (silverReview?.resume_message || 'Review generated Silver scripts before the pipeline continues.')
+                  ? (silverReview?.resume_message || 'Stage 05 completed. Review generated Silver scripts before the pipeline continues.')
                   : isGate4
-                  ? (bronzeReview?.resume_message || 'Review generated Bronze artifacts before the pipeline continues.')
+                  ? (bronzeReview?.resume_message || 'Stage 04 completed. Review generated Bronze artifacts before the pipeline continues.')
                   : isGate3
-                  ? (enrichmentReview?.resume_message || 'Review semantic enrichment before the pipeline continues.')
+                  ? (enrichmentReview?.resume_message || 'Stage 03 completed. Review semantic enrichment before the pipeline continues.')
                   : isGate2
-                  ? (tableReview?.resume_message || (isSftpRun ? 'Review discovered feeds before the pipeline continues.' : 'Review nominated tables before the pipeline continues.'))
-                  : 'Review and approve extracted KPIs before the pipeline continues.'}
+                  ? (tableReview?.resume_message || (isSftpRun ? 'Stage 02 completed. Review discovered feeds before the pipeline continues.' : 'Stage 02 completed. Review nominated tables before the pipeline continues.'))
+                  : 'Stage 04 completed. Review KPIs before the pipeline continues.'}
               </p>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-3">
+            {!isGate2 && !isGate3 && !isGate4 && !isGate5 && (
+              <button
+                type="button"
+                disabled
+                title="Add KPI is not connected to a backend create endpoint yet."
+                className="inline-flex h-12 items-center gap-2 rounded-[10px] bg-[#202b3a] px-5 text-[17px] font-bold text-[#b9c1cf] opacity-80"
+              >
+                <PlusCircle size={18} className="text-[#12b886]" />
+                Add KPI
+              </button>
+            )}
+
             <button
               onClick={isGate3 ? () => setGate3Decision('APPROVED') : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleToggleAllTables) : handleAutoApproveAll}
-              className="inline-flex items-center gap-2 rounded-xl border border-[#294766] bg-[#1b2a3f] px-4 py-2 text-sm font-semibold text-[#c6d2e8] transition-colors hover:bg-[#223550]"
+              className="inline-flex h-12 items-center gap-2 rounded-[10px] bg-[#202b3a] px-5 text-[17px] font-bold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
             >
-              <CheckCircle size={15} className="text-[#19c37d]" />
+              <CheckCircle size={18} className="text-[#12b886]" />
               {isGate2 ? 'Auto-Select Pending' : 'Auto-Approve Pending'}
             </button>
+          </div>
+        </div>
 
+        {(reviewRuns.length > 0 || (!isGate2 && !isGate3 && !isGate4 && !isGate5)) && (
+          <div className="flex flex-wrap items-center gap-3 border-t border-[#1d2940] px-8 py-4">
           {reviewRuns.length > 0 && (
             <select
               value={selectedRunId || ''}
@@ -1012,7 +1028,7 @@ function HitlQueue() {
             </select>
           )}
           </div>
-        </div>
+        )}
       </div>
 
       <div className="flex gap-4 flex-1 min-h-0">
