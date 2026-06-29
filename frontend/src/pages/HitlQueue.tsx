@@ -691,9 +691,13 @@ function HitlQueue() {
   const totalFeedCount = availableSftpFeeds.length
   const bronzeReviewFeeds = bronzeReview?.bronze_review_artifact?.feeds || []
   const silverReviewItems = silverReview?.silver_review_artifact?.items || []
+  const semanticReviewSource = useMemo(
+    () => buildSemanticReviewSource(enrichmentReview, currentRun, selectedRunId),
+    [enrichmentReview, currentRun, selectedRunId]
+  )
   const semanticReviewItems = useMemo(
-    () => toAthenaSemanticItems(enrichmentReview, isSftpRun, selectedRunId),
-    [enrichmentReview, isSftpRun, selectedRunId]
+    () => toAthenaSemanticItems(semanticReviewSource, isSftpRun, selectedRunId),
+    [semanticReviewSource, isSftpRun, selectedRunId]
   )
   const pendingSemanticReviewItems = semanticReviewItems.filter((item) => {
     const key = semanticReviewItemKey(item)
@@ -1035,7 +1039,7 @@ function HitlQueue() {
                   : isGate4
                   ? (bronzeReview?.resume_message || 'Stage 04 completed. Review generated Bronze artifacts before the pipeline continues.')
                   : isGate3
-                  ? (enrichmentReview?.resume_message || 'Stage 03 completed. Review semantic enrichment before the pipeline continues.')
+                  ? (semanticReviewSource?.resume_message || 'Stage 03 completed. Review semantic enrichment before the pipeline continues.')
                   : isGate2
                   ? (tableReview?.resume_message || (isSftpRun ? 'Stage 02 completed. Review discovered feeds before the pipeline continues.' : 'Stage 02 completed. Review nominated tables before the pipeline continues.'))
                   : 'Stage 04 completed. Review KPIs before the pipeline continues.'}
@@ -1359,9 +1363,9 @@ function HitlQueue() {
                 </>
                 ) : isGate3 ? (
                 <>
-                  <CountRow label="Columns" value={(enrichmentReview?.enriched_columns || []).length} color="text-gray-300" />
-                  <CountRow label="Joins" value={(enrichmentReview?.enriched_joins || []).length} color="text-accent-blue" />
-                  <CountRow label="Decision" value={gate3Decision === 'APPROVED' ? 'Approve' : 'Reject'} color={gate3Decision === 'APPROVED' ? 'text-accent-green' : 'text-accent-red'} pulse />
+                  <CountRow label="Items" value={semanticReviewItems.length} color="text-gray-300" />
+                  <CountRow label="Reviewed" value={semanticReviewItems.length - pendingSemanticReviewItems.length} color="text-accent-green" pulse={allSemanticReviewed} />
+                  <CountRow label="Pending" value={pendingSemanticReviewItems.length} color="text-accent-amber" />
                 </>
                 ) : isGate4 ? (
                 <>
@@ -1417,11 +1421,11 @@ function HitlQueue() {
           </div>
 
           <button
-            onClick={isGate3 ? () => setGate3Decision('APPROVED') : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleToggleAllTables) : handleAutoApproveAll}
+            onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleToggleAllTables) : handleAutoApproveAll}
             className="flex items-center justify-center gap-2 px-4 py-3 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/25 text-accent-green text-sm font-semibold rounded-xl transition-colors"
           >
             <CheckCircle size={15} />
-            {isGate3 || isGate4 || isGate5 ? 'Set Approve' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
+            {isGate3 ? 'Auto-Approve Pending' : isGate4 || isGate5 ? 'Set Approve' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
           </button>
 
           <div className="rounded-[20px] border border-[#22304b] bg-[#0d1729] p-3">
@@ -1466,7 +1470,7 @@ function HitlQueue() {
                 <span className={gate3Decision === 'APPROVED' ? 'text-accent-green font-semibold' : 'text-accent-red font-semibold'}>
                   {gate3Decision === 'APPROVED' ? 'Approve selected' : 'Reject selected'}
                 </span>
-                <span className="text-gray-500">{(enrichmentReview?.enriched_columns || []).length} enriched columns</span>
+                <span className="text-gray-500">{semanticReviewItems.length} semantic item(s)</span>
               </>
             ) : isGate2 ? (
               <>
@@ -1544,7 +1548,15 @@ function mapHitlRow(row) {
 }
 
 function normalizeSemanticColumns(columns = []) {
-  return (columns || []).map((column, index) => {
+  const list = Array.isArray(columns)
+    ? columns
+    : Object.entries(columns || {}).map(([name, detail]) => ({
+        ...(typeof detail === 'object' && detail !== null ? detail : {}),
+        column_name: name,
+        semantic_type: typeof detail === 'string' ? detail : detail?.semantic_type,
+      }))
+
+  return list.map((column, index) => {
     if (typeof column === 'string') {
       return {
         column_name: column,
@@ -1571,6 +1583,47 @@ function normalizeSemanticColumns(columns = []) {
       is_pii_candidate: !!(column.is_pii_candidate || column.is_pii),
     }
   })
+}
+
+function buildSemanticReviewSource(enrichmentReview, currentRun, runId) {
+  const source = {
+    ...(currentRun || {}),
+    ...(enrichmentReview || {}),
+  }
+  const enrichedColumns = source.enriched_columns || []
+  const enrichedColumnCount = Array.isArray(enrichedColumns)
+    ? enrichedColumns.length
+    : Object.keys(enrichedColumns || {}).length
+
+  const hasModernArtifact = Boolean(
+    enrichedColumnCount ||
+    (source.enriched_joins || []).length ||
+    (source.feed_semantic_summary || []).length ||
+    Object.keys(source.enriched_metadata || {}).length ||
+    Object.keys(source.semantic_counts || {}).length ||
+    (source.pii_columns || []).length ||
+    (source.join_key_columns || []).length ||
+    (source.measure_columns || []).length
+  )
+
+  if (!source.run_id && !source.id) source.run_id = runId
+
+  if (!hasModernArtifact) {
+    return {
+      ...source,
+      queue_id: source.queue_id || `${runId || source.id || 'run'}-semantic-enrichment-fallback`,
+      table_name: source.table_name || source.entity || source.display_name || source.name || 'Semantic Enrichment',
+      enriched_columns: [],
+      resume_message: source.resume_message || 'Stage 03 completed. Review semantic enrichment before the pipeline continues.',
+      is_fallback_artifact: true,
+    }
+  }
+
+  if (enrichedColumnCount === 0 && source.enriched_metadata) {
+    source.enriched_columns = source.enriched_metadata
+  }
+
+  return source
 }
 
 function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
