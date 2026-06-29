@@ -118,9 +118,9 @@ function AppShell() {
   }, [activeRunId, addNotification, setRuns, setActiveRun, setServerOnline])
 
   const pausedRun = useMemo(() => {
-    const pausedRuns = (runs || []).filter(isReviewPausedRun)
-    if (!pausedRuns.length) return null
-    return pausedRuns.find((run) => run.id === activeRunId) || pausedRuns[0]
+    if (!activeRunId) return null
+    const activeRun = (runs || []).find((run) => run.id === activeRunId)
+    return isReviewPausedRun(activeRun) ? activeRun : null
   }, [activeRunId, runs])
 
   const pausedRunId = pausedRun?.id || null
