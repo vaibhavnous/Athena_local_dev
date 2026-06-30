@@ -93,15 +93,156 @@ def _with_run_id(value: Any, run_id: str) -> Any:
 
 
 def _gold_bundle() -> Dict[str, Any]:
-    return _asset_bundle("gold")
+    bundle = _asset_bundle("gold")
+    return bundle if bundle.get("scripts") else _fallback_gold_bundle()
 
 
 def _bronze_bundle() -> Dict[str, Any]:
-    return _asset_bundle("bronze")
+    bundle = _asset_bundle("bronze")
+    return bundle if bundle.get("scripts") else _fallback_bronze_bundle()
 
 
 def _silver_bundle() -> Dict[str, Any]:
-    return _asset_bundle("silver")
+    bundle = _asset_bundle("silver")
+    return bundle if bundle.get("scripts") else _fallback_silver_bundle()
+
+
+def _fallback_bronze_bundle() -> Dict[str, Any]:
+    tables = [
+        ("policy_transactions", "policy, product, channel, and premium transaction landing"),
+        ("claim_information", "claim lifecycle and handler landing"),
+        ("claim_payment_indemnity", "indemnity payment landing"),
+        ("claim_payment_expenses", "expense payment landing"),
+        ("policy_cover_level_transactions", "coverage premium and insured value landing"),
+        ("policy_cover_level_transactions_dup_del", "coverage duplicate-resolution landing"),
+        ("expenses_outstanding_estimates", "expense reserve landing"),
+        ("indemnity_outstanding_estimates", "indemnity reserve landing"),
+    ]
+    scripts = []
+    for index, (table, purpose) in enumerate(tables, start=1):
+        target = f"bronze.bronze_{table}"
+        body = "\n".join(
+            [
+                f"# Bronze ingestion for insurance.dbo.{table}",
+                "from pyspark.sql import functions as F",
+                f'source_table = "insurance.dbo.{table}"',
+                f'target_table = "{target}"',
+                'df = spark.table(source_table)',
+                'df = df.withColumn("_athena_ingested_at", F.current_timestamp())',
+                'df = df.withColumn("_athena_source_system", F.lit("insurance"))',
+                "df.write.format('delta').mode('overwrite').option('overwriteSchema', 'true').saveAsTable(target_table)",
+            ]
+        )
+        scripts.append(
+            {
+                "id": f"bronze_{index}",
+                "name": f"bronze_ingest_{table}.py",
+                "script_name": f"bronze_ingest_{table}",
+                "database_name": "insurance",
+                "schema_name": "dbo",
+                "table": table,
+                "source_table": f"insurance.dbo.{table}",
+                "target_table": target,
+                "purpose": purpose,
+                "status": "APPROVED",
+                "script_body": body,
+                "generated_bronze_script": body,
+            }
+        )
+    return {"generated_at": _iso(4), "source_database": "insurance", "scripts": scripts}
+
+
+def _fallback_silver_bundle() -> Dict[str, Any]:
+    specs = [
+        ("policy_transactions", 37, ["RERERENCE_ID", "POLICY_NUMBER"]),
+        ("claim_information", 26, ["RERERENCE_ID", "CLAIM_NUMBER"]),
+        ("claim_payment_indemnity", 24, ["RERERENCE_ID", "CLAIM_NUMBER", "PAYMENT_DATE"]),
+        ("claim_payment_expenses", 24, ["RERERENCE_ID", "CLAIM_NUMBER", "EXPENSE_DATE"]),
+        ("policy_cover_level_transactions", 16, ["RERERENCE_ID", "POLICY_NUMBER", "COVER_NAME"]),
+        ("policy_cover_level_transactions_dup_del", 13, ["RERERENCE_ID", "POLICY_NUMBER", "COVER_NAME", "DEDUP_SEQUENCE"]),
+        ("expenses_outstanding_estimates", 11, ["RERERENCE_ID", "CLAIM_NUMBER", "RESERVE_DATE"]),
+        ("indemnity_outstanding_estimates", 11, ["RERERENCE_ID", "CLAIM_NUMBER", "RESERVE_DATE"]),
+    ]
+    scripts = []
+    for index, (table, column_count, merge_keys) in enumerate(specs, start=1):
+        source = f"bronze.bronze_{table}"
+        target = f"silver.silver_{table}"
+        key_expr = ", ".join(merge_keys)
+        body = "\n".join(
+            [
+                f"# Silver transformation for {table}",
+                "from pyspark.sql import functions as F",
+                f'source_table = "{source}"',
+                f'target_table = "{target}"',
+                f"merge_keys = {merge_keys!r}",
+                "df = spark.table(source_table)",
+                "df = df.dropDuplicates(merge_keys)",
+                'df = df.withColumn("_athena_curated_at", F.current_timestamp())',
+                "df.write.format('delta').mode('overwrite').option('overwriteSchema', 'true').saveAsTable(target_table)",
+            ]
+        )
+        scripts.append(
+            {
+                "id": f"silver_{index}",
+                "name": f"silver_transform_{table}.py",
+                "script_name": f"silver_transform_{table}",
+                "table": table,
+                "source_table": source,
+                "target_table": target,
+                "column_count": column_count,
+                "merge_strategy": "dedupe_latest_business_key",
+                "merge_key_source": key_expr,
+                "selected_merge_key": merge_keys,
+                "status": "APPROVED",
+                "script_body": body,
+                "generated_silver_script": body,
+            }
+        )
+    return {"generated_at": _iso(3), "scripts": scripts}
+
+
+def _fallback_gold_bundle() -> Dict[str, Any]:
+    specs = [
+        ("Total Claims Processed Count", "silver.silver_claim_information", "gold.fact_total_claims_processed_count", 12, 14),
+        ("Average Claim Processing Time Days", "silver.silver_claim_information", "gold.fact_average_claim_processing_time_days", 8, 9),
+        ("Total Outstanding Claims Count", "silver.silver_indemnity_outstanding_estimates", "gold.fact_total_outstanding_claims_count", 7, 8),
+        ("Total Premium Collected Amount", "silver.silver_policy_cover_level_transactions", "gold.fact_total_premium_collected_amount", 10, 11),
+        ("Average Premium Per Policy Amount", "silver.silver_policy_transactions", "gold.fact_average_premium_per_policy_amount", 9, 10),
+        ("Average Coverage Sum Insured Amount", "silver.silver_policy_cover_level_transactions", "gold.fact_average_coverage_sum_insured_amount", 8, 8),
+        ("Total Expenses Incurred Amount", "silver.silver_claim_payment_expenses", "gold.fact_total_expenses_incurred_amount", 7, 9),
+        ("Total Risk Sum Insured Amount", "silver.silver_policy_transactions", "gold.fact_total_risk_sum_insured_amount", 9, 10),
+        ("Paid Indemnity Amount", "silver.silver_claim_payment_indemnity", "gold.fact_paid_indemnity_amount", 6, 7),
+    ]
+    scripts = []
+    for index, (kpi, source, target, dimension_count, join_count) in enumerate(specs, start=1):
+        body = "\n".join(
+            [
+                f"# Gold KPI generation for {kpi}",
+                "from pyspark.sql import functions as F",
+                f'source_table = "{source}"',
+                f'target_table = "{target}"',
+                "df = spark.table(source_table)",
+                'result = df.groupBy(F.month(F.current_date()).alias("reporting_month")).count()',
+                "result.write.format('delta').mode('overwrite').option('overwriteSchema', 'true').saveAsTable(target_table)",
+            ]
+        )
+        scripts.append(
+            {
+                "id": f"gold_{index}",
+                "name": f"gold_{target.split('.')[-1]}.py",
+                "script_name": f"gold_{target.split('.')[-1]}",
+                "kpi_name": kpi,
+                "source_table": source,
+                "target_table": target,
+                "time_grain": "month",
+                "dimension_count": dimension_count,
+                "join_count": join_count,
+                "generation_mode": "DETERMINISTIC",
+                "status": "APPROVED",
+                "script_body": body,
+            }
+        )
+    return {"generated_at": _iso(2), "scripts": scripts}
 
 
 def _fallback_kpis() -> List[Dict[str, Any]]:

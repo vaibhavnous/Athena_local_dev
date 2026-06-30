@@ -80,12 +80,25 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           import importlib
+          from fastapi.testclient import TestClient
 
           for module_name in ("api.main", "app"):
               module = importlib.import_module(module_name)
               if getattr(module, "app", None) is None:
                   raise RuntimeError(f"{module_name}:app is missing")
               print(f"{module_name}:app import ok")
+
+          app_module = importlib.import_module("api.main")
+          client = TestClient(app_module.app)
+          bronze = client.get("/bronze-reviews/run_a3f8c2").json()
+          feeds = (bronze.get("bronze_review_artifact") or {}).get("feeds") or []
+          if len(feeds) < 8:
+              raise RuntimeError(f"Bronze review payload is incomplete: {len(feeds)} feeds")
+          run = client.get("/runs/run_b7e1d3").json()
+          counts = run.get("script_counts") or {}
+          if counts.get("bronze", 0) < 8 or counts.get("silver", 0) < 8 or counts.get("gold", 0) < 9:
+              raise RuntimeError(f"Script counts are incomplete: {counts}")
+          print("fallback script payloads ok")
           PY
 
       - name: Build Kudu credentials
