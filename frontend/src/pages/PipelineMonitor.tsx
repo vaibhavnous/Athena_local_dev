@@ -24,6 +24,19 @@ function PipelineMonitor() {
   const navigate = useNavigate()
   const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline, addNotification, addRun } = useAthenaStore()
   const activeRun = activeRunId ? runs.find((run) => run.id === activeRunId) || null : runs[0] || null
+  const activeRunStableId = activeRun?.id || null
+  const activeRunIsDemoFallback = isDemoFallbackRun(activeRun)
+  const activeRunDemoScriptBundles = useMemo(
+    () =>
+      activeRun
+        ? {
+            bronze: activeRun.bronze || null,
+            silver: activeRun.silver || null,
+            gold: activeRun.gold || null,
+          }
+        : null,
+    [activeRun]
+  )
   const runsRequestInFlightRef = useRef(false)
   const activeRunRequestInFlightRef = useRef(false)
   const runningStepSinceRef = useRef<Record<string, number>>({})
@@ -228,7 +241,7 @@ function PipelineMonitor() {
   }, [runs, setRuns, setServerOnline])
 
   useEffect(() => {
-    if (!activeRun?.id || isDemoFallbackRun(activeRun)) return
+    if (!activeRunStableId || activeRunIsDemoFallback) return
     let cancelled = false
     let timer: number | null = null
 
@@ -246,9 +259,9 @@ function PipelineMonitor() {
 
       activeRunRequestInFlightRef.current = true
       try {
-        const data = await getRun(activeRun.id)
+        const data = await getRun(activeRunStableId)
         if (!cancelled) {
-          updateRun(activeRun.id, data)
+          updateRun(activeRunStableId, data)
           setServerOnline(true)
         }
       } catch (error) {
@@ -271,7 +284,7 @@ function PipelineMonitor() {
       cancelled = true
       if (timer !== null) window.clearTimeout(timer)
     }
-  }, [activeRun?.id, updateRun, setServerOnline])
+  }, [activeRunStableId, activeRunIsDemoFallback, updateRun, setServerOnline])
 
   const actualPhaseIndex = useMemo(() => {
     const sourcePhases = actualPhases?.length ? actualPhases : phases
@@ -411,28 +424,24 @@ function PipelineMonitor() {
   const [scriptsFullViewOpen, setScriptsFullViewOpen] = useState(false)
 
   useEffect(() => {
-    if (!activeRun?.id) {
+    if (!activeRunStableId) {
       setScriptBundles(null)
       setSelectedScriptKey('')
       return
     }
 
-    if (isDemoFallbackRun(activeRun)) {
-      setScriptBundles({
-        bronze: activeRun.bronze || null,
-        silver: activeRun.silver || null,
-        gold: activeRun.gold || null,
-      })
+    if (activeRunIsDemoFallback) {
+      setScriptBundles(activeRunDemoScriptBundles)
       return
     }
 
     let cancelled = false
     const loadScripts = async () => {
       try {
-        const payload = await getRunScripts(activeRun.id)
+        const payload = await getRunScripts(activeRunStableId)
         if (cancelled) return
         setScriptBundles(payload)
-        updateRun(activeRun.id, {
+        updateRun(activeRunStableId, {
           bronze: payload?.bronze,
           silver: payload?.silver,
           gold: payload?.gold,
@@ -450,7 +459,7 @@ function PipelineMonitor() {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [activeRun?.id, updateRun])
+  }, [activeRunStableId, activeRunIsDemoFallback, activeRunDemoScriptBundles, updateRun])
 
   const monitorRunWithScripts = useMemo(() => {
     if (!monitorRun || !scriptBundles) return monitorRun
