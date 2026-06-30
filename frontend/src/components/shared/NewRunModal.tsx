@@ -551,9 +551,6 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                     </span>
                                     <span className="min-w-0">
                                       <span className="block text-[16px] font-semibold text-white">Domain Knowledge Check</span>
-                                      <span className="mt-1 block text-[13px] leading-5 text-[#9fb1ca]">
-                                        Use saved insurance terminology and KPI patterns before requirement extraction.
-                                      </span>
                                     </span>
                                   </span>
                                 </label>
