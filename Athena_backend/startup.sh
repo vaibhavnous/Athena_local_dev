@@ -37,8 +37,9 @@ else
   echo "Embedding preload skipped at startup; ATHENA_PRELOAD_EMBEDDINGS=${ATHENA_PRELOAD_EMBEDDINGS:-false}"
 fi
 
-echo "Import smoke test:"
-python - <<'PY'
+if [ "${ATHENA_STARTUP_IMPORT_SMOKE,,}" = "true" ] || [ "${ATHENA_STARTUP_IMPORT_SMOKE}" = "1" ]; then
+  echo "Import smoke test:"
+  python - <<'PY'
 import importlib
 import traceback
 
@@ -51,6 +52,9 @@ except Exception:
     traceback.print_exc()
     raise
 PY
+else
+  echo "Import smoke test skipped; ATHENA_STARTUP_IMPORT_SMOKE=${ATHENA_STARTUP_IMPORT_SMOKE:-false}"
+fi
 
 echo "Starting Uvicorn..."
 exec python -m uvicorn api.main:app --host 0.0.0.0 --port "${PORT:-8000}" --log-level debug

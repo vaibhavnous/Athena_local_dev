@@ -32,10 +32,17 @@ pinecone_index_name = "ai-store-index"
 pc = None
 pinecone_index = None
 
-try:
+def _get_pinecone_index(*, log_context: dict) -> Optional[object]:
+    global pc, pinecone_index
+
+    if pinecone_index is not None:
+        return pinecone_index
+
     if not pinecone_api_key:
         logger.warning("Pinecone API key not found", extra={"node": "ingestion_bootstrap"})
-    else:
+        return None
+
+    try:
         logger.info("Initializing Pinecone client", extra={"node": "ingestion_bootstrap"})
         pc = Pinecone(api_key=pinecone_api_key)
         if DEV_MODE:
@@ -43,8 +50,10 @@ try:
             logger.info("Available Pinecone indexes: %s", indexes, extra={"node": "ingestion_bootstrap"})
         pinecone_index = pc.Index(name=pinecone_index_name)
         logger.info("Connected to Pinecone index %s", pinecone_index_name, extra={"node": "ingestion_bootstrap"})
-except Exception as e:
-    logger.warning("Pinecone init failed: %s", e, extra={"node": "ingestion_bootstrap"})
+        return pinecone_index
+    except Exception as e:
+        logger.warning("Pinecone init failed: %s", e, extra=log_context)
+        return None
 
 
 def _get_embedding_model(*, log_context: dict) -> Optional[object]:
@@ -456,7 +465,7 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
             logger.info("BRD semantic index deferred; requirement extraction will use parsed BRD content", extra=log_context)
             return _mark_embedding_skipped(new_state, brd_embedded=False)
 
-        if pinecone_index is None:
+        if _get_pinecone_index(log_context=log_context) is None:
             raise Exception("Pinecone not initialized")
 
         brd_text = new_state.get("brd_text", "").strip()
