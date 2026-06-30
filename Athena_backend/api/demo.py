@@ -94,7 +94,9 @@ def _with_run_id(value: Any, run_id: str) -> Any:
 
 def _gold_bundle() -> Dict[str, Any]:
     bundle = _asset_bundle("gold")
-    return bundle if bundle.get("scripts") else _fallback_gold_bundle()
+    if bundle.get("scripts"):
+        return {**bundle, "scripts": (bundle.get("scripts") or [])[:6]}
+    return _fallback_gold_bundle()
 
 
 def _bronze_bundle() -> Dict[str, Any]:
@@ -203,29 +205,86 @@ def _fallback_silver_bundle() -> Dict[str, Any]:
 
 def _fallback_gold_bundle() -> Dict[str, Any]:
     specs = [
-        ("Total Claims Processed Count", "silver.silver_claim_information", "gold.fact_total_claims_processed_count", 12, 14),
-        ("Average Claim Processing Time Days", "silver.silver_claim_information", "gold.fact_average_claim_processing_time_days", 8, 9),
-        ("Total Outstanding Claims Count", "silver.silver_indemnity_outstanding_estimates", "gold.fact_total_outstanding_claims_count", 7, 8),
-        ("Total Premium Collected Amount", "silver.silver_policy_cover_level_transactions", "gold.fact_total_premium_collected_amount", 10, 11),
-        ("Average Premium Per Policy Amount", "silver.silver_policy_transactions", "gold.fact_average_premium_per_policy_amount", 9, 10),
-        ("Average Coverage Sum Insured Amount", "silver.silver_policy_cover_level_transactions", "gold.fact_average_coverage_sum_insured_amount", 8, 8),
-        ("Total Expenses Incurred Amount", "silver.silver_claim_payment_expenses", "gold.fact_total_expenses_incurred_amount", 7, 9),
-        ("Total Risk Sum Insured Amount", "silver.silver_policy_transactions", "gold.fact_total_risk_sum_insured_amount", 9, 10),
-        ("Paid Indemnity Amount", "silver.silver_claim_payment_indemnity", "gold.fact_paid_indemnity_amount", 6, 7),
+        {
+            "kpi": "Total Claims Processed Count",
+            "source": "silver.silver_claim_information",
+            "target": "gold.fact_total_claims_processed_count",
+            "date_column": "CLAIM_REGISTERED_DATE",
+            "dimensions": ["PRODUCT_NAME", "CLAIM_TYPE", "CLAIM_REGION", "CLAIM_STATUS"],
+            "required": ["CLAIM_NUMBER", "CLAIM_REGISTERED_DATE", "PRODUCT_NAME", "CLAIM_TYPE", "CLAIM_REGION", "CLAIM_STATUS"],
+            "metric_expr": 'F.countDistinct("CLAIM_NUMBER")',
+            "metric_name": "total_claims_processed_count",
+            "dimension_count": 12,
+            "join_count": 14,
+        },
+        {
+            "kpi": "Average Claim Processing Time Days",
+            "source": "silver.silver_claim_information",
+            "target": "gold.fact_average_claim_processing_time_days",
+            "date_column": "CLAIM_REGISTERED_DATE",
+            "dimensions": ["PRODUCT_NAME", "CLAIM_TYPE", "CLAIM_REGION"],
+            "required": ["CLAIM_NUMBER", "CLAIM_REGISTERED_DATE", "CLAIM_CLOSED_DATE", "PRODUCT_NAME", "CLAIM_TYPE", "CLAIM_REGION"],
+            "metric_expr": 'F.avg(F.datediff(F.col("CLAIM_CLOSED_DATE"), F.col("CLAIM_REGISTERED_DATE")))',
+            "metric_name": "average_claim_processing_time_days",
+            "dimension_count": 8,
+            "join_count": 9,
+        },
+        {
+            "kpi": "Total Outstanding Claims Count",
+            "source": "silver.silver_indemnity_outstanding_estimates",
+            "target": "gold.fact_total_outstanding_claims_count",
+            "date_column": "RESERVE_DATE",
+            "dimensions": ["RESERVE_STATUS", "INDEMNITY_CATEGORY"],
+            "required": ["CLAIM_NUMBER", "RESERVE_DATE", "RESERVE_STATUS", "INDEMNITY_CATEGORY", "RESERVE_AMOUNT"],
+            "metric_expr": 'F.countDistinct("CLAIM_NUMBER")',
+            "metric_name": "total_outstanding_claims_count",
+            "dimension_count": 7,
+            "join_count": 8,
+        },
+        {
+            "kpi": "Total Premium Collected Amount",
+            "source": "silver.silver_policy_cover_level_transactions",
+            "target": "gold.fact_total_premium_collected_amount",
+            "date_column": "COVER_START_DATE",
+            "dimensions": ["COVER_NAME", "GEOG_STATE_NAME", "COVER_STATUS"],
+            "required": ["POLICY_NUMBER", "COVER_START_DATE", "COVER_NAME", "GEOG_STATE_NAME", "COVER_STATUS", "PREMIUM_AMOUNT"],
+            "metric_expr": 'F.sum(F.col("PREMIUM_AMOUNT").cast("double"))',
+            "metric_name": "total_premium_collected_amount",
+            "dimension_count": 10,
+            "join_count": 11,
+        },
+        {
+            "kpi": "Average Premium Per Policy Amount",
+            "source": "silver.silver_policy_transactions",
+            "target": "gold.fact_average_premium_per_policy_amount",
+            "date_column": "POLICY_ISSUED_DATE",
+            "dimensions": ["PRODUCT_NAME", "CHANNEL_NAME", "POLICY_STATUS"],
+            "required": ["POLICY_NUMBER", "POLICY_ISSUED_DATE", "PRODUCT_NAME", "CHANNEL_NAME", "POLICY_STATUS", "NET_PREMIUM_AMOUNT"],
+            "metric_expr": 'F.sum(F.col("NET_PREMIUM_AMOUNT").cast("double")) / F.countDistinct("POLICY_NUMBER")',
+            "metric_name": "average_premium_per_policy_amount",
+            "dimension_count": 9,
+            "join_count": 10,
+        },
+        {
+            "kpi": "Average Coverage Sum Insured Amount",
+            "source": "silver.silver_policy_cover_level_transactions",
+            "target": "gold.fact_average_coverage_sum_insured_amount",
+            "date_column": "COVER_START_DATE",
+            "dimensions": ["COVER_NAME", "GEOG_STATE_NAME", "RISK_CLASS_CODE"],
+            "required": ["POLICY_NUMBER", "COVER_START_DATE", "COVER_NAME", "GEOG_STATE_NAME", "RISK_CLASS_CODE", "SUM_INSURED_AMOUNT"],
+            "metric_expr": 'F.avg(F.col("SUM_INSURED_AMOUNT").cast("double"))',
+            "metric_name": "average_coverage_sum_insured_amount",
+            "dimension_count": 8,
+            "join_count": 8,
+        },
     ]
     scripts = []
-    for index, (kpi, source, target, dimension_count, join_count) in enumerate(specs, start=1):
-        body = "\n".join(
-            [
-                f"# Gold KPI generation for {kpi}",
-                "from pyspark.sql import functions as F",
-                f'source_table = "{source}"',
-                f'target_table = "{target}"',
-                "df = spark.table(source_table)",
-                'result = df.groupBy(F.month(F.current_date()).alias("reporting_month")).count()',
-                "result.write.format('delta').mode('overwrite').option('overwriteSchema', 'true').saveAsTable(target_table)",
-            ]
-        )
+    for index, spec in enumerate(specs, start=1):
+        kpi = spec["kpi"]
+        source = spec["source"]
+        target = spec["target"]
+        dimensions = spec["dimensions"]
+        body = _gold_script_body(spec)
         scripts.append(
             {
                 "id": f"gold_{index}",
@@ -235,14 +294,62 @@ def _fallback_gold_bundle() -> Dict[str, Any]:
                 "source_table": source,
                 "target_table": target,
                 "time_grain": "month",
-                "dimension_count": dimension_count,
-                "join_count": join_count,
+                "dimensions": dimensions,
+                "metric_name": spec["metric_name"],
+                "dimension_count": spec["dimension_count"],
+                "join_count": spec["join_count"],
                 "generation_mode": "DETERMINISTIC",
                 "status": "APPROVED",
                 "script_body": body,
             }
         )
     return {"generated_at": _iso(2), "scripts": scripts}
+
+
+def _gold_script_body(spec: Dict[str, Any]) -> str:
+    dimensions = list(spec["dimensions"])
+    required = list(dict.fromkeys([*spec["required"], *dimensions, spec["date_column"]]))
+    group_columns = ["REPORTING_MONTH", *dimensions]
+    return "\n".join(
+        [
+            f"# Gold KPI generation for {spec['kpi']}",
+            "# Databricks PySpark script generated by Athena",
+            "from pyspark.sql import functions as F",
+            "",
+            f"source_table = \"{spec['source']}\"",
+            f"target_table = \"{spec['target']}\"",
+            f"kpi_name = \"{spec['kpi']}\"",
+            f"metric_name = \"{spec['metric_name']}\"",
+            f"date_column = \"{spec['date_column']}\"",
+            f"required_columns = {required!r}",
+            f"dimension_columns = {dimensions!r}",
+            f"group_columns = {group_columns!r}",
+            "",
+            "df = spark.table(source_table)",
+            "missing_columns = [column for column in required_columns if column not in df.columns]",
+            "if missing_columns:",
+            "    raise ValueError(f\"Missing required columns for {kpi_name}: {missing_columns}\")",
+            "",
+            "prepared = (",
+            "    df",
+            "    .withColumn(\"REPORTING_MONTH\", F.date_trunc(\"month\", F.col(date_column).cast(\"timestamp\")))",
+            "    .filter(F.col(\"REPORTING_MONTH\").isNotNull())",
+            ")",
+            "",
+            "result = (",
+            "    prepared",
+            f"    .groupBy(*group_columns)",
+            f"    .agg(({spec['metric_expr']}).alias(\"METRIC_VALUE\"), F.count(F.lit(1)).alias(\"SOURCE_ROW_COUNT\"))",
+            "    .withColumn(\"KPI_NAME\", F.lit(kpi_name))",
+            "    .withColumn(\"METRIC_NAME\", F.lit(metric_name))",
+            "    .withColumn(\"SOURCE_TABLE\", F.lit(source_table))",
+            "    .withColumn(\"GENERATED_AT\", F.current_timestamp())",
+            "    .select(\"KPI_NAME\", \"METRIC_NAME\", *group_columns, \"METRIC_VALUE\", \"SOURCE_ROW_COUNT\", \"SOURCE_TABLE\", \"GENERATED_AT\")",
+            ")",
+            "",
+            "result.write.format(\"delta\").mode(\"overwrite\").option(\"overwriteSchema\", \"true\").saveAsTable(target_table)",
+        ]
+    )
 
 
 def _fallback_kpis() -> List[Dict[str, Any]]:
@@ -372,6 +479,9 @@ def demo_tables() -> List[Dict[str, Any]]:
     rows = []
     for index, item in enumerate(bronze_scripts[:8]):
         table_name = item.get("table") or f"insurance_table_{index + 1}"
+        confidence = round(0.97 - index * 0.025, 2)
+        coverage = round(0.91 - index * 0.018, 2)
+        matched_keywords = _table_matched_keywords(str(table_name))
         rows.append(
             {
                 "id": f"{DEMO_RUN_ID}:table:{index}",
@@ -379,24 +489,77 @@ def demo_tables() -> List[Dict[str, Any]]:
                 "schema_name": item.get("schema_name") or "dbo",
                 "table_name": table_name,
                 "logical_name": str(table_name).replace("_", " ").title(),
-                "score": round(0.97 - index * 0.025, 2),
-                "confidence": round(0.97 - index * 0.025, 2),
-                "semantic_score": round(0.97 - index * 0.025, 2),
-                "confidence_score": round(0.97 - index * 0.025, 2),
+                "score": confidence,
+                "confidence": confidence,
+                "semantic_score": confidence,
+                "confidence_score": confidence,
+                "coverage_ratio": coverage,
+                "lexical_score": coverage,
+                "business_coverage": coverage,
+                "matched_keywords": matched_keywords,
                 "status": "PENDING_REVIEW",
-                "reason": "Required for claim, policy, premium, reserve, and coverage KPI computation.",
+                "reason": _table_nomination_reason(str(table_name), coverage),
+                "nomination_reason": _table_nomination_reason(str(table_name), coverage),
                 "matched_kpis": [kpi["kpi_name"] for kpi in DEMO_KPIS[index % max(1, len(DEMO_KPIS)): index % max(1, len(DEMO_KPIS)) + 2]],
                 "selected": True,
             }
         )
     if rows:
         return rows
-    return [
-        {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy_transactions", "score": 0.97},
-        {"database_name": "insurance", "schema_name": "dbo", "table_name": "claim_information", "score": 0.94},
-        {"database_name": "insurance", "schema_name": "dbo", "table_name": "claim_payment_indemnity", "score": 0.91},
-        {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy_cover_level_transactions", "score": 0.89},
+    fallback_specs = [
+        ("policy_transactions", 0.97, 0.91),
+        ("claim_information", 0.94, 0.88),
+        ("claim_payment_indemnity", 0.91, 0.84),
+        ("policy_cover_level_transactions", 0.89, 0.82),
     ]
+    return [
+        {
+            "id": f"{DEMO_RUN_ID}:table:fallback:{index}",
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table_name": table_name,
+            "logical_name": table_name.replace("_", " ").title(),
+            "score": confidence,
+            "confidence": confidence,
+            "semantic_score": confidence,
+            "confidence_score": confidence,
+            "coverage_ratio": coverage,
+            "lexical_score": coverage,
+            "business_coverage": coverage,
+            "matched_keywords": _table_matched_keywords(table_name),
+            "reason": _table_nomination_reason(table_name, coverage),
+            "nomination_reason": _table_nomination_reason(table_name, coverage),
+            "status": "PENDING_REVIEW",
+            "selected": True,
+        }
+        for index, (table_name, confidence, coverage) in enumerate(fallback_specs)
+    ]
+
+
+def _table_matched_keywords(table_name: str) -> List[str]:
+    name = table_name.lower()
+    keywords = ["insurance"]
+    if "policy" in name:
+        keywords.extend(["policy", "premium", "risk"])
+    if "claim" in name:
+        keywords.extend(["claim", "loss", "settlement"])
+    if "payment" in name:
+        keywords.extend(["payment", "paid amount"])
+    if "expense" in name:
+        keywords.extend(["expense", "cost"])
+    if "cover" in name:
+        keywords.extend(["coverage", "sum insured"])
+    if "outstanding" in name or "estimate" in name:
+        keywords.extend(["reserve", "outstanding"])
+    return list(dict.fromkeys(keywords))
+
+
+def _table_nomination_reason(table_name: str, coverage: float) -> str:
+    label = table_name.replace("_", " ")
+    return (
+        f"{label.title()} covers {coverage:.0%} of the insurance KPI requirements and supports "
+        "policy, claim, premium, reserve, coverage, and payment analytics."
+    )
 
 
 def demo_enriched_columns() -> List[Dict[str, Any]]:

@@ -763,14 +763,13 @@ function HitlQueue() {
   })
   const allSemanticReviewed = semanticReviewItems.length > 0 && pendingSemanticReviewItems.length === 0
   const gateReviewReady = isGate4 ? bronzeReviewFeeds.length > 0 : isGate5 ? silverReviewItems.length > 0 : false
-  const allKpisDecided = queue.length > 0 && queue.every((item) => localDecisions[reviewItemKey(item)] || item.decision)
   const canSubmitReview = isReviewableRun && (isGate2
     ? (isSftpRun ? totalFeedCount > 0 : (tableReview?.nominated_tables || []).length > 0)
     : isGate3
     ? true
     : (isGate4 || isGate5)
     ? true
-    : allKpisDecided)
+    : queue.length > 0)
 
   const returnToMonitor = (runId) => {
     if (runId) setActiveRun(runId)
@@ -812,6 +811,21 @@ function HitlQueue() {
     setLocalDecisions((prev) => ({ ...prev, ...next }))
   }
 
+  const buildApprovedKpiDecisions = () => {
+    return queue.map((item) => {
+      const key = reviewItemKey(item)
+      const decision = localDecisions[key] || item.decision || 'APPROVED'
+      const edited = editedKpis[key]
+      return {
+        kpi_id: key,
+        decision,
+        reviewer: REVIEWER_ID,
+        notes: edited?.notes || rejectionReasons[key] || '',
+        edited_definition: edited?.definition || null
+      }
+    })
+  }
+
   const handleApproveSemanticItem = (id) => {
     setSemanticValidationError('')
     setSemanticDecisions((prev) => ({ ...prev, [id]: 'APPROVED' }))
@@ -833,6 +847,15 @@ function HitlQueue() {
     setSemanticDecisions((prev) => ({ ...prev, ...next }))
   }
 
+  const buildApprovedSemanticDecisions = () => {
+    const next = {}
+    semanticReviewItems.forEach((item) => {
+      const key = semanticReviewItemKey(item)
+      next[key] = semanticDecisions[key] || item.decision || 'APPROVED'
+    })
+    return next
+  }
+
   const handleSelectAllTables = () => {
     setSelectedTables((prev) => {
       const next = { ...prev }
@@ -843,23 +866,16 @@ function HitlQueue() {
     })
   }
 
-  const handleClearAllTables = () => {
-    setSelectedTables((prev) => {
-      const next = { ...prev }
-      for (const table of availableTableReviews) {
-        delete next[tableReviewKey(table)]
-      }
-      return next
-    })
-  }
-
-  const handleToggleAllTables = () => {
-    const allSelected = availableTableReviews.length > 0 && availableTableReviews.every((table) => selectedTables[tableReviewKey(table)])
-    if (allSelected) {
-      handleClearAllTables()
-    } else {
-      handleSelectAllTables()
+  const handleAutoApproveTables = () => {
+    const selected = {}
+    const decisions = {}
+    for (const table of availableTableReviews) {
+      const key = tableReviewKey(table)
+      selected[key] = true
+      decisions[key] = 'APPROVED'
     }
+    setSelectedTables((prev) => ({ ...prev, ...selected }))
+    setTableReviewDecisions((prev) => ({ ...prev, ...decisions }))
   }
 
   const handleApproveTableReview = (table) => {
@@ -886,35 +902,25 @@ function HitlQueue() {
     setSelectedTables(next)
   }
 
+  const selectedOrAllTableKeys = () => {
+    const keys = (tableReview?.nominated_tables || []).map((table) => tableReviewKey(table))
+    const selected = keys.filter((key) => selectedTables[key])
+    return selected.length > 0 ? selected : keys
+  }
+
+  const selectedOrAllFeedKeys = () => {
+    const keys = availableSftpFeeds.map((feed) => sftpFeedKey(feed))
+    const selected = keys.filter((key) => selectedTables[key])
+    return selected.length > 0 ? selected : keys
+  }
+
   const handleSubmit = async () => {
     if (isGate2) {
-      if (isSftpRun) {
-        const approvedFeeds = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)])
-
-        if (!approvedFeeds.length) {
-          addNotification({ type: 'amber', title: 'No Feeds Selected', message: `Select at least one discovered feed before submitting ${gate2Name}.`, duration: 3000 })
-          return
-        }
-      } else {
-        const approvedTables = (tableReview?.nominated_tables || [])
-          .map((table) => tableReviewKey(table))
-          .filter((key) => selectedTables[key])
-
-        if (!approvedTables.length) {
-          addNotification({ type: 'amber', title: 'No Tables Selected', message: `Select at least one table before submitting ${gate2Name}.`, duration: 3000 })
-          return
-        }
-      }
-
       setSubmitting(true)
       try {
-        const approvedTables = isSftpRun
-          ? availableSftpFeeds
-              .map((feed) => sftpFeedKey(feed))
-              .filter((key) => selectedTables[key])
-          : (tableReview?.nominated_tables || [])
-              .map((table) => tableReviewKey(table))
-              .filter((key) => selectedTables[key])
+        const approvedTables = isSftpRun ? selectedOrAllFeedKeys() : selectedOrAllTableKeys()
+        if (isSftpRun) handleSelectAllFeeds()
+        else handleAutoApproveTables()
         await submitTableReviews(selectedRunId, approvedTables)
         updateRun(selectedRunId, {
           id: selectedRunId,
@@ -944,16 +950,14 @@ function HitlQueue() {
     }
 
     if (isGate3) {
-      if (!allSemanticReviewed) {
-        setSemanticValidationError('Please review all semantic enrichment items before continuing.')
-        return
-      }
-
       setSubmitting(true)
       try {
+        const nextSemanticDecisions = buildApprovedSemanticDecisions()
+        setSemanticValidationError('')
+        setSemanticDecisions(nextSemanticDecisions)
         const hasRejectedSemanticItem = semanticReviewItems.some((item) => {
           const key = semanticReviewItemKey(item)
-          return (semanticDecisions[key] || item.decision) === 'REJECTED'
+          return nextSemanticDecisions[key] === 'REJECTED'
         })
         await submitEnrichmentReview(selectedRunId, !hasRejectedSemanticItem)
         const refreshed = await getRun(selectedRunId)
@@ -1033,34 +1037,15 @@ function HitlQueue() {
       return
     }
 
-    const missingDecisions = queue.filter((item) => !localDecisions[reviewItemKey(item)] && !item.decision)
-    if (missingDecisions.length > 0) {
-      addNotification({
-        type: 'amber',
-        title: 'Review Incomplete',
-        message: `Decide all KPIs before submitting. ${missingDecisions.length} still pending.`,
-        duration: 4000
-      })
-      return
-    }
-
     setSubmitting(true)
     const hasQueueIds = queue.some((item) => item.queue_id)
 
     try {
-      const decisions = queue.map((item) => {
-        const key = reviewItemKey(item)
-        const decision = localDecisions[key] || item.decision
-        if (!decision) return null
-        const edited = editedKpis[key]
-        return {
-          kpi_id: key,
-          decision,
-          reviewer: REVIEWER_ID,
-          notes: edited?.notes || rejectionReasons[key] || '',
-          edited_definition: edited?.definition || null
-        }
-      }).filter(Boolean)
+      const decisions = buildApprovedKpiDecisions()
+      setLocalDecisions((prev) => ({
+        ...prev,
+        ...Object.fromEntries(decisions.map((decision) => [decision.kpi_id, decision.decision]))
+      }))
 
       if (hasQueueIds) {
         await submitHitlDecisions(selectedRunId, decisions)
@@ -1168,7 +1153,7 @@ function HitlQueue() {
                 </button>
                 <button
                   onClick={handleSubmit}
-                  disabled={hydrating || submitting || !selectedRunId || !allKpisDecided}
+                  disabled={submitting}
                   className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {submitting ? 'Submitting...' : 'Submit Decisions & Resume'}
@@ -1287,7 +1272,7 @@ function HitlQueue() {
                   </button>
                   <button
                     onClick={handleSubmit}
-                    disabled={!allSemanticReviewed || submitting}
+                    disabled={submitting}
                     className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {submitting ? 'Saving...' : 'Submit Decisions & Resume'}
@@ -1443,7 +1428,7 @@ function HitlQueue() {
                 </button>
                 <button
                   onClick={handleSubmit}
-                  disabled={hydrating || submitting || !selectedRunId || selectedTableCount === 0}
+                  disabled={submitting}
                   className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {submitting ? 'Submitting...' : 'Submit Decisions & Resume'}
@@ -1496,7 +1481,7 @@ function HitlQueue() {
             )}
 
             <button
-              onClick={isGate3 ? () => setGate3Decision('APPROVED') : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleToggleAllTables) : handleAutoApproveAll}
+              onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
               className="inline-flex h-12 items-center gap-2 rounded-[10px] bg-[#202b3a] px-5 text-[17px] font-bold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
             >
               <CheckCircle size={18} className="text-[#12b886]" />
@@ -1557,7 +1542,7 @@ function HitlQueue() {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={hydrating || submitting || !selectedRunId}
+              disabled={submitting}
               submitLabel="Submit & View Generated Code"
             />
             ) : isGate4 ? (
@@ -1573,7 +1558,7 @@ function HitlQueue() {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={hydrating || submitting || !selectedRunId}
+              disabled={submitting}
               submitLabel="Submit & Generate Silver"
             />
             ) : isGate3 ? (
@@ -1650,7 +1635,7 @@ function HitlQueue() {
                     </button>
                     <button
                       onClick={handleSubmit}
-                      disabled={!allSemanticReviewed || submitting}
+                      disabled={submitting}
                       className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {submitting ? 'Saving...' : 'Submit Decisions & Resume'}
@@ -1814,7 +1799,7 @@ function HitlQueue() {
           </div>
 
           <button
-            onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleToggleAllTables) : handleAutoApproveAll}
+            onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
             className="flex items-center justify-center gap-2 px-4 py-3 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/25 text-accent-green text-sm font-semibold rounded-xl transition-colors"
           >
             <CheckCircle size={15} />
@@ -1882,7 +1867,7 @@ function HitlQueue() {
 
           <button
             onClick={handleSubmit}
-            disabled={hydrating || submitting || !selectedRunId || !isReviewableRun}
+            disabled={submitting}
             className="flex items-center gap-2 px-6 py-2.5 bg-accent-blue hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-bold rounded-xl transition-colors shadow-lg"
           >
             {submitting ? (

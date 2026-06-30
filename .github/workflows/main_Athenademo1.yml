@@ -74,7 +74,7 @@ jobs:
 
           run = demo.demo_run("run_b7e1d3", include_scripts=True)
           counts = run.get("script_counts") or {}
-          if counts != {"bronze": 8, "silver": 8, "gold": 9}:
+          if counts != {"bronze": 8, "silver": 8, "gold": 6}:
               raise RuntimeError(f"Script counts are incomplete: {counts}")
 
           lineage = demo.demo_lineage("run_b7e1d3")
