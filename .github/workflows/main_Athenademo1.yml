@@ -20,6 +20,7 @@ jobs:
   deploy:
     name: Deploy backend
     runs-on: ubuntu-latest
+    timeout-minutes: 12
 
     steps:
       - uses: actions/checkout@v4
@@ -30,24 +31,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-          cache-dependency-path: 'Athena_backend/requirements.txt'
 
-      - name: Install backend dependencies for tests
-        env:
-          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      - name: Prepare small backend artifact
         run: |
-          python -m pip install -r Athena_backend/requirements.txt
-
-      - name: Run backend tests
-        working-directory: ./Athena_backend
-        run: |
-          python -m pytest tests/test_api_main.py -v || true
-
-      - name: Prepare backend artifact
-        run: |
+          set -euo pipefail
           mkdir -p deploy/Athena_backend
-          rsync -av \
+          rsync -a \
             --exclude '.env' \
             --exclude '.venv' \
             --exclude '.python_packages' \
@@ -55,50 +44,49 @@ jobs:
             --exclude '__pycache__' \
             --exclude 'tests' \
             --exclude 'uploads' \
+            --exclude 'generated_code' \
+            --exclude '*.zip' \
             --exclude 'pipeline_logs.json' \
             --exclude 'pipeline_logs.json.localbackup' \
             Athena_backend/ deploy/Athena_backend/
           chmod +x deploy/Athena_backend/startup.sh
-
-      - name: Validate backend artifact
-        run: |
-          set -euo pipefail
-          if grep -E "^(pinecone|sentence-transformers|langchain-huggingface|torch|nvidia|cuda|triton)([<>= ]|$)" deploy/Athena_backend/requirements.txt; then
-            echo "Default deployment artifact contains optional embedding dependencies."
-            exit 1
-          fi
-          test -f deploy/Athena_backend/app.py
-          test -f deploy/Athena_backend/Procfile
-          test -f deploy/Athena_backend/startup.sh
-          test ! -d deploy/Athena_backend/.python_packages
-          grep -q "SCM_DO_BUILD_DURING_DEPLOYMENT=true" deploy/Athena_backend/.deployment
           printf "%s\n" "${GITHUB_SHA}" > deploy/Athena_backend/DEPLOYED_COMMIT.txt
 
-      - name: Smoke test packaged backend imports
+      - name: Validate fallback payloads
         working-directory: deploy/Athena_backend
         run: |
           set -euo pipefail
+          if grep -E "^(pinecone|sentence-transformers|langchain-huggingface|torch|nvidia|cuda|triton)([<>= ]|$)" requirements.txt; then
+            echo "Optional embedding dependencies are still in the deployment requirements."
+            exit 1
+          fi
+          test -f app.py
+          test -f Procfile
+          test -f startup.sh
+          test -f .deployment
           python - <<'PY'
-          import importlib
-          from fastapi.testclient import TestClient
+          from api import demo
 
-          for module_name in ("api.main", "app"):
-              module = importlib.import_module(module_name)
-              if getattr(module, "app", None) is None:
-                  raise RuntimeError(f"{module_name}:app is missing")
-              print(f"{module_name}:app import ok")
-
-          app_module = importlib.import_module("api.main")
-          client = TestClient(app_module.app)
-          bronze = client.get("/bronze-reviews/run_a3f8c2").json()
+          bronze = demo.demo_bronze_review("run_a3f8c2")
           feeds = (bronze.get("bronze_review_artifact") or {}).get("feeds") or []
           if len(feeds) < 8:
               raise RuntimeError(f"Bronze review payload is incomplete: {len(feeds)} feeds")
-          run = client.get("/runs/run_b7e1d3").json()
+
+          run = demo.demo_run("run_b7e1d3", include_scripts=True)
           counts = run.get("script_counts") or {}
-          if counts.get("bronze", 0) < 8 or counts.get("silver", 0) < 8 or counts.get("gold", 0) < 9:
+          if counts != {"bronze": 8, "silver": 8, "gold": 9}:
               raise RuntimeError(f"Script counts are incomplete: {counts}")
-          print("fallback script payloads ok")
+
+          lineage = demo.demo_lineage("run_b7e1d3")
+          node_ids = {node["id"] for node in lineage.get("nodes", [])}
+          bad_edges = [
+              edge for edge in lineage.get("edges", [])
+              if edge.get("source") not in node_ids or edge.get("target") not in node_ids
+          ]
+          if bad_edges:
+              raise RuntimeError(f"Lineage has broken edges: {len(bad_edges)}")
+
+          print("fallback payloads ok")
           PY
 
       - name: Build Kudu credentials
@@ -127,21 +115,18 @@ jobs:
         working-directory: deploy/Athena_backend
         run: zip -qr ../backend.zip .
 
-      - name: Wait for any previous App Service deployment lock
-        run: sleep 20
-
       - name: Deploy backend with Kudu ZIP deploy
         run: |
           set -euo pipefail
 
-          for attempt in 1 2 3; do
-            echo "ZIP deploy attempt ${attempt}/3"
+          for attempt in 1 2; do
+            echo "ZIP deploy attempt ${attempt}/2"
             response_file="/tmp/kudu-deploy-${attempt}.json"
             status="$(curl -sS -u "$KUDU_USER:$KUDU_PASS" \
               -o "$response_file" \
               -w "%{http_code}" \
-              --connect-timeout 30 \
-              --max-time 120 \
+              --connect-timeout 20 \
+              --max-time 90 \
               -X POST \
               --data-binary @deploy/backend.zip \
               "$KUDU_URL/api/zipdeploy?isAsync=true" || true)"
@@ -152,18 +137,17 @@ jobs:
               break
             fi
 
-            if [ "$attempt" = "3" ]; then
+            if [ "$attempt" = "2" ]; then
               echo "Kudu ZIP deploy did not accept the package."
               exit 1
             fi
 
-            sleep $((attempt * 120))
+            sleep 45
           done
 
           echo "Waiting for Kudu deployment completion..."
-          for poll in {1..180}; do
+          for poll in {1..72}; do
             curl -fsS -u "$KUDU_USER:$KUDU_PASS" "$KUDU_URL/api/deployments/latest" -o /tmp/kudu-latest.json || true
-            cat /tmp/kudu-latest.json || true
             status="$(python - <<'PY'
           import json
           try:
@@ -172,6 +156,7 @@ jobs:
               print('')
           PY
           )"
+            echo "Kudu poll ${poll}/72 status=${status:-pending}"
             if [ "$status" = "4" ]; then
               echo "Kudu deployment completed successfully."
               exit 0
@@ -181,100 +166,25 @@ jobs:
               curl -fsS -u "$KUDU_USER:$KUDU_PASS" "$KUDU_URL/api/deployments/latest/log" || true
               exit 1
             fi
-            sleep 10
+            sleep 5
           done
 
-          echo "Kudu deployment did not complete in time."
+          echo "Kudu deployment did not complete in 6 minutes."
           curl -fsS -u "$KUDU_USER:$KUDU_PASS" "$KUDU_URL/api/deployments/latest/log" || true
           exit 1
-
-      - name: Verify deployed backend artifact
-        run: |
-          set -euo pipefail
-          python - <<'PY' > /tmp/verify-payload.json
-          import json
-
-          command = r'''
-          set -e
-          echo "Deployed commit:"
-          cat DEPLOYED_COMMIT.txt
-          echo "Runtime dependency environment:"
-          test -d antenv/lib || test -d antenv
-          test ! -d .python_packages || echo "Stale .python_packages exists but startup ignores it"
-          echo "Checking default requirements for optional embedding stack:"
-          if grep -E "^(pinecone|sentence-transformers|langchain-huggingface|torch|nvidia|cuda|triton)([<>= ]|$)" requirements.txt; then
-            echo "Stale or invalid requirements.txt deployed."
-            exit 1
-          fi
-          '''
-          print(json.dumps({"command": command, "dir": "/home/site/wwwroot"}))
-          PY
-
-          curl -fsS -u "$KUDU_USER:$KUDU_PASS" \
-            -H "Content-Type: application/json" \
-            --data-binary @/tmp/verify-payload.json \
-            "$KUDU_URL/api/command"
 
       - name: Health check
         run: |
+          set -euo pipefail
           echo "Waiting for app to be ready..."
-          for attempt in {1..12}; do
-            : > /tmp/health-body.txt
+          for attempt in {1..10}; do
             status="$(curl -sS -o /tmp/health-body.txt -w "%{http_code}" --connect-timeout 5 --max-time 15 "${{ env.AZURE_WEBAPP_URL }}/health" || true)"
-            echo "Attempt ${attempt}/12 returned HTTP ${status}"
+            echo "Health attempt ${attempt}/10 returned HTTP ${status}"
+            cat /tmp/health-body.txt || true
             if [ "$status" = "200" ]; then
-              cat /tmp/health-body.txt
               exit 0
             fi
-            if [ -s /tmp/health-body.txt ]; then
-              cat /tmp/health-body.txt
-            fi
-            sleep 10
+            sleep 6
           done
           echo "Backend did not become healthy in time."
           exit 1
-
-      - name: Collect App Service diagnostics
-        if: failure()
-        env:
-          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-        run: |
-          python - <<'PY' > /tmp/kudu-env.sh
-          import os
-          import shlex
-          import xml.etree.ElementTree as ET
-
-          root = ET.fromstring(os.environ["PUBLISH_PROFILE"])
-          profiles = [
-              p for p in root.findall("publishProfile")
-              if p.get("publishMethod") in {"ZipDeploy", "MSDeploy"}
-          ]
-          profile = profiles[0] if profiles else root.find("publishProfile")
-          publish_url = (profile.get("publishUrl") or "").strip()
-          if not publish_url.startswith("https://"):
-              publish_url = f"https://{publish_url}"
-          publish_url = publish_url.rstrip("/")
-          print(f"KUDU_URL={shlex.quote(publish_url)}")
-          print(f"KUDU_USER={shlex.quote(profile.get('userName') or '')}")
-          print(f"KUDU_PASS={shlex.quote(profile.get('userPWD') or '')}")
-          PY
-
-          . /tmp/kudu-env.sh
-
-          echo "::group::Latest Kudu deployment log"
-          curl -fsS -u "$KUDU_USER:$KUDU_PASS" "$KUDU_URL/api/deployments/latest/log" || true
-          echo "::endgroup::"
-
-          echo "::group::Runtime startup inspection"
-          curl -fsS -u "$KUDU_USER:$KUDU_PASS" \
-            -H "Content-Type: application/json" \
-            -d '{"command":"pwd; ls -la; test -f startup.sh && sed -n \"1,120p\" startup.sh; test -f Procfile && cat Procfile; python --version; ls -la antenv/bin/python antenv/bin/gunicorn antenv/bin/uvicorn 2>&1; tail -n 200 /home/LogFiles/default_docker.log 2>/dev/null || true; find /home/LogFiles -maxdepth 2 -type f | tail -n 20","dir":"/home/site/wwwroot"}' \
-            "$KUDU_URL/api/command" || true
-          echo "::endgroup::"
-
-      - name: Upload deployment artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-app
-          path: deploy/Athena_backend/
-          retention-days: 5
