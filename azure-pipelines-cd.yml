@@ -73,8 +73,8 @@ stages:
         resourceGroupName: '$(resourceGroupName)'
         slotName: 'staging'
         package: '$(Pipeline.Workspace)/app'
-        runtimeStack: 'PYTHON|3.9'
-        startupCommand: 'startup.sh'
+        runtimeStack: 'PYTHON|3.10'
+        startupCommand: 'bash startup.sh'
       displayName: 'Deploy to staging slot'
 
     - task: AzureAppServiceManage@0

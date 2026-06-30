@@ -65,7 +65,7 @@ resource combinedApp 'Microsoft.Web/sites@2021-02-01' = {
   properties: {
     serverFarmId: appServicePlan.id
     siteConfig: {
-      linuxFxVersion: 'PYTHON|3.9'
+      linuxFxVersion: 'PYTHON|3.10'
       appSettings: [
         {
           name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE'
@@ -160,7 +160,7 @@ resource combinedStagingSlot 'Microsoft.Web/sites/slots@2021-02-01' = {
   properties: {
     serverFarmId: appServicePlan.id
     siteConfig: {
-      linuxFxVersion: 'PYTHON|3.9'
+      linuxFxVersion: 'PYTHON|3.10'
       appSettings: [
         {
           name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE'
