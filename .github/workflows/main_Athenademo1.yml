@@ -55,7 +55,6 @@ jobs:
             --exclude '__pycache__' \
             --exclude 'tests' \
             --exclude 'uploads' \
-            --exclude 'generated_code' \
             --exclude 'pipeline_logs.json' \
             --exclude 'pipeline_logs.json.localbackup' \
             Athena_backend/ deploy/Athena_backend/
