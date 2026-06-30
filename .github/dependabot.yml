@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 2
+    groups:
+      frontend-npm:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/Athena_backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:30"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 1
+    groups:
+      backend-pip:
+        patterns:
+          - "*"
