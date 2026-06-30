@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 
-from api.demo import demo_action, demo_enabled, demo_kpi_reviews
+from api.demo import demo_action, demo_enabled, demo_kpi_reviews, demo_start_progress
 from api.models import HitlDecisionPayload
 from utilis.logger import logger
 
@@ -52,7 +52,8 @@ def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
 @router.post("/kpi-reviews/{queue_id}/approve")
 def approve_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if demo_enabled():
-        return {"queue_id": queue_id, "status": "APPROVED"}
+        run_id = queue_id.split(":1:", 1)[0] if ":1:" in queue_id else queue_id
+        return {"queue_id": queue_id, "status": "APPROVED", "run": demo_start_progress(run_id, "kpi")}
 
     from api.services.kpi_service import maybe_resume_gate1
     from utilis.db import update_hitl_item
@@ -108,7 +109,8 @@ def reject_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 @router.post("/kpi-reviews/{queue_id}/modify")
 def modify_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if demo_enabled():
-        return {"queue_id": queue_id, "status": "APPROVED"}
+        run_id = queue_id.split(":1:", 1)[0] if ":1:" in queue_id else queue_id
+        return {"queue_id": queue_id, "status": "APPROVED", "run": demo_start_progress(run_id, "kpi")}
 
     from api.services.kpi_service import maybe_resume_gate1
     from utilis.db import update_hitl_item
@@ -140,7 +142,8 @@ def modify_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 @router.post("/kpi-reviews/{run_id}/bulk")
 def bulk_kpi_action(run_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if demo_enabled():
-        return demo_action(run_id, status=payload.get("action", "APPROVED") if payload else "APPROVED")
+        action = payload.get("action", "APPROVED") if payload else "APPROVED"
+        return demo_action(run_id, status=action, segment="kpi" if action == "APPROVED" else None)
 
     from api.services.kpi_service import fetch_hitl_rows, maybe_resume_gate1
     from utilis.db import update_hitl_item
@@ -185,7 +188,7 @@ def hitl_queue(run_id: str) -> Dict[str, Any]:
 @router.post("/hitl/{run_id}/decisions")
 def submit_hitl_decisions(run_id: str, payload: HitlDecisionPayload) -> Dict[str, Any]:
     if demo_enabled():
-        return demo_action(run_id)
+        return demo_action(run_id, segment="kpi")
 
     from api.services.kpi_service import maybe_resume_gate1
     from utilis.db import update_hitl_item

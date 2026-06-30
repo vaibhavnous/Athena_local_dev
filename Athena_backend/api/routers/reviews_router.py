@@ -58,7 +58,7 @@ def table_reviews(run_id: str) -> Dict[str, Any]:
 @router.post("/table-reviews/{run_id}")
 def submit_table_reviews(run_id: str, payload: Gate2DecisionPayload) -> Dict[str, Any]:
     if demo_enabled():
-        return demo_action(run_id, approved_tables=payload.approved_tables)
+        return demo_action(run_id, segment="table", approved_tables=payload.approved_tables)
 
     from services.pipeline_runtime import (
         load_checkpoint_state,
@@ -123,7 +123,7 @@ def enrichment_reviews(run_id: str) -> Dict[str, Any]:
 @router.post("/enrichment-reviews/{run_id}")
 def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict[str, Any]:
     if demo_enabled():
-        return demo_action(run_id, approve=payload.approve)
+        return demo_action(run_id, segment="enrichment" if payload.approve else None, approve=payload.approve)
 
     from services.pipeline_runtime import (
         load_checkpoint_state,
@@ -183,7 +183,7 @@ def bronze_reviews(run_id: str) -> Dict[str, Any]:
 @router.post("/bronze-reviews/{run_id}")
 def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
     if demo_enabled():
-        return demo_action(run_id, action=payload.action)
+        return demo_action(run_id, segment="bronze" if payload.action == "APPROVED" else None, action=payload.action)
 
     from services.pipeline_runtime import submit_background
     from sftp_nodes.hitl import submit_sftp_gate4_review
@@ -233,7 +233,7 @@ def silver_reviews(run_id: str) -> Dict[str, Any]:
 @router.post("/silver-reviews/{run_id}")
 def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
     if demo_enabled():
-        return demo_action(run_id, action=payload.action)
+        return demo_action(run_id, segment="silver" if payload.action == "APPROVED" else None, action=payload.action)
 
     from services.pipeline_runtime import submit_background
     from sftp_nodes.hitl import submit_sftp_gate5_review

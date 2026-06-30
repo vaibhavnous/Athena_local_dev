@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+
 from fastapi.testclient import TestClient
+
+os.environ.setdefault("ATHENA_DEMO_MODE", "false")
 
 from api.main import app
 from api.services.ui import run_ui_service
@@ -97,7 +101,7 @@ def test_ui_status_uses_reconciled_context_over_stale_checkpoint_pause():
 
 def test_pipeline_status_endpoint_syncs_with_ui_service(monkeypatch):
     monkeypatch.setattr(
-        "api.routers.pipeline_router.ui_run",
+        "api.services.ui_service.ui_run",
         lambda run_id: {
             "status": "SUCCESS",
             "run_id": run_id,
@@ -117,7 +121,7 @@ def test_pipeline_status_endpoint_syncs_with_ui_service(monkeypatch):
 
 def test_run_detail_endpoint_returns_scripts_from_ui_layer(monkeypatch):
     monkeypatch.setattr(
-        "api.routers.runs_router.ui_run",
+        "api.services.ui_service.ui_run",
         lambda run_id, include_scripts=True: {
             "run_id": run_id,
             "status": "SUCCESS",
@@ -159,9 +163,9 @@ def test_mocked_pipeline_progression_stays_in_sync(monkeypatch):
         state["next_gate"] = None
         state["resume_message"] = "Pipeline completed."
 
-    monkeypatch.setattr("api.routers.pipeline_router.ui_run", fake_ui_run)
-    monkeypatch.setattr("api.routers.kpi_router.update_hitl_item", fake_update_hitl_item)
-    monkeypatch.setattr("api.routers.kpi_router.maybe_resume_gate1", lambda run_id: None)
+    monkeypatch.setattr("api.services.ui_service.ui_run", fake_ui_run)
+    monkeypatch.setattr("utilis.db.update_hitl_item", fake_update_hitl_item)
+    monkeypatch.setattr("api.services.kpi_service.maybe_resume_gate1", lambda run_id: None)
 
     before = client.get("/pipeline/run-progress/status")
     assert before.status_code == 200

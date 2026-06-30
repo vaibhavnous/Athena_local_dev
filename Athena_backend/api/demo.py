@@ -30,6 +30,7 @@ def _iso(minutes_ago: int) -> str:
 
 
 def _stage(key: str, label: str, status: str, index: int) -> Dict[str, Any]:
+    active = status in {"COMPLETED", "SUCCESS", "HITL_WAIT", "RUNNING"}
     completed = status in {"COMPLETED", "SUCCESS", "HITL_WAIT"}
     return {
         "id": key,
@@ -38,13 +39,13 @@ def _stage(key: str, label: str, status: str, index: int) -> Dict[str, Any]:
         "label": label,
         "status": status,
         "state": status,
-        "tokens": 2400 + index * 375 if completed else 0,
-        "cost": round((2400 + index * 375) / 100000, 4) if completed else 0,
-        "attempts": 1 if completed else 0,
-        "started_at": _iso(18 - index) if completed else None,
+        "tokens": 2400 + index * 375 if active else 0,
+        "cost": round((2400 + index * 375) / 100000, 4) if active else 0,
+        "attempts": 1 if active else 0,
+        "started_at": _iso(18 - index) if active else None,
         "completed_at": _iso(17 - index) if completed and status != "HITL_WAIT" else None,
         "error": None,
-        "prompt_metadata": {"model": "gpt-4.1", "temperature": 0.0} if completed else None,
+        "prompt_metadata": {"model": "gpt-4.1", "temperature": 0.0} if active else None,
     }
 
 
@@ -429,26 +430,221 @@ def _qualified_columns(columns: List[Dict[str, Any]], predicate) -> List[str]:
     ]
 
 
+DEMO_STAGE_SECONDS = 5
+DEMO_STAGE_SEQUENCE = [
+    "ingestion",
+    "memory",
+    "requirements",
+    "kpis",
+    "gate1",
+    "nomination",
+    "gate2",
+    "discovery",
+    "profiling",
+    "enrichment",
+    "gate3",
+    "bronze",
+    "gate4",
+    "silver",
+    "gate5",
+    "gold",
+]
+DEMO_PROGRESS_SEGMENTS: Dict[str, Dict[str, Any]] = {
+    "kpi": {
+        "completed_before": ["ingestion", "memory", "requirements", "kpis", "gate1"],
+        "running": ["nomination"],
+        "next_gate": 2,
+        "next_gate_key": "gate2",
+        "running_message": "KPI Review approved. Table Extraction is running.",
+        "waiting_message": "Table Extraction completed. Table Review is ready.",
+    },
+    "table": {
+        "completed_before": ["ingestion", "memory", "requirements", "kpis", "gate1", "nomination", "gate2"],
+        "running": ["discovery", "profiling", "enrichment"],
+        "next_gate": 3,
+        "next_gate_key": "gate3",
+        "running_message": "Table Review approved. Column discovery, profiling, and semantic enrichment are running.",
+        "waiting_message": "Column enrichment completed. Column Review is ready.",
+    },
+    "enrichment": {
+        "completed_before": [
+            "ingestion",
+            "memory",
+            "requirements",
+            "kpis",
+            "gate1",
+            "nomination",
+            "gate2",
+            "discovery",
+            "profiling",
+            "enrichment",
+            "gate3",
+        ],
+        "running": ["bronze"],
+        "next_gate": 4,
+        "next_gate_key": "gate4",
+        "running_message": "Column Review approved. Bronze Code Generation is running.",
+        "waiting_message": "Bronze scripts are generated and ready for review.",
+    },
+    "bronze": {
+        "completed_before": [
+            "ingestion",
+            "memory",
+            "requirements",
+            "kpis",
+            "gate1",
+            "nomination",
+            "gate2",
+            "discovery",
+            "profiling",
+            "enrichment",
+            "gate3",
+            "bronze",
+            "gate4",
+        ],
+        "running": ["silver"],
+        "next_gate": 5,
+        "next_gate_key": "gate5",
+        "running_message": "Bronze Review approved. Silver Code Generation is running.",
+        "waiting_message": "Silver scripts and merge-key review are ready.",
+    },
+    "silver": {
+        "completed_before": [
+            "ingestion",
+            "memory",
+            "requirements",
+            "kpis",
+            "gate1",
+            "nomination",
+            "gate2",
+            "discovery",
+            "profiling",
+            "enrichment",
+            "gate3",
+            "bronze",
+            "gate4",
+            "silver",
+            "gate5",
+        ],
+        "running": ["gold"],
+        "next_gate": None,
+        "next_gate_key": None,
+        "running_message": "Silver Review approved. Gold KPI generation is running.",
+        "waiting_message": "Gold KPI generation completed.",
+    },
+}
+_DEMO_PROGRESS: Dict[str, Dict[str, Any]] = {}
+
+
+def demo_start_progress(run_id: str, segment: str) -> Dict[str, Any]:
+    if segment in DEMO_PROGRESS_SEGMENTS:
+        _DEMO_PROGRESS[run_id] = {"segment": segment, "started_at": time.time()}
+    return demo_run(run_id, include_scripts=True)
+
+
+def _demo_progress_snapshot(run_id: str) -> Dict[str, Any]:
+    progress = _DEMO_PROGRESS.get(run_id)
+    if not progress:
+        return {}
+
+    segment_name = str(progress.get("segment") or "")
+    segment = DEMO_PROGRESS_SEGMENTS.get(segment_name)
+    if not segment:
+        return {}
+
+    elapsed = max(0, time.time() - float(progress.get("started_at") or time.time()))
+    running_keys = list(segment["running"])
+    running_index = int(elapsed // DEMO_STAGE_SECONDS)
+    completed_keys = set(segment["completed_before"])
+    current_key: Optional[str] = None
+    next_gate = segment["next_gate"]
+    resume_message = segment["running_message"]
+    status = "PROCESSING"
+
+    if running_index < len(running_keys):
+        completed_keys.update(running_keys[:running_index])
+        current_key = running_keys[running_index]
+    else:
+        completed_keys.update(running_keys)
+        next_gate_key = segment.get("next_gate_key")
+        if next_gate_key:
+            completed_keys.add(str(next_gate_key))
+            status = "HITL_WAIT"
+        else:
+            status = "SUCCESS"
+        resume_message = segment["waiting_message"]
+
+    stage_labels = {stage["key"]: stage["label"] for stage in demo_stages()}
+    stages = []
+    for index, key in enumerate(DEMO_STAGE_SEQUENCE, start=1):
+        if key == current_key:
+            stage_status = "RUNNING"
+        elif key in completed_keys:
+            if key.startswith("gate") and key == segment.get("next_gate_key") and status == "HITL_WAIT":
+                stage_status = "HITL_WAIT"
+            else:
+                stage_status = "COMPLETED"
+        else:
+            stage_status = "PENDING"
+        stages.append(_stage(key, stage_labels.get(key, key.replace("_", " ").title()), stage_status, index))
+
+    return {
+        "status": status,
+        "next_gate": next_gate if status == "HITL_WAIT" else None,
+        "resume_message": resume_message,
+        "stages": stages,
+        "completed_keys": completed_keys,
+        "current_key": current_key,
+    }
+
+
+def _demo_script_counts_for(completed_keys: set[str], status: str) -> Dict[str, int]:
+    bronze_ready = "bronze" in completed_keys
+    silver_ready = "silver" in completed_keys
+    gold_ready = "gold" in completed_keys or status == "SUCCESS"
+    return {
+        "bronze": len((_bronze_bundle().get("scripts") or [])) if bronze_ready else 0,
+        "silver": len((_silver_bundle().get("scripts") or [])) if silver_ready else 0,
+        "gold": len((_gold_bundle().get("scripts") or [])) if gold_ready else 0,
+    }
+
+
 def demo_run(run_id: Optional[str] = None, *, include_scripts: bool = False) -> Dict[str, Any]:
     run_id = run_id or DEMO_RUN_ID
     is_completed = run_id == DEMO_COMPLETED_RUN_ID
+    progress = _demo_progress_snapshot(run_id) if not is_completed else {}
     scripts = demo_scripts(run_id)
     tables = demo_tables()
     enriched_columns = demo_enriched_columns()
     feed_semantic_summary = demo_feed_semantic_summary()
-    stages = demo_stages()
+    stages = progress.get("stages") or demo_stages()
     if is_completed:
         stages = [_stage(s["key"], s["label"], "COMPLETED", i + 1) for i, s in enumerate(stages)]
+    status = progress.get("status") or ("SUCCESS" if is_completed else "HITL_WAIT")
+    next_gate = progress.get("next_gate") if progress else (None if is_completed else 1)
+    resume_message = progress.get("resume_message") or (
+        "Run completed." if is_completed else "KPI Review is ready. Validate the extracted KPIs before the pipeline continues."
+    )
+    completed_keys = progress.get("completed_keys") or ({stage["key"] for stage in stages} if is_completed else set())
+    script_counts = (
+        _demo_script_counts_for(completed_keys, status)
+        if progress
+        else {
+            "bronze": len((scripts.get("bronze") or {}).get("scripts") or []),
+            "silver": len((scripts.get("silver") or {}).get("scripts") or []),
+            "gold": len((scripts.get("gold") or {}).get("scripts") or []),
+        } if is_completed else {"bronze": 0, "silver": 0, "gold": 0}
+    )
     payload: Dict[str, Any] = {
         "id": run_id,
         "run_id": run_id,
         "brd_filename": "Insurance_BRD_v3.txt" if not is_completed else "Sales_Dashboard_BRD.txt",
         "source": "database",
-        "status": "SUCCESS" if is_completed else "HITL_WAIT",
+        "status": status,
         "provider": "azure_openai",
         "deployment": "gpt-4o-athena",
         "started_at": _iso(45 if is_completed else 8),
-        "completed_at": _iso(30) if is_completed else None,
+        "completed_at": _iso(30) if is_completed or status == "SUCCESS" else None,
         "cache_hit": "L1_EXACT" if is_completed else "L2_FUZZY",
         "cache_score": 1.0 if is_completed else 0.947,
         "extraction_path": "CACHED_L1" if is_completed else "CACHED_L2",
@@ -478,34 +674,39 @@ def demo_run(run_id: Optional[str] = None, *, include_scripts: bool = False) -> 
         "join_key_columns": _qualified_columns(enriched_columns, lambda column: column.get("semantic_type") == "ID"),
         "measure_columns": _qualified_columns(enriched_columns, lambda column: column.get("is_measure")),
         "feed_semantic_summary": feed_semantic_summary,
-        "next_gate": None if is_completed else 1,
-        "resume_message": "Run completed." if is_completed else "KPI Review is ready. Validate the extracted KPIs before the pipeline continues.",
+        "next_gate": next_gate,
+        "resume_message": resume_message,
         "stage_confirmation": None,
         "failed_stage_key": None,
         "failed_stage_label": None,
         "error": None,
         "updated_at": _iso(1),
         "databricks_run_id": run_id,
-        "script_counts": {
-            "bronze": len((scripts.get("bronze") or {}).get("scripts") or []),
-            "silver": len((scripts.get("silver") or {}).get("scripts") or []),
-            "gold": len((scripts.get("gold") or {}).get("scripts") or []),
-        } if is_completed else {"bronze": 0, "silver": 0, "gold": 0},
-        "gold_generation_completed": is_completed,
-        "gold_generation_status": "COMPLETED" if is_completed else "PENDING",
+        "script_counts": script_counts,
+        "gold_generation_completed": is_completed or status == "SUCCESS",
+        "gold_generation_status": "COMPLETED" if is_completed or status == "SUCCESS" else "PENDING",
     }
-    if is_completed:
+    if is_completed or script_counts["bronze"] > 0:
         payload["bronze_review_artifact"] = demo_bronze_review(run_id)["bronze_review_artifact"]
+    if is_completed or script_counts["silver"] > 0:
         payload["silver_review_artifact"] = demo_silver_review(run_id)["silver_review_artifact"]
-    if include_scripts and is_completed:
-        payload.update(scripts)
+    if include_scripts:
+        available_scripts = {}
+        if script_counts["bronze"] > 0:
+            available_scripts["bronze"] = scripts.get("bronze")
+        if script_counts["silver"] > 0:
+            available_scripts["silver"] = scripts.get("silver")
+        if script_counts["gold"] > 0:
+            available_scripts["gold"] = scripts.get("gold")
+        payload.update(available_scripts)
     return payload
 
 
 def demo_runs() -> List[Dict[str, Any]]:
-    active = demo_run(DEMO_RUN_ID)
+    run_ids = [DEMO_RUN_ID, *[run_id for run_id in _DEMO_PROGRESS if run_id != DEMO_RUN_ID]]
+    active_runs = [demo_run(run_id) for run_id in run_ids]
     completed = demo_run(DEMO_COMPLETED_RUN_ID)
-    return [active, completed]
+    return [*active_runs, completed]
 
 
 def demo_status(run_id: str) -> Dict[str, Any]:
@@ -887,7 +1088,30 @@ def demo_logs(run_id: str, limit: int = 300) -> List[Dict[str, Any]]:
         ("kpis", "INFO", "Mapped KPIs to claims, policy, premium, coverage, expenses, and reserve domains"),
         ("gate1", "INFO", "KPI Review is ready for approval"),
     ]
-    if run_id == DEMO_COMPLETED_RUN_ID:
+    progress = _demo_progress_snapshot(run_id)
+    completed_keys = progress.get("completed_keys") or set()
+    current_key = progress.get("current_key")
+    if completed_keys or current_key:
+        progressive_messages = [
+            ("gate1", "INFO", "KPI Review approved by Data Engineer"),
+            ("nomination", "INFO", f"Certified {len(demo_tables())} source table nominations from insurance.dbo"),
+            ("gate2", "INFO", "Table Review approved; source metadata extraction unlocked"),
+            ("discovery", "INFO", "Discovered source columns for policy, claim, payment, reserve, and coverage tables"),
+            ("profiling", "INFO", "Profiled keys, dates, measures, nullability, and cardinality"),
+            ("enrichment", "INFO", f"Prepared {len(demo_enriched_columns())} semantic column classifications"),
+            ("gate3", "INFO", "Column Review approved with semantic labels, PII tags, and join keys"),
+            ("bronze", "INFO", f"Generated {len((_bronze_bundle().get('scripts') or []))} Bronze ingestion artifacts"),
+            ("gate4", "INFO", "Bronze Review approved; raw ingestion contracts certified"),
+            ("silver", "INFO", f"Generated {len((_silver_bundle().get('scripts') or []))} Silver transformation artifacts"),
+            ("gate5", "INFO", "Silver Review approved with merge keys and curated transformations"),
+            ("gold", "INFO", f"Generated {len((_gold_bundle().get('scripts') or []))} Gold KPI generation artifacts"),
+            ("gold", "INFO", "Pipeline completed successfully with Bronze, Silver, and Gold assets available"),
+        ]
+        messages.extend([item for item in progressive_messages if item[0] in completed_keys])
+        if current_key:
+            labels = {stage["key"]: stage["label"] for stage in demo_stages()}
+            messages.append((str(current_key), "INFO", f"{labels.get(str(current_key), str(current_key))} is running"))
+    elif run_id == DEMO_COMPLETED_RUN_ID:
         messages.extend(
             [
                 ("nomination", "INFO", f"Certified {len(demo_tables())} source table nominations from insurance.dbo"),
@@ -897,6 +1121,7 @@ def demo_logs(run_id: str, limit: int = 300) -> List[Dict[str, Any]]:
                 ("bronze", "INFO", f"Generated {len((_bronze_bundle().get('scripts') or []))} Bronze ingestion artifacts"),
                 ("silver", "INFO", f"Generated {len((_silver_bundle().get('scripts') or []))} Silver transformation artifacts"),
                 ("gold", "INFO", f"Generated {len((_gold_bundle().get('scripts') or []))} Gold KPI generation artifacts"),
+                ("gold", "INFO", "Pipeline completed successfully with Bronze, Silver, and Gold assets available"),
             ]
         )
     rows = [
@@ -907,6 +1132,10 @@ def demo_logs(run_id: str, limit: int = 300) -> List[Dict[str, Any]]:
 
 
 def demo_action(run_id: str, status: str = "SUBMITTED", **extra: Any) -> Dict[str, Any]:
+    segment = extra.pop("segment", None)
+    if segment:
+        run = demo_start_progress(run_id, str(segment))
+        return {"run_id": run_id, "status": status, "run": run, **extra}
     return {"run_id": run_id, "status": status, **extra}
 
 

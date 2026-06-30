@@ -214,10 +214,13 @@ def abort_run(run_id: str) -> Dict[str, Any]:
 @router.post("/pipeline/{run_id}/continue-stage")
 def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]:
     if demo_enabled():
+        gate = int((demo_status(run_id).get("run") or {}).get("next_gate") or 1)
+        segment_by_gate = {1: "kpi", 2: "table", 3: "enrichment", 4: "bronze", 5: "silver"}
         return demo_action(
             run_id,
-            next_stage_key="nomination",
-            resume_message="Flow continued to Table Nomination.",
+            segment=segment_by_gate.get(gate, "kpi"),
+            next_stage_key="nomination" if gate == 1 else None,
+            resume_message="Flow continued.",
         )
 
     from api.services.pipeline_service import continue_database_pipeline_job
