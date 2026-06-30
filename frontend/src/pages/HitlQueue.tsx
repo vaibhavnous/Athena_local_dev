@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { AlertTriangle, CheckCircle, CheckCircle2, Copy, Database, Download, Inbox, Loader2, PlusCircle, Send, Shield, Table2, Timer } from 'lucide-react'
+import { AlertTriangle, CheckCircle, CheckCircle2, Copy, Database, Download, Inbox, Loader2, PlusCircle, RotateCcw, Send, Shield, Table2, Timer, XCircle } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import KpiReviewCard from '../components/hitl/KpiReviewCard'
 import EditKpiModal from '../components/hitl/EditKpiModal'
@@ -347,7 +347,7 @@ function HitlQueue() {
   const [bronzeReview, setBronzeReview] = useState(null)
   const [silverReview, setSilverReview] = useState(null)
   const [gate3Decision, setGate3Decision] = useState('APPROVED')
-  const [gateDecision, setGateDecision] = useState('APPROVED')
+  const [gateDecision, setGateDecision] = useState('')
   const [selectedRunDetail, setSelectedRunDetail] = useState(null)
   const hydrationRequestRef = useRef(0)
 
@@ -492,7 +492,7 @@ function HitlQueue() {
     setSilverReview(null)
     setTableReviewDecisions({})
     setSelectedTables({})
-    setGateDecision('APPROVED')
+    setGateDecision('')
     hydrationRequestRef.current += 1
   }, [selectedRunId, currentRun?.source, gateToReview])
 
@@ -1016,8 +1016,9 @@ function HitlQueue() {
     if (isGate4) {
       setSubmitting(true)
       try {
-        await submitBronzeReview(selectedRunId, gateDecision)
-        const refreshed = gateDecision === 'APPROVED'
+        const reviewAction = gateDecision || 'APPROVED'
+        await submitBronzeReview(selectedRunId, reviewAction)
+        const refreshed = reviewAction === 'APPROVED'
           ? await waitForRunGate(selectedRunId, updateRun, 5)
           : await getRun(selectedRunId)
         updateRun(selectedRunId, refreshed)
@@ -1047,8 +1048,9 @@ function HitlQueue() {
     if (isGate5) {
       setSubmitting(true)
       try {
-        await submitSilverReview(selectedRunId, gateDecision)
-        const refreshed = gateDecision === 'APPROVED'
+        const reviewAction = gateDecision || 'APPROVED'
+        await submitSilverReview(selectedRunId, reviewAction)
+        const refreshed = reviewAction === 'APPROVED'
           ? await waitForGoldScripts(selectedRunId, updateRun)
           : await getRun(selectedRunId)
         updateRun(selectedRunId, refreshed)
@@ -1056,9 +1058,9 @@ function HitlQueue() {
         addNotification({
           type: 'success',
           title: `${gate5Name} Submitted`,
-          message: gateDecision === 'APPROVED' && hasGoldScripts(refreshed)
+          message: reviewAction === 'APPROVED' && hasGoldScripts(refreshed)
             ? 'Silver approved. Gold scripts are now ready.'
-            : gateDecision === 'APPROVED'
+            : reviewAction === 'APPROVED'
             ? 'Silver approved. Gold generation is still processing.'
             : 'Silver review was submitted. Pipeline is resuming.',
           duration: 5000
@@ -2351,6 +2353,17 @@ function CodeReviewPanel({
     )))
   }
 
+  const decisionLabel =
+    decision === 'APPROVED' ? 'Approve selected' :
+    decision === 'REJECTED' ? 'Reject selected' :
+    decision === 'REGENERATE' ? 'Regenerate selected' :
+    'No decision selected'
+  const decisionTone =
+    decision === 'APPROVED' ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-300' :
+    decision === 'REJECTED' ? 'border-red-500/35 bg-red-500/10 text-red-300' :
+    decision === 'REGENERATE' ? 'border-[#3f82ff]/35 bg-[#3f82ff]/10 text-[#78a9ff]' :
+    'border-amber-500/35 bg-amber-500/10 text-amber-300'
+
   return (
     <div className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#0f1829] shadow-2xl">
       <div className="flex shrink-0 flex-col gap-4 border-b border-[#1d2940] bg-[#101726] p-6 md:flex-row md:items-center md:justify-between">
@@ -2364,6 +2377,9 @@ function CodeReviewPanel({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          <span className={`inline-flex h-10 items-center rounded-lg border px-3 text-xs font-bold ${decisionTone}`}>
+            {decisionLabel}
+          </span>
           {onViewLineage && (
             <button
               type="button"
@@ -2411,39 +2427,51 @@ function CodeReviewPanel({
           <span className="font-semibold text-white">{reviewedCount}</span> / {totalCount} items reviewed
         </p>
         <div className="flex items-center gap-3">
-          <div className="hidden items-center gap-2 lg:flex">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => setDecision('APPROVED')}
+              aria-pressed={decision === 'APPROVED'}
               className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
                 decision === 'APPROVED'
                   ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300'
                   : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/15'
               }`}
             >
-              Approve Gate
+              <span className="inline-flex items-center gap-1">
+                <CheckCircle2 size={13} />
+                Approve Gate
+              </span>
             </button>
             <button
               type="button"
               onClick={() => setDecision('REJECTED')}
+              aria-pressed={decision === 'REJECTED'}
               className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
                 decision === 'REJECTED'
                   ? 'border-red-400 bg-red-500/20 text-red-300'
                   : 'border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/15'
               }`}
             >
-              Reject Gate
+              <span className="inline-flex items-center gap-1">
+                <XCircle size={13} />
+                Reject Gate
+              </span>
             </button>
             <button
               type="button"
               onClick={() => setDecision('REGENERATE')}
+              aria-pressed={decision === 'REGENERATE'}
               className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
                 decision === 'REGENERATE'
                   ? 'border-[#3f82ff] bg-[#3f82ff]/20 text-[#78a9ff]'
                   : 'border-[#3f82ff]/30 bg-[#3f82ff]/10 text-[#78a9ff] hover:bg-[#3f82ff]/15'
               }`}
             >
-              Regenerate
+              <span className="inline-flex items-center gap-1">
+                <RotateCcw size={13} />
+                Regenerate
+              </span>
             </button>
           </div>
           <button type="button" onClick={onPause} className="btn-secondary">
@@ -2532,8 +2560,12 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onR
       <div className="mt-4 grid gap-2 md:grid-cols-2">
         <button
           type="button"
-          onClick={onApprove}
-          className={`rounded-lg border px-4 py-2 text-sm font-bold transition-colors ${
+          onClick={(event) => {
+            event.stopPropagation()
+            onApprove()
+          }}
+          aria-pressed={approved}
+          className={`inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2 text-sm font-bold transition-colors ${
             approved
               ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300'
               : 'border-emerald-500/35 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/15'
@@ -2543,8 +2575,12 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onR
         </button>
         <button
           type="button"
-          onClick={onReject}
-          className={`rounded-lg border px-4 py-2 text-sm font-bold transition-colors ${
+          onClick={(event) => {
+            event.stopPropagation()
+            onReject()
+          }}
+          aria-pressed={rejected}
+          className={`inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2 text-sm font-bold transition-colors ${
             rejected
               ? 'border-red-400 bg-red-500/20 text-red-300'
               : 'border-red-500/35 bg-red-500/10 text-red-400 hover:bg-red-500/15'
