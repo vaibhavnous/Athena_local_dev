@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowLeft,
+  BookOpenCheck,
   ChevronDown,
   FileText,
   Loader2,
@@ -307,6 +308,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         sftp_entity: normalizedSftpEntity,
         provider: form.provider,
         deployment: form.deployment || null,
+        use_domain_kb: !!form.useDomainKb,
         started_at: new Date().toISOString(),
         stages: [],
         kpis: [],
@@ -530,6 +532,31 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                     <ChevronDown size={21} className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white" />
                                   </div>
                                 </Field>
+                                <label className={`flex cursor-pointer items-start gap-3 rounded-[10px] border px-4 py-4 transition-colors ${
+                                  form.useDomainKb
+                                    ? 'border-[#3f82ff] bg-[#102144]'
+                                    : 'border-[#26344b] bg-[#070d1a] hover:border-[#3f82ff]/60'
+                                }`}>
+                                  <input
+                                    type="checkbox"
+                                    checked={form.useDomainKb}
+                                    onChange={(event) =>
+                                      setForm((current) => ({ ...current, useDomainKb: event.target.checked }))
+                                    }
+                                    className="mt-1 h-5 w-5 rounded border-[#4b5d78] bg-[#0b1220] text-[#3f82ff] accent-[#3f82ff]"
+                                  />
+                                  <span className="flex min-w-0 flex-1 gap-3">
+                                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[9px] border border-[#31415f] bg-[#0b1220] text-[#9fc0ff]">
+                                      <BookOpenCheck size={18} />
+                                    </span>
+                                    <span className="min-w-0">
+                                      <span className="block text-[16px] font-semibold text-white">Domain Knowledge Check</span>
+                                      <span className="mt-1 block text-[13px] leading-5 text-[#9fb1ca]">
+                                        Use saved insurance terminology and KPI patterns before requirement extraction.
+                                      </span>
+                                    </span>
+                                  </span>
+                                </label>
                               </>
                             )}
 

@@ -252,7 +252,7 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
       feed_semantic_summary: isFileSource ? [{ vendor: 'Vendor1', entity: 'transactions', format: 'csv', column_count: 5, pii_count: 0, join_key_count: 1, measure_count: 1, semantic_counts: { business_key: 1, measure: 1 }, sample_row_count: 12840 }] : [],
       enriched_metadata: { confidence: 'demo-fallback', stage: 'Column Extraction' },
       next_gate: 3,
-      resume_message: 'Demo fallback Column Review is ready.',
+      resume_message: 'Demo fallback Semantic Review is ready.',
     }
   }
 
@@ -1208,8 +1208,8 @@ function HitlQueue() {
       <div className="flex h-full min-h-0 flex-col gap-4">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-sm font-semibold text-white">Column Review</p>
-            <p className="text-xs text-[#8fa0bf]">Athena column extraction approval for the active run.</p>
+            <p className="text-sm font-semibold text-white">Semantic Review</p>
+            <p className="text-xs text-[#8fa0bf]">Athena semantic enrichment approval for the active run.</p>
           </div>
           {reviewRuns.length > 0 && (
             <select
@@ -1234,7 +1234,7 @@ function HitlQueue() {
                   <Database size={22} className="text-[#78a9ff]" />
                 </div>
                 <div className="min-w-0">
-                  <h2 className="text-xl font-bold text-white">Column Review</h2>
+                  <h2 className="text-xl font-bold text-white">Semantic Review</h2>
                   <p className="mt-1 text-sm text-[#a9b6cc]">
                     Review extracted and enriched column metadata for {semanticReviewItems.length} item{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
                   </p>
@@ -1604,7 +1604,7 @@ function HitlQueue() {
                     <Database size={20} className="text-accent-blue" />
                   </div>
                   <div>
-                    <h2 className="text-xl font-bold text-text-primary">Column Review</h2>
+                    <h2 className="text-xl font-bold text-text-primary">Semantic Review</h2>
                     <p className="text-sm text-text-secondary">
                       Review extracted and enriched column metadata for {semanticReviewItems.length} item{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
                     </p>
@@ -2025,9 +2025,9 @@ function buildSemanticReviewSource(enrichmentReview, currentRun, runId) {
     return {
       ...source,
       queue_id: source.queue_id || `${runId || source.id || 'run'}-semantic-enrichment-fallback`,
-      table_name: source.table_name || source.entity || source.display_name || source.name || 'Column Review',
+      table_name: source.table_name || source.entity || source.display_name || source.name || 'Semantic Review',
       enriched_columns: [],
-      resume_message: source.resume_message || 'Column Extraction completed. Review extracted and enriched column metadata before the pipeline continues.',
+      resume_message: source.resume_message || 'Semantic Enrichment completed. Review enriched column metadata before the pipeline continues.',
       is_fallback_artifact: true,
     }
   }
@@ -2064,10 +2064,10 @@ function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
   return [
     {
       queue_id: enrichmentReview.queue_id || `${runId || 'run'}-semantic-enrichment`,
-      item_id: enrichmentReview.entity || enrichmentReview.table_name || 'Column Review',
+      item_id: enrichmentReview.entity || enrichmentReview.table_name || 'Semantic Review',
       item_type: 'ENRICHMENT',
       item_detail: {
-        table_name: enrichmentReview.entity || enrichmentReview.table_name || 'Column Review',
+        table_name: enrichmentReview.entity || enrichmentReview.table_name || 'Semantic Review',
         columns: normalizeSemanticColumns(enrichmentReview.enriched_columns || []),
         table_summary: enrichmentReview.table_summary || enrichmentReview.summary || 'Column extraction and enrichment summary.',
       },

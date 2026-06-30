@@ -108,7 +108,7 @@ def _file_next_gate_and_message(
     elif gate2_decision == "APPROVED":
         if semantic_enrichment_completed and gate3_decision not in {"APPROVED", "REJECTED"}:
             next_gate = 3
-            resume_message = "Enrichment Review is pending. Review semantic enrichment before continuing."
+            resume_message = "Semantic Review is pending. Review semantic enrichment before continuing."
         elif (gate3_decision == "APPROVED" or gate3_payload) and bronze_review_ready and gate4_decision not in {"APPROVED", "REJECTED"}:
             next_gate = 4
             resume_message = "Bronze Review is pending. Review Bronze plan before ingestion."
@@ -132,7 +132,7 @@ def _file_next_gate_and_message(
     elif gate2_decision == "REJECTED":
         resume_message = "Feed Review was rejected."
     elif gate3_decision == "REJECTED":
-        resume_message = "Enrichment Review was rejected."
+        resume_message = "Semantic Review was rejected."
     elif gate4_decision == "REJECTED":
         resume_message = "Bronze Review was rejected."
     elif gate5_decision == "REJECTED":

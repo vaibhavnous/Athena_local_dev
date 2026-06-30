@@ -29,9 +29,9 @@ DATABASE_STAGE_SEQUENCE = [
     ("nomination", "Table Extraction"),
     ("gate2", "Table Review"),
     ("discovery", "Column Extraction"),
-    ("profiling", "Column Extraction"),
-    ("enrichment", "Column Extraction"),
-    ("gate3", "Column Review"),
+    ("profiling", "Column Profiling"),
+    ("enrichment", "Semantic Enrichment"),
+    ("gate3", "Semantic Review"),
     ("bronze", "Bronze Generation"),
     ("silver", "Silver Generation"),
     ("gold", "Gold Generation"),
@@ -89,7 +89,7 @@ def _gate_label(gate: int, *, source: str = "database") -> str:
     if gate == 2:
         return "Feed Review" if str(source or "").lower() in {"sftp", "adls_gen2"} else "Table Review"
     if gate == 3:
-        return "Column Review"
+        return "Semantic Review"
     if gate == 4:
         return "Bronze Review"
     if gate == 5:
@@ -1224,13 +1224,13 @@ def build_pipeline_steps(
             },
             {
                 "key": "profiling",
-                "label": "Column Extraction",
+                "label": "Column Profiling",
                 "complete": bool("SFTP_COLUMN_PROFILING" in artifact_types or checkpoint.get("column_profiling_status") == "COMPLETED"),
                 "detail": "Sample-based feed profiling completed",
             },
             {
                 "key": "enrichment",
-                "label": "Column Extraction",
+                "label": "Semantic Enrichment",
                 "complete": bool("ENRICHED_METADATA" in artifact_types or checkpoint.get("semantic_enrichment_status") == "COMPLETED"),
                 "detail": "File-feed semantics classified",
             },
@@ -1320,6 +1320,12 @@ def build_pipeline_steps(
             "detail": "Exact/semantic memory checked",
         },
         {
+            "key": "domain_knowledge",
+            "label": "Domain Knowledge Check",
+            "complete": bool(checkpoint.get("use_domain_kb")),
+            "detail": "Reusable domain terminology checked",
+        },
+        {
             "key": "requirements",
             "label": "Req Extract",
             "complete": bool(artifact_types.intersection({"REQUIREMENTS", "REQUIREMENTS_WARN"})),
@@ -1357,13 +1363,13 @@ def build_pipeline_steps(
         },
         {
             "key": "profiling",
-            "label": "Column Extraction",
+            "label": "Column Profiling",
             "complete": bool("COLUMN_PROFILES" in artifact_types or checkpoint.get("column_profiling_status")),
             "detail": "Column profiles generated",
         },
         {
             "key": "enrichment",
-            "label": "Column Extraction",
+            "label": "Semantic Enrichment",
             "complete": bool("ENRICHED_METADATA" in artifact_types or enriched_payload or checkpoint.get("semantic_enrichment_status")),
             "detail": "Semantic metadata enriched",
         },
@@ -1616,9 +1622,9 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         resume_message = "Table Review is pending. Review and certify nominated tables below."
     elif enriched_payload and not gate3_payload:
         next_gate = 3
-        resume_message = "Column Review is pending. Review extracted and enriched column metadata below."
+        resume_message = "Semantic Review is pending. Review enriched column metadata below."
     elif gate3_payload:
-        resume_message = "Column Review is complete."
+        resume_message = "Semantic Review is complete."
     elif certified_tables and not enriched_payload:
         resume_message = "Table Review is certified. Column Extraction has not completed yet."
     elif completed_gate1 and not nominated_tables:

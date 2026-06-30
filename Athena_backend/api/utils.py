@@ -29,7 +29,7 @@ def gate_label(gate: int, *, source: str = "database") -> str:
     if gate == 2:
         return "Feed Review" if str(source or "").lower() in {"sftp", "adls_gen2"} else "Table Review"
     if gate == 3:
-        return "Enrichment Review"
+        return "Semantic Review"
     if gate == 4:
         return "Bronze Review"
     if gate == 5:
@@ -81,6 +81,8 @@ def stage_key(value: Any) -> Optional[str]:
         return "ingestion"
     if "memory" in text:
         return "memory"
+    if "domain knowledge" in text or "domain kb" in text:
+        return "domain_knowledge"
     if "requirement" in text or "req extract" in text:
         return "requirements"
     if "gate1" in text or "gate 1" in text or text == "hitl certification":
@@ -99,7 +101,7 @@ def stage_key(value: Any) -> Optional[str]:
         return "profiling"
     if "semantic enrichment" in text:
         return "enrichment"
-    if "gate3" in text or "gate 3" in text or "enrichment certification" in text:
+    if "gate3" in text or "gate 3" in text or "semantic review" in text or "enrichment certification" in text:
         return "gate3"
     if "pre-bronze" in text or "bronze readiness" in text:
         return "pre_bronze"
@@ -128,6 +130,8 @@ def stage_label_from_key(key: Optional[str], source: Optional[str] = None) -> Op
     labels = {
         "ingestion": "BRD Ingest" if not is_file_source(source) else "Ingestion",
         "memory": "Memory Check",
+        "domain_knowledge": "Domain Knowledge Check",
+        "domain_kb": "Domain Knowledge Check",
         "requirements": "Requirement Extraction",
         "kpis": "KPI Extraction",
         "gate1": gate_label(1, source=str(source or "database")),

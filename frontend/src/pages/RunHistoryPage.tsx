@@ -384,6 +384,7 @@ function getHistoryDisplaySteps(phase) {
     return [
       actual('ingestion', 'BRD Ingestion'),
       actual('memory', 'Memory Intelligence'),
+      actual('domain_knowledge', 'Domain Knowledge Check'),
       actual('requirements', 'Requirement Extraction'),
       actual('kpis', 'KPI Extraction'),
       actual('gate1', 'KPI Review', reviewAwareState(byKey.get('gate1'), phase)),
@@ -394,17 +395,10 @@ function getHistoryDisplaySteps(phase) {
     return [
       actual('nomination', 'Table Extraction'),
       actual('gate2', 'Table Review', reviewAwareState(byKey.get('gate2'), phase)),
-      {
-        key: 'column_extraction',
-        label: 'Column Extraction',
-        state: combineStepStates(
-          byKey.get('discovery')?.state,
-          byKey.get('profiling')?.state,
-          byKey.get('enrichment')?.state,
-          phaseState
-        ),
-      },
-      actual('gate3', 'Column Review', reviewAwareState(byKey.get('gate3'), phase)),
+      actual('discovery', 'Column Extraction', byKey.get('discovery')?.state || byKey.get('schema')?.state || phaseState),
+      actual('profiling', 'Column Profiling', byKey.get('profiling')?.state || phaseState),
+      actual('enrichment', 'Semantic Enrichment', byKey.get('enrichment')?.state || phaseState),
+      actual('gate3', 'Semantic Review', reviewAwareState(byKey.get('gate3'), phase)),
     ]
   }
 
@@ -462,18 +456,6 @@ function inferExecutionState(generationState, reviewState, phaseStatus) {
   if (normalizedReview === 'HITL_WAIT' || normalizedReview === 'PAUSED_FOR_HITL') return 'PENDING'
   if (normalizedGeneration === 'RUNNING') return 'PENDING'
   return phaseStatusToStepState(phaseStatus) === 'FAILED' ? 'FAILED' : 'PENDING'
-}
-
-function combineStepStates(...statesWithFallback) {
-  const fallbackState = statesWithFallback[statesWithFallback.length - 1] || 'PENDING'
-  const states = statesWithFallback
-    .slice(0, -1)
-    .map((state) => String(state || fallbackState || 'PENDING').toUpperCase())
-  if (states.includes('FAILED')) return 'FAILED'
-  if (states.includes('RUNNING') || states.includes('PROCESSING') || states.includes('IN_PROGRESS')) return 'RUNNING'
-  if (states.includes('HITL_WAIT') || states.includes('PAUSED_FOR_HITL') || states.includes('PENDING_REVIEW')) return 'HITL_WAIT'
-  if (states.every((state) => isCompletedStep(state))) return 'COMPLETED'
-  return fallbackState || 'PENDING'
 }
 
 function isCompletedStep(state) {

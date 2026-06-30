@@ -1,6 +1,7 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { motion } from 'framer-motion'
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Play, RefreshCcw, RotateCcw, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
@@ -857,8 +858,8 @@ function PipelineMonitor() {
                     <div className="bg-[#080e1d] px-6 pb-6 pt-1">
                       <div className="ml-[18px] border-l border-[#2b3648] pl-7">
                         <div className="space-y-5">
-                          {phase.steps.map((step) => (
-                            <StepRow key={step.key} step={step} onOpenReview={handleOpenGateReview} />
+                          {phase.steps.map((step, stepIndex) => (
+                            <StepRow key={step.key} step={step} index={stepIndex} onOpenReview={handleOpenGateReview} />
                           ))}
                         </div>
                       </div>
@@ -1308,7 +1309,7 @@ function StatusPill({ status, tone, compact }) {
   )
 }
 
-function StepRow({ step, onOpenReview }) {
+function StepRow({ step, index = 0, onOpenReview }) {
   const complete = step.state === 'COMPLETED'
   const waiting = step.state === 'HITL_WAIT'
   const running = step.state === 'RUNNING'
@@ -1317,7 +1318,11 @@ function StepRow({ step, onOpenReview }) {
   const canOpenReview = waiting && isGate && onOpenReview
 
   return (
-    <div
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.24, delay: Math.min(index * 0.035, 0.18), ease: 'easeOut' }}
       role={canOpenReview ? 'button' : undefined}
       tabIndex={canOpenReview ? 0 : undefined}
       onClick={canOpenReview ? onOpenReview : undefined}
@@ -1361,7 +1366,7 @@ function StepRow({ step, onOpenReview }) {
           {step.label}
         </div>
       </div>
-    </div>
+    </motion.div>
   )
 }
 
@@ -1464,26 +1469,19 @@ function buildPipelineDisplayPhase(phase, allSteps = []) {
     displaySteps = [
       makeStep('ingestion', 'BRD Ingestion'),
       makeStep('memory', 'Memory Intelligence'),
+      makeStep('domain_knowledge', 'Domain Knowledge Check'),
       makeStep('requirements', 'Requirement Extraction'),
       makeStep('kpis', 'KPI Extraction'),
       makeStep('gate1', 'KPI Review', reviewAwareStepState(byKey.get('gate1'), phase)),
-    ].filter((step) => byKey.has(step.key) || step.key !== 'memory')
+    ].filter((step) => byKey.has(step.key) || !['memory', 'domain_knowledge'].includes(step.key))
   } else if (phase.id === 'phase-2') {
     displaySteps = [
       makeStep('nomination', 'Table Extraction'),
       makeStep('gate2', byKey.has('gate2') && String(byKey.get('gate2')?.label || '').toLowerCase().includes('feed') ? 'Feed Review' : 'Table Review', reviewAwareStepState(byKey.get('gate2'), phase)),
-      makeSynthetic(
-        'column_extraction',
-        'Column Extraction',
-        combineStepStates(
-          byKey.get('discovery')?.state,
-          byKey.get('schema')?.state,
-          byKey.get('profiling')?.state,
-          byKey.get('enrichment')?.state,
-          phaseState
-        )
-      ),
-      makeStep('gate3', 'Column Review', reviewAwareStepState(byKey.get('gate3'), phase)),
+      makeStep('discovery', 'Column Extraction', byKey.get('discovery')?.state || byKey.get('schema')?.state || phaseState),
+      makeStep('profiling', 'Column Profiling', byKey.get('profiling')?.state || phaseState),
+      makeStep('enrichment', 'Semantic Enrichment', byKey.get('enrichment')?.state || phaseState),
+      makeStep('gate3', 'Semantic Review', reviewAwareStepState(byKey.get('gate3'), phase)),
     ]
   } else if (phase.id === 'phase-3') {
     const bronzeState = byKey.get('bronze')?.state || phaseState
@@ -1553,18 +1551,6 @@ function inferExecutionDisplayState(generationState, reviewState, phaseStatus) {
   if (normalizedReview === 'HITL_WAIT' || normalizedReview === 'PAUSED_FOR_HITL') return 'PENDING'
   if (normalizedGeneration === 'RUNNING') return 'PENDING'
   return phaseStatusToStepState(phaseStatus) === 'FAILED' ? 'FAILED' : 'PENDING'
-}
-
-function combineStepStates(...statesWithFallback) {
-  const fallbackState = statesWithFallback[statesWithFallback.length - 1] || 'PENDING'
-  const states = statesWithFallback
-    .slice(0, -1)
-    .map((state) => String(state || fallbackState || 'PENDING').toUpperCase())
-  if (states.includes('FAILED')) return 'FAILED'
-  if (states.includes('RUNNING') || states.includes('PROCESSING') || states.includes('IN_PROGRESS')) return 'RUNNING'
-  if (states.includes('HITL_WAIT') || states.includes('PAUSED_FOR_HITL') || states.includes('PENDING_REVIEW')) return 'HITL_WAIT'
-  if (states.length && states.every((state) => isCompletedStepState(state))) return 'COMPLETED'
-  return fallbackState || 'PENDING'
 }
 
 function isCompletedStepState(state) {

@@ -224,7 +224,7 @@ def _gate_label(gate: int) -> str:
     if gate == 2:
         return "Feed Review"
     if gate == 3:
-        return "Enrichment Review"
+        return "Semantic Review"
     if gate == 4:
         return "Bronze Review"
     if gate == 5:

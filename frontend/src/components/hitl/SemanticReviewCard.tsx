@@ -84,7 +84,7 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
   const columns = item?.item_detail?.columns || EMPTY_COLUMNS
   const decision = localDecision || item?.decision
   const id = itemId(item)
-  const tableName = item?.item_detail?.table_name || item?.item_id || 'Column Review'
+  const tableName = item?.item_detail?.table_name || item?.item_id || 'Semantic Review'
   const initialColumns = useMemo(() => normalizeColumns(columns), [columns])
   const initialSummary = item?.item_detail?.table_summary || item?.summary || 'Review enriched semantic labels and business descriptions before continuing.'
   const [draftColumns, setDraftColumns] = useState(() => initialColumns)

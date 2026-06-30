@@ -457,20 +457,21 @@ def demo_stages() -> List[Dict[str, Any]]:
     return [
         _stage("ingestion", "BRD Ingestion", "COMPLETED", 1),
         _stage("memory", "Memory Intelligence", "COMPLETED", 2),
-        _stage("requirements", "Requirement Extraction", "COMPLETED", 3),
-        _stage("kpis", "KPI Extraction", "COMPLETED", 4),
-        _stage("gate1", "KPI Review", "HITL_WAIT", 5),
-        _stage("nomination", "Table Extraction", "PENDING", 6),
-        _stage("gate2", "Table Review", "PENDING", 7),
-        _stage("discovery", "Column Extraction", "PENDING", 8),
-        _stage("profiling", "Column Extraction", "PENDING", 9),
-        _stage("enrichment", "Column Extraction", "PENDING", 10),
-        _stage("gate3", "Column Review", "PENDING", 11),
-        _stage("bronze", "Bronze Code Generation", "PENDING", 12),
-        _stage("gate4", "Bronze Review", "PENDING", 13),
-        _stage("silver", "Silver Code Generation", "PENDING", 14),
-        _stage("gate5", "Silver Review", "PENDING", 15),
-        _stage("gold", "Gold Code Generation", "PENDING", 16),
+        _stage("domain_knowledge", "Domain Knowledge Check", "COMPLETED", 3),
+        _stage("requirements", "Requirement Extraction", "COMPLETED", 4),
+        _stage("kpis", "KPI Extraction", "COMPLETED", 5),
+        _stage("gate1", "KPI Review", "HITL_WAIT", 6),
+        _stage("nomination", "Table Extraction", "PENDING", 7),
+        _stage("gate2", "Table Review", "PENDING", 8),
+        _stage("discovery", "Column Extraction", "PENDING", 9),
+        _stage("profiling", "Column Profiling", "PENDING", 10),
+        _stage("enrichment", "Semantic Enrichment", "PENDING", 11),
+        _stage("gate3", "Semantic Review", "PENDING", 12),
+        _stage("bronze", "Bronze Code Generation", "PENDING", 13),
+        _stage("gate4", "Bronze Review", "PENDING", 14),
+        _stage("silver", "Silver Code Generation", "PENDING", 15),
+        _stage("gate5", "Silver Review", "PENDING", 16),
+        _stage("gold", "Gold Code Generation", "PENDING", 17),
     ]
 
 
@@ -738,6 +739,7 @@ DEMO_STAGE_SECONDS = 5
 DEMO_STAGE_SEQUENCE = [
     "ingestion",
     "memory",
+    "domain_knowledge",
     "requirements",
     "kpis",
     "gate1",
@@ -755,7 +757,7 @@ DEMO_STAGE_SEQUENCE = [
 ]
 DEMO_PROGRESS_SEGMENTS: Dict[str, Dict[str, Any]] = {
     "kpi": {
-        "completed_before": ["ingestion", "memory", "requirements", "kpis", "gate1"],
+        "completed_before": ["ingestion", "memory", "domain_knowledge", "requirements", "kpis", "gate1"],
         "running": ["nomination"],
         "next_gate": 2,
         "next_gate_key": "gate2",
@@ -763,17 +765,18 @@ DEMO_PROGRESS_SEGMENTS: Dict[str, Dict[str, Any]] = {
         "waiting_message": "Table Extraction completed. Table Review is ready.",
     },
     "table": {
-        "completed_before": ["ingestion", "memory", "requirements", "kpis", "gate1", "nomination", "gate2"],
+        "completed_before": ["ingestion", "memory", "domain_knowledge", "requirements", "kpis", "gate1", "nomination", "gate2"],
         "running": ["discovery", "profiling", "enrichment"],
         "next_gate": 3,
         "next_gate_key": "gate3",
-        "running_message": "Table Review approved. Column discovery, profiling, and semantic enrichment are running.",
-        "waiting_message": "Column enrichment completed. Column Review is ready.",
+        "running_message": "Table Review approved. Column Extraction, Column Profiling, and Semantic Enrichment will run one stage at a time.",
+        "waiting_message": "Semantic Enrichment completed. Semantic Review is ready.",
     },
     "enrichment": {
         "completed_before": [
             "ingestion",
             "memory",
+            "domain_knowledge",
             "requirements",
             "kpis",
             "gate1",
@@ -787,13 +790,14 @@ DEMO_PROGRESS_SEGMENTS: Dict[str, Dict[str, Any]] = {
         "running": ["bronze"],
         "next_gate": 4,
         "next_gate_key": "gate4",
-        "running_message": "Column Review approved. Bronze Code Generation is running.",
+        "running_message": "Semantic Review approved. Bronze Code Generation is running.",
         "waiting_message": "Bronze scripts are generated and ready for review.",
     },
     "bronze": {
         "completed_before": [
             "ingestion",
             "memory",
+            "domain_knowledge",
             "requirements",
             "kpis",
             "gate1",
@@ -816,6 +820,7 @@ DEMO_PROGRESS_SEGMENTS: Dict[str, Dict[str, Any]] = {
         "completed_before": [
             "ingestion",
             "memory",
+            "domain_knowledge",
             "requirements",
             "kpis",
             "gate1",
@@ -1048,10 +1053,10 @@ def demo_enrichment_reviews(run_id: str) -> Dict[str, Any]:
     return {
         "run_id": run_id,
         "next_gate": 3,
-        "resume_message": "Column enrichment review is ready.",
+        "resume_message": "Semantic Review is ready.",
         "queue_id": f"{run_id}-semantic-enrichment",
         "entity": "insurance_column_enrichment",
-        "table_name": "Insurance Column Review",
+        "table_name": "Insurance Semantic Review",
         "table_summary": "Semantic enrichment prepared claim, policy, premium, reserve, payment, and coverage columns for review.",
         "enriched_metadata": {
             "policy_transactions": "Policy transaction grain with product, channel, dates, and risk values.",
@@ -1403,7 +1408,7 @@ def demo_logs(run_id: str, limit: int = 300) -> List[Dict[str, Any]]:
             ("discovery", "INFO", "Discovered source columns for policy, claim, payment, reserve, and coverage tables"),
             ("profiling", "INFO", "Profiled keys, dates, measures, nullability, and cardinality"),
             ("enrichment", "INFO", f"Prepared {len(demo_enriched_columns())} semantic column classifications"),
-            ("gate3", "INFO", "Column Review approved with semantic labels, PII tags, and join keys"),
+            ("gate3", "INFO", "Semantic Review approved with semantic labels, PII tags, and join keys"),
             ("bronze", "INFO", f"Generated {len((_bronze_bundle().get('scripts') or []))} Bronze ingestion artifacts"),
             ("gate4", "INFO", "Bronze Review approved; raw ingestion contracts certified"),
             ("silver", "INFO", f"Generated {len((_silver_bundle().get('scripts') or []))} Silver transformation artifacts"),
