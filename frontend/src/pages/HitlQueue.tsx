@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, CheckCircle, CheckCircle2, Copy, Database, Download, Inbox, Loader2, PlusCircle, Send, Shield, Table2, Timer } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import KpiReviewCard from '../components/hitl/KpiReviewCard'
@@ -306,6 +306,8 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
 
 function HitlQueue() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedRunId = searchParams.get('runId') || ''
   const {
     runs,
     activeRunId,
@@ -327,7 +329,7 @@ function HitlQueue() {
 
   const initialReviewRun =
     reviewRuns.find((run) => run.id === activeRunId) || null
-  const [selectedRunId, setSelectedRunId] = useState(activeRunId || initialReviewRun?.id || null)
+  const [selectedRunId, setSelectedRunId] = useState(requestedRunId || activeRunId || initialReviewRun?.id || null)
   const [statusFilter, setStatusFilter] = useState('All')
   const [localDecisions, setLocalDecisions] = useState({})
   const [editedKpis, setEditedKpis] = useState({})
@@ -381,6 +383,16 @@ function HitlQueue() {
     () => filterReviewQueue(rawQueue, selectedRunId, currentRun?.source),
     [rawQueue, selectedRunId, currentRun?.source]
   )
+
+  useEffect(() => {
+    if (!requestedRunId || requestedRunId === selectedRunId) return
+    setSelectedRunId(requestedRunId)
+    setActiveRun(requestedRunId)
+    setTableReview(null)
+    setEnrichmentReview(null)
+    setSelectedTables({})
+    setLocalDecisions({})
+  }, [requestedRunId, selectedRunId, setActiveRun])
 
   useEffect(() => {
     if (selectedRunId || !activeRunId) return
@@ -444,6 +456,7 @@ function HitlQueue() {
   }, [addRun, currentRun, runs, selectedRunId, updateRun])
 
   useEffect(() => {
+    if (requestedRunId) return
     if (activeRunId && selectedRunId !== activeRunId) {
       setSelectedRunId(activeRunId)
       setTableReview(null)
@@ -467,7 +480,7 @@ function HitlQueue() {
       setSelectedTables({})
       setLocalDecisions({})
     }
-  }, [runs, selectedRunId, currentRun, isReviewableRun, activeRunId, selectedRunDetail?.id])
+  }, [runs, selectedRunId, currentRun, isReviewableRun, activeRunId, selectedRunDetail?.id, requestedRunId])
 
   useEffect(() => {
     setTableReview(null)
@@ -776,6 +789,23 @@ function HitlQueue() {
     navigate('/app/data-discovery')
   }
 
+  const selectReviewRun = (runId) => {
+    setSelectedRunId(runId)
+    setActiveRun(runId)
+    if (runId) {
+      setSearchParams({ runId })
+    } else {
+      setSearchParams({})
+    }
+  }
+
+  const stayOnReviewGate = (runId, gate) => {
+    if (!runId) return
+    setSelectedRunId(runId)
+    setActiveRun(runId)
+    setSearchParams({ runId, gate: String(gate || '') })
+  }
+
   const handleApprove = (kpiId) => {
     setLocalDecisions((prev) => ({ ...prev, [kpiId]: 'APPROVED' }))
   }
@@ -1000,7 +1030,12 @@ function HitlQueue() {
             : 'Bronze review was submitted. Pipeline is still processing.',
           duration: 5000
         })
-        returnToMonitor(selectedRunId)
+        if (Number(refreshed?.next_gate || 0) === 5 && isReviewGateAccessible(refreshed)) {
+          setSilverReview(null)
+          stayOnReviewGate(selectedRunId, 5)
+        } else {
+          returnToMonitor(selectedRunId)
+        }
       } catch (error) {
         addNotification({ type: 'error', title: `${gate4Name} Failed`, message: error.message, duration: 5000 })
       } finally {
@@ -1177,10 +1212,7 @@ function HitlQueue() {
           {reviewRuns.length > 0 && (
             <select
               value={selectedRunId || ''}
-              onChange={(event) => {
-                setSelectedRunId(event.target.value)
-                setActiveRun(event.target.value)
-              }}
+              onChange={(event) => selectReviewRun(event.target.value)}
               className="h-10 rounded-xl border border-[#253044] bg-[#0a1220] px-3 text-xs text-[#c6d2e8] outline-none"
             >
               {reviewRuns.map((run) => (
@@ -1495,10 +1527,7 @@ function HitlQueue() {
           {reviewRuns.length > 0 && (
             <select
               value={selectedRunId || ''}
-              onChange={(event) => {
-                setSelectedRunId(event.target.value)
-                setActiveRun(event.target.value)
-              }}
+              onChange={(event) => selectReviewRun(event.target.value)}
               className="h-10 rounded-xl border border-[#253044] bg-[#0a1220] px-3 text-xs text-[#c6d2e8] outline-none"
             >
               {reviewRuns.map((run) => (
@@ -1533,6 +1562,8 @@ function HitlQueue() {
             <CodeReviewPanel
               title="Silver Code Review"
               description={`Review ${silverReviewItems.length} generated script${silverReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.`}
+              lineageLabel="View Source -> Bronze -> Silver Lineage"
+              onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
               emptyMessage={`Silver scripts are not loaded yet. Submit is still available if ${gate5Name} is pending.`}
               items={buildSilverCodeReviewItems(silverReview?.silver_review_artifact?.items || [])}
               reviewedCount={gateDecision ? silverReviewItems.length : 0}
@@ -1549,6 +1580,8 @@ function HitlQueue() {
             <CodeReviewPanel
               title="Bronze Code Review"
               description={`Review ${bronzeReviewFeeds.length} generated script${bronzeReviewFeeds.length !== 1 ? 's' : ''} before the pipeline continues.`}
+              lineageLabel="View Source -> Bronze Lineage"
+              onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
               emptyMessage={`Bronze scripts are not loaded yet. Submit is still available if ${gate4Name} is pending.`}
               items={buildBronzeCodeReviewItems(bronzeReview?.bronze_review_artifact?.feeds || [])}
               reviewedCount={gateDecision ? bronzeReviewFeeds.length : 0}
@@ -2296,6 +2329,8 @@ function CodeReviewPanel({
   submitting,
   disabled,
   submitLabel,
+  lineageLabel,
+  onViewLineage,
 }) {
   const [expandedKey, setExpandedKey] = useState(items[0]?.key || null)
   const [draftItems, setDraftItems] = useState(items)
@@ -2328,14 +2363,26 @@ function CodeReviewPanel({
             <p className="text-sm text-[#c6d2e8]">{description}</p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => setDecision('APPROVED')}
-          className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#202b3a] px-4 text-sm font-bold text-[#c6d2e8] transition-colors hover:bg-[#263449] hover:text-white"
-        >
-          <CheckCircle size={14} className="text-[#12b886]" />
-          Auto-Approve Pending
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          {onViewLineage && (
+            <button
+              type="button"
+              onClick={onViewLineage}
+              className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#2c4f85] bg-[#102144] px-4 text-sm font-bold text-[#9fc0ff] transition-colors hover:bg-[#14305f]"
+            >
+              <Database size={14} />
+              {lineageLabel || 'View Lineage'}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setDecision('APPROVED')}
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#202b3a] px-4 text-sm font-bold text-[#c6d2e8] transition-colors hover:bg-[#263449] hover:text-white"
+          >
+            <CheckCircle size={14} className="text-[#12b886]" />
+            Auto-Approve Pending
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 space-y-4 overflow-y-auto bg-[#0b1220] p-6">

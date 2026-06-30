@@ -23,7 +23,6 @@ import { getGateDisplayName, getPhaseGroups } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
 const PAUSED_BANNER_DELAY_MS = 2500
-const REVIEW_AUTO_OPEN_KEY = 'athena.reviewAutoOpen'
 const REVIEW_READY_NOTIFICATIONS_KEY = 'athena.reviewReadyNotifications'
 const REVIEW_READY_NOTIFICATION_DELAY_MS = 3000
 const RUNS_POLL_SUCCESS_MS = 10000
@@ -80,8 +79,8 @@ function AppShell() {
   const demoRunsSeededRef = useRef(false)
   const demoRunsNotifiedRef = useRef(false)
   const pausedDetailKeyRef = useRef<string | null>(null)
+  const reviewAutoOpenSessionRef = useRef({})
   const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadJsonMap(PAUSED_BANNER_DISMISSALS_KEY))
-  const [reviewAutoOpenHistory, setReviewAutoOpenHistory] = useState(() => loadJsonMap(REVIEW_AUTO_OPEN_KEY))
   const [reviewReadyNotifications, setReviewReadyNotifications] = useState(() => loadJsonMap(REVIEW_READY_NOTIFICATIONS_KEY))
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
   const [readyPausedBannerKey, setReadyPausedBannerKey] = useState<string | null>(null)
@@ -176,9 +175,9 @@ function AppShell() {
   }, [activeRunId, addNotification, setRuns, setActiveRun, setServerOnline])
 
   const pausedRun = useMemo(() => {
-    if (!activeRunId) return null
-    const activeRun = (runs || []).find((run) => run.id === activeRunId)
-    return isReviewPausedRun(activeRun) ? activeRun : null
+    const activeRun = activeRunId ? (runs || []).find((run) => run.id === activeRunId) : null
+    if (isReviewPausedRun(activeRun)) return activeRun
+    return (runs || []).find(isReviewPausedRun) || null
   }, [activeRunId, runs])
 
   const pausedRunId = pausedRun?.id || null
@@ -293,15 +292,11 @@ function AppShell() {
       if (changed) persistJsonMap(PAUSED_BANNER_DISMISSALS_KEY, next)
       return changed ? next : current
     })
-    setReviewAutoOpenHistory((current) => {
-      const activeKeys = new Set(pausedKeys)
-      const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
-      const changed = Object.keys(next).length !== Object.keys(current).length
-      if (changed) persistJsonMap(REVIEW_AUTO_OPEN_KEY, next)
-      return changed ? next : current
-    })
+    const activeKeys = new Set(pausedKeys)
+    reviewAutoOpenSessionRef.current = Object.fromEntries(
+      Object.entries(reviewAutoOpenSessionRef.current || {}).filter(([key]) => activeKeys.has(key))
+    )
     setReviewReadyNotifications((current) => {
-      const activeKeys = new Set(pausedKeys)
       const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
       const changed = Object.keys(next).length !== Object.keys(current).length
       if (changed) persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
@@ -312,31 +307,31 @@ function AppShell() {
   useEffect(() => {
     if (!pausedRun || !pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return
     if (readyPausedBannerKey !== pausedBannerKey) return
-    if (reviewAutoOpenHistory[pausedBannerKey]) return
-    if (location.pathname === '/app/hitl') return
+    if (reviewAutoOpenSessionRef.current?.[pausedBannerKey]) return
 
     const timer = window.setTimeout(() => {
+      const targetPath = `/app/hitl?runId=${encodeURIComponent(pausedRun.id)}&gate=${Number(pausedRun.next_gate || 0)}`
       setActiveRun(pausedRun.id)
-      navigate('/app/hitl')
+      if (`${location.pathname}${location.search}` !== targetPath) {
+        navigate(targetPath)
+      }
       addNotification({
         type: 'amber',
         title: `${pausedGateLabel} opened automatically`,
         message: pausedResumeMessage,
         duration: 5000,
       })
-
-      setReviewAutoOpenHistory((current) => {
-        if (current[pausedBannerKey]) return current
-        const next = { ...current, [pausedBannerKey]: true }
-        persistJsonMap(REVIEW_AUTO_OPEN_KEY, next)
-        return next
-      })
+      reviewAutoOpenSessionRef.current = {
+        ...(reviewAutoOpenSessionRef.current || {}),
+        [pausedBannerKey]: true,
+      }
     }, 800)
 
     return () => window.clearTimeout(timer)
   }, [
     addNotification,
     location.pathname,
+    location.search,
     navigate,
     pausedBannerKey,
     pausedGateLabel,
@@ -345,7 +340,6 @@ function AppShell() {
     pausedRunDetail,
     pausedRunSummary,
     readyPausedBannerKey,
-    reviewAutoOpenHistory,
     setActiveRun,
   ])
 
@@ -402,7 +396,7 @@ function AppShell() {
   const handleResumePausedRun = () => {
     if (!pausedRun) return
     setActiveRun(pausedRun.id)
-    navigate('/app/hitl')
+    navigate(`/app/hitl?runId=${encodeURIComponent(pausedRun.id)}&gate=${Number(pausedRun.next_gate || 0)}`)
   }
 
   const handleRestartPausedRun = () => {
