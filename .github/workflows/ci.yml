@@ -2,6 +2,11 @@ name: CI
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["main", "master"]
+    paths:
+      - "frontend/**"
+      - "Athena_backend/**"
 
 jobs:
   frontend-build:
