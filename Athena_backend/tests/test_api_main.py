@@ -1,9 +1,11 @@
 from concurrent.futures import TimeoutError as FutureTimeoutError
+import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+os.environ.setdefault("ATHENA_DEMO_MODE", "false")
 
 from api.main import app
 
@@ -17,9 +19,9 @@ def test_health_endpoint():
     body = response.json()
     assert body["status"] == "ok"
     assert body["service"] == "athena-fastapi"
-    assert "ready" in body["embeddings"]
-    assert "env_enabled" in body["embeddings"]
-    assert "pinecone_configured" in body["embeddings"]
+    embeddings = body["embeddings"]
+    assert embeddings["enabled"] is False
+    assert embeddings["mode"] == "disabled"
 
 
 def test_sql_tcp_probe_failure_is_cached(monkeypatch):
@@ -58,36 +60,14 @@ def test_sql_tcp_probe_failure_is_cached(monkeypatch):
     assert calls["probe"] == 1
 
 
-def test_schema_embedding_deletes_only_selected_database_vectors(monkeypatch):
+def test_schema_embedding_is_skipped_when_embeddings_are_disabled(monkeypatch):
     from nodes import ingestion
 
-    calls = {"delete": [], "upsert": []}
-
-    class StubModel:
-        def embed_documents(self, texts):
-            return [[0.1, 0.2, 0.3] for _ in texts]
-
-    class StubIndex:
-        def delete(self, **kwargs):
-            calls["delete"].append(kwargs)
-
-        def upsert(self, **kwargs):
-            calls["upsert"].append(kwargs)
-
-    class StubPinecone:
-        def __init__(self, api_key=None):
-            self.api_key = api_key
-
-        def Index(self, name):
-            return StubIndex()
-
-    monkeypatch.setattr(ingestion, "_get_embedding_model", lambda log_context: StubModel())
-    monkeypatch.setattr(ingestion, "Pinecone", StubPinecone)
-    monkeypatch.setattr(ingestion, "execute_source_sql", lambda db, query, params: [
-        SimpleNamespace(TABLE_SCHEMA="dbo", TABLE_NAME="Claims", COLUMN_NAME="ClaimAmount")
-    ])
-    monkeypatch.setenv("PINECONE_API_KEY", "test-key")
-    monkeypatch.setenv("PINECONE_SCHEMA_INDEX_NAME", "metadata")
+    monkeypatch.setattr(
+        ingestion,
+        "execute_source_sql",
+        lambda db, query, params: (_ for _ in ()).throw(AssertionError("schema SQL should not run")),
+    )
 
     result = ingestion._embed_schema_metadata({
         "run_id": "run-schema-smoke",
@@ -95,16 +75,8 @@ def test_schema_embedding_deletes_only_selected_database_vectors(monkeypatch):
         "source_databases": ["Insurance"],
     })
 
-    assert result["schema_embedded"] is True
-    assert result["schema_columns_count"] == 1
-    assert calls["delete"] == [
-        {
-            "filter": {"database_name": {"$eq": "insurance"}},
-            "namespace": "schema",
-        }
-    ]
-    assert all(call.get("delete_all") is not True for call in calls["delete"])
-    assert len(calls["upsert"]) == 1
+    assert result["schema_embedded"] is False
+    assert result["schema_columns_count"] == 0
 
 
 def test_pipeline_run_requires_brd_text_for_database_source():
@@ -124,13 +96,13 @@ def test_pipeline_run_requires_brd_text_for_file_source():
 def test_pipeline_run_accepts_file_source_with_brd_text(monkeypatch):
     saved = {}
 
-    monkeypatch.setattr("api.routers.pipeline_router.load_checkpoint_state", lambda run_id: None)
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: None)
     monkeypatch.setattr(
-        "api.routers.pipeline_router.save_checkpoint_state",
+        "services.pipeline_runtime.save_checkpoint_state",
         lambda run_id, state: saved.update({"run_id": run_id, "state": state}),
     )
     monkeypatch.setattr(
-        "api.routers.pipeline_router.submit_pipeline_start",
+        "api.services.pipeline_service.submit_pipeline_start",
         lambda run_id, payload: saved.update({"submitted_run_id": run_id, "submitted_source": payload.source}),
     )
 
@@ -146,9 +118,9 @@ def test_pipeline_run_accepts_file_source_with_brd_text(monkeypatch):
 
 
 def test_pipeline_run_returns_503_when_checkpoint_init_fails(monkeypatch):
-    monkeypatch.setattr("api.routers.pipeline_router.load_checkpoint_state", lambda run_id: None)
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: None)
     monkeypatch.setattr(
-        "api.routers.pipeline_router.save_checkpoint_state",
+        "services.pipeline_runtime.save_checkpoint_state",
         lambda run_id, state: (_ for _ in ()).throw(RuntimeError("db down")),
     )
 
@@ -188,7 +160,7 @@ def test_upload_brd_rejects_large_file(monkeypatch):
 
 
 def test_pipeline_status_returns_404_for_missing_run(monkeypatch):
-    monkeypatch.setattr("api.routers.pipeline_router.ui_run", lambda run_id: {"status": "NOT_FOUND"})
+    monkeypatch.setattr("api.services.ui_service.ui_run", lambda run_id: {"status": "NOT_FOUND"})
 
     response = client.get("/pipeline/run-123/status")
 
@@ -198,7 +170,7 @@ def test_pipeline_status_returns_404_for_missing_run(monkeypatch):
 
 def test_pipeline_status_shapes_running_response(monkeypatch):
     monkeypatch.setattr(
-        "api.routers.pipeline_router.ui_run",
+        "api.services.ui_service.ui_run",
         lambda run_id: {"status": "RUNNING", "run_id": run_id},
     )
 
@@ -213,8 +185,8 @@ def test_pipeline_status_shapes_running_response(monkeypatch):
 
 def test_abort_run_persists_aborted_status(monkeypatch):
     saved = {}
-    monkeypatch.setattr("api.routers.pipeline_router.load_checkpoint_state", lambda run_id: {"run_id": run_id, "status": "RUNNING"})
-    monkeypatch.setattr("api.routers.pipeline_router.save_checkpoint_state", lambda run_id, state: saved.update({"run_id": run_id, "state": state}))
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"run_id": run_id, "status": "RUNNING"})
+    monkeypatch.setattr("services.pipeline_runtime.save_checkpoint_state", lambda run_id, state: saved.update({"run_id": run_id, "state": state}))
 
     response = client.post("/pipeline/run-123/abort")
 
@@ -224,7 +196,7 @@ def test_abort_run_persists_aborted_status(monkeypatch):
 
 
 def test_continue_stage_requires_pending_stage(monkeypatch):
-    monkeypatch.setattr("api.routers.pipeline_router.load_checkpoint_state", lambda run_id: {})
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {})
 
     response = client.post("/pipeline/run-123/continue-stage", json={"auto_advance": False})
 
@@ -234,7 +206,7 @@ def test_continue_stage_requires_pending_stage(monkeypatch):
 
 def test_continue_stage_rejects_file_source(monkeypatch):
     monkeypatch.setattr(
-        "api.routers.pipeline_router.load_checkpoint_state",
+        "services.pipeline_runtime.load_checkpoint_state",
         lambda run_id: {"next_stage_key": "ingestion", "source": "sftp"},
     )
 
@@ -253,13 +225,13 @@ def test_continue_stage_submits_background_job(monkeypatch):
         "source": "database",
     }
 
-    monkeypatch.setattr("api.routers.pipeline_router.load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: checkpoint)
     monkeypatch.setattr(
-        "api.routers.pipeline_router.save_checkpoint_state",
+        "services.pipeline_runtime.save_checkpoint_state",
         lambda run_id, state: recorded.update({"saved_run_id": run_id, "saved_state": state}),
     )
     monkeypatch.setattr(
-        "api.routers.pipeline_router.submit_background",
+        "services.pipeline_runtime.submit_background",
         lambda run_id, stage, fn, *args: recorded.update(
             {"background_run_id": run_id, "background_stage": stage, "background_fn": fn.__name__, "background_args": args}
         ),
@@ -284,9 +256,9 @@ def test_continue_stage_submits_background_job(monkeypatch):
 
 
 def test_run_lineage_endpoint_returns_payload(monkeypatch):
-    monkeypatch.setattr("api.routers.runs_router.load_checkpoint_state", lambda run_id: {"run_id": run_id})
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"run_id": run_id})
     monkeypatch.setattr(
-        "api.routers.runs_router.build_run_lineage",
+        "services.pipeline_runtime.build_run_lineage",
         lambda run_id, checkpoint: {"run_id": run_id, "nodes": [{"id": "n1"}], "edges": [], "summary": {"fk_edge_count": 0}},
     )
 
@@ -298,7 +270,7 @@ def test_run_lineage_endpoint_returns_payload(monkeypatch):
 
 
 def test_retry_failed_stage_rejects_non_failed_run(monkeypatch):
-    monkeypatch.setattr("api.routers.pipeline_router.load_checkpoint_state", lambda run_id: {"status": "RUNNING"})
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"status": "RUNNING"})
 
     response = client.post("/pipeline/run-123/retry-failed-stage")
 
@@ -310,17 +282,17 @@ def test_retry_failed_stage_submits_file_resume(monkeypatch):
     recorded = {}
     checkpoint = {"status": "FAILED", "source": "sftp", "error": "boom"}
 
-    monkeypatch.setattr("api.routers.pipeline_router.load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: checkpoint)
     monkeypatch.setattr(
-        "api.routers.pipeline_router.clean_checkpoint_for_resume",
+        "api.services.pipeline_service.clean_checkpoint_for_resume",
         lambda state: {"status": "RUNNING", "source": state["source"]},
     )
     monkeypatch.setattr(
-        "api.routers.pipeline_router.save_checkpoint_state",
+        "services.pipeline_runtime.save_checkpoint_state",
         lambda run_id, state: recorded.update({"saved_run_id": run_id, "saved_state": state}),
     )
     monkeypatch.setattr(
-        "api.routers.pipeline_router.submit_background",
+        "services.pipeline_runtime.submit_background",
         lambda run_id, stage, fn, *args: recorded.update(
             {"background_run_id": run_id, "background_stage": stage, "background_fn": fn.__name__, "background_args": args}
         ),
@@ -368,7 +340,7 @@ def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
 
     monkeypatch.setenv("ATHENA_RUNS_FAST_SUMMARY", "false")
     monkeypatch.setattr("api.routers.runs_router.RUN_LIST_EXECUTOR", StubExecutor())
-    monkeypatch.setattr("api.routers.runs_router.ui_run_summary", fake_summary)
+    monkeypatch.setattr("api.services.ui_service.ui_run_summary", fake_summary)
 
     response = client.get("/runs")
 
@@ -382,11 +354,11 @@ def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
 def test_runs_uses_fast_checkpoint_summary_by_default(monkeypatch):
     monkeypatch.delenv("ATHENA_RUNS_FAST_SUMMARY", raising=False)
     monkeypatch.setattr(
-        "api.routers.runs_router.list_runs",
+        "services.pipeline_runtime.list_runs",
         lambda limit: [{"run_id": "run-fast", "last_activity": "2026-06-30T00:00:00Z"}],
     )
     monkeypatch.setattr(
-        "api.routers.runs_router.load_checkpoint_state",
+        "services.pipeline_runtime.load_checkpoint_state",
         lambda run_id: {
             "run_id": run_id,
             "brd_filename": "fast-summary.docx",
@@ -400,7 +372,7 @@ def test_runs_uses_fast_checkpoint_summary_by_default(monkeypatch):
     def fail_full_summary(run_id):
         raise AssertionError("ui_run_summary should not be called by default /runs")
 
-    monkeypatch.setattr("api.routers.runs_router.ui_run_summary", fail_full_summary)
+    monkeypatch.setattr("api.services.ui_service.ui_run_summary", fail_full_summary)
 
     response = client.get("/runs")
 
@@ -414,10 +386,10 @@ def test_runs_uses_fast_checkpoint_summary_by_default(monkeypatch):
 
 def test_run_detail_returns_fallback_on_failure(monkeypatch):
     monkeypatch.setattr(
-        "api.routers.runs_router.ui_run",
+        "api.services.ui_service.ui_run",
         lambda run_id, include_scripts=True: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    monkeypatch.setattr("api.routers.runs_router.load_checkpoint_state", lambda run_id: {"status": "RUNNING"})
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"status": "RUNNING"})
 
     response = client.get("/runs/run-123")
 
