@@ -5,6 +5,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Co
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
 import { formatPipelineStepLabel, getPhaseGroups, getPipelineSteps, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
+import { ENABLE_DEMO_FALLBACKS, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { abortRun, continueStage, getRun, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
 const MIN_STAGE_VISIBLE_MS = 60000
@@ -187,6 +188,11 @@ function PipelineMonitor() {
     }
 
     const refreshRuns = async () => {
+      if (ENABLE_DEMO_FALLBACKS && runs.length > 0 && runs.every((run) => isDemoFallbackRun(run))) {
+        scheduleNext(30000)
+        return
+      }
+
       if (runsRequestInFlightRef.current) {
         scheduleNext()
         return
@@ -219,10 +225,10 @@ function PipelineMonitor() {
       cancelled = true
       if (timer !== null) window.clearTimeout(timer)
     }
-  }, [setRuns, setServerOnline])
+  }, [runs, setRuns, setServerOnline])
 
   useEffect(() => {
-    if (!activeRun?.id) return
+    if (!activeRun?.id || isDemoFallbackRun(activeRun)) return
     let cancelled = false
     let timer: number | null = null
 
@@ -408,6 +414,15 @@ function PipelineMonitor() {
     if (!activeRun?.id) {
       setScriptBundles(null)
       setSelectedScriptKey('')
+      return
+    }
+
+    if (isDemoFallbackRun(activeRun)) {
+      setScriptBundles({
+        bronze: activeRun.bronze || null,
+        silver: activeRun.silver || null,
+        gold: activeRun.gold || null,
+      })
       return
     }
 

@@ -72,7 +72,7 @@ function RunDetail() {
   }, [runId])
 
   useEffect(() => {
-    if (!runId || !serverOnline) return
+    if (!runId || !serverOnline || storeRun?.is_demo_fallback) return
     let cancelled = false
     let timer: number | null = null
     let inFlight = false
@@ -102,7 +102,7 @@ function RunDetail() {
       cancelled = true
       if (timer !== null) window.clearTimeout(timer)
     }
-  }, [runId, serverOnline, updateRun])
+  }, [runId, serverOnline, storeRun?.is_demo_fallback, updateRun])
 
   if (!run) {
     return (

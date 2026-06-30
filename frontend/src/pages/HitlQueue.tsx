@@ -21,13 +21,14 @@ import {
   submitSilverReview,
   submitTableReviews
 } from '../api/athenaApi'
-import { MOCK_KPIS_LIST, MOCK_RUNS } from '../data/mockData'
+import { MOCK_KPIS_LIST } from '../data/mockData'
+import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { getGateDisplayName } from '../utils/pipelinePhases'
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const REVIEW_HYDRATION_ATTEMPTS = 12
 const REVIEW_HYDRATION_DELAY_MS = 2500
-const ENABLE_DEMO_REVIEW_FALLBACKS = String(process.env.REACT_APP_ENABLE_DEMO_FALLBACKS || '').toLowerCase() === 'true'
+const ENABLE_DEMO_REVIEW_FALLBACKS = ENABLE_DEMO_FALLBACKS
 
 async function waitForRunGate(runId, updateRun, targetGate, attempts = 20) {
   let latest = null
@@ -128,7 +129,7 @@ function isSuccessfulRun(run) {
 
 function findPreviousSuccessfulRun(allRuns, currentRun, isFileSource) {
   const targetRunId = String(currentRun?.id || currentRun?.run_id || '')
-  const candidates = [...(allRuns || []), ...MOCK_RUNS]
+  const candidates = [...(allRuns || []), ...getDemoRuns()]
     .filter((run) => run && String(run.id || run.run_id || '') !== targetRunId)
     .filter(isSuccessfulRun)
     .filter((run) => {
@@ -492,6 +493,49 @@ function HitlQueue() {
     const hydrate = async () => {
       setHydrating(true)
       try {
+        if (isDemoFallbackRun(currentRun) && ENABLE_DEMO_REVIEW_FALLBACKS) {
+          const fallbackPatch = {
+            ...buildDemoGateFallback(currentRun, gateToReview || 1, isSftpRun, runs),
+            demo_review_fallback: true,
+            review_fallback_reason: 'Backend review hydration was skipped for the saved demo run.',
+          }
+
+          if (gateToReview === 3) {
+            setEnrichmentReview(fallbackPatch)
+            updateRun(selectedRunId, fallbackPatch)
+          } else if (gateToReview === 4) {
+            setBronzeReview(fallbackPatch)
+            updateRun(selectedRunId, fallbackPatch)
+          } else if (gateToReview === 5) {
+            setSilverReview(fallbackPatch)
+            updateRun(selectedRunId, fallbackPatch)
+          } else if (gateToReview === 2) {
+            setTableReview(fallbackPatch)
+            setSelectedTables((prev) => {
+              const next = { ...prev }
+              const items = isSftpRun ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
+              for (const table of items) {
+                const key = isSftpRun ? sftpFeedKey(table) : tableReviewKey(table)
+                next[key] = true
+              }
+              return next
+            })
+            updateRun(selectedRunId, fallbackPatch)
+          } else {
+            const mappedDemoKpis = (fallbackPatch.kpis || []).map(mapHitlRow)
+            setHitlQueue(selectedRunId, mappedDemoKpis)
+            updateRun(selectedRunId, {
+              kpis: mappedDemoKpis,
+              next_gate: 1,
+              resume_message: 'Demo fallback KPI review is ready.',
+              demo_review_fallback: true,
+              review_fallback_reason: fallbackPatch.review_fallback_reason,
+            })
+          }
+
+          return
+        }
+
         if (isGate3) {
           const review = await waitForRenderableReview(() => getEnrichmentReviews(selectedRunId), 3)
           if (!isCurrentHydration()) return

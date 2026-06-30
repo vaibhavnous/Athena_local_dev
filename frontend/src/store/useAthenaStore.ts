@@ -163,12 +163,16 @@ const useAthenaStore = create<AthenaState>((set, get) => ({
         activeRunId ? state.runs.find((run) => run.id === activeRunId) || null : null
       const activePresentInBackend =
         !!activeRunId && backendRuns.some((run) => run.id === activeRunId)
+      const shouldPreserveMissingActive =
+        Boolean(activeExisting) &&
+        !activePresentInBackend &&
+        !activeExisting?.is_demo_fallback
       const mergedBackendRuns = backendRuns.map((run) =>
         mergeRunPreservingDetail(existingById.get(run.id), run)
       )
 
       const mergedRuns =
-        activeExisting && !activePresentInBackend
+        shouldPreserveMissingActive
           ? [activeExisting, ...mergedBackendRuns.filter((run) => run.id !== activeExisting.id)]
           : mergedBackendRuns
 

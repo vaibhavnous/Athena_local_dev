@@ -18,6 +18,7 @@ import {
   getSilverReview,
   getTableReviews
 } from '../../api/athenaApi'
+import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../../utils/demoFallbacks'
 import { getGateDisplayName, getPhaseGroups } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
@@ -74,12 +75,24 @@ function AppShell() {
   const runsRequestInFlightRef = useRef(false)
   const runsHydrationFailuresRef = useRef(0)
   const lastRunsHydrationWarningRef = useRef(0)
+  const latestRunsRef = useRef(runs)
+  const latestActiveRunIdRef = useRef(activeRunId)
+  const demoRunsSeededRef = useRef(false)
+  const demoRunsNotifiedRef = useRef(false)
   const pausedDetailKeyRef = useRef<string | null>(null)
   const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadJsonMap(PAUSED_BANNER_DISMISSALS_KEY))
   const [reviewAutoOpenHistory, setReviewAutoOpenHistory] = useState(() => loadJsonMap(REVIEW_AUTO_OPEN_KEY))
   const [reviewReadyNotifications, setReviewReadyNotifications] = useState(() => loadJsonMap(REVIEW_READY_NOTIFICATIONS_KEY))
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
   const [readyPausedBannerKey, setReadyPausedBannerKey] = useState<string | null>(null)
+
+  useEffect(() => {
+    latestRunsRef.current = runs
+  }, [runs])
+
+  useEffect(() => {
+    latestActiveRunIdRef.current = activeRunId
+  }, [activeRunId])
 
   useEffect(() => {
     let cancelled = false
@@ -104,6 +117,13 @@ function AppShell() {
         if (cancelled || !Array.isArray(backendRuns)) return
         setServerOnline(true)
         runsHydrationFailuresRef.current = 0
+        demoRunsSeededRef.current = false
+
+        const currentActiveRun = latestRunsRef.current.find((run) => run.id === latestActiveRunIdRef.current)
+        if (isDemoFallbackRun(currentActiveRun) && backendRuns.length > 0) {
+          const resumable = backendRuns.find(isReviewPausedRun)
+          setActiveRun((resumable || backendRuns[0]).id)
+        }
 
         setRuns(backendRuns)
         if (!activeRunId && backendRuns.length > 0) {
@@ -123,6 +143,23 @@ function AppShell() {
           if (now - lastRunsHydrationWarningRef.current > RUNS_HYDRATION_WARN_INTERVAL_MS) {
             lastRunsHydrationWarningRef.current = now
             console.warn('[AppShell] Failed to hydrate backend runs; keeping last known UI state', error)
+          }
+
+          const hasAnyRuns = latestRunsRef.current.length > 0
+          if (ENABLE_DEMO_FALLBACKS && !hasAnyRuns && !demoRunsSeededRef.current) {
+            const demoRuns = getDemoRuns()
+            setRuns(demoRuns)
+            setActiveRun((demoRuns.find(isReviewPausedRun) || demoRuns[0] || {}).id || null)
+            demoRunsSeededRef.current = true
+            if (!demoRunsNotifiedRef.current) {
+              demoRunsNotifiedRef.current = true
+              addNotification({
+                type: 'amber',
+                title: 'Demo data loaded',
+                message: 'Backend run hydration timed out. Showing the saved demo pipeline so the UI stays usable.',
+                duration: 7000,
+              })
+            }
           }
         }
       } finally {

@@ -54,7 +54,7 @@ def get_allowed_origins() -> list[str]:
         "ATHENA_CORS_ORIGINS",
         "http://localhost:3000,http://127.0.0.1:3000",
     )
-    return [origin.strip() for origin in origins.split(",") if origin.strip()]
+    return [origin.strip().rstrip("/") for origin in origins.split(",") if origin.strip()]
 
 
 app.add_middleware(
