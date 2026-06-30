@@ -101,6 +101,7 @@ stages:
             --settings \
               SQL_CONNECTION_STRING="@Microsoft.KeyVault(VaultName=$(keyVaultName);SecretName=sql-connection-string)" \
               API_KEY="@Microsoft.KeyVault(VaultName=$(keyVaultName);SecretName=api-key)" \
+              ATHENA_CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000,https://ashy-mud-0abca9a00.7.azurestaticapps.net" \
               ENVIRONMENT="$(environment)" \
               LOG_LEVEL="INFO" \
               PYTHONUNBUFFERED="1"

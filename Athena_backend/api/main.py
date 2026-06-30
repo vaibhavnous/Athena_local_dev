@@ -52,7 +52,7 @@ app = FastAPI(
 def get_allowed_origins() -> list[str]:
     origins = os.getenv(
         "ATHENA_CORS_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000",
+        "http://localhost:3000,http://127.0.0.1:3000,https://ashy-mud-0abca9a00.7.azurestaticapps.net",
     )
     return [origin.strip().rstrip("/") for origin in origins.split(",") if origin.strip()]
 

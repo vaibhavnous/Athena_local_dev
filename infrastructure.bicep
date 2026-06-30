@@ -16,7 +16,7 @@ param sqlDatabase string = 'metadata'
 param sqlSchema string = 'metadata'
 
 // Azure Services Configuration
-param corsSites string = 'http://localhost:3000'
+param corsSites string = 'http://localhost:3000,http://127.0.0.1:3000,https://ashy-mud-0abca9a00.7.azurestaticapps.net'
 @secure()
 param pineconeApiKey string = ''
 param adlsAccountUrl string = ''
