@@ -45,6 +45,10 @@ def _env_enabled(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def embeddings_blocked() -> bool:
+    return _env_enabled("ATHENA_BLOCK_EMBEDDINGS", "true")
+
+
 def _normalize_azure_endpoint(endpoint: str | None) -> str | None:
     if not endpoint:
         return endpoint
@@ -56,6 +60,7 @@ def _normalize_azure_endpoint(endpoint: str | None) -> str | None:
 
 
 def get_embedding_provider_config() -> Dict[str, Any]:
+    blocked = embeddings_blocked()
     azure_endpoint = _normalize_azure_endpoint(
         os.getenv("AZURE_OPENAI_EMBEDDING_ENDPOINT") or os.getenv("AZURE_OPENAI_ENDPOINT")
     )
@@ -68,8 +73,9 @@ def get_embedding_provider_config() -> Dict[str, Any]:
     openai_api_key = os.getenv("OPENAI_API_KEY")
     openai_model = os.getenv("OPENAI_EMBEDDING_MODEL") or os.getenv("OPENAI_MODEL")
     return {
-        "enabled": _env_enabled("ATHENA_ENABLE_EMBEDDINGS"),
-        "allow_local_fallback": _env_enabled("ATHENA_ALLOW_LOCAL_EMBEDDING_FALLBACK"),
+        "blocked": blocked,
+        "enabled": False if blocked else _env_enabled("ATHENA_ENABLE_EMBEDDINGS"),
+        "allow_local_fallback": False if blocked else _env_enabled("ATHENA_ALLOW_LOCAL_EMBEDDING_FALLBACK"),
         "azure_configured": bool(azure_endpoint and azure_api_key and azure_deployment),
         "azure_endpoint": azure_endpoint,
         "azure_api_key": azure_api_key,
@@ -178,6 +184,11 @@ def get_embedding_model(*, log_context: Optional[dict] = None) -> Optional[Any]:
         return _EMBEDDING_MODEL
 
     config = get_embedding_provider_config()
+    if config["blocked"]:
+        _EMBEDDING_PROVIDER = None
+        _log_probe("Embedding feature is blocked for demo runtime", log_context)
+        return None
+
     if not config["enabled"]:
         _log_probe("Semantic indexing deferred; embeddings are disabled", log_context)
         return None

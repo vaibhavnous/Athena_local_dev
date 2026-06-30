@@ -3,16 +3,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 
-from api.services.kpi_service import (
-    artifact_kpis,
-    fetch_hitl_rows,
-    list_all_kpis,
-    map_kpi,
-    maybe_resume_gate1,
-)
-from api.services.pipeline_service import load_checkpoint_state
+from api.demo import demo_action, demo_enabled, demo_kpi_reviews
 from api.models import HitlDecisionPayload
-from utilis.db import update_hitl_item
 from utilis.logger import logger
 
 router = APIRouter()
@@ -23,6 +15,12 @@ router = APIRouter()
 # -------------------------
 @router.get("/kpi-reviews/{run_id}")
 def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_kpi_reviews(run_id)
+
+    from api.services.kpi_service import artifact_kpis, fetch_hitl_rows, map_kpi
+    from services.pipeline_runtime import load_checkpoint_state
+
     checkpoint = load_checkpoint_state(run_id) or {}
     source = str(checkpoint.get("source") or "database").lower()
 
@@ -53,6 +51,11 @@ def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
 # -------------------------
 @router.post("/kpi-reviews/{queue_id}/approve")
 def approve_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if demo_enabled():
+        return {"queue_id": queue_id, "status": "APPROVED"}
+
+    from api.services.kpi_service import maybe_resume_gate1
+    from utilis.db import update_hitl_item
 
     if payload is None:
         raise HTTPException(status_code=400, detail="Invalid payload")
@@ -76,6 +79,11 @@ def approve_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 # -------------------------
 @router.post("/kpi-reviews/{queue_id}/reject")
 def reject_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if demo_enabled():
+        return {"queue_id": queue_id, "status": "REJECTED"}
+
+    from api.services.kpi_service import maybe_resume_gate1
+    from utilis.db import update_hitl_item
 
     if payload is None:
         raise HTTPException(status_code=400, detail="Invalid payload")
@@ -99,6 +107,11 @@ def reject_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 # -------------------------
 @router.post("/kpi-reviews/{queue_id}/modify")
 def modify_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if demo_enabled():
+        return {"queue_id": queue_id, "status": "APPROVED"}
+
+    from api.services.kpi_service import maybe_resume_gate1
+    from utilis.db import update_hitl_item
 
     if payload is None:
         raise HTTPException(status_code=400, detail="Invalid payload")
@@ -126,6 +139,11 @@ def modify_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 # -------------------------
 @router.post("/kpi-reviews/{run_id}/bulk")
 def bulk_kpi_action(run_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_action(run_id, status=payload.get("action", "APPROVED") if payload else "APPROVED")
+
+    from api.services.kpi_service import fetch_hitl_rows, maybe_resume_gate1
+    from utilis.db import update_hitl_item
 
     if payload is None:
         raise HTTPException(status_code=400, detail="Invalid payload")
@@ -166,6 +184,11 @@ def hitl_queue(run_id: str) -> Dict[str, Any]:
 # -------------------------
 @router.post("/hitl/{run_id}/decisions")
 def submit_hitl_decisions(run_id: str, payload: HitlDecisionPayload) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_action(run_id)
+
+    from api.services.kpi_service import maybe_resume_gate1
+    from utilis.db import update_hitl_item
 
     for decision in payload.decisions:
         if not str(decision.kpi_id or "").startswith(f"{run_id}:"):
@@ -203,4 +226,9 @@ def submit_hitl_decisions(run_id: str, payload: HitlDecisionPayload) -> Dict[str
 # -------------------------
 @router.get("/kpis")
 def kpis() -> List[Dict[str, Any]]:
+    if demo_enabled():
+        return demo_kpi_reviews("athena-insurance-run")["kpis"]
+
+    from api.services.kpi_service import list_all_kpis
+
     return list_all_kpis()

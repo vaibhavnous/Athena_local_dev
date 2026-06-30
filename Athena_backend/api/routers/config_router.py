@@ -4,8 +4,6 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter
 
-from utilis.db import config
-
 router = APIRouter()
 
 
@@ -27,6 +25,8 @@ def save_settings(data: Dict[str, Any]) -> Dict[str, Any]:
 
 @router.get("/configurations")
 def configurations() -> List[Dict[str, Any]]:
+    from utilis.db import config
+
     db_conf = config["azure_sql"]
     return [
         {

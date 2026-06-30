@@ -15,24 +15,13 @@ from api.routers.logs_router import router as logs_router
 from api.routers.pipeline_router import router as pipeline_router
 from api.routers.reviews_router import router as reviews_router
 from api.routers.runs_router import router as runs_router
-from utilis.embedding_status import get_embedding_runtime_status
 from utilis.logger import logger
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Athena API service started")
-    embedding_status = get_embedding_runtime_status(probe_models=False)
-    log_fn = logger.info if embedding_status.get("ready") else logger.warning
-    log_fn(
-        "Embedding runtime status | env_enabled=%s provider=%s provider_configured=%s pinecone=%s langchain_embedding=%s ready=%s",
-        embedding_status.get("env_enabled"),
-        embedding_status.get("provider"),
-        embedding_status.get("provider_configured"),
-        embedding_status.get("pinecone_configured"),
-        embedding_status.get("langchain_embedding_available"),
-        embedding_status.get("ready"),
-    )
+    logger.info("Embeddings disabled; using non-vector fallbacks")
     try:
         yield
     finally:
@@ -71,7 +60,7 @@ async def health_check():
     return {
         "status": "ok",
         "service": "athena-fastapi",
-        "embeddings": get_embedding_runtime_status(probe_models=False),
+        "embeddings": {"enabled": False, "mode": "disabled"},
     }
 
 

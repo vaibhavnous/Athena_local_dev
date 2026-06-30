@@ -12,11 +12,6 @@ langchain-text-splitters>=0.3.0
 langgraph>=0.0.56
 
 # -----------------------------
-# Vector Store (Pinecone)
-# -----------------------------
-pinecone>=5.1.0
-
-# -----------------------------
 # OpenAI + Token Utilities
 # -----------------------------
 langchain-openai>=0.2.0

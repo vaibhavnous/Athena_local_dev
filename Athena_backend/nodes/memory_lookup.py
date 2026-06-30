@@ -4,15 +4,11 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from pinecone import Pinecone
-
 from nodes.ingestion import _chunk_and_embed, finalize_ingestion_after_memory
 from state import Stage01State
 from utilis.db import artifact_storage_fingerprint, config, get_pipeline_connection
-from utilis.embeddings import get_embedding_model
 from utilis.env import load_backend_env
 from utilis.logger import logger
-
 
 load_backend_env()
 db_conf = config.get("azure_sql", {})
@@ -81,25 +77,7 @@ def _fetch_exact_match(fingerprint: str, state: Stage01State) -> Tuple[bool, Dic
 
 
 def _fetch_context_kpis(embeddings: List[float], top_k: int = 3) -> List[Dict[str, Any]]:
-    kpis = []
-    try:
-        pc = Pinecone(api_key=pinecone_conf.get("api_key") or os.getenv("PINECONE_API_KEY"))
-        index = pc.Index(pinecone_conf.get("index_name", "ai-store-index"))
-        res = index.query(
-            vector=embeddings,
-            top_k=top_k,
-            include_metadata=True,
-            filter={"artifact_type": "KPIS"},
-            namespace="global",
-        )
-        for match in res.matches:
-            fp = match.metadata.get("fingerprint")
-            if fp:
-                payload = _fetch_latest_payload(fp, ("KPIS",)) or {}
-                kpis.extend(payload.get("kpis", [])[:3])
-    except Exception as e:
-        logger.warning("Context KPIs fetch failed: %s", str(e))
-    return kpis
+    return []
 
 
 def _fetch_rejected_kpis(fingerprint: str, limit: int = 10) -> List[str]:
@@ -170,60 +148,8 @@ def _apply_match_result(
 
 def _run_semantic_lookup(state: Stage01State, log_context: dict) -> Stage01State:
     new_state = _copy_state(state)
-    logger.info("START: semantic lookup", extra=log_context)
-
-    try:
-        model = get_embedding_model(log_context=log_context)
-        if model is None:
-            new_state["memory_layer2"] = False
-            return new_state
-
-        pinecone_api_key = pinecone_conf.get("api_key") or os.getenv("PINECONE_API_KEY")
-        if not pinecone_api_key:
-            logger.warning("No Pinecone API key", extra=log_context)
-            new_state["memory_layer2"] = False
-            return new_state
-
-        pc = Pinecone(api_key=pinecone_api_key)
-        pinecone_index = pc.Index(pinecone_conf.get("index_name", "ai-store-index"))
-
-        text = new_state.get("brd_text", "").strip()
-        if not text:
-            logger.warning("No text for embedding", extra=log_context)
-            new_state["memory_layer2"] = False
-            return new_state
-
-        emb = model.embed_query(text)
-        namespace = "global"
-
-        res = pinecone_index.query(
-            vector=emb,
-            top_k=1,
-            include_metadata=True,
-            namespace=namespace,
-        )
-
-        log_context["query_namespace"] = namespace
-
-        if res.matches:
-            score = float(res.matches[0].score)
-            logger.info("Semantic score %.3f", score, extra=log_context)
-
-            if score >= 0.75:
-                new_state["memory_layer2"] = True
-                new_state["context_kpis"] = _fetch_context_kpis(emb)
-                logger.info("Layer2 KPI context: %d KPIs", len(new_state["context_kpis"]), extra=log_context)
-            else:
-                new_state["memory_layer2"] = False
-        else:
-            new_state["memory_layer2"] = False
-
-        new_state["rejected_kpis"] = _fetch_rejected_kpis(new_state["fingerprint"])
-
-    except Exception as e:
-        logger.error("Semantic lookup error: %s", str(e), extra=log_context)
-        new_state["memory_layer2"] = False
-
+    logger.info("Semantic memory lookup disabled for demo runtime", extra=log_context)
+    new_state["memory_layer2"] = False
     return new_state
 
 

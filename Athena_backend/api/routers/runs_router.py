@@ -5,14 +5,12 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException
 
-from api.services.ui_service import ui_run, ui_run_summary
-from services.pipeline_runtime import (
-    build_run_lineage,
-    list_runs,
-    load_bronze_scripts,
-    load_checkpoint_state,
-    load_gold_scripts,
-    load_silver_scripts,
+from api.demo import (
+    demo_enabled,
+    demo_lineage,
+    demo_run,
+    demo_runs,
+    demo_scripts,
 )
 from utilis.logger import logger
 
@@ -72,6 +70,8 @@ def _status_from_checkpoint(checkpoint: Dict[str, Any]) -> str:
 
 
 def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    from services.pipeline_runtime import load_checkpoint_state
+
     run_id = str(row.get("run_id") or row.get("id") or "")
     checkpoint = load_checkpoint_state(run_id) or {}
     return {
@@ -131,6 +131,11 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
 # -------------------------
 @router.get("/runs")
 def runs() -> List[Dict[str, Any]]:
+    if demo_enabled():
+        return demo_runs()
+
+    from services.pipeline_runtime import list_runs
+
     try:
         # ✅ configurable timeout with safe minimum
         timeout_seconds = max(1, int(os.getenv("ATHENA_RUNS_ENDPOINT_TIMEOUT_SECONDS", "5")))
@@ -168,6 +173,8 @@ def runs() -> List[Dict[str, Any]]:
                 continue
 
             try:
+                from api.services.ui_service import ui_run_summary
+
                 remaining = max(0.1, deadline - time.monotonic())
                 summary_future = RUN_SUMMARY_EXECUTOR.submit(ui_run_summary, run_id)
                 results.append(summary_future.result(timeout=remaining))
@@ -202,6 +209,12 @@ def runs() -> List[Dict[str, Any]]:
 # -------------------------
 @router.get("/runs/{run_id}")
 def run_detail(run_id: str) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_run(run_id, include_scripts=True)
+
+    from api.services.ui_service import ui_run
+    from services.pipeline_runtime import load_checkpoint_state
+
     try:
         timeout_seconds = max(1, int(os.getenv("ATHENA_RUN_DETAIL_TIMEOUT_SECONDS", "8")))
         future = RUN_DETAIL_EXECUTOR.submit(ui_run, run_id, include_scripts=True)
@@ -228,6 +241,16 @@ def run_detail(run_id: str) -> Dict[str, Any]:
 
 @router.get("/run-scripts/{run_id}")
 def run_scripts(run_id: str) -> Dict[str, Any]:
+    if demo_enabled():
+        return {"run_id": run_id, **demo_scripts(run_id)}
+
+    from services.pipeline_runtime import (
+        load_bronze_scripts,
+        load_checkpoint_state,
+        load_gold_scripts,
+        load_silver_scripts,
+    )
+
     try:
         checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
         return {
@@ -247,6 +270,11 @@ def run_scripts(run_id: str) -> Dict[str, Any]:
 
 @router.get("/run-lineage/{run_id}")
 def run_lineage(run_id: str) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_lineage(run_id)
+
+    from services.pipeline_runtime import build_run_lineage, load_checkpoint_state
+
     try:
         checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
         return build_run_lineage(run_id, checkpoint)

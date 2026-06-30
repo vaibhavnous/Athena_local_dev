@@ -9,9 +9,7 @@ from pydantic import BaseModel, Field
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from pinecone import Pinecone
 
-from nodes.ingestion import _get_embedding_model
 from state import Stage01State
 from schema import KPISchema, KPISchemaItem, DerivationType
 from utilis.logger import logger
@@ -82,59 +80,8 @@ def _resolve_source_databases(state: Stage01State) -> List[str]:
 
 
 def _fetch_relevant_schema(brd_text: str, source_databases: List[str], top_k: int = 10) -> List[Dict[str, Any]]:
-    if not brd_text.strip() or not source_databases:
-        return []
-
-    model = _get_embedding_model(log_context={"node": "kpi_extraction"})
-    if model is None:
-        return []
-
-    try:
-        pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-        index = pc.Index("metadata")
-        query_vector = model.embed_query(brd_text[:4000])
-        results = index.query(
-            vector=query_vector,
-            top_k=top_k,
-            include_metadata=True,
-            namespace="schema",
-        )
-    except Exception as exc:
-        logger.warning("Schema grounding lookup failed: %s", exc, extra={"node": "kpi_extraction"})
-        return []
-
-    source_set = {db.lower() for db in source_databases}
-    schema_map: Dict[str, Dict[str, Any]] = {}
-    matches = getattr(results, "matches", None)
-    if matches is None and isinstance(results, dict):
-        matches = results.get("matches", [])
-    matches = matches or []
-
-    for match in matches:
-        meta = getattr(match, "metadata", {}) or {}
-        db = str(meta.get("database_name", "")).lower()
-        if db not in source_set:
-            continue
-
-        table = str(meta.get("table_name", "")).lower()
-        schema = str(meta.get("schema_name", "dbo")).lower()
-        key = f"{db}.{schema}.{table}"
-        row = schema_map.setdefault(
-            key,
-            {
-                "database_name": db,
-                "schema_name": schema,
-                "table_name": table,
-                "columns": set(),
-            },
-        )
-        if meta.get("column_name"):
-            row["columns"].add(str(meta["column_name"]))
-
-    grounded_schema: List[Dict[str, Any]] = []
-    for row in schema_map.values():
-        grounded_schema.append({**row, "columns": sorted(row["columns"])[:8]})
-    return grounded_schema[:top_k]
+    logger.info("Embedding schema grounding disabled for demo runtime", extra={"node": "kpi_extraction"})
+    return []
 
 
 def _format_schema_context(schema_rows: List[Dict[str, Any]]) -> str:

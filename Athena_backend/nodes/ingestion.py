@@ -11,13 +11,11 @@ from typing import Optional
 
 import docx
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from pinecone import Pinecone
 from pydantic import ValidationError
 
 from schema import BRDSchema
 from state import Stage01State
 from utilis.db import config, get_pipeline_connection
-from utilis.embeddings import get_embedding_model
 from utilis.env import load_backend_env
 from utilis.logger import logger
 from utilis.db import execute_source_sql
@@ -33,31 +31,13 @@ pc = None
 pinecone_index = None
 
 def _get_pinecone_index(*, log_context: dict) -> Optional[object]:
-    global pc, pinecone_index
-
-    if pinecone_index is not None:
-        return pinecone_index
-
-    if not pinecone_api_key:
-        logger.warning("Pinecone API key not found", extra={"node": "ingestion_bootstrap"})
-        return None
-
-    try:
-        logger.info("Initializing Pinecone client", extra={"node": "ingestion_bootstrap"})
-        pc = Pinecone(api_key=pinecone_api_key)
-        if DEV_MODE:
-            indexes = pc.list_indexes()
-            logger.info("Available Pinecone indexes: %s", indexes, extra={"node": "ingestion_bootstrap"})
-        pinecone_index = pc.Index(name=pinecone_index_name)
-        logger.info("Connected to Pinecone index %s", pinecone_index_name, extra={"node": "ingestion_bootstrap"})
-        return pinecone_index
-    except Exception as e:
-        logger.warning("Pinecone init failed: %s", e, extra=log_context)
-        return None
+    logger.info("Pinecone disabled for demo runtime; embeddings skipped", extra=log_context)
+    return None
 
 
 def _get_embedding_model(*, log_context: dict) -> Optional[object]:
-    return get_embedding_model(log_context=log_context)
+    logger.info("Embedding model disabled for demo runtime", extra=log_context)
+    return None
 
 
 db_conf = config["azure_sql"]
@@ -454,6 +434,8 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
     }
 
     logger.info("START: _chunk_and_embed", extra=log_context)
+    logger.info("BRD semantic index disabled for demo runtime", extra=log_context)
+    return _mark_embedding_skipped(new_state, brd_embedded=False)
 
     try:
         if new_state.get("status") == "FAILED":
@@ -552,6 +534,8 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
     }
 
     logger.info("START: _embed_schema_metadata", extra=log_context)
+    logger.info("Schema semantic index disabled for demo runtime", extra=log_context)
+    return _mark_embedding_skipped(new_state, schema_embedded=False, schema_columns_count=0)
 
     try:
         if new_state.get("status") == "FAILED":

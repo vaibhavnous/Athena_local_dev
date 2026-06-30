@@ -7,21 +7,8 @@ from typing import Any, Dict
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from api import utils as api_utils
+from api.demo import demo_action, demo_enabled, demo_status, new_demo_run_id
 from api.models import PipelineRunRequest, StageContinueRequest
-from api.services.pipeline_service import (
-    clean_checkpoint_for_resume,
-    continue_database_pipeline_job,
-    continue_file_pipeline_job,
-    database_failed_stage_key,
-    seed_payload_from_checkpoint,
-    submit_pipeline_start,
-)
-from api.services.ui_service import ui_run
-from services.pipeline_runtime import (
-    load_checkpoint_state,
-    save_checkpoint_state,
-    submit_background,
-)
 from utilis.logger import logger
 
 router = APIRouter()
@@ -75,6 +62,13 @@ def health() -> Dict[str, str]:
 # -------------------------
 @router.post("/pipeline/run")
 def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
+    if demo_enabled():
+        run_id = new_demo_run_id()
+        logger.info("Pipeline run requested", extra={"run_id": run_id})
+        return {"run_id": run_id, "status": "HITL_WAIT"}
+
+    from api.services.pipeline_service import submit_pipeline_start
+    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
 
     source = str(payload.source or "database").lower()
     sftp_entity = api_utils.normalize_file_entity(source, payload.sftp_entity)
@@ -154,6 +148,11 @@ async def upload_brd(file: UploadFile = File(...)) -> Dict[str, Any]:
 # -------------------------
 @router.get("/pipeline/{run_id}/status")
 def pipeline_status(run_id: str) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_status(run_id)
+
+    from api.services.ui_service import ui_run
+    from services.pipeline_runtime import load_checkpoint_state
 
     try:
         timeout_seconds = max(1, int(os.getenv("ATHENA_STATUS_ENDPOINT_TIMEOUT_SECONDS", "5")))
@@ -195,6 +194,10 @@ def pipeline_status(run_id: str) -> Dict[str, Any]:
 # -------------------------
 @router.post("/pipeline/{run_id}/abort")
 def abort_run(run_id: str) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_action(run_id, status="ABORTED")
+
+    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
 
     checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
     checkpoint["status"] = "ABORTED"
@@ -210,6 +213,19 @@ def abort_run(run_id: str) -> Dict[str, Any]:
 # -------------------------
 @router.post("/pipeline/{run_id}/continue-stage")
 def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_action(
+            run_id,
+            next_stage_key="nomination",
+            resume_message="Flow continued to Table Nomination.",
+        )
+
+    from api.services.pipeline_service import continue_database_pipeline_job
+    from services.pipeline_runtime import (
+        load_checkpoint_state,
+        save_checkpoint_state,
+        submit_background,
+    )
 
     checkpoint = load_checkpoint_state(run_id) or {}
     next_stage_key = checkpoint.get("next_stage_key")
@@ -264,6 +280,20 @@ def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]
 # -------------------------
 @router.post("/pipeline/{run_id}/retry-failed-stage")
 def retry_failed_stage(run_id: str) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_action(run_id, action="retry_failed_stage")
+
+    from api.services.pipeline_service import (
+        clean_checkpoint_for_resume,
+        continue_database_pipeline_job,
+        continue_file_pipeline_job,
+        database_failed_stage_key,
+    )
+    from services.pipeline_runtime import (
+        load_checkpoint_state,
+        save_checkpoint_state,
+        submit_background,
+    )
 
     checkpoint = load_checkpoint_state(run_id) or {}
 
@@ -309,3 +339,13 @@ def retry_failed_stage(run_id: str) -> Dict[str, Any]:
         "action": "retry_failed_stage",
         "start_stage_key": failed_stage_key,
     }
+
+
+@router.post("/pipeline/{run_id}/resume-from-failure")
+def resume_from_failure(run_id: str) -> Dict[str, Any]:
+    return demo_action(run_id, action="resume_from_failure")
+
+
+@router.post("/pipeline/{run_id}/restart")
+def restart_run(run_id: str) -> Dict[str, Any]:
+    return demo_action(run_id, action="restart")

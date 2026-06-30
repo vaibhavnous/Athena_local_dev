@@ -3,6 +3,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
 
+from api.demo import demo_enabled, demo_logs
 from api.services.log_service import read_logs
 from utilis.logger import logger
 
@@ -35,6 +36,8 @@ def logs(run_id: str, limit: int = 300) -> Dict[str, Any]:
 
     # ✅ MUST FIX: Clamp limit to prevent abuse
     limit = min(max(limit, 1), 1000)
+    if demo_enabled():
+        return {"runId": run_id, "logs": demo_logs(run_id, limit=limit)}
 
     logger.debug("Fetching logs", extra={"run_id": run_id, "limit": limit})
 
@@ -55,6 +58,8 @@ def logs_since(run_id: str, since_timestamp: str, limit: int = 300) -> Dict[str,
 
     # ✅ MUST FIX: Clamp limit
     limit = min(max(limit, 1), 1000)
+    if demo_enabled():
+        return {"runId": run_id, "logs": demo_logs(run_id, limit=limit)}
 
     # ✅ MUST FIX: Validate timestamp format
     try:

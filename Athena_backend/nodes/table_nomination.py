@@ -15,9 +15,7 @@ from typing import Any, Callable, Dict, List, Set
 
 from langgraph.graph import StateGraph
 from langchain_core.messages import HumanMessage, SystemMessage
-from pinecone import Pinecone
 
-from nodes.ingestion import _get_embedding_model
 from nodes.req_extraction import get_llm
 from schema import NominationItem, NominationSchema
 from state import Stage01State
@@ -502,81 +500,9 @@ def _lexical_search(
 
 
 def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> List[Dict[str, Any]]:
-    kpi_queries = [part.strip() for part in combined_kpi_string.split(";") if part.strip()]
-    if not kpi_queries:
-        return []
-
     log_context = {"node": "table_nomination", "pass": "semantic"}
-    model = _get_embedding_model(log_context=log_context)
-    if model is None:
-        logger.info(
-            "Schema ranking using catalog and lexical matching",
-            extra=log_context,
-        )
-        return []
-
-    try:
-        pinecone_api_key = os.getenv("PINECONE_API_KEY")
-        if not pinecone_api_key:
-            logger.info("Schema ranking using catalog and lexical matching", extra=log_context)
-            return []
-
-        pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-        schema_index_name = os.getenv("PINECONE_SCHEMA_INDEX_NAME") or "metadata"
-        index = pc.Index(schema_index_name)
-    except Exception as e:
-        logger.error(f"Pinecone init failed: {e}", extra=log_context)
-        return []
-
-    table_map: Dict[str, Dict[str, Any]] = {}
-    source_set = {db.lower() for db in source_databases}
-
-    for kpi_query in kpi_queries:
-        try:
-            query_vector = model.embed_query(kpi_query)
-            results = index.query(
-                vector=query_vector,
-                top_k=30,
-                include_metadata=True,
-                namespace="schema",
-            )
-        except Exception as e:
-            logger.error(f"Pinecone query failed: {e}", extra=log_context)
-            continue
-
-        matches = getattr(results, "matches", None)
-        if matches is None and isinstance(results, dict):
-            matches = results.get("matches", [])
-        matches = matches or []
-
-        for match in matches:
-            raw_score = float(getattr(match, "score", 0.0))
-            score = max(0.0, min(raw_score, 1.0))
-            meta = getattr(match, "metadata", {}) or {}
-
-            db = str(meta.get("database_name", "")).lower()
-            if db not in source_set:
-                continue
-
-            table = str(meta.get("table_name", "")).lower()
-            schema = str(meta.get("schema_name", "dbo")).lower()
-            key = f"{db}.{schema}.{table}"
-
-            if key not in table_map:
-                table_map[key] = {
-                    "database_name": db,
-                    "schema_name": schema,
-                    "table_name": table,
-                    "semantic_score": score,
-                    "matched_columns": set(),
-                }
-
-            table_map[key]["semantic_score"] = max(table_map[key]["semantic_score"], score)
-
-            if meta.get("column_name"):
-                table_map[key]["matched_columns"].add(str(meta["column_name"]))
-
-    return [{**value, "matched_columns": sorted(value["matched_columns"])} for value in table_map.values()]
+    logger.info("Semantic vector ranking disabled; using catalog and lexical matching", extra=log_context)
+    return []
 
 
 def _fuse_results(

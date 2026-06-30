@@ -3,20 +3,15 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException
 
 from api import utils as api_utils
+from api.demo import (
+    demo_action,
+    demo_bronze_review,
+    demo_enabled,
+    demo_enrichment_reviews,
+    demo_silver_review,
+    demo_table_reviews,
+)
 from api.models import Gate2DecisionPayload, Gate3DecisionPayload, GenericGateDecisionPayload
-from api.services.ui_service import bronze_review_from_scripts, silver_review_from_scripts, ui_run
-from services.pipeline_runtime import (
-    load_checkpoint_state,
-    submit_background,
-    submit_gate2_review,
-    submit_gate3_review,
-)
-from sftp_nodes.hitl import (
-    submit_sftp_gate2_review,
-    submit_sftp_gate3_review,
-    submit_sftp_gate4_review,
-    submit_sftp_gate5_review,
-)
 from utilis.logger import logger
 
 router = APIRouter()
@@ -27,6 +22,12 @@ router = APIRouter()
 # -------------------------
 @router.get("/table-reviews/{run_id}")
 def table_reviews(run_id: str) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_table_reviews(run_id)
+
+    from api.services.ui_service import ui_run
+    from services.pipeline_runtime import load_checkpoint_state
+
     try:
         run = ui_run(run_id)
     except Exception:
@@ -56,6 +57,15 @@ def table_reviews(run_id: str) -> Dict[str, Any]:
 # -------------------------
 @router.post("/table-reviews/{run_id}")
 def submit_table_reviews(run_id: str, payload: Gate2DecisionPayload) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_action(run_id, approved_tables=payload.approved_tables)
+
+    from services.pipeline_runtime import (
+        load_checkpoint_state,
+        submit_background,
+        submit_gate2_review,
+    )
+    from sftp_nodes.hitl import submit_sftp_gate2_review
 
     checkpoint = load_checkpoint_state(run_id) or {}
 
@@ -80,6 +90,11 @@ def submit_table_reviews(run_id: str, payload: Gate2DecisionPayload) -> Dict[str
 # -------------------------
 @router.get("/enrichment-reviews/{run_id}")
 def enrichment_reviews(run_id: str) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_enrichment_reviews(run_id)
+
+    from api.services.ui_service import ui_run
+
     try:
         run = ui_run(run_id)
     except Exception:
@@ -107,6 +122,15 @@ def enrichment_reviews(run_id: str) -> Dict[str, Any]:
 # -------------------------
 @router.post("/enrichment-reviews/{run_id}")
 def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_action(run_id, approve=payload.approve)
+
+    from services.pipeline_runtime import (
+        load_checkpoint_state,
+        submit_background,
+        submit_gate3_review,
+    )
+    from sftp_nodes.hitl import submit_sftp_gate3_review
 
     checkpoint = load_checkpoint_state(run_id) or {}
 
@@ -126,6 +150,12 @@ def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict
 # -------------------------
 @router.get("/bronze-reviews/{run_id}")
 def bronze_reviews(run_id: str) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_bronze_review(run_id)
+
+    from api.services.ui_service import bronze_review_from_scripts, ui_run
+    from services.pipeline_runtime import load_checkpoint_state
+
     try:
         run = ui_run(run_id)
     except Exception:
@@ -152,6 +182,11 @@ def bronze_reviews(run_id: str) -> Dict[str, Any]:
 # -------------------------
 @router.post("/bronze-reviews/{run_id}")
 def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_action(run_id, action=payload.action)
+
+    from services.pipeline_runtime import submit_background
+    from sftp_nodes.hitl import submit_sftp_gate4_review
 
     logger.info("Submitting bronze review", extra={"run_id": run_id, "action": payload.action})
 
@@ -165,6 +200,12 @@ def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
 # -------------------------
 @router.get("/silver-reviews/{run_id}")
 def silver_reviews(run_id: str) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_silver_review(run_id)
+
+    from api.services.ui_service import silver_review_from_scripts, ui_run
+    from services.pipeline_runtime import load_checkpoint_state
+
     try:
         run = ui_run(run_id)
     except Exception:
@@ -191,6 +232,11 @@ def silver_reviews(run_id: str) -> Dict[str, Any]:
 # -------------------------
 @router.post("/silver-reviews/{run_id}")
 def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_action(run_id, action=payload.action)
+
+    from services.pipeline_runtime import submit_background
+    from sftp_nodes.hitl import submit_sftp_gate5_review
 
     logger.info("Submitting silver review", extra={"run_id": run_id, "action": payload.action})
 
