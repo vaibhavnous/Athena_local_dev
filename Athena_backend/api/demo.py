@@ -258,39 +258,124 @@ def demo_tables() -> List[Dict[str, Any]]:
 
 
 def demo_enriched_columns() -> List[Dict[str, Any]]:
-    columns = [
-        ("policy_transactions", "POLICY_NUMBER", "Policy Number", "ID", "Policy grain and reporting identifier", False, True, False),
-        ("policy_transactions", "POLICY_ISSUED_DATE", "Policy Issued Date", "DATE", "Policy issue period for monthly reporting", False, True, False),
-        ("policy_transactions", "PRODUCT_NAME", "Product Name", "DIMENSION", "Product rollup for policy and premium analytics", False, True, False),
-        ("policy_cover_level_transactions", "PREMIUM_AMOUNT", "Premium Amount", "MEASURE", "Collected premium amount for coverage-level transactions", True, False, False),
-        ("policy_cover_level_transactions", "SUM_INSURED_AMOUNT", "Sum Insured Amount", "MEASURE", "Coverage value used for risk and exposure analytics", True, False, False),
-        ("claim_information", "CLAIM_NUMBER", "Claim Number", "ID", "Claim grain and lifecycle identifier", False, True, False),
-        ("claim_information", "CLAIM_STATUS", "Claim Status", "FLAG", "Claim lifecycle state used by operations dashboards", False, True, False),
-        ("claim_payment_indemnity", "PAID_AMOUNT", "Paid Indemnity Amount", "MEASURE", "Indemnity payment value for paid claim analytics", True, False, False),
-        ("claim_payment_expenses", "EXPENSE_AMOUNT", "Expense Amount", "MEASURE", "Claim expense payment amount for cost reporting", True, False, False),
-        ("expenses_outstanding_estimates", "OUTSTANDING_AMOUNT", "Outstanding Expense Amount", "MEASURE", "Open expense reserve amount", True, False, False),
-        ("indemnity_outstanding_estimates", "RESERVE_AMOUNT", "Indemnity Reserve Amount", "MEASURE", "Open indemnity reserve amount", True, False, False),
-        ("policy_transactions", "RERERENCE_ID", "Reference Id", "ID", "Cross-table join key linking policy, claim, payment, and reserve feeds", False, True, False),
-        ("policy_transactions", "CUSTOMER_IDENTIFIER", "Customer Identifier", "PII", "Customer-level identifier protected for privacy review", False, True, True),
-    ]
-    return [
-        {
-            "table_name": table,
-            "column_name": column,
-            "name": column,
-            "suggested_display_name": display_name,
-            "semantic_type": semantic_type,
-            "business_description": definition,
-            "business_definition": definition,
-            "enrichment_source": "semantic_enrichment_llm" if index % 3 == 0 else "rules_and_catalog",
-            "is_measure": is_measure,
-            "is_dimension": is_dimension,
-            "is_pii_candidate": is_pii,
-            "confidence": round(0.98 - index * 0.01, 2),
-            "status": "PENDING_REVIEW",
-        }
-        for index, (table, column, display_name, semantic_type, definition, is_measure, is_dimension, is_pii) in enumerate(columns)
-    ]
+    table_columns = {
+        "policy_transactions": [
+            "RERERENCE_ID", "POLICY_NUMBER", "POLICY_TRANSACTION_TYPE", "BEGIN_DATE", "END_DATE",
+            "POLICY_ISSUED_DATE", "PRODUCT_NAME", "PRODUCT_GROUP_NAME", "SEGMENT_NAME",
+            "BUSINESS_DIVISION_NAME", "AGENT_NAME", "AGEN_T_CATEGORY_NAME", "AGENT_SUB_CATEGORY_NAME",
+            "CHANNEL_NAME", "BRANCH_OFFICE_NAME", "CUSTOMER_IDENTIFIER", "TOTAL_RISK_SUM_INSURED_AMOUNT",
+            "POLICY_STATUS", "POLICY_TENURE_MONTHS", "RENEWAL_INDICATOR", "WRITTEN_PREMIUM_AMOUNT",
+            "NET_PREMIUM_AMOUNT", "COMMISSION_AMOUNT", "UNDERWRITING_YEAR", "CUSTOMER_TIER",
+            "PAYMENT_FREQUENCY", "POLICY_SOURCE_SYSTEM", "POLICY_EFFECTIVE_STATUS", "RISK_CATEGORY",
+            "INSURED_AGE_BAND", "POLICY_POSTAL_REGION", "LOAD_TIMESTAMP", "SOURCE_BATCH_ID",
+        ],
+        "claim_information": [
+            "RERERENCE_ID", "CLAIM_NUMBER", "CLAIM_STATUS", "CLAIM_REGISTERED_DATE", "CLAIM_CLOSED_DATE",
+            "LOSS_DATE", "POLICY_NUMBER", "PRODUCT_NAME", "CLAIM_TYPE", "CLAIM_CAUSE",
+            "CUSTOMER_IDENTIFIER", "CLAIM_HANDLER", "CLAIM_REGION", "CLAIM_SEVERITY", "CLAIM_CHANNEL",
+            "FIRST_NOTICE_DATE", "ADJUDICATION_DATE", "SETTLEMENT_DATE", "CLAIM_AGE_DAYS",
+            "FRAUD_SUSPECTED_FLAG", "LITIGATION_FLAG", "CATASTROPHE_EVENT_CODE", "LOSS_LOCATION_STATE",
+            "COVERAGE_CODE", "CLAIM_SOURCE_SYSTEM", "LOAD_TIMESTAMP",
+        ],
+        "claim_payment_indemnity": [
+            "RERERENCE_ID", "CLAIM_NUMBER", "PAYMENT_DATE", "PAID_AMOUNT", "PAYMENT_STATUS",
+            "PAYMENT_TYPE", "CURRENCY_CODE", "APPROVED_BY", "PAYEE_TYPE", "RECOVERY_FLAG",
+            "PAYMENT_METHOD", "PAYMENT_BATCH_ID", "RESERVE_RELEASE_AMOUNT", "TAX_WITHHELD_AMOUNT",
+            "NET_PAYMENT_AMOUNT", "PAYMENT_APPROVAL_DATE", "PAYMENT_SOURCE_SYSTEM", "LOAD_TIMESTAMP",
+        ],
+        "claim_payment_expenses": [
+            "RERERENCE_ID", "CLAIM_NUMBER", "EXPENSE_DATE", "EXPENSE_AMOUNT", "EXPENSE_TYPE",
+            "VENDOR_NAME", "PAYMENT_STATUS", "CURRENCY_CODE", "APPROVED_BY", "COST_CENTER",
+            "INVOICE_NUMBER", "INVOICE_DATE", "SERVICE_CATEGORY", "NET_EXPENSE_AMOUNT",
+            "TAX_AMOUNT", "PAYMENT_BATCH_ID", "EXPENSE_SOURCE_SYSTEM", "LOAD_TIMESTAMP",
+        ],
+        "policy_cover_level_transactions": [
+            "RERERENCE_ID", "POLICY_NUMBER", "COVER_NAME", "COVER_GROUP_IDENTIFIER_NAME",
+            "PREMIUM_AMOUNT", "SUM_INSURED_AMOUNT", "GEOG_STATE_NAME", "COVER_START_DATE",
+            "COVER_END_DATE", "DEDUCTIBLE_AMOUNT", "COVER_STATUS", "COVER_LIMIT_AMOUNT",
+            "COVER_PREMIUM_TAX_AMOUNT", "RISK_CLASS_CODE", "COVER_SOURCE_SYSTEM", "LOAD_TIMESTAMP",
+        ],
+        "policy_cover_level_transactions_dup_del": [
+            "RERERENCE_ID", "POLICY_NUMBER", "COVER_NAME", "PREMIUM_AMOUNT", "SUM_INSURED_AMOUNT",
+            "DUPLICATE_GROUP_ID", "DEDUP_SEQUENCE", "COVER_STATUS", "DUPLICATE_REASON_CODE",
+            "SURVIVOR_RECORD_FLAG", "DEDUP_RULE_VERSION", "LOAD_TIMESTAMP", "SOURCE_BATCH_ID",
+        ],
+        "expenses_outstanding_estimates": [
+            "RERERENCE_ID", "CLAIM_NUMBER", "OUTSTANDING_AMOUNT", "RESERVE_DATE", "RESERVE_STATUS",
+            "RESERVE_CATEGORY", "RESERVE_CHANGE_AMOUNT", "RESERVE_REASON_CODE", "ESTIMATOR_ID",
+            "ESTIMATE_SOURCE_SYSTEM", "LOAD_TIMESTAMP",
+        ],
+        "indemnity_outstanding_estimates": [
+            "RERERENCE_ID", "CLAIM_NUMBER", "RESERVE_AMOUNT", "RESERVE_DATE", "RESERVE_STATUS",
+            "INDEMNITY_CATEGORY", "RESERVE_CHANGE_AMOUNT", "RESERVE_REASON_CODE", "ESTIMATOR_ID",
+            "ESTIMATE_SOURCE_SYSTEM", "LOAD_TIMESTAMP",
+        ],
+    }
+    scripts = _silver_bundle().get("scripts") or []
+    counts = {str(item.get("table")): int(item.get("column_count") or 0) for item in scripts}
+    rows: List[Dict[str, Any]] = []
+    for table, seed_columns in table_columns.items():
+        target_count = max(len(seed_columns), counts.get(table, len(seed_columns)))
+        expanded_columns = list(seed_columns)
+        while len(expanded_columns) < target_count:
+            expanded_columns.append(f"{table.upper()}_SOURCE_ATTRIBUTE_{len(expanded_columns) + 1}")
+        for column in expanded_columns[:target_count]:
+            semantic_type = _semantic_type_for_column(column)
+            is_measure = semantic_type == "MEASURE"
+            is_pii = semantic_type == "PII"
+            rows.append(
+                {
+                    "table_name": table,
+                    "column_name": column,
+                    "name": column,
+                    "suggested_display_name": column.replace("_", " ").title(),
+                    "semantic_type": semantic_type,
+                    "business_description": _semantic_description(table, column, semantic_type),
+                    "business_definition": _semantic_description(table, column, semantic_type),
+                    "enrichment_source": "semantic_enrichment_llm" if len(rows) % 4 == 0 else "rules_and_catalog",
+                    "is_measure": is_measure,
+                    "is_dimension": semantic_type in {"DIMENSION", "ID", "DATE", "FLAG", "PII"},
+                    "is_pii_candidate": is_pii,
+                    "confidence": round(max(0.72, 0.98 - (len(rows) % 18) * 0.012), 2),
+                    "status": "PENDING_REVIEW",
+                }
+            )
+    return rows
+
+
+def _semantic_type_for_column(column_name: str) -> str:
+    name = column_name.upper()
+    if "CUSTOMER" in name:
+        return "PII"
+    if "LOAD_TIMESTAMP" in name:
+        return "AUDIT_TIMESTAMP"
+    if name.endswith("_ID") or "NUMBER" in name or "RERERENCE" in name or "BATCH_ID" in name:
+        return "ID"
+    if "DATE" in name:
+        return "DATE"
+    if any(token in name for token in ("AMOUNT", "PREMIUM", "SUM_INSURED", "RESERVE", "PAID", "TENURE", "AGE_DAYS")):
+        return "MEASURE"
+    if any(token in name for token in ("STATUS", "FLAG", "TYPE", "INDICATOR")):
+        return "FLAG"
+    return "DIMENSION"
+
+
+def _semantic_description(table_name: str, column_name: str, semantic_type: str) -> str:
+    table_label = table_name.replace("_", " ")
+    column_label = column_name.replace("_", " ").title()
+    if semantic_type == "MEASURE":
+        return f"{column_label} is a quantitative insurance metric from {table_label} used for KPI aggregation and Gold facts."
+    if semantic_type == "ID":
+        return f"{column_label} is a business or technical key from {table_label} used for joins, deduplication, and lineage."
+    if semantic_type == "DATE":
+        return f"{column_label} is a lifecycle date from {table_label} used for period, aging, and SLA analysis."
+    if semantic_type == "PII":
+        return f"{column_label} is a privacy-sensitive identifier from {table_label} requiring review before downstream exposure."
+    if semantic_type == "AUDIT_TIMESTAMP":
+        return f"{column_label} is an audit timestamp from {table_label} used for ingestion traceability."
+    if semantic_type == "FLAG":
+        return f"{column_label} is a lifecycle/status signal from {table_label} used for segmentation and filtering."
+    return f"{column_label} is a descriptive insurance dimension from {table_label} used for slicing and reporting."
 
 
 def demo_feed_semantic_summary() -> List[Dict[str, Any]]:
@@ -319,6 +404,28 @@ def demo_feed_semantic_summary() -> List[Dict[str, Any]]:
             "sample_row_count": 12840 - index * 730,
         }
         for index, (table_name, columns) in enumerate(grouped.items())
+    ]
+
+
+def _semantic_summary(columns: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "tables": len({str(column.get("table_name")) for column in columns if column.get("table_name")}),
+        "columns": len(columns),
+        "joins": 3,
+        "measures": sum(1 for column in columns if column.get("is_measure")),
+        "dimensions": sum(1 for column in columns if column.get("is_dimension")),
+        "pii": sum(1 for column in columns if column.get("is_pii_candidate")),
+        "dates": sum(1 for column in columns if column.get("semantic_type") in {"DATE", "AUDIT_TIMESTAMP"}),
+        "ids": sum(1 for column in columns if column.get("semantic_type") == "ID"),
+        "flags": sum(1 for column in columns if column.get("semantic_type") == "FLAG"),
+    }
+
+
+def _qualified_columns(columns: List[Dict[str, Any]], predicate) -> List[str]:
+    return [
+        f"{column.get('table_name')}.{column.get('column_name')}"
+        for column in columns
+        if column.get("table_name") and column.get("column_name") and predicate(column)
     ]
 
 
@@ -366,10 +473,10 @@ def demo_run(run_id: Optional[str] = None, *, include_scripts: bool = False) -> 
             {"left": "policy_transactions.RERERENCE_ID", "right": "claim_payment_indemnity.RERERENCE_ID", "join_type": "LEFT"},
             {"left": "policy_transactions.RERERENCE_ID", "right": "policy_cover_level_transactions.RERERENCE_ID", "join_type": "LEFT"},
         ],
-        "semantic_counts": {"tables": len(tables), "columns": len(enriched_columns), "joins": 3, "kpis": len(DEMO_KPIS)},
-        "pii_columns": ["policy_transactions.CUSTOMER_IDENTIFIER"],
-        "join_key_columns": ["RERERENCE_ID", "POLICY_NUMBER", "CLAIM_NUMBER"],
-        "measure_columns": ["PREMIUM_AMOUNT", "SUM_INSURED_AMOUNT", "PAID_AMOUNT", "EXPENSE_AMOUNT", "RESERVE_AMOUNT"],
+        "semantic_counts": {**_semantic_summary(enriched_columns), "kpis": len(DEMO_KPIS)},
+        "pii_columns": _qualified_columns(enriched_columns, lambda column: column.get("is_pii_candidate")),
+        "join_key_columns": _qualified_columns(enriched_columns, lambda column: column.get("semantic_type") == "ID"),
+        "measure_columns": _qualified_columns(enriched_columns, lambda column: column.get("is_measure")),
         "feed_semantic_summary": feed_semantic_summary,
         "next_gate": None if is_completed else 1,
         "resume_message": "Run completed." if is_completed else "KPI Review is ready. Validate the extracted KPIs before the pipeline continues.",
@@ -383,13 +490,14 @@ def demo_run(run_id: Optional[str] = None, *, include_scripts: bool = False) -> 
             "bronze": len((scripts.get("bronze") or {}).get("scripts") or []),
             "silver": len((scripts.get("silver") or {}).get("scripts") or []),
             "gold": len((scripts.get("gold") or {}).get("scripts") or []),
-        },
-        "bronze_review_artifact": demo_bronze_review(run_id)["bronze_review_artifact"],
-        "silver_review_artifact": demo_silver_review(run_id)["silver_review_artifact"],
-        "gold_generation_completed": True,
-        "gold_generation_status": "COMPLETED",
+        } if is_completed else {"bronze": 0, "silver": 0, "gold": 0},
+        "gold_generation_completed": is_completed,
+        "gold_generation_status": "COMPLETED" if is_completed else "PENDING",
     }
-    if include_scripts:
+    if is_completed:
+        payload["bronze_review_artifact"] = demo_bronze_review(run_id)["bronze_review_artifact"]
+        payload["silver_review_artifact"] = demo_silver_review(run_id)["silver_review_artifact"]
+    if include_scripts and is_completed:
         payload.update(scripts)
     return payload
 
@@ -452,10 +560,10 @@ def demo_enrichment_reviews(run_id: str) -> Dict[str, Any]:
             {"left": "policy_transactions.RERERENCE_ID", "right": "claim_payment_indemnity.RERERENCE_ID", "join_type": "LEFT", "confidence": 0.89},
             {"left": "policy_transactions.RERERENCE_ID", "right": "policy_cover_level_transactions.RERERENCE_ID", "join_type": "LEFT", "confidence": 0.91},
         ],
-        "semantic_counts": {"tables": len(demo_tables()), "columns": len(enriched_columns), "joins": 3, "measures": 5},
-        "pii_columns": ["policy_transactions.CUSTOMER_IDENTIFIER"],
-        "join_key_columns": ["RERERENCE_ID", "POLICY_NUMBER", "CLAIM_NUMBER"],
-        "measure_columns": ["PREMIUM_AMOUNT", "SUM_INSURED_AMOUNT", "PAID_AMOUNT", "EXPENSE_AMOUNT", "RESERVE_AMOUNT"],
+        "semantic_counts": _semantic_summary(enriched_columns),
+        "pii_columns": _qualified_columns(enriched_columns, lambda column: column.get("is_pii_candidate")),
+        "join_key_columns": _qualified_columns(enriched_columns, lambda column: column.get("semantic_type") == "ID"),
+        "measure_columns": _qualified_columns(enriched_columns, lambda column: column.get("is_measure")),
         "feed_semantic_summary": feed_semantic_summary,
         "gate3_approved": False,
     }
@@ -599,24 +707,87 @@ def demo_scripts(run_id: str) -> Dict[str, Any]:
 def demo_lineage(run_id: str) -> Dict[str, Any]:
     tables = [row["table_name"] for row in demo_tables()]
     gold_scripts = (demo_scripts(run_id).get("gold") or {}).get("scripts") or []
+    semantic_by_table = {feed["entity"]: feed for feed in demo_feed_semantic_summary()}
+    table_roles = {
+        "policy_transactions": "Policy transaction fact source",
+        "claim_information": "Claim lifecycle source",
+        "claim_payment_indemnity": "Indemnity payment source",
+        "claim_payment_expenses": "Expense payment source",
+        "policy_cover_level_transactions": "Coverage and premium source",
+        "policy_cover_level_transactions_dup_del": "Coverage duplicate-resolution source",
+        "expenses_outstanding_estimates": "Expense reserve source",
+        "indemnity_outstanding_estimates": "Indemnity reserve source",
+    }
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
 
     for table in tables:
+        semantic = semantic_by_table.get(table) or {}
+        column_count = int(semantic.get("column_count") or 0)
+        sample_row_count = int(semantic.get("sample_row_count") or 0)
         source_id = f"source:{table}"
         bronze_id = f"bronze:{table}"
         silver_id = f"silver:{table}"
         nodes.extend(
             [
-                {"id": source_id, "name": f"insurance.dbo.{table}", "label": f"insurance.dbo.{table}", "layer": "source", "table": table},
-                {"id": bronze_id, "name": f"main.bronze.bronze_{table}", "label": f"main.bronze.bronze_{table}", "layer": "bronze", "table": table},
-                {"id": silver_id, "name": f"main.silver.silver_{table}", "label": f"main.silver.silver_{table}", "layer": "silver", "table": table},
+                {
+                    "id": source_id,
+                    "name": f"insurance.dbo.{table}",
+                    "label": f"insurance.dbo.{table}",
+                    "layer": "source",
+                    "table": table,
+                    "database": "insurance",
+                    "schema": "dbo",
+                    "role": table_roles.get(table, "Insurance source table"),
+                    "column_count": column_count,
+                    "sample_row_count": sample_row_count,
+                    "semantic_counts": semantic.get("semantic_counts") or {},
+                },
+                {
+                    "id": bronze_id,
+                    "name": f"main.bronze.bronze_{table}",
+                    "label": f"main.bronze.bronze_{table}",
+                    "layer": "bronze",
+                    "table": table,
+                    "database": "main",
+                    "schema": "bronze",
+                    "role": "Raw landing table with audit metadata and source fidelity",
+                    "column_count": column_count + 4,
+                    "source_table": f"insurance.dbo.{table}",
+                },
+                {
+                    "id": silver_id,
+                    "name": f"main.silver.silver_{table}",
+                    "label": f"main.silver.silver_{table}",
+                    "layer": "silver",
+                    "table": table,
+                    "database": "main",
+                    "schema": "silver",
+                    "role": "Curated table with merge key, casts, dedupe, and semantic labels",
+                    "column_count": column_count + 3,
+                    "source_table": f"main.bronze.bronze_{table}",
+                    "merge_key": _lineage_merge_key(table),
+                },
             ]
         )
         edges.extend(
             [
-                {"id": f"pipeline:source:{table}:bronze", "source": source_id, "target": bronze_id, "type": "pipeline"},
-                {"id": f"pipeline:bronze:{table}:silver", "source": bronze_id, "target": silver_id, "type": "pipeline"},
+                {
+                    "id": f"pipeline:source:{table}:bronze",
+                    "source": source_id,
+                    "target": bronze_id,
+                    "type": "pipeline",
+                    "operation": "bronze_ingest",
+                    "description": "Source table lands into Bronze with no business transformation.",
+                },
+                {
+                    "id": f"pipeline:bronze:{table}:silver",
+                    "source": bronze_id,
+                    "target": silver_id,
+                    "type": "pipeline",
+                    "operation": "silver_transform",
+                    "description": "Bronze table is cast, deduplicated, and assigned merge keys.",
+                },
             ]
         )
 
@@ -631,20 +802,35 @@ def demo_lineage(run_id: str) -> Dict[str, Any]:
                 "label": script.get("target_table") or kpi_name,
                 "layer": "gold",
                 "kpi_name": kpi_name,
+                "role": "Gold KPI fact output",
+                "source_table": script.get("source_table"),
+                "target_table": script.get("target_table"),
+                "time_grain": script.get("time_grain") or "month",
+                "dimension_count": script.get("dimension_count") or 0,
+                "join_count": script.get("join_count") or 0,
             }
         )
         if source_table:
-            edges.append({"id": f"pipeline:silver:{source_table}:gold:{index}", "source": f"silver:{source_table}", "target": gold_id, "type": "pipeline"})
+            edges.append(
+                {
+                    "id": f"pipeline:silver:{source_table}:gold:{index}",
+                    "source": f"silver:{source_table}",
+                    "target": gold_id,
+                    "type": "pipeline",
+                    "operation": "gold_aggregation",
+                    "description": f"Silver table feeds {kpi_name} Gold KPI generation.",
+                }
+            )
 
     relationship_edges = [
-        ("policy_transactions", "claim_information", "RERERENCE_ID", "RERERENCE_ID", "fk_policy_claim_reference", "fk"),
-        ("policy_transactions", "claim_payment_indemnity", "RERERENCE_ID", "RERERENCE_ID", "fk_policy_indemnity_payment", "fk"),
-        ("policy_transactions", "claim_payment_expenses", "RERERENCE_ID", "RERERENCE_ID", "fk_policy_expense_payment", "fk"),
-        ("policy_transactions", "policy_cover_level_transactions", "RERERENCE_ID", "RERERENCE_ID", "heuristic_policy_cover_reference", "heuristic"),
-        ("claim_information", "expenses_outstanding_estimates", "RERERENCE_ID", "RERERENCE_ID", "heuristic_claim_expense_reserve", "heuristic"),
-        ("claim_information", "indemnity_outstanding_estimates", "RERERENCE_ID", "RERERENCE_ID", "heuristic_claim_indemnity_reserve", "heuristic"),
+        ("policy_transactions", "claim_information", "RERERENCE_ID", "RERERENCE_ID", "fk_policy_claim_reference", "fk", 0.96, "Policy-to-claim lifecycle linkage"),
+        ("policy_transactions", "claim_payment_indemnity", "RERERENCE_ID", "RERERENCE_ID", "fk_policy_indemnity_payment", "fk", 0.94, "Policy-to-indemnity payment linkage"),
+        ("policy_transactions", "claim_payment_expenses", "RERERENCE_ID", "RERERENCE_ID", "fk_policy_expense_payment", "fk", 0.93, "Policy-to-expense payment linkage"),
+        ("policy_transactions", "policy_cover_level_transactions", "RERERENCE_ID", "RERERENCE_ID", "heuristic_policy_cover_reference", "heuristic", 0.88, "Coverage-level premium rollup candidate"),
+        ("claim_information", "expenses_outstanding_estimates", "RERERENCE_ID", "RERERENCE_ID", "heuristic_claim_expense_reserve", "heuristic", 0.84, "Claim-to-expense reserve candidate"),
+        ("claim_information", "indemnity_outstanding_estimates", "RERERENCE_ID", "RERERENCE_ID", "heuristic_claim_indemnity_reserve", "heuristic", 0.85, "Claim-to-indemnity reserve candidate"),
     ]
-    for source_table, target_table, source_column, target_column, name, edge_type in relationship_edges:
+    for source_table, target_table, source_column, target_column, name, edge_type, confidence, description in relationship_edges:
         edges.append(
             {
                 "id": f"{edge_type}:{source_table}:{target_table}",
@@ -654,6 +840,8 @@ def demo_lineage(run_id: str) -> Dict[str, Any]:
                 "source_column": source_column,
                 "target_column": target_column,
                 "constraint_name": name,
+                "confidence": confidence,
+                "description": description,
             }
         )
 
@@ -671,6 +859,20 @@ def demo_lineage(run_id: str) -> Dict[str, Any]:
             "kpi_count": len(DEMO_KPIS),
         },
     }
+
+
+def _lineage_merge_key(table_name: str) -> List[str]:
+    keys = {
+        "policy_transactions": ["RERERENCE_ID", "POLICY_NUMBER"],
+        "claim_information": ["RERERENCE_ID", "CLAIM_NUMBER"],
+        "claim_payment_indemnity": ["RERERENCE_ID", "CLAIM_NUMBER", "PAYMENT_DATE"],
+        "claim_payment_expenses": ["RERERENCE_ID", "CLAIM_NUMBER", "EXPENSE_DATE"],
+        "policy_cover_level_transactions": ["RERERENCE_ID", "POLICY_NUMBER", "COVER_NAME"],
+        "policy_cover_level_transactions_dup_del": ["RERERENCE_ID", "POLICY_NUMBER", "COVER_NAME", "DEDUP_SEQUENCE"],
+        "expenses_outstanding_estimates": ["RERERENCE_ID", "CLAIM_NUMBER", "RESERVE_DATE"],
+        "indemnity_outstanding_estimates": ["RERERENCE_ID", "CLAIM_NUMBER", "RESERVE_DATE"],
+    }
+    return keys.get(table_name, ["RERERENCE_ID"])
 
 
 def demo_logs(run_id: str, limit: int = 300) -> List[Dict[str, Any]]:

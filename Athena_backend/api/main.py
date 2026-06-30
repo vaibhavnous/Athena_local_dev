@@ -15,6 +15,7 @@ from api.routers.logs_router import router as logs_router
 from api.routers.pipeline_router import router as pipeline_router
 from api.routers.reviews_router import router as reviews_router
 from api.routers.runs_router import router as runs_router
+from utilis.embedding_status import get_embedding_runtime_status
 from utilis.logger import logger
 
 
@@ -60,7 +61,11 @@ async def health_check():
     return {
         "status": "ok",
         "service": "athena-fastapi",
-        "embeddings": {"enabled": False, "mode": "disabled"},
+        "embeddings": {
+            **get_embedding_runtime_status(probe_models=False),
+            "enabled": False,
+            "mode": "disabled",
+        },
     }
 
 
