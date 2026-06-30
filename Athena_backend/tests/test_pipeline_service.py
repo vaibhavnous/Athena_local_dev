@@ -255,6 +255,146 @@ def test_run_context_preserves_stage_confirmation_status_after_bronze(monkeypatc
     assert context["bronze"]["scripts"][0]["script_body"] == "print('bronze')"
 
 
+def test_build_run_lineage_prefers_certified_fk_edges(monkeypatch):
+    from services import pipeline_runtime
+
+    checkpoint = {"run_id": "run-lineage", "gold_generation_contract": {}}
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_bronze_scripts",
+        lambda run_id, checkpoint=None: {
+            "scripts": [
+                {"source": "insurance.dbo.claims", "target": "main.bronze.bronze_claims", "status": "APPROVED"},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_silver_scripts",
+        lambda run_id, checkpoint=None: {
+            "scripts": [
+                {"source_table": "main.bronze.bronze_claims", "target_table": "silver.silver_claims", "status": "APPROVED"},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_gold_scripts",
+        lambda run_id, checkpoint=None: {
+            "scripts": [
+                {
+                    "source_table": "silver.silver_claims",
+                    "target_table": "gold.fact_claim_count",
+                    "dimension_script_path": "C:\\tmp\\gold_dim_claim_count.py",
+                    "status": "APPROVED",
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "fetch_json_artifact",
+        lambda run_id, artifact: {
+            "certified_joins": [
+                {
+                    "left_table": "claims",
+                    "left_column": "policy_id",
+                    "right_table": "policies",
+                    "right_column": "policy_id",
+                    "constraint_name": "fk_claims_policies",
+                    "confidence": 1.0,
+                    "certified": True,
+                }
+            ],
+            "join_candidates": [
+                {
+                    "left_table": "claims",
+                    "left_column": "agent_id",
+                    "right_table": "agents",
+                    "right_column": "agent_id",
+                    "confidence": 0.55,
+                }
+            ],
+        }
+        if artifact == "ENRICHED_METADATA"
+        else {},
+    )
+
+    payload = pipeline_runtime.build_run_lineage("run-lineage", checkpoint)
+
+    edge_types = {edge["type"] for edge in payload["edges"]}
+    assert {"pipeline", "fk", "heuristic"}.issubset(edge_types)
+    fk_edges = [edge for edge in payload["edges"] if edge["type"] == "fk"]
+    assert fk_edges[0]["constraint_name"] == "fk_claims_policies"
+    assert payload["summary"]["fk_edge_count"] == 1
+    assert payload["summary"]["heuristic_edge_count"] == 1
+
+
+def test_build_run_lineage_uses_checkpoint_fallback_when_scripts_missing(monkeypatch):
+    from services import pipeline_runtime
+
+    checkpoint = {
+        "run_id": "run-lineage-fallback",
+        "source": "adls_gen2",
+        "file_feeds": [
+            {
+                "feed_id": "Vendor1_Deposit",
+                "entity": "Deposit",
+                "cloud_path": "abfss://athena@storage.dfs.core.windows.net/evention/vendor1/machine1/Deposit/",
+            }
+        ],
+        "gold_generation_contract": {},
+    }
+    monkeypatch.setattr(pipeline_runtime, "load_bronze_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+    monkeypatch.setattr(pipeline_runtime, "load_silver_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+    monkeypatch.setattr(pipeline_runtime, "load_gold_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+    monkeypatch.setattr(pipeline_runtime, "fetch_json_artifact", lambda run_id, artifact: {})
+
+    payload = pipeline_runtime.build_run_lineage("run-lineage-fallback", checkpoint)
+
+    assert payload["summary"]["fallback"] is True
+    assert payload["summary"]["mode"] == "checkpoint_fallback"
+    assert payload["summary"]["source_count"] == 1
+    assert payload["summary"]["bronze_count"] == 1
+    assert payload["summary"]["silver_count"] == 1
+    assert payload["summary"]["gold_count"] == 1
+    assert [edge["type"] for edge in payload["edges"]] == ["pipeline", "pipeline", "pipeline"]
+
+
+def test_build_run_lineage_database_fallback_uses_certified_tables(monkeypatch):
+    from services import pipeline_runtime
+
+    checkpoint = {
+        "run_id": "run-lineage-db-fallback",
+        "source": "database",
+        "certified_tables": [
+            {
+                "source_schema": "dbo",
+                "table_name": "claim_information",
+            },
+            {
+                "source_schema": "dbo",
+                "table_name": "expenses_outstanding_estimates",
+            },
+        ],
+        "gold_generation_contract": {},
+    }
+    monkeypatch.setattr(pipeline_runtime, "load_bronze_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+    monkeypatch.setattr(pipeline_runtime, "load_silver_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+    monkeypatch.setattr(pipeline_runtime, "load_gold_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+    monkeypatch.setattr(pipeline_runtime, "fetch_json_artifact", lambda run_id, artifact: {})
+
+    payload = pipeline_runtime.build_run_lineage("run-lineage-db-fallback", checkpoint)
+
+    assert payload["summary"]["fallback"] is True
+    assert payload["summary"]["source_count"] == 2
+    assert payload["summary"]["bronze_count"] == 2
+    assert payload["summary"]["silver_count"] == 2
+    assert payload["summary"]["gold_count"] == 2
+    assert any(node["name"] == "dbo.claim_information" for node in payload["nodes"])
+    assert any(node["name"] == "main.bronze.bronze_claim_information" for node in payload["nodes"])
+
+
 def test_run_context_converts_existing_pause_before_review_gate_to_hitl_wait(monkeypatch):
     from services import pipeline_runtime
 
@@ -285,7 +425,7 @@ def test_run_context_converts_existing_pause_before_review_gate_to_hitl_wait(mon
     assert context["status"] == "HITL_WAIT"
     assert context["next_gate"] == 3
     assert context["stage_confirmation"] is None
-    assert "Enrichment Review is pending" in context["resume_message"]
+    assert "Column Review is pending" in context["resume_message"]
 
 
 def test_run_context_suppresses_stage_confirmation_when_background_stage_active(monkeypatch):

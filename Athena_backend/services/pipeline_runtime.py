@@ -26,12 +26,12 @@ DATABASE_STAGE_SEQUENCE = [
     ("requirements", "Requirement Extraction"),
     ("kpis", "KPI Extraction"),
     ("gate1", "KPI Review"),
-    ("nomination", "Table Nomination"),
+    ("nomination", "Table Extraction"),
     ("gate2", "Table Review"),
-    ("discovery", "Metadata Discovery"),
-    ("profiling", "Column Profiling"),
-    ("enrichment", "Semantic Enrichment"),
-    ("gate3", "Enrichment Review"),
+    ("discovery", "Column Extraction"),
+    ("profiling", "Column Extraction"),
+    ("enrichment", "Column Extraction"),
+    ("gate3", "Column Review"),
     ("bronze", "Bronze Generation"),
     ("silver", "Silver Generation"),
     ("gold", "Gold Generation"),
@@ -89,7 +89,7 @@ def _gate_label(gate: int, *, source: str = "database") -> str:
     if gate == 2:
         return "Feed Review" if str(source or "").lower() in {"sftp", "adls_gen2"} else "Table Review"
     if gate == 3:
-        return "Enrichment Review"
+        return "Column Review"
     if gate == 4:
         return "Bronze Review"
     if gate == 5:
@@ -733,6 +733,413 @@ def load_gold_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) 
     }
 
 
+def _lineage_node_id(layer: str, name: str) -> str:
+    safe_layer = re.sub(r"[^a-z0-9]+", "-", str(layer or "").lower()).strip("-") or "layer"
+    safe_name = re.sub(r"[^a-z0-9_.:]+", "-", str(name or "").lower()).strip("-") or "node"
+    return f"{safe_layer}:{safe_name}"
+
+
+def _append_lineage_edge(
+    edges: List[Dict[str, Any]],
+    seen_edges: set[tuple[str, str, str]],
+    *,
+    source: str,
+    target: str,
+    edge_type: str,
+    **metadata: Any,
+) -> None:
+    key = (source, target, edge_type)
+    if key in seen_edges:
+        return
+    seen_edges.add(key)
+    edges.append(
+        {
+            "id": f"{source}->{target}:{edge_type}",
+            "source": source,
+            "target": target,
+            "type": edge_type,
+            **metadata,
+        }
+    )
+
+
+def _lineage_safe_entity(value: str, fallback: str = "source") -> str:
+    raw = str(value or "").strip().strip("/\\")
+    if not raw:
+        return fallback
+    name = re.split(r"[/\\]", raw)[-1] or raw
+    if "." in name:
+        name = name.rsplit(".", 1)[0]
+    safe = re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_").lower()
+    return safe or fallback
+
+
+def _lineage_table_name(item: Dict[str, Any]) -> str:
+    schema = str(item.get("schema") or item.get("table_schema") or item.get("source_schema") or "").strip()
+    table = str(
+        item.get("table")
+        or item.get("table_name")
+        or item.get("source_table")
+        or item.get("entity")
+        or ""
+    ).strip()
+    if schema and table and "." not in table:
+        return f"{schema}.{table}"
+    return table or schema
+
+
+def _checkpoint_lineage_sources(checkpoint: Dict[str, Any]) -> List[Dict[str, str]]:
+    sources: List[Dict[str, str]] = []
+
+    def add_source(
+        *,
+        source: Any,
+        entity: Any = None,
+        bronze: Any = None,
+        silver: Any = None,
+        gold: Any = None,
+    ) -> None:
+        source_name = str(source or "").strip()
+        if not source_name:
+            return
+        entity_name = _lineage_safe_entity(str(entity or source_name), "source")
+        row = {
+            "source": source_name,
+            "entity": entity_name,
+            "bronze": str(bronze or "").strip(),
+            "silver": str(silver or "").strip(),
+            "gold": str(gold or "").strip(),
+        }
+        if not any(existing["source"] == row["source"] for existing in sources):
+            sources.append(row)
+
+    for item in checkpoint.get("bronze_generation_results") or []:
+        if not isinstance(item, dict):
+            continue
+        config_payload = item.get("bronze_config") or item.get("generated_bronze_config") or {}
+        add_source(
+            source=(
+                item.get("source")
+                or item.get("source_table")
+                or item.get("source_path")
+                or config_payload.get("source_path")
+                or config_payload.get("source_table")
+            ),
+            entity=item.get("entity") or item.get("table") or item.get("table_name"),
+            bronze=item.get("target") or item.get("target_table") or config_payload.get("target_table"),
+        )
+
+    for item in checkpoint.get("silver_generation_results") or []:
+        if not isinstance(item, dict):
+            continue
+        add_source(
+            source=item.get("bronze_table") or item.get("source_table"),
+            entity=item.get("entity") or item.get("table") or item.get("table_name"),
+            bronze=item.get("bronze_table") or item.get("source_table"),
+            silver=item.get("silver_table") or item.get("target_table"),
+        )
+
+    for feed in checkpoint.get("file_feeds") or []:
+        if not isinstance(feed, dict):
+            continue
+        add_source(
+            source=(
+                feed.get("cloud_path")
+                or feed.get("databricks_source_path")
+                or feed.get("remote_path")
+                or feed.get("feed_name")
+                or feed.get("feed_id")
+            ),
+            entity=feed.get("entity") or feed.get("feed_name") or feed.get("feed_id"),
+        )
+
+    candidate_feed = checkpoint.get("candidate_feed")
+    if isinstance(candidate_feed, dict):
+        add_source(
+            source=(
+                candidate_feed.get("cloud_path")
+                or candidate_feed.get("databricks_source_path")
+                or candidate_feed.get("remote_path")
+                or candidate_feed.get("feed_name")
+                or candidate_feed.get("feed_id")
+            ),
+            entity=candidate_feed.get("entity") or candidate_feed.get("feed_name") or candidate_feed.get("feed_id"),
+        )
+
+    for table in (checkpoint.get("certified_tables") or checkpoint.get("nominated_tables") or []):
+        if not isinstance(table, dict):
+            continue
+        table_name = _lineage_table_name(table)
+        add_source(source=table_name, entity=table.get("table_name") or table.get("table") or table_name)
+
+    if not sources:
+        source_type = str(checkpoint.get("source") or "database").lower()
+        entity = checkpoint.get("sftp_entity") or checkpoint.get("entity") or checkpoint.get("brd_filename") or "source"
+        if source_type == "adls_gen2":
+            source_name = checkpoint.get("databricks_source_path") or checkpoint.get("adls_source_root") or f"adls://{entity}"
+        elif source_type == "sftp":
+            source_name = checkpoint.get("landing_path") or f"sftp://{entity}"
+        else:
+            source_name = f"database://{entity}"
+        add_source(source=source_name, entity=entity)
+
+    return sources
+
+
+def _append_checkpoint_lineage_fallback(
+    *,
+    run_id: str,
+    checkpoint: Dict[str, Any],
+    ensure_node,
+    edges: List[Dict[str, Any]],
+    seen_edges: set[tuple[str, str, str]],
+) -> bool:
+    sources = _checkpoint_lineage_sources(checkpoint)
+    if not sources:
+        return False
+
+    source_type = str(checkpoint.get("source") or "database").lower()
+    bronze_schema = str(checkpoint.get("bronze_schema") or "bronze")
+    silver_schema = str(checkpoint.get("silver_schema") or "silver")
+    gold_schema = str(checkpoint.get("gold_schema") or "gold")
+
+    for item in sources:
+        entity = item["entity"]
+        source_name = item["source"]
+        bronze_name = item["bronze"] or (
+            f"{bronze_schema}.{entity}_raw" if source_type in {"sftp", "adls_gen2"} else f"main.{bronze_schema}.bronze_{entity}"
+        )
+        silver_name = item["silver"] or f"{silver_schema}.{entity}_clean"
+        gold_name = item["gold"] or f"{gold_schema}.fact_{entity}"
+
+        source_id = ensure_node("source", source_name, source_name, kind="source", fallback=True)
+        bronze_id = ensure_node("bronze", bronze_name, bronze_name, kind="table", fallback=True)
+        silver_id = ensure_node("silver", silver_name, silver_name, kind="table", fallback=True)
+        gold_id = ensure_node("gold", gold_name, gold_name, kind="fact", fallback=True)
+
+        _append_lineage_edge(
+            edges,
+            seen_edges,
+            source=source_id,
+            target=bronze_id,
+            edge_type="pipeline",
+            status=str(checkpoint.get("bronze_generation_status") or "DEMO_FALLBACK"),
+            certified=False,
+            fallback=True,
+            run_id=run_id,
+        )
+        _append_lineage_edge(
+            edges,
+            seen_edges,
+            source=bronze_id,
+            target=silver_id,
+            edge_type="pipeline",
+            status=str(checkpoint.get("silver_generation_status") or "DEMO_FALLBACK"),
+            certified=False,
+            fallback=True,
+            run_id=run_id,
+        )
+        _append_lineage_edge(
+            edges,
+            seen_edges,
+            source=silver_id,
+            target=gold_id,
+            edge_type="pipeline",
+            status=str(checkpoint.get("gold_generation_status") or "DEMO_FALLBACK"),
+            certified=False,
+            fallback=True,
+            run_id=run_id,
+        )
+
+    return True
+
+
+def build_run_lineage(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    checkpoint = checkpoint or load_checkpoint_state(run_id) or {"run_id": run_id}
+    bronze = load_bronze_scripts(run_id, checkpoint)
+    silver = load_silver_scripts(run_id, checkpoint)
+    gold = load_gold_scripts(run_id, checkpoint)
+    enriched_payload = fetch_json_artifact(run_id, "ENRICHED_METADATA") or _checkpoint_enriched_payload(checkpoint)
+    gold_contract = fetch_json_artifact(run_id, "GOLD_GENERATION_CONTRACT") or checkpoint.get("gold_generation_contract") or {}
+
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    seen_nodes: set[str] = set()
+    seen_edges: set[tuple[str, str, str]] = set()
+
+    def ensure_node(layer: str, name: str, label: str, **metadata: Any) -> str:
+        node_id = _lineage_node_id(layer, name)
+        if node_id not in seen_nodes:
+            seen_nodes.add(node_id)
+            nodes.append(
+                {
+                    "id": node_id,
+                    "layer": layer,
+                    "name": name,
+                    "label": label,
+                    **metadata,
+                }
+            )
+        return node_id
+
+    for item in (bronze.get("scripts") or []):
+        if not isinstance(item, dict):
+            continue
+        source_name = str(item.get("source") or item.get("source_table") or "")
+        target_name = str(item.get("target") or item.get("target_table") or "")
+        if not source_name or not target_name:
+            continue
+        source_id = ensure_node("source", source_name, source_name, kind="table")
+        bronze_id = ensure_node("bronze", target_name, target_name, kind="table")
+        _append_lineage_edge(
+            edges,
+            seen_edges,
+            source=source_id,
+            target=bronze_id,
+            edge_type="pipeline",
+            status=str(item.get("status") or "APPROVED"),
+            certified=True,
+        )
+
+    for item in (silver.get("scripts") or []):
+        if not isinstance(item, dict):
+            continue
+        source_name = str(item.get("source_table") or "")
+        target_name = str(item.get("target_table") or "")
+        if not source_name or not target_name:
+            continue
+        bronze_id = ensure_node("bronze", source_name, source_name, kind="table")
+        silver_id = ensure_node("silver", target_name, target_name, kind="table")
+        _append_lineage_edge(
+            edges,
+            seen_edges,
+            source=bronze_id,
+            target=silver_id,
+            edge_type="pipeline",
+            status=str(item.get("status") or "APPROVED"),
+            certified=True,
+        )
+
+    for item in (gold.get("scripts") or []):
+        if not isinstance(item, dict):
+            continue
+        source_name = str(item.get("source_table") or "")
+        target_name = str(item.get("target_table") or "")
+        if not source_name or not target_name:
+            continue
+        silver_id = ensure_node("silver", source_name, source_name, kind="table")
+        gold_id = ensure_node("gold", target_name, target_name, kind="fact")
+        _append_lineage_edge(
+            edges,
+            seen_edges,
+            source=silver_id,
+            target=gold_id,
+            edge_type="pipeline",
+            status=str(item.get("status") or "APPROVED"),
+            certified=True,
+        )
+        dimension_script_path = str(item.get("dimension_script_path") or "")
+        if dimension_script_path:
+            base_name = os.path.basename(dimension_script_path).replace(".py", "")
+            dim_id = ensure_node("gold", base_name, base_name, kind="dimension_script")
+            _append_lineage_edge(
+                edges,
+                seen_edges,
+                source=silver_id,
+                target=dim_id,
+                edge_type="dimension",
+                status=str(item.get("status") or "APPROVED"),
+                certified=True,
+            )
+
+    certified_joins = enriched_payload.get("certified_joins") if isinstance(enriched_payload, dict) else []
+    for join in certified_joins or []:
+        left_name = str(join.get("left_table") or "")
+        right_name = str(join.get("right_table") or "")
+        if not left_name or not right_name:
+            continue
+        left_id = ensure_node("logical", left_name, left_name, kind="logical_table")
+        right_id = ensure_node("logical", right_name, right_name, kind="logical_table")
+        _append_lineage_edge(
+            edges,
+            seen_edges,
+            source=left_id,
+            target=right_id,
+            edge_type="fk",
+            certified=True,
+            source_column=join.get("left_column"),
+            target_column=join.get("right_column"),
+            constraint_name=join.get("constraint_name"),
+            confidence=join.get("confidence"),
+        )
+
+    join_candidates = enriched_payload.get("join_candidates") if isinstance(enriched_payload, dict) else []
+    for join in join_candidates or []:
+        left_name = str(join.get("left_table") or "")
+        right_name = str(join.get("right_table") or "")
+        if not left_name or not right_name:
+            continue
+        left_id = ensure_node("logical", left_name, left_name, kind="logical_table")
+        right_id = ensure_node("logical", right_name, right_name, kind="logical_table")
+        _append_lineage_edge(
+            edges,
+            seen_edges,
+            source=left_id,
+            target=right_id,
+            edge_type="heuristic",
+            certified=False,
+            source_column=join.get("left_column"),
+            target_column=join.get("right_column"),
+            confidence=join.get("confidence"),
+        )
+
+    for mapping in (gold_contract.get("kpi_mappings") or []):
+        if not isinstance(mapping, dict):
+            continue
+        kpi_name = str(mapping.get("kpi_name") or "")
+        source_table = str(mapping.get("source_silver_table") or "")
+        if not kpi_name:
+            continue
+        kpi_id = ensure_node("kpi", kpi_name, kpi_name, kind="kpi", readiness=mapping.get("readiness"))
+        if source_table:
+            silver_id = ensure_node("silver", source_table, source_table, kind="table")
+            _append_lineage_edge(
+                edges,
+                seen_edges,
+                source=silver_id,
+                target=kpi_id,
+                edge_type="kpi",
+                certified=bool(mapping.get("join_paths")),
+                aggregation=(mapping.get("measure") or {}).get("aggregation"),
+            )
+
+    fallback_used = False
+    if not any(node.get("layer") in {"source", "bronze", "silver", "gold"} for node in nodes):
+        fallback_used = _append_checkpoint_lineage_fallback(
+            run_id=run_id,
+            checkpoint=checkpoint,
+            ensure_node=ensure_node,
+            edges=edges,
+            seen_edges=seen_edges,
+        )
+
+    return {
+        "run_id": run_id,
+        "nodes": nodes,
+        "edges": edges,
+        "summary": {
+            "source_count": sum(1 for node in nodes if node.get("layer") == "source"),
+            "bronze_count": sum(1 for node in nodes if node.get("layer") == "bronze"),
+            "silver_count": sum(1 for node in nodes if node.get("layer") == "silver"),
+            "gold_count": sum(1 for node in nodes if node.get("layer") == "gold"),
+            "fk_edge_count": sum(1 for edge in edges if edge.get("type") == "fk"),
+            "heuristic_edge_count": sum(1 for edge in edges if edge.get("type") == "heuristic"),
+            "fallback": fallback_used,
+            "mode": "checkpoint_fallback" if fallback_used else "artifact_backed",
+        },
+    }
+
+
 def build_pipeline_steps(
     *,
     source: str,
@@ -817,13 +1224,13 @@ def build_pipeline_steps(
             },
             {
                 "key": "profiling",
-                "label": "Column Profiling",
+                "label": "Column Extraction",
                 "complete": bool("SFTP_COLUMN_PROFILING" in artifact_types or checkpoint.get("column_profiling_status") == "COMPLETED"),
                 "detail": "Sample-based feed profiling completed",
             },
             {
                 "key": "enrichment",
-                "label": "Semantic Enrichment",
+                "label": "Column Extraction",
                 "complete": bool("ENRICHED_METADATA" in artifact_types or checkpoint.get("semantic_enrichment_status") == "COMPLETED"),
                 "detail": "File-feed semantics classified",
             },
@@ -932,7 +1339,7 @@ def build_pipeline_steps(
         },
         {
             "key": "nomination",
-            "label": "Nomination",
+            "label": "Table Extraction",
             "complete": bool("TABLE_NOMINATIONS" in artifact_types or nominated_tables),
             "detail": "Candidate tables selected",
         },
@@ -944,19 +1351,19 @@ def build_pipeline_steps(
         },
         {
             "key": "discovery",
-            "label": "Metadata Discovery",
+            "label": "Column Extraction",
             "complete": bool("DISCOVERED_METADATA" in artifact_types or checkpoint.get("metadata_status")),
             "detail": "Table metadata discovered",
         },
         {
             "key": "profiling",
-            "label": "Column Profiling",
+            "label": "Column Extraction",
             "complete": bool("COLUMN_PROFILES" in artifact_types or checkpoint.get("column_profiling_status")),
             "detail": "Column profiles generated",
         },
         {
             "key": "enrichment",
-            "label": "Semantic Enrichment",
+            "label": "Column Extraction",
             "complete": bool("ENRICHED_METADATA" in artifact_types or enriched_payload or checkpoint.get("semantic_enrichment_status")),
             "detail": "Semantic metadata enriched",
         },
@@ -1209,13 +1616,13 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         resume_message = "Table Review is pending. Review and certify nominated tables below."
     elif enriched_payload and not gate3_payload:
         next_gate = 3
-        resume_message = "Enrichment Review is pending. Review enrichment details below."
+        resume_message = "Column Review is pending. Review extracted and enriched column metadata below."
     elif gate3_payload:
-        resume_message = "Enrichment Review is complete."
+        resume_message = "Column Review is complete."
     elif certified_tables and not enriched_payload:
-        resume_message = "Table Review is certified. Downstream metadata/profiling/enrichment has not completed yet."
+        resume_message = "Table Review is certified. Column Extraction has not completed yet."
     elif completed_gate1 and not nominated_tables:
-        resume_message = "KPI Review is certified. Table nomination has not completed yet."
+        resume_message = "KPI Review is certified. Table Extraction has not completed yet."
     elif not summary and not checkpoint:
         resume_message = "No stored state was found for this run ID."
 

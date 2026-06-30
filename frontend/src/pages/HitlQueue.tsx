@@ -27,6 +27,7 @@ import { getGateDisplayName } from '../utils/pipelinePhases'
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const REVIEW_HYDRATION_ATTEMPTS = 12
 const REVIEW_HYDRATION_DELAY_MS = 2500
+const ENABLE_DEMO_REVIEW_FALLBACKS = String(process.env.REACT_APP_ENABLE_DEMO_FALLBACKS || '').toLowerCase() === 'true'
 
 async function waitForRunGate(runId, updateRun, targetGate, attempts = 20) {
   let latest = null
@@ -96,7 +97,9 @@ async function waitForRenderableReview(fetcher, gate, isFileSource = false, atte
       await sleep(REVIEW_HYDRATION_DELAY_MS)
     }
   }
-  return latest
+  const error = new Error('Review data was not ready after ' + attempts + ' backend attempt' + (attempts !== 1 ? 's' : '') + '.')
+  Object.assign(error, { code: 'REVIEW_NOT_READY', latest })
+  throw error
 }
 
 function hasGoldScripts(run) {
@@ -146,10 +149,11 @@ function buildBronzeScriptFromRun(sourceRun, currentRun, isFileSource) {
   const entity = isFileSource ? (currentRun?.sftp_entity || 'transactions') : 'claims'
   const sourceName = sourceRun?.brd_filename || sourceRun?.id || 'successful_run'
   return [
-    `-- Reused demo Bronze pattern from successful run: ${sourceName}`,
-    `CREATE OR REPLACE TABLE bronze.${entity} AS`,
-    `SELECT *`,
-    `FROM ${isFileSource ? 'landing.vendor1_feed' : 'source.claims'};`,
+    '-- Demo fallback Bronze Code Review artifact',
+    '-- Reused pattern from previous successful run: ' + sourceName,
+    'CREATE OR REPLACE TABLE bronze.' + entity + ' AS',
+    'SELECT *',
+    'FROM ' + (isFileSource ? 'landing.vendor1_feed' : 'source.claims') + ';',
   ].join('\n')
 }
 
@@ -157,10 +161,11 @@ function buildSilverScriptFromRun(sourceRun, currentRun, isFileSource) {
   const entity = isFileSource ? (currentRun?.sftp_entity || 'transactions') : 'claims'
   const sourceName = sourceRun?.brd_filename || sourceRun?.id || 'successful_run'
   return [
-    `-- Reused demo Silver pattern from successful run: ${sourceName}`,
-    `CREATE OR REPLACE TABLE silver.${entity}_curated AS`,
-    `SELECT *`,
-    `FROM bronze.${entity};`,
+    '-- Demo fallback Silver Code Review artifact',
+    '-- Reused pattern from previous successful run: ' + sourceName,
+    'CREATE OR REPLACE TABLE silver.' + entity + '_curated AS',
+    'SELECT *',
+    'FROM bronze.' + entity + ';',
   ].join('\n')
 }
 
@@ -171,7 +176,7 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
   if (gate === 1) {
     return {
       kpis: MOCK_KPIS_LIST.slice(0, 5).map((item, index) => ({
-        queue_id: `${runId}:demo-kpi-${index + 1}`,
+        queue_id: runId + ':demo-kpi-' + (index + 1),
         item_id: item.id,
         run_id: runId,
         source: run?.source || 'database',
@@ -221,7 +226,7 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
           },
         ],
         next_gate: 2,
-        resume_message: 'Demo fallback feed review is ready.',
+        resume_message: 'Demo fallback Feed Review is ready.',
       }
     }
 
@@ -231,7 +236,7 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
         { database_name: 'insurance', schema_name: 'dbo', table_name: 'policies', confidence_score: 0.92, coverage_ratio: 0.83, matched_keywords: ['policy', 'customer'], nomination_reason: 'Relevant master data for KPI derivation.' },
       ],
       next_gate: 2,
-      resume_message: 'Demo fallback table review is ready.',
+      resume_message: 'Demo fallback Table Review is ready.',
     }
   }
 
@@ -244,9 +249,9 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
       join_key_columns: ['policy_id'],
       measure_columns: ['amount'],
       feed_semantic_summary: isFileSource ? [{ vendor: 'Vendor1', entity: 'transactions', format: 'csv', column_count: 5, pii_count: 0, join_key_count: 1, measure_count: 1, semantic_counts: { business_key: 1, measure: 1 }, sample_row_count: 12840 }] : [],
-      enriched_metadata: { confidence: 'demo-fallback' },
+      enriched_metadata: { confidence: 'demo-fallback', stage: 'Column Extraction' },
       next_gate: 3,
-      resume_message: 'Demo fallback enrichment review is ready.',
+      resume_message: 'Demo fallback Column Review is ready.',
     }
   }
 
@@ -262,15 +267,15 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
             file_format: isFileSource ? 'csv' : 'table',
             primary_keys: ['policy_id'],
             watermark_column: 'ingested_at',
-            landing_path: `/demo/reused/${sourceRunName}/bronze/input`,
-            bronze_output_path: `/demo/reused/${sourceRunName}/bronze/output`,
-            checkpoint_path: `/demo/reused/${sourceRunName}/bronze/checkpoint`,
+            landing_path: '/demo/reused/' + sourceRunName + '/bronze/input',
+            bronze_output_path: '/demo/reused/' + sourceRunName + '/bronze/output',
+            checkpoint_path: '/demo/reused/' + sourceRunName + '/bronze/checkpoint',
             generated_bronze_script: buildBronzeScriptFromRun(previousSuccessfulRun, run, isFileSource),
           },
         ],
       },
       next_gate: 4,
-      resume_message: 'Bronze review is ready.',
+      resume_message: 'Demo fallback Bronze Code Review is ready.',
     }
   }
 
@@ -280,7 +285,7 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
         items: [
           {
             entity: isFileSource ? 'transactions_curated' : 'claims_curated',
-            bronze_source: `bronze.${isFileSource ? (run?.sftp_entity || 'transactions') : 'claims'}`,
+            bronze_source: 'bronze.' + (isFileSource ? (run?.sftp_entity || 'transactions') : 'claims'),
             transformations: ['standardize schema', 'deduplicate records'],
             type_casts: ['amount -> decimal(18,2)'],
             dq_rules: ['policy_id not null'],
@@ -291,7 +296,7 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
         ],
       },
       next_gate: 5,
-      resume_message: 'Silver review is ready.',
+      resume_message: 'Demo fallback Silver Code Review is ready.',
     }
   }
 
@@ -330,6 +335,7 @@ function HitlQueue() {
   const [submitting, setSubmitting] = useState(false)
   const [hydrating, setHydrating] = useState(false)
   const [tableReview, setTableReview] = useState(null)
+  const [tableReviewDecisions, setTableReviewDecisions] = useState({})
   const [selectedTables, setSelectedTables] = useState({})
   const [enrichmentReview, setEnrichmentReview] = useState(null)
   const [semanticDecisions, setSemanticDecisions] = useState({})
@@ -355,6 +361,7 @@ function HitlQueue() {
   }, [runs, selectedRunDetail, selectedRunId])
   const gateToReview = Number(currentRun?.next_gate || 0)
   const isReviewableRun = isReviewGateAccessible(currentRun)
+  const isGate1 = gateToReview === 1
   const isGate2 = gateToReview === 2
   const isGate3 = gateToReview === 3
   const isGate4 = gateToReview === 4
@@ -469,6 +476,7 @@ function HitlQueue() {
     setSemanticValidationError('')
     setBronzeReview(null)
     setSilverReview(null)
+    setTableReviewDecisions({})
     setSelectedTables({})
     setGateDecision('APPROVED')
     hydrationRequestRef.current += 1
@@ -609,48 +617,53 @@ function HitlQueue() {
         window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 1, source: expectedSource } }))
       } catch (error) {
         if (!isCurrentHydration()) return
-        const demoFallback = buildDemoGateFallback(currentRun, gateToReview || 1, isSftpRun, runs)
+        const demoFallback = ENABLE_DEMO_REVIEW_FALLBACKS ? buildDemoGateFallback(currentRun, gateToReview || 1, isSftpRun, runs) : null
         if (demoFallback) {
+          const fallbackPatch = {
+            ...demoFallback,
+            demo_review_fallback: true,
+            review_fallback_reason: error.message || 'Backend review data did not load in time.',
+          }
           if (gateToReview === 3) {
-            setEnrichmentReview(demoFallback)
-            updateRun(selectedRunId, demoFallback)
+            setEnrichmentReview(fallbackPatch)
+            updateRun(selectedRunId, fallbackPatch)
           } else if (gateToReview === 4) {
-            setBronzeReview(demoFallback)
-            updateRun(selectedRunId, demoFallback)
+            setBronzeReview(fallbackPatch)
+            updateRun(selectedRunId, fallbackPatch)
           } else if (gateToReview === 5) {
-            setSilverReview(demoFallback)
-            updateRun(selectedRunId, demoFallback)
+            setSilverReview(fallbackPatch)
+            updateRun(selectedRunId, fallbackPatch)
           } else if (gateToReview === 2) {
-            setTableReview(demoFallback)
+            setTableReview(fallbackPatch)
             setSelectedTables((prev) => {
               const next = { ...prev }
-              const items = isSftpRun ? getSftpFeeds(demoFallback) : (demoFallback.nominated_tables || [])
+              const items = isSftpRun ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
               for (const table of items) {
                 const key = isSftpRun ? sftpFeedKey(table) : tableReviewKey(table)
                 next[key] = true
               }
               return next
             })
-            updateRun(selectedRunId, demoFallback)
+            updateRun(selectedRunId, fallbackPatch)
           } else {
-            const mappedDemoKpis = (demoFallback.kpis || []).map(mapHitlRow)
+            const mappedDemoKpis = (fallbackPatch.kpis || []).map(mapHitlRow)
             setHitlQueue(selectedRunId, mappedDemoKpis)
-            updateRun(selectedRunId, { kpis: mappedDemoKpis, resume_message: 'Demo fallback KPI review is ready.' })
+            updateRun(selectedRunId, { kpis: mappedDemoKpis, resume_message: 'Demo fallback KPI review is ready.', demo_review_fallback: true, review_fallback_reason: fallbackPatch.review_fallback_reason })
           }
 
           addNotification({
-            type: 'success',
-            title: 'Review Content Ready',
-            message: `${isGate2 ? gate2Name : isGate3 ? gate3Name : isGate4 ? gate4Name : isGate5 ? gate5Name : gate1Name} is ready.`,
-            duration: 5000
+            type: 'amber',
+            title: 'Demo Fallback Used',
+            message: (isGate2 ? gate2Name : isGate3 ? gate3Name : isGate4 ? gate4Name : isGate5 ? gate5Name : gate1Name) + ' loaded fallback content after backend review data failed.',
+            duration: 7000
           })
           return
         }
 
         addNotification({
           type: 'error',
-          title: isGate2 ? `${gate2Name} Load Failed` : isGate3 ? `${gate3Name} Load Failed` : isGate4 ? `${gate4Name} Load Failed` : isGate5 ? `${gate5Name} Load Failed` : `${gate1Name} Load Failed`,
-          message: error.message || (isGate2 ? 'Unable to load table review data.' : isGate3 ? 'Unable to load enrichment review data.' : isGate4 ? 'Unable to load Bronze review data.' : isGate5 ? 'Unable to load Silver review data.' : 'Unable to load KPI review data.'),
+          title: (isGate2 ? gate2Name : isGate3 ? gate3Name : isGate4 ? gate4Name : isGate5 ? gate5Name : gate1Name) + ' Load Failed',
+          message: error.message || (isGate2 ? 'Unable to load table review data.' : isGate3 ? 'Unable to load column review data.' : isGate4 ? 'Unable to load Bronze review data.' : isGate5 ? 'Unable to load Silver review data.' : 'Unable to load KPI review data.'),
           duration: 5000
         })
       } finally {
@@ -687,6 +700,7 @@ function HitlQueue() {
   const selectedTableCount = (tableReview?.nominated_tables || []).filter((table) => selectedTables[tableReviewKey(table)]).length
   const availableSftpFeeds = getSftpFeeds(tableReview)
   const availableTableReviews = tableReview?.nominated_tables || []
+  const reviewedTableCount = availableTableReviews.filter((table) => tableReviewDecisions[tableReviewKey(table)]).length
   const selectedFeedCount = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length
   const totalFeedCount = availableSftpFeeds.length
   const bronzeReviewFeeds = bronzeReview?.bronze_review_artifact?.feeds || []
@@ -802,6 +816,22 @@ function HitlQueue() {
     } else {
       handleSelectAllTables()
     }
+  }
+
+  const handleApproveTableReview = (table) => {
+    const key = tableReviewKey(table)
+    setTableReviewDecisions((prev) => ({ ...prev, [key]: 'APPROVED' }))
+    setSelectedTables((prev) => ({ ...prev, [key]: true }))
+  }
+
+  const handleRejectTableReview = (table) => {
+    const key = tableReviewKey(table)
+    setTableReviewDecisions((prev) => ({ ...prev, [key]: 'REJECTED' }))
+    setSelectedTables((prev) => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
   }
 
   const handleSelectAllFeeds = () => {
@@ -1021,6 +1051,367 @@ function HitlQueue() {
     }
   }
 
+  if (selectedRunId && isReviewableRun && isGate1) {
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-4">
+        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto rounded-[28px] bg-[linear-gradient(180deg,#0a1020_0%,#070c16_100%)] px-5 py-6">
+          <div className="flex w-full max-w-6xl flex-col overflow-hidden rounded-[24px] border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
+            <div className="flex flex-col gap-4 border-b border-[#1d2940] px-5 py-5 md:flex-row md:items-center md:justify-between">
+              <div className="flex min-w-0 items-center gap-4">
+                <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-[10px] border border-[#5a3d13] bg-[#3a2a16] text-[#f4a912]">
+                  <Shield size={20} strokeWidth={2.2} />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-[18px] font-extrabold text-white">Action Required: {gate1Name}</h2>
+                  <p className="mt-1 text-sm text-[#b9c1cf]">
+                    {currentRun?.resume_message || 'Stage 04 completed. Review KPIs before the pipeline continues.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  disabled
+                  title="Add KPI is not connected to a backend create endpoint yet."
+                  className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] opacity-80"
+                >
+                  <PlusCircle size={16} className="text-[#12b886]" />
+                  Add KPI
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAutoApproveAll}
+                  className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
+                >
+                  <CheckCircle size={16} className="text-[#12b886]" />
+                  Auto-Approve Pending
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
+              {filteredQueue.length === 0 ? (
+                <div className="flex min-h-[220px] items-center justify-center rounded-[18px] border border-dashed border-[#263247] bg-[#0d1524] text-center">
+                  <div>
+                    <p className="text-sm font-semibold text-white">
+                      {queue.length === 0 ? `No KPIs in queue. Select a run with ${gate1Name} pending.` : 'No KPIs match the current filter.'}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                filteredQueue.map((kpi) => (
+                  <KpiReviewCard
+                    key={reviewItemKey(kpi)}
+                    kpi={{ ...kpi, ...(editedKpis[reviewItemKey(kpi)] || {}) }}
+                    localDecision={localDecisions[reviewItemKey(kpi)]}
+                    rejectionReason={rejectionReasons[reviewItemKey(kpi)]}
+                    onApprove={(id) => id ? handleApprove(id) : handleClearDecision(reviewItemKey(kpi))}
+                    onEdit={handleEdit}
+                    onReject={handleReject}
+                  />
+                ))
+              )}
+            </div>
+
+            <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#1d2940] bg-[#101726] px-5 py-4">
+              <p className="text-sm text-[#c6d2e8]">
+                <span className="font-semibold text-white">{kpiCounts.approved + kpiCounts.edited + kpiCounts.rejected}</span> / {kpiCounts.total} KPIs reviewed
+              </p>
+              <div className="flex items-center gap-3">
+                <button type="button" onClick={() => returnToMonitor(selectedRunId)} className="btn-secondary">
+                  Pause Pipeline
+                </button>
+                <button
+                  onClick={handleSubmit}
+                  disabled={hydrating || submitting || !selectedRunId || !allKpisDecided}
+                  className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {submitting ? 'Submitting...' : 'Submit Decisions & Resume'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (selectedRunId && isReviewableRun && isGate3) {
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-semibold text-white">Column Review</p>
+            <p className="text-xs text-[#8fa0bf]">Athena column extraction approval for the active run.</p>
+          </div>
+          {reviewRuns.length > 0 && (
+            <select
+              value={selectedRunId || ''}
+              onChange={(event) => {
+                setSelectedRunId(event.target.value)
+                setActiveRun(event.target.value)
+              }}
+              className="h-10 rounded-xl border border-[#253044] bg-[#0a1220] px-3 text-xs text-[#c6d2e8] outline-none"
+            >
+              {reviewRuns.map((run) => (
+                <option key={run.id} value={run.id}>
+                  {run.id.slice(0, 14)} - {run.brd_filename} (Gate {run.next_gate})
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto rounded-[28px] bg-[radial-gradient(circle_at_top,_rgba(44,87,150,0.2),_transparent_42%),linear-gradient(180deg,#09101c_0%,#060b14_100%)] px-5 py-6">
+          <div className="flex w-full max-w-5xl flex-col overflow-hidden rounded-[26px] border border-[#1d2940] bg-[#0d1729] shadow-[0_30px_90px_rgba(0,0,0,0.46)]">
+            <div className="flex flex-col gap-4 border-b border-[#1d2940] bg-[#10192c] px-6 py-5 md:flex-row md:items-center md:justify-between">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-[14px] border border-[#29496f] bg-[#11213a]">
+                  <Database size={22} className="text-[#78a9ff]" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-xl font-bold text-white">Column Review</h2>
+                  <p className="mt-1 text-sm text-[#a9b6cc]">
+                    Review extracted and enriched column metadata for {semanticReviewItems.length} item{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="rounded-[12px] border border-[#22304b] bg-[#0b1424] px-4 py-2 text-xs text-[#c6d2e8]">
+                  {selectedRunId?.slice(0, 14)} - {currentRun?.brd_filename || 'Active run'}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAutoApproveSemanticItems}
+                  className="inline-flex h-11 items-center gap-2 rounded-[12px] border border-[#2e845c] bg-[#112d21] px-4 text-sm font-semibold text-[#65d69e] transition-colors hover:bg-[#153925]"
+                >
+                  <CheckCircle size={15} />
+                  Auto-Approve Pending
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 space-y-4 overflow-y-auto bg-[#0b1220] p-6">
+              {semanticReviewItems.length === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center gap-4 py-16 text-center">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#131d30]">
+                    <Inbox size={28} className="text-[#6f809f]" />
+                  </div>
+                  <div>
+                    <p className="font-medium text-white">No Items Available</p>
+                    <p className="mt-1 text-sm text-[#8fa0bf]">
+                      The pipeline did not return any items for semantic review.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                semanticReviewItems.map((item) => {
+                  const key = semanticReviewItemKey(item)
+                  return (
+                    <SemanticReviewCard
+                      key={key}
+                      item={item}
+                      localDecision={semanticDecisions[key]}
+                      rejectionReason={semanticRejectionReasons[key]}
+                      onApprove={handleApproveSemanticItem}
+                      onReject={handleRejectSemanticItem}
+                    />
+                  )
+                })
+              )}
+            </div>
+
+            <div className="flex shrink-0 flex-col gap-3 border-t border-[#1d2940] bg-[#10192c] px-6 pb-5 pt-4">
+              {semanticValidationError && (
+                <div className="flex items-center gap-2 rounded-lg border border-accent-red/30 bg-accent-red/10 px-3 py-2 text-sm text-accent-red">
+                  <AlertTriangle size={14} />
+                  <span>{semanticValidationError}</span>
+                </div>
+              )}
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <p className="text-sm text-[#9ca9bd]">
+                  <span className="font-medium text-white">
+                    {semanticReviewItems.length - pendingSemanticReviewItems.length}
+                  </span>{' '}
+                  / {semanticReviewItems.length} items reviewed
+                </p>
+                <div className="flex gap-3">
+                  <button type="button" onClick={() => returnToMonitor(selectedRunId)} className="btn-secondary">
+                    Pause Pipeline
+                  </button>
+                  <button
+                    onClick={handleSubmit}
+                    disabled={!allSemanticReviewed || submitting}
+                    className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {submitting ? 'Saving...' : 'Submit Decisions & Resume'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (selectedRunId && isReviewableRun && isGate2 && !isSftpRun) {
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-4">
+        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto rounded-[28px] bg-[linear-gradient(180deg,#0a1020_0%,#070c16_100%)] px-5 py-6">
+          <div className="flex w-full max-w-6xl flex-col overflow-hidden rounded-[24px] border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
+            <div className="flex flex-col gap-4 border-b border-[#1d2940] px-5 py-5 md:flex-row md:items-center md:justify-between">
+              <div className="flex min-w-0 items-center gap-4">
+                <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-[10px] border border-[#244a93] bg-[#142952] text-[#69a0ff]">
+                  <Table2 size={20} strokeWidth={2.2} />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-[18px] font-extrabold text-white">Action Required: {gate2Name}</h2>
+                  <p className="mt-1 text-sm text-[#b9c1cf]">
+                    {tableReview?.resume_message || 'Stage 06 completed. Review nominated tables before the pipeline continues.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSelectAllTables()
+                    const next = {}
+                    availableTableReviews.forEach((table) => {
+                      next[tableReviewKey(table)] = 'APPROVED'
+                    })
+                    setTableReviewDecisions((prev) => ({ ...prev, ...next }))
+                  }}
+                  className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
+                >
+                  <CheckCircle size={16} className="text-[#12b886]" />
+                  Auto-Approve Pending
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
+              {availableTableReviews.length === 0 ? (
+                <div className="flex min-h-[220px] items-center justify-center rounded-[18px] border border-dashed border-[#263247] bg-[#0d1524] text-center">
+                  <div>
+                    <p className="text-sm font-semibold text-white">No nominated tables found for this run.</p>
+                  </div>
+                </div>
+              ) : (
+                availableTableReviews.map((table) => {
+                  const key = tableReviewKey(table)
+                  const decision = tableReviewDecisions[key]
+                  const confidence = Number(table.confidence_score || table.semantic_score || 0)
+                  const coverage = Number(table.coverage_ratio || table.lexical_score || 0)
+                  const matchedItems = Array.isArray(table.matched_keywords) ? table.matched_keywords : []
+
+                  return (
+                    <div
+                      key={key}
+                      className={`rounded-[16px] border px-5 py-5 transition-colors ${
+                        decision === 'APPROVED'
+                          ? 'border-[#1f5d4e] bg-[#112d2b]'
+                          : decision === 'REJECTED'
+                          ? 'border-[#723148] bg-[#2c1823]'
+                          : 'border-[#263247] bg-[#121a2b]'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <Database size={14} className="text-[#6ea2ff]" />
+                            <h3 className="truncate text-[15px] font-bold text-white">{table.table_name || table.name || table.entity || key}</h3>
+                            <span className="rounded-full border border-[#2e394d] bg-[#202938] px-2 py-0.5 text-[10px] font-semibold text-[#d5deec]">
+                              TABLE
+                            </span>
+                          </div>
+                          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-[#9ca8bb]">
+                            <span>{table.database_name || table.database || 'database'}</span>
+                            <span>›</span>
+                            <span>{table.schema_name || table.schema || 'schema'}</span>
+                            <span className="rounded-[6px] border border-[#1f5d4e] bg-[#11322f] px-2 py-1 text-[10px] font-semibold text-[#33d6a2]">
+                              Nominated
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-4">
+                        <div className="mb-2 flex items-center justify-between text-xs text-[#c6d2e8]">
+                          <span>Confidence</span>
+                          <span className="font-semibold text-[#ffb621]">{confidence.toFixed(3)}</span>
+                        </div>
+                        <div className="h-1.5 overflow-hidden rounded-full bg-[#243247]">
+                          <div className="h-full rounded-full bg-[#ffb621]" style={{ width: `${Math.max(8, Math.min(100, confidence * 100))}%` }} />
+                        </div>
+                      </div>
+
+                      <div className="mt-4 rounded-[10px] border border-[#263247] bg-[#0d1524] px-4 py-3 text-xs text-[#c8d2e5]">
+                        {table.nomination_reason || `Business coverage=${coverage.toFixed(3)}${matchedItems.length ? `, signals: ${matchedItems.join(', ')}` : ''}`}
+                      </div>
+
+                      {matchedItems.length > 0 && (
+                        <div className="mt-4">
+                          <div className="mb-2 text-xs text-[#9ca8bb]">Matching KPIs</div>
+                          <div className="flex flex-wrap gap-2">
+                            {matchedItems.map((item) => (
+                              <span key={`${key}:${item}`} className="rounded-full border border-[#2d64c3] bg-[#122a52] px-2 py-1 text-[10px] font-medium text-[#69a0ff]">
+                                {item}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="mt-4 flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleApproveTableReview(table)}
+                          className="flex-1 rounded-[10px] border border-[#14856d] bg-[#103533] px-4 py-2.5 text-sm font-semibold text-[#31d49f] transition-colors hover:bg-[#15413d]"
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRejectTableReview(table)}
+                          className="flex-1 rounded-[10px] border border-[#8a3148] bg-[#2a1823] px-4 py-2.5 text-sm font-semibold text-[#ff647f] transition-colors hover:bg-[#351d29]"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+
+            <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#1d2940] bg-[#101726] px-5 py-4">
+              <p className="text-sm text-[#c6d2e8]">
+                <span className="font-semibold text-white">{reviewedTableCount}</span> / {availableTableReviews.length} tables reviewed
+              </p>
+              <div className="flex items-center gap-3">
+                <button type="button" onClick={() => returnToMonitor(selectedRunId)} className="btn-secondary">
+                  Pause Pipeline
+                </button>
+                <button
+                  onClick={handleSubmit}
+                  disabled={hydrating || submitting || !selectedRunId || selectedTableCount === 0}
+                  className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {submitting ? 'Submitting...' : 'Submit Decisions & Resume'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-full gap-4">
       <div className="overflow-hidden rounded-[16px] border border-[#1d2940] bg-[#0f1829] shadow-[0_20px_80px_rgba(0,0,0,0.28)]">
@@ -1110,79 +1501,37 @@ function HitlQueue() {
         <div key={`${selectedRunId || 'none'}:${gateToReview || 0}:${currentRun?.source || 'unknown'}`} className="flex-1 overflow-y-auto pr-1 space-y-4 pb-20">
           {selectedRunId && isReviewableRun ? (
             isGate5 ? (
-            <div className="space-y-4">
-              <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
-                <h3 className="text-base font-bold text-text-primary mb-3">Silver Review</h3>
-                {silverReviewItems.length === 0 && (
-                  <div className="rounded-2xl border border-[#22304b] bg-[#0b1424] p-4 text-sm text-text-secondary">
-                    Silver scripts are not loaded yet. Submit is still available if {gate5Name} is pending.
-                  </div>
-                )}
-                {((silverReview?.silver_review_artifact?.items) || []).map((item, index) => (
-                  <div key={`${item.entity || index}`} className="mb-3 rounded-[20px] border border-[#22304b] bg-[#0f1a2e] p-4 space-y-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-semibold text-text-primary">{item.entity || 'Silver Item'}</div>
-                      <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-400">Ready</span>
-                    </div>
-                    <ReviewBlock label="Bronze Source" value={item.bronze_source || '-'} />
-                    <ReviewBlock label="Transformations" value={(item.transformations || []).join('\n') || '-'} />
-                    <ReviewBlock label="Type Casts" value={JSON.stringify(item.type_casts || [], null, 2)} />
-                    <ReviewBlock label="Dedup Logic" value={item.dedup_logic || '-'} />
-                    <ReviewBlock label="DQ Rules" value={(item.dq_rules || []).join('\n') || '-'} />
-                    <ReviewBlock label="PII Masking Rules" value={(item.pii_masking_rules || []).join('\n') || '-'} />
-                    <ReviewBlock label="Merge Strategy" value={item.merge_strategy || '-'} />
-                    <ReviewBlock label="Generated Silver Script" value={item.generated_silver_script || '-'} />
-                  </div>
-                ))}
-              </div>
-
-              <GateDecisionCard gateDecision={gateDecision} setGateDecision={setGateDecision} approveLabel="Approve Silver" rejectLabel="Reject Silver" regenerateLabel="Regenerate Silver" />
-              <button
-                onClick={handleSubmit}
-                disabled={hydrating || submitting || !selectedRunId}
-                className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-5 py-3 text-sm font-bold text-white shadow-lg transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {submitting ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
-                Submit {gate5Name} & Continue Pipeline
-              </button>
-            </div>
+            <CodeReviewPanel
+              title="Silver Code Review"
+              description={`Review ${silverReviewItems.length} generated script${silverReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.`}
+              emptyMessage={`Silver scripts are not loaded yet. Submit is still available if ${gate5Name} is pending.`}
+              items={buildSilverCodeReviewItems(silverReview?.silver_review_artifact?.items || [])}
+              reviewedCount={gateDecision ? silverReviewItems.length : 0}
+              totalCount={silverReviewItems.length}
+              decision={gateDecision}
+              setDecision={setGateDecision}
+              onPause={() => returnToMonitor(selectedRunId)}
+              onSubmit={handleSubmit}
+              submitting={submitting}
+              disabled={hydrating || submitting || !selectedRunId}
+              submitLabel="Submit & View Generated Code"
+            />
             ) : isGate4 ? (
-            <div className="space-y-4">
-              <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
-                <h3 className="text-base font-bold text-text-primary mb-3">Bronze Review</h3>
-                {bronzeReviewFeeds.length === 0 && (
-                  <div className="rounded-2xl border border-[#22304b] bg-[#0b1424] p-4 text-sm text-text-secondary">
-                    Bronze scripts are not loaded yet. Submit is still available if {gate4Name} is pending.
-                  </div>
-                )}
-                {((bronzeReview?.bronze_review_artifact?.feeds) || []).map((feed, index) => (
-                  <div key={`${feed.entity || index}`} className="mb-3 rounded-[20px] border border-[#22304b] bg-[#0f1a2e] p-4 space-y-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-semibold text-text-primary">{feed.vendor || 'Vendor'}.{feed.entity || 'Feed'}</div>
-                      <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-400">Ready</span>
-                    </div>
-                    <ReviewBlock label="Source Type" value={feed.source_type || '-'} />
-                    <ReviewBlock label="File Format" value={feed.file_format || '-'} />
-                    <ReviewBlock label="Primary Keys" value={(feed.primary_keys || []).join(', ') || '-'} />
-                    <ReviewBlock label="Watermark Column" value={feed.watermark_column || '-'} />
-                    <ReviewBlock label="Landing Path" value={feed.landing_path || '-'} />
-                    <ReviewBlock label="Bronze Output Path" value={feed.bronze_output_path || '-'} />
-                    <ReviewBlock label="Checkpoint Path" value={feed.checkpoint_path || '-'} />
-                    <ReviewBlock label="Generated Bronze Script" value={feed.generated_bronze_script || '-'} />
-                  </div>
-                ))}
-              </div>
-
-              <GateDecisionCard gateDecision={gateDecision} setGateDecision={setGateDecision} approveLabel="Approve Bronze" rejectLabel="Reject Bronze" regenerateLabel="Regenerate Bronze" />
-              <button
-                onClick={handleSubmit}
-                disabled={hydrating || submitting || !selectedRunId}
-                className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-5 py-3 text-sm font-bold text-white shadow-lg transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {submitting ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
-                Submit {gate4Name} & Generate Silver
-              </button>
-            </div>
+            <CodeReviewPanel
+              title="Bronze Code Review"
+              description={`Review ${bronzeReviewFeeds.length} generated script${bronzeReviewFeeds.length !== 1 ? 's' : ''} before the pipeline continues.`}
+              emptyMessage={`Bronze scripts are not loaded yet. Submit is still available if ${gate4Name} is pending.`}
+              items={buildBronzeCodeReviewItems(bronzeReview?.bronze_review_artifact?.feeds || [])}
+              reviewedCount={gateDecision ? bronzeReviewFeeds.length : 0}
+              totalCount={bronzeReviewFeeds.length}
+              decision={gateDecision}
+              setDecision={setGateDecision}
+              onPause={() => returnToMonitor(selectedRunId)}
+              onSubmit={handleSubmit}
+              submitting={submitting}
+              disabled={hydrating || submitting || !selectedRunId}
+              submitLabel="Submit & Generate Silver"
+            />
             ) : isGate3 ? (
             <div className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-bg-border bg-bg-card shadow-2xl">
               <div className="flex shrink-0 flex-col gap-4 border-b border-bg-border bg-bg-base/50 p-6 md:flex-row md:items-center md:justify-between">
@@ -1191,9 +1540,9 @@ function HitlQueue() {
                     <Database size={20} className="text-accent-blue" />
                   </div>
                   <div>
-                    <h2 className="text-xl font-bold text-text-primary">Enrichment Review</h2>
+                    <h2 className="text-xl font-bold text-text-primary">Column Review</h2>
                     <p className="text-sm text-text-secondary">
-                      Review semantic enrichment for {semanticReviewItems.length} item{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
+                      Review extracted and enriched column metadata for {semanticReviewItems.length} item{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
                     </p>
                   </div>
                 </div>
@@ -1449,7 +1798,7 @@ function HitlQueue() {
         </div>
       </div>
 
-      {canSubmitReview && !isGate3 && (
+      {canSubmitReview && !isGate3 && !isGate4 && !isGate5 && (
         <motion.div
           initial={{ y: 80, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
@@ -1612,9 +1961,9 @@ function buildSemanticReviewSource(enrichmentReview, currentRun, runId) {
     return {
       ...source,
       queue_id: source.queue_id || `${runId || source.id || 'run'}-semantic-enrichment-fallback`,
-      table_name: source.table_name || source.entity || source.display_name || source.name || 'Semantic Enrichment',
+      table_name: source.table_name || source.entity || source.display_name || source.name || 'Column Review',
       enriched_columns: [],
-      resume_message: source.resume_message || 'Stage 03 completed. Review semantic enrichment before the pipeline continues.',
+      resume_message: source.resume_message || 'Column Extraction completed. Review extracted and enriched column metadata before the pipeline continues.',
       is_fallback_artifact: true,
     }
   }
@@ -1638,6 +1987,7 @@ function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
       item_detail: {
         table_name: feed.feed_id || feed.entity || feed.table_name || `Feed ${index + 1}`,
         columns: normalizeSemanticColumns(feed.enriched_columns || feed.columns || feed.semantic_columns || []),
+        table_summary: feed.table_summary || feed.summary || `${feed.entity || feed.table_name || 'Feed'} column extraction summary.`,
       },
       decision: feed.decision,
       reviewer_id: feed.reviewer_id,
@@ -1650,11 +2000,12 @@ function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
   return [
     {
       queue_id: enrichmentReview.queue_id || `${runId || 'run'}-semantic-enrichment`,
-      item_id: enrichmentReview.entity || enrichmentReview.table_name || 'Semantic Enrichment',
+      item_id: enrichmentReview.entity || enrichmentReview.table_name || 'Column Review',
       item_type: 'ENRICHMENT',
       item_detail: {
-        table_name: enrichmentReview.entity || enrichmentReview.table_name || 'Semantic Enrichment',
+        table_name: enrichmentReview.entity || enrichmentReview.table_name || 'Column Review',
         columns: normalizeSemanticColumns(enrichmentReview.enriched_columns || []),
+        table_summary: enrichmentReview.table_summary || enrichmentReview.summary || 'Column extraction and enrichment summary.',
       },
       decision: enrichmentReview.decision,
       reviewer_id: enrichmentReview.reviewer_id,
@@ -1902,76 +2253,180 @@ function FileSemanticFeedCard({ feed }) {
 
 export default HitlQueue
 
-function GateDecisionCard({ gateDecision, setGateDecision, approveLabel, rejectLabel, regenerateLabel }) {
+function CodeReviewPanel({
+  title,
+  description,
+  emptyMessage,
+  items,
+  reviewedCount,
+  totalCount,
+  decision,
+  setDecision,
+  onPause,
+  onSubmit,
+  submitting,
+  disabled,
+  submitLabel,
+}) {
+  const [expandedKey, setExpandedKey] = useState(items[0]?.key || null)
+  const [draftItems, setDraftItems] = useState(items)
+
+  useEffect(() => {
+    if (!items.length) {
+      setExpandedKey(null)
+      setDraftItems([])
+      return
+    }
+    setDraftItems(items)
+    if (!items.some((item) => item.key === expandedKey)) setExpandedKey(items[0].key)
+  }, [items, expandedKey])
+
+  const updateItemCode = (key, code) => {
+    setDraftItems((current) => current.map((item) => (
+      item.key === key ? { ...item, code, edited: true } : item
+    )))
+  }
+
   return (
-    <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-5">
-      <h3 className="text-base font-bold text-text-primary mb-3">Decision</h3>
-      <div className="grid grid-cols-3 gap-3">
+    <div className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#0f1829] shadow-2xl">
+      <div className="flex shrink-0 flex-col gap-4 border-b border-[#1d2940] bg-[#101726] p-6 md:flex-row md:items-center md:justify-between">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#163b74] text-[#4fa3ff]">
+            <Copy size={20} />
+          </div>
+          <div>
+            <h2 className="text-xl font-extrabold text-white">{title}</h2>
+            <p className="text-sm text-[#c6d2e8]">{description}</p>
+          </div>
+        </div>
         <button
-          onClick={() => setGateDecision('APPROVED')}
-          className={`px-4 py-3 rounded-lg border text-sm font-semibold transition-colors ${
-            gateDecision === 'APPROVED'
-              ? 'bg-accent-green/15 border-accent-green/30 text-accent-green'
-              : 'border-bg-border text-text-secondary hover:border-gray-600'
-          }`}
+          type="button"
+          onClick={() => setDecision('APPROVED')}
+          className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#202b3a] px-4 text-sm font-bold text-[#c6d2e8] transition-colors hover:bg-[#263449] hover:text-white"
         >
-          {approveLabel}
+          <CheckCircle size={14} className="text-[#12b886]" />
+          Auto-Approve Pending
         </button>
-        <button
-          onClick={() => setGateDecision('REJECTED')}
-          className={`px-4 py-3 rounded-lg border text-sm font-semibold transition-colors ${
-            gateDecision === 'REJECTED'
-              ? 'bg-accent-red/15 border-accent-red/30 text-accent-red'
-              : 'border-bg-border text-text-secondary hover:border-gray-600'
-          }`}
-        >
-          {rejectLabel}
-        </button>
-        <button
-          onClick={() => setGateDecision('REGENERATE')}
-          className={`px-4 py-3 rounded-lg border text-sm font-semibold transition-colors ${
-            gateDecision === 'REGENERATE'
-              ? 'bg-accent-blue/15 border-accent-blue/30 text-accent-blue'
-              : 'border-bg-border text-text-secondary hover:border-gray-600'
-          }`}
-        >
-          {regenerateLabel}
-        </button>
+      </div>
+
+      <div className="flex-1 space-y-4 overflow-y-auto bg-[#0b1220] p-6">
+        {draftItems.length === 0 ? (
+          <div className="rounded-2xl border border-[#22304b] bg-[#0b1424] p-4 text-sm text-[#c6d2e8]">
+            {emptyMessage}
+          </div>
+        ) : (
+          draftItems.map((item) => (
+            <CodeReviewItem
+              key={item.key}
+              item={item}
+              expanded={expandedKey === item.key}
+              onToggle={() => setExpandedKey((current) => (current === item.key ? null : item.key))}
+              onCodeChange={(code) => updateItemCode(item.key, code)}
+              onApprove={() => setDecision('APPROVED')}
+              onReject={() => setDecision('REJECTED')}
+              decision={decision}
+            />
+          ))
+        )}
+      </div>
+
+      <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#1d2940] bg-[#101726] px-6 py-4">
+        <p className="text-sm text-[#c6d2e8]">
+          <span className="font-semibold text-white">{reviewedCount}</span> / {totalCount} items reviewed
+        </p>
+        <div className="flex items-center gap-3">
+          <div className="hidden items-center gap-2 lg:flex">
+            <button
+              type="button"
+              onClick={() => setDecision('APPROVED')}
+              className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
+                decision === 'APPROVED'
+                  ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300'
+                  : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/15'
+              }`}
+            >
+              Approve Gate
+            </button>
+            <button
+              type="button"
+              onClick={() => setDecision('REJECTED')}
+              className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
+                decision === 'REJECTED'
+                  ? 'border-red-400 bg-red-500/20 text-red-300'
+                  : 'border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/15'
+              }`}
+            >
+              Reject Gate
+            </button>
+            <button
+              type="button"
+              onClick={() => setDecision('REGENERATE')}
+              className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
+                decision === 'REGENERATE'
+                  ? 'border-[#3f82ff] bg-[#3f82ff]/20 text-[#78a9ff]'
+                  : 'border-[#3f82ff]/30 bg-[#3f82ff]/10 text-[#78a9ff] hover:bg-[#3f82ff]/15'
+              }`}
+            >
+              Regenerate
+            </button>
+          </div>
+          <button type="button" onClick={onPause} className="btn-secondary">
+            Pause Pipeline
+          </button>
+          <button
+            type="button"
+            onClick={onSubmit}
+            disabled={disabled}
+            className="inline-flex items-center gap-2 rounded-lg bg-accent-blue px-5 py-3 text-sm font-bold text-white shadow-lg transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {submitting ? <Loader2 size={15} className="animate-spin" /> : <Copy size={15} />}
+            {submitting ? 'Submitting...' : submitLabel}
+          </button>
+        </div>
       </div>
     </div>
   )
 }
 
-function ReviewBlock({ label, value }) {
-  const text = value || '-'
-  const isScript = /script/i.test(label) && text !== '-'
-
-  const copyValue = async () => {
-    await navigator.clipboard.writeText(text)
-  }
-
-  const downloadValue = () => {
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
-    const url = window.URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    const fileName = `${label || 'generated_script'}`.replace(/[^\w.-]+/g, '_').toLowerCase()
-    anchor.href = url
-    anchor.download = fileName.endsWith('.py') ? fileName : `${fileName}.py`
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    window.URL.revokeObjectURL(url)
-  }
+function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onReject, decision }) {
+  const approved = decision === 'APPROVED'
+  const rejected = decision === 'REJECTED'
 
   return (
-    <div>
-      <div className="mb-1 flex items-center justify-between gap-3">
-        <div className="text-[11px] uppercase tracking-wider text-[#7f8eab]">{label}</div>
-        {isScript && (
-          <div className="flex items-center gap-2">
+    <div className="rounded-xl border border-[#22304b] bg-[#101827] p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <Copy size={15} className="flex-shrink-0 text-[#4fa3ff]" />
+            <h3 className="truncate text-sm font-extrabold text-white">{item.title}</h3>
+            <span className="rounded-full bg-[#334155] px-2 py-1 text-[10px] font-extrabold text-[#d7dfed]">
+              {item.type}
+            </span>
+            {item.edited && (
+              <span className="rounded-full border border-[#3f82ff]/35 bg-[#3f82ff]/10 px-2 py-1 text-[10px] font-bold text-[#78a9ff]">
+                Edited in UI
+              </span>
+            )}
+          </div>
+          <div className="mt-3 text-xs text-[#91a4cb]">Queued: {item.queuedAt || 'Pending review'}</div>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        onClick={onToggle}
+        className="mt-3 inline-flex items-center gap-2 text-xs font-bold text-[#c6d2e8] hover:text-white"
+      >
+        <span className="text-[10px] text-[#91a4cb]">{expanded ? '⌃' : '⌄'}</span>
+        {expanded ? 'Hide code' : 'Preview code'}
+      </button>
+
+      {expanded && (
+        <div className="mt-3">
+          <div className="mb-2 flex justify-end gap-2">
             <button
               type="button"
-              onClick={copyValue}
+              onClick={() => copyCode(item.code)}
               className="inline-flex items-center gap-1 rounded-md border border-[#22304b] px-2 py-1 text-[10px] font-semibold text-[#aab8d0] hover:border-[#3f82ff] hover:text-white"
             >
               <Copy size={11} />
@@ -1979,18 +2434,110 @@ function ReviewBlock({ label, value }) {
             </button>
             <button
               type="button"
-              onClick={downloadValue}
+              onClick={() => downloadCode(item)}
               className="inline-flex items-center gap-1 rounded-md border border-[#22304b] px-2 py-1 text-[10px] font-semibold text-[#aab8d0] hover:border-[#3f82ff] hover:text-white"
             >
               <Download size={11} />
               Download
             </button>
           </div>
-        )}
+          <textarea
+            value={item.code || '# Generated code is not available yet.'}
+            onChange={(event) => onCodeChange(event.target.value)}
+            spellCheck={false}
+            className="min-h-[180px] w-full resize-y rounded-lg border border-[#22304b] bg-[#09111f] p-3 font-mono text-xs leading-relaxed text-[#9bd384] outline-none transition-colors focus:border-[#3f82ff]"
+          />
+          <div className="mt-2 text-[11px] text-[#91a4cb]">
+            Edits are local to this review screen. Copy/download uses the edited draft; backend approval still submits the gate decision.
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4 grid gap-2 md:grid-cols-2">
+        <button
+          type="button"
+          onClick={onApprove}
+          className={`rounded-lg border px-4 py-2 text-sm font-bold transition-colors ${
+            approved
+              ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300'
+              : 'border-emerald-500/35 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/15'
+          }`}
+        >
+          ✓ Approve
+        </button>
+        <button
+          type="button"
+          onClick={onReject}
+          className={`rounded-lg border px-4 py-2 text-sm font-bold transition-colors ${
+            rejected
+              ? 'border-red-400 bg-red-500/20 text-red-300'
+              : 'border-red-500/35 bg-red-500/10 text-red-400 hover:bg-red-500/15'
+          }`}
+        >
+          × Reject
+        </button>
       </div>
-      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-[#22304b] bg-[#09111f] p-3 text-xs text-text-secondary">
-        {text}
-      </pre>
     </div>
   )
+}
+
+function buildBronzeCodeReviewItems(feeds) {
+  return feeds.map((feed, index) => ({
+    key: `bronze-${feed.entity || feed.vendor || index}`,
+    title: [feed.vendor, feed.entity || feed.feed_name || feed.table_name].filter(Boolean).join('.') || `bronze_script_${index + 1}`,
+    type: 'BRONZE',
+    queuedAt: formatReviewTimestamp(feed.queued_at || feed.created_at || feed.updated_at),
+    code: feed.generated_bronze_script || feed.script_body || JSON.stringify(stripEmptyReviewFields(feed), null, 2),
+    fileName: `${feed.entity || feed.feed_name || `bronze_script_${index + 1}`}.py`,
+  }))
+}
+
+function buildSilverCodeReviewItems(items) {
+  return items.map((item, index) => {
+    const title = item.script_name || item.entity || item.target_table || item.table_name || `silver_script_${index + 1}`
+    return {
+      key: `silver-${title}-${index}`,
+      title,
+      type: title.toLowerCase().includes('merge_key') || item.merge_strategy || item.merge_key_source ? 'MERGE_KEY' : 'SILVER',
+      queuedAt: formatReviewTimestamp(item.queued_at || item.created_at || item.updated_at),
+      code: item.generated_silver_script || item.script_body || JSON.stringify(stripEmptyReviewFields(item), null, 2),
+      fileName: `${title}.py`,
+    }
+  })
+}
+
+function stripEmptyReviewFields(value) {
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value).filter(([, fieldValue]) => {
+      if (fieldValue === null || fieldValue === undefined || fieldValue === '') return false
+      if (Array.isArray(fieldValue) && fieldValue.length === 0) return false
+      return true
+    })
+  )
+}
+
+function formatReviewTimestamp(value) {
+  if (!value) return new Date().toLocaleString('en-IN')
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toLocaleString('en-IN')
+}
+
+async function copyCode(value) {
+  await navigator.clipboard.writeText(value || '')
+}
+
+function downloadCode(item) {
+  const blob = new Blob([item.code || ''], { type: 'text/plain;charset=utf-8' })
+  const url = window.URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  const fallbackName = `${item.title || 'generated_script'}`.replace(/[^\w.-]+/g, '_').toLowerCase()
+  const requestedName = item.fileName || fallbackName
+  anchor.href = url
+  anchor.download = requestedName.endsWith('.py') ? requestedName : `${requestedName}.py`
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.URL.revokeObjectURL(url)
 }

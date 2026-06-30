@@ -335,6 +335,10 @@ function PipelineMonitor() {
       }
     })
   }, [phases, shouldDebouncePhaseSwitch, visiblePhaseIndex])
+  const renderedPhases = useMemo(
+    () => displayPhases.map((phase) => buildPipelineDisplayPhase(phase, displaySteps)),
+    [displayPhases, displaySteps]
+  )
 
   const defaultExpandedPhase = useMemo(() => {
     if (!displayPhases?.length) return 'phase-1'
@@ -670,6 +674,13 @@ function PipelineMonitor() {
     }
   }
 
+  const handleOpenLineage = (preferredLayer = '') => {
+    if (!activeRun?.id) return
+    const params = new URLSearchParams({ runId: String(activeRun.id) })
+    if (preferredLayer) params.set('layer', preferredLayer)
+    navigate(`/app/data-migration?${params.toString()}`)
+  }
+
   return (
     <div className="flex h-full min-h-[calc(100vh-116px)] flex-col">
       <div className="mb-7 flex flex-col gap-4">
@@ -788,7 +799,7 @@ function PipelineMonitor() {
       <div className="grid min-h-0 flex-1 gap-5 xl:grid-cols-[520px_minmax(0,1fr)]">
         <section className="min-h-0 overflow-hidden rounded-lg border border-[#253044] bg-[#080e1d]">
           <div className="divide-y divide-[#253044]">
-            {displayPhases.map((phase, index) => {
+            {renderedPhases.map((phase, index) => {
               const expanded = expandedPhase === phase.id
               const tone = statusTone(phase.status)
               return (
@@ -839,13 +850,22 @@ function PipelineMonitor() {
                 <div className="text-sm font-semibold text-white">Generated Scripts</div>
                 <div className="mt-1 text-xs text-[#7d8daa]">Click Bronze, Silver, or Gold to preview generated artifacts.</div>
               </div>
-              <button
-                type="button"
-                onClick={() => handleOpenScriptsFullView()}
-                className="rounded-lg border border-[#34547f] px-3 py-2 text-xs font-semibold text-[#bcd4ff] transition-colors hover:bg-[#132849]"
-              >
-                Full View
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleOpenLineage(selectedScriptLayer)}
+                  className="rounded-lg border border-[#2f6e62] px-3 py-2 text-xs font-semibold text-[#b7f5e7] transition-colors hover:bg-[#12352f]"
+                >
+                  View Lineage
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleOpenScriptsFullView()}
+                  className="rounded-lg border border-[#34547f] px-3 py-2 text-xs font-semibold text-[#bcd4ff] transition-colors hover:bg-[#132849]"
+                >
+                  Full View
+                </button>
+              </div>
             </div>
 
             <div className="mb-3 grid grid-cols-3 gap-2">
@@ -1094,13 +1114,22 @@ function PipelineMonitor() {
                         Copy or download the generated script, then continue to {stageConfirmation.next_stage_label || 'the next stage'}.
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => handleOpenScriptsFullView(stageScriptReview.layer)}
-                      className="rounded-lg border border-[#34547f] px-3 py-2 text-xs font-semibold text-[#bcd4ff] transition-colors hover:bg-[#132849]"
-                    >
-                      Open Full Script View
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenLineage(stageScriptReview.layer)}
+                        className="rounded-lg border border-[#2f6e62] px-3 py-2 text-xs font-semibold text-[#b7f5e7] transition-colors hover:bg-[#12352f]"
+                      >
+                        View Lineage
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenScriptsFullView(stageScriptReview.layer)}
+                        className="rounded-lg border border-[#34547f] px-3 py-2 text-xs font-semibold text-[#bcd4ff] transition-colors hover:bg-[#132849]"
+                      >
+                        Open Full Script View
+                      </button>
+                    </div>
                   </div>
 
                   <div className="space-y-3">
@@ -1380,6 +1409,142 @@ function formatScriptBody(script) {
   const body = script?.body || '# Script body is not available.'
   if (!script?.dimension_body) return body
   return `${body}\n\n# ---------------- Gold dimension script ----------------\n\n${script.dimension_body}`
+}
+
+function buildPipelineDisplayPhase(phase, allSteps = []) {
+  const steps = Array.isArray(phase?.steps) ? phase.steps : []
+  const byKey = new Map([...allSteps, ...steps].map((step) => [step.key, step]))
+  const phaseState = phaseStatusToStepState(phase.status)
+  const makeStep = (key, label, fallbackState = phaseState) => {
+    const step = byKey.get(key)
+    return {
+      ...(step || {}),
+      key,
+      label,
+      state: step?.state || fallbackState,
+      detail: step?.detail || '',
+      complete: isCompletedStepState(step?.state || fallbackState),
+    }
+  }
+  const makeSynthetic = (key, label, state) => ({
+    key,
+    label,
+    state: state || phaseState,
+    detail: '',
+    complete: isCompletedStepState(state || phaseState),
+  })
+
+  let displaySteps = steps
+
+  if (phase.id === 'phase-1') {
+    displaySteps = [
+      makeStep('ingestion', 'BRD Ingestion'),
+      makeStep('memory', 'Memory Intelligence'),
+      makeStep('requirements', 'Requirement Extraction'),
+      makeStep('kpis', 'KPI Extraction'),
+      makeStep('gate1', 'KPI Review', reviewAwareStepState(byKey.get('gate1'), phase)),
+    ].filter((step) => byKey.has(step.key) || step.key !== 'memory')
+  } else if (phase.id === 'phase-2') {
+    displaySteps = [
+      makeStep('nomination', 'Table Extraction'),
+      makeStep('gate2', byKey.has('gate2') && String(byKey.get('gate2')?.label || '').toLowerCase().includes('feed') ? 'Feed Review' : 'Table Review', reviewAwareStepState(byKey.get('gate2'), phase)),
+      makeSynthetic(
+        'column_extraction',
+        'Column Extraction',
+        combineStepStates(
+          byKey.get('discovery')?.state,
+          byKey.get('schema')?.state,
+          byKey.get('profiling')?.state,
+          byKey.get('enrichment')?.state,
+          phaseState
+        )
+      ),
+      makeStep('gate3', 'Column Review', reviewAwareStepState(byKey.get('gate3'), phase)),
+    ]
+  } else if (phase.id === 'phase-3') {
+    const bronzeState = byKey.get('bronze')?.state || phaseState
+    const gate4State = reviewAwareStepState(byKey.get('gate4'), phase)
+    displaySteps = [
+      makeStep('bronze', 'Bronze Code Generation'),
+      makeStep('gate4', 'Bronze Review', gate4State),
+      makeSynthetic('bronze_code_execution', 'Bronze Code Execution', inferExecutionDisplayState(bronzeState, byKey.get('gate4')?.state, phase.status)),
+    ]
+  } else if (phase.id === 'phase-4') {
+    const silverState = byKey.get('silver')?.state || phaseState
+    const gate5State = reviewAwareStepState(byKey.get('gate5'), phase)
+    displaySteps = [
+      makeSynthetic('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverState),
+      makeSynthetic('silver_merge_key_review', 'Silver Merge Key Review', gate5State),
+      makeStep('silver', 'Silver Code Generation'),
+      makeStep('gate5', 'Silver Review', gate5State),
+      makeSynthetic('silver_code_execution', 'Silver Code Execution', inferExecutionDisplayState(silverState, byKey.get('gate5')?.state, phase.status)),
+    ]
+  } else if (phase.id === 'phase-5') {
+    const goldState = byKey.get('gold')?.state || phaseState
+    displaySteps = [
+      makeStep('gold', 'Gold Code Generation'),
+      makeSynthetic('gold_code_execution', 'Gold Code Execution', inferExecutionDisplayState(goldState, undefined, phase.status)),
+    ]
+  }
+
+  const completed = displaySteps.filter((step) => isCompletedStepState(step.state)).length
+  const waiting = displaySteps.find((step) => step.state === 'HITL_WAIT')
+  const running = displaySteps.find((step) => step.state === 'RUNNING')
+  const failed = displaySteps.find((step) => step.state === 'FAILED')
+  let status = phase.status
+  if (failed) status = 'Failed'
+  else if (waiting) status = 'Review'
+  else if (running) status = 'Running'
+  else if (displaySteps.length && completed === displaySteps.length) status = 'Done'
+
+  return {
+    ...phase,
+    steps: displaySteps,
+    completed,
+    total: displaySteps.length,
+    status,
+  }
+}
+
+function phaseStatusToStepState(status) {
+  const value = String(status || '').toLowerCase()
+  if (value === 'done') return 'COMPLETED'
+  if (value === 'running') return 'RUNNING'
+  if (value === 'review') return 'HITL_WAIT'
+  if (value === 'failed') return 'FAILED'
+  return 'PENDING'
+}
+
+function reviewAwareStepState(step, phase) {
+  if (step?.state) return step.state
+  if (phase.status === 'Review') return 'HITL_WAIT'
+  return phaseStatusToStepState(phase.status)
+}
+
+function inferExecutionDisplayState(generationState, reviewState, phaseStatus) {
+  const normalizedGeneration = String(generationState || '').toUpperCase()
+  const normalizedReview = String(reviewState || '').toUpperCase()
+  if (phaseStatus === 'Done') return 'COMPLETED'
+  if (normalizedReview === 'COMPLETED' && normalizedGeneration === 'COMPLETED') return 'COMPLETED'
+  if (normalizedReview === 'HITL_WAIT' || normalizedReview === 'PAUSED_FOR_HITL') return 'PENDING'
+  if (normalizedGeneration === 'RUNNING') return 'PENDING'
+  return phaseStatusToStepState(phaseStatus) === 'FAILED' ? 'FAILED' : 'PENDING'
+}
+
+function combineStepStates(...statesWithFallback) {
+  const fallbackState = statesWithFallback[statesWithFallback.length - 1] || 'PENDING'
+  const states = statesWithFallback
+    .slice(0, -1)
+    .map((state) => String(state || fallbackState || 'PENDING').toUpperCase())
+  if (states.includes('FAILED')) return 'FAILED'
+  if (states.includes('RUNNING') || states.includes('PROCESSING') || states.includes('IN_PROGRESS')) return 'RUNNING'
+  if (states.includes('HITL_WAIT') || states.includes('PAUSED_FOR_HITL') || states.includes('PENDING_REVIEW')) return 'HITL_WAIT'
+  if (states.length && states.every((state) => isCompletedStepState(state))) return 'COMPLETED'
+  return fallbackState || 'PENDING'
+}
+
+function isCompletedStepState(state) {
+  return ['COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'].includes(String(state || '').toUpperCase())
 }
 
 export default PipelineMonitor

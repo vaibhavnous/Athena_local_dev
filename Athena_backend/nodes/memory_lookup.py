@@ -1,58 +1,23 @@
 from __future__ import annotations
 
 import json
-import io
 import os
 from typing import Any, Dict, List, Optional, Tuple
-from contextlib import redirect_stderr, redirect_stdout
 
 from pinecone import Pinecone
 
 from nodes.ingestion import _chunk_and_embed, finalize_ingestion_after_memory
 from state import Stage01State
 from utilis.db import artifact_storage_fingerprint, config, get_pipeline_connection
+from utilis.embeddings import get_embedding_model
 from utilis.env import load_backend_env
 from utilis.logger import logger
 
 
 load_backend_env()
-DEV_MODE = os.getenv("DEV_MODE", "").strip().lower() in {"1", "true", "yes", "on", "dev"}
-
 db_conf = config.get("azure_sql", {})
 db_schema = db_conf.get("schema_name", "dbo")
 pinecone_conf = config.get("pinecone", {})
-
-_EMB_MODEL: Optional[SentenceTransformer] = None
-
-
-def _get_embedding_model(*, log_context: dict) -> Optional[SentenceTransformer]:
-    """
-    Lazily initialize the local embedding model.
-
-    Importing this module should not require network access (HF downloads).
-    If the model isn't available locally and can't be downloaded, we skip
-    semantic memory lookup gracefully.
-    """
-    global _EMB_MODEL
-    if _EMB_MODEL is not None:
-        return _EMB_MODEL
-    try:
-        if os.getenv("ATHENA_ENABLE_EMBEDDINGS", "").strip().lower() not in {"1", "true", "yes", "on"}:
-            logger.info("Semantic memory lookup deferred; continuing with exact artifact history", extra=log_context)
-            return None
-
-        from sentence_transformers import SentenceTransformer
-
-        if DEV_MODE:
-            _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
-        else:
-            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
-        return _EMB_MODEL
-    except Exception as exc:
-        logger.info("Semantic memory lookup deferred; continuing with exact artifact history: %s", exc, extra=log_context)
-        _EMB_MODEL = None
-        return None
 
 
 def _copy_state(state: Stage01State) -> Stage01State:
@@ -208,7 +173,7 @@ def _run_semantic_lookup(state: Stage01State, log_context: dict) -> Stage01State
     logger.info("START: semantic lookup", extra=log_context)
 
     try:
-        model = _get_embedding_model(log_context=log_context)
+        model = get_embedding_model(log_context=log_context)
         if model is None:
             new_state["memory_layer2"] = False
             return new_state
@@ -228,7 +193,7 @@ def _run_semantic_lookup(state: Stage01State, log_context: dict) -> Stage01State
             new_state["memory_layer2"] = False
             return new_state
 
-        emb = model.encode(text).tolist()
+        emb = model.embed_query(text)
         namespace = "global"
 
         res = pinecone_index.query(

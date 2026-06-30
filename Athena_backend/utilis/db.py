@@ -5,6 +5,7 @@ import json
 import hashlib
 import time
 import socket
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
@@ -58,10 +59,16 @@ config = {
 }
 
 FINGERPRINT_MAX_LEN = 64
-SQL_CONNECT_RETRIES = max(1, int(os.getenv("ATHENA_SQL_CONNECT_RETRIES", "3")))
+SQL_CONNECT_RETRIES = max(1, int(os.getenv("ATHENA_SQL_CONNECT_RETRIES", "1")))
 SQL_CONNECT_RETRY_DELAY_SECONDS = float(os.getenv("ATHENA_SQL_CONNECT_RETRY_DELAY_SECONDS", "1"))
-SQL_TCP_PROBE_TIMEOUT_SECONDS = float(os.getenv("ATHENA_SQL_TCP_PROBE_TIMEOUT_SECONDS", "5"))
+SQL_TCP_PROBE_TIMEOUT_SECONDS = float(os.getenv("ATHENA_SQL_TCP_PROBE_TIMEOUT_SECONDS", "2"))
+SQL_TCP_PROBE_ENABLED = str(os.getenv("ATHENA_SQL_TCP_PROBE_ENABLED", "true")).lower() not in {"0", "false", "no"}
+SQL_FAIL_FAST_ON_TCP_PROBE = str(os.getenv("ATHENA_SQL_FAIL_FAST_ON_TCP_PROBE", "true")).lower() not in {"0", "false", "no"}
+SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS = max(0, float(os.getenv("ATHENA_SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS", "60")))
 NETWORK_ERROR_MARKERS = ("08S01", "10060", "10061", "10054", "08001")
+_SQL_ENDPOINT_FAILURE_CACHE: Dict[tuple[str, str, int, str], tuple[float, str]] = {}
+_SQL_ENDPOINT_FAILURE_LOCK = threading.Lock()
+_SQL_ENDPOINT_PROBE_LOCK = threading.Lock()
 
 
 def _get_pyodbc():
@@ -151,6 +158,40 @@ def _probe_sql_endpoint(host: str, port: int, timeout_seconds: float) -> Optiona
         return exc
 
 
+def _sql_endpoint_cache_key(*, role: str, host: str, port: int, database_name: str) -> tuple[str, str, int, str]:
+    return (role, str(host or "").lower(), int(port or 1433), str(database_name or "").lower())
+
+
+def _get_cached_sql_endpoint_failure(*, role: str, host: str, port: int, database_name: str) -> Optional[str]:
+    if SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS <= 0:
+        return None
+    key = _sql_endpoint_cache_key(role=role, host=host, port=port, database_name=database_name)
+    now = time.monotonic()
+    with _SQL_ENDPOINT_FAILURE_LOCK:
+        cached = _SQL_ENDPOINT_FAILURE_CACHE.get(key)
+        if not cached:
+            return None
+        expires_at, message = cached
+        if expires_at > now:
+            return message
+        _SQL_ENDPOINT_FAILURE_CACHE.pop(key, None)
+    return None
+
+
+def _cache_sql_endpoint_failure(*, role: str, host: str, port: int, database_name: str, message: str) -> None:
+    if SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS <= 0:
+        return
+    key = _sql_endpoint_cache_key(role=role, host=host, port=port, database_name=database_name)
+    with _SQL_ENDPOINT_FAILURE_LOCK:
+        _SQL_ENDPOINT_FAILURE_CACHE[key] = (time.monotonic() + SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS, message)
+
+
+def _clear_sql_endpoint_failure(*, role: str, host: str, port: int, database_name: str) -> None:
+    key = _sql_endpoint_cache_key(role=role, host=host, port=port, database_name=database_name)
+    with _SQL_ENDPOINT_FAILURE_LOCK:
+        _SQL_ENDPOINT_FAILURE_CACHE.pop(key, None)
+
+
 def _sql_error_hint(exc: Exception, *, role: str, host: str, port: int, database_name: str) -> str:
     message = str(exc)
     if any(marker in message for marker in NETWORK_ERROR_MARKERS):
@@ -171,24 +212,56 @@ def _connect_with_retry(
     host: str,
     port: int,
     role: str,
-) -> pyodbc.Connection:
+) -> Any:
+    if host and SQL_TCP_PROBE_ENABLED:
+        with _SQL_ENDPOINT_PROBE_LOCK:
+            cached_failure = _get_cached_sql_endpoint_failure(
+                role=role,
+                host=host,
+                port=port,
+                database_name=database_name,
+            )
+            if cached_failure:
+                raise RuntimeError(cached_failure)
+
+            endpoint_error = _probe_sql_endpoint(host, port, SQL_TCP_PROBE_TIMEOUT_SECONDS)
+            if endpoint_error:
+                message = (
+                    f"SQL TCP probe failed for {role} database '{database_name}' at {host}:{port}: {endpoint_error}. "
+                    "Check Azure SQL firewall rules, private endpoint/VPN access, and local network egress to TCP 1433."
+                )
+                logger.warning("%s", message)
+                _cache_sql_endpoint_failure(role=role, host=host, port=port, database_name=database_name, message=message)
+                if SQL_FAIL_FAST_ON_TCP_PROBE:
+                    raise RuntimeError(message) from endpoint_error
+    else:
+        cached_failure = _get_cached_sql_endpoint_failure(
+            role=role,
+            host=host,
+            port=port,
+            database_name=database_name,
+        )
+        if cached_failure:
+            raise RuntimeError(cached_failure)
+
     pyodbc = _get_pyodbc()
     last_exc = None
-    endpoint_error = _probe_sql_endpoint(host, port, SQL_TCP_PROBE_TIMEOUT_SECONDS) if host else None
-    if endpoint_error:
-        logger.warning(
-            "TCP probe failed before SQL login for %s:%s (%s): %s",
-            host,
-            port,
-            database_name,
-            endpoint_error,
-        )
     for attempt in range(1, SQL_CONNECT_RETRIES + 1):
         try:
-            return pyodbc.connect(conn_str)
+            conn = pyodbc.connect(conn_str)
+            _clear_sql_endpoint_failure(role=role, host=host, port=port, database_name=database_name)
+            return conn
         except pyodbc.Error as exc:
             last_exc = exc
             if attempt >= SQL_CONNECT_RETRIES:
+                if any(marker in str(exc) for marker in NETWORK_ERROR_MARKERS):
+                    _cache_sql_endpoint_failure(
+                        role=role,
+                        host=host,
+                        port=port,
+                        database_name=database_name,
+                        message=_sql_error_hint(exc, role=role, host=host, port=port, database_name=database_name),
+                    )
                 logger.error(
                     "%s",
                     _sql_error_hint(exc, role=role, host=host, port=port, database_name=database_name),

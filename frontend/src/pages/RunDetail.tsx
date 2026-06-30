@@ -827,6 +827,7 @@ function KpisTab({ run }) {
 }
 
 function ScriptsTab({ run, addNotification, onRunRefresh }) {
+  const navigate = useNavigate()
   const [layer, setLayer] = useState('gold')
   const [submitting, setSubmitting] = useState(null)
   const currentGate = Number(run?.next_gate || 0)
@@ -1039,6 +1040,10 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
     }
   }
 
+  const handleOpenLineage = () => {
+    navigate(`/app/data-migration?runId=${encodeURIComponent(String(run.id || run.run_id || ''))}`)
+  }
+
   if (!scripts.length) {
     return <EmptyState message="No generated scripts are available for this run yet." />
   }
@@ -1054,6 +1059,12 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
           </div>
           {reviewLayer ? (
             <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleOpenLineage}
+                className="btn-secondary text-sm"
+              >
+                View Lineage
+              </button>
               <button
                 onClick={() => handleReviewAction('APPROVED')}
                 disabled={!!submitting}
@@ -1087,7 +1098,15 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
               )}
             </div>
           ) : (
-            <StatusBadge status={counts.gold > 0 ? 'COMPLETED' : 'GENERATED'} size="sm" />
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleOpenLineage}
+                className="btn-secondary text-sm"
+              >
+                View Lineage
+              </button>
+              <StatusBadge status={counts.gold > 0 ? 'COMPLETED' : 'GENERATED'} size="sm" />
+            </div>
           )}
         </div>
       </div>

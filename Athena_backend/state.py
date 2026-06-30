@@ -91,6 +91,9 @@ class Stage01State(TypedDict, total=False):
     certified_tables: Optional[List[Dict]]
 
     discovered_metadata: Optional[Dict[str, Any]]
+    primary_keys: Optional[List[Dict[str, Any]]]
+    foreign_keys: Optional[List[Dict[str, Any]]]
+    table_relationships: Optional[List[Dict[str, Any]]]
     metadata_discovery_status: Optional[str]
     metadata_status: Optional[str]  # 'PENDING' | 'COMPLETED' | 'FAILED' | 'SKIPPED'
     metadata_error: Optional[str]
@@ -107,6 +110,8 @@ class Stage01State(TypedDict, total=False):
     semantic_tags_reviewed: Optional[bool]
     pii_classifications_reviewed: Optional[bool]
     join_key_annotations_reviewed: Optional[bool]
+    join_candidates: Optional[List[Dict[str, Any]]]
+    certified_joins: Optional[List[Dict[str, Any]]]
     enrichment_review_decision: Optional[str]  # 'APPROVED' | 'REJECTED' | 'PENDING'
     enrichment_review_artifact: Optional[Dict[str, Any]]  # GATE3_APPROVED_ENRICHMENT
 

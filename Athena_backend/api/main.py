@@ -25,10 +25,11 @@ async def lifespan(app: FastAPI):
     embedding_status = get_embedding_runtime_status(probe_models=False)
     log_fn = logger.info if embedding_status.get("ready") else logger.warning
     log_fn(
-        "Embedding runtime status | env_enabled=%s pinecone=%s sentence_transformer=%s langchain_embedding=%s ready=%s",
+        "Embedding runtime status | env_enabled=%s provider=%s provider_configured=%s pinecone=%s langchain_embedding=%s ready=%s",
         embedding_status.get("env_enabled"),
+        embedding_status.get("provider"),
+        embedding_status.get("provider_configured"),
         embedding_status.get("pinecone_configured"),
-        embedding_status.get("sentence_transformer_available"),
         embedding_status.get("langchain_embedding_available"),
         embedding_status.get("ready"),
     )

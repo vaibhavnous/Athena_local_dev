@@ -657,6 +657,8 @@ def _join_paths_for_table(joins: List[Dict[str, Any]], table_name: str | None) -
             "join_type": join.get("join_type", "INNER"),
             "cardinality": join.get("cardinality"),
             "confidence": join.get("confidence"),
+            "source": join.get("source"),
+            "constraint_name": join.get("constraint_name"),
             "certified": bool(join.get("certified")),
         }
         for join in joins
@@ -680,7 +682,12 @@ def _build_gold_generation_contract(
     generated_at: str,
 ) -> Dict[str, Any]:
     columns = enriched_metadata.get("columns", []) if isinstance(enriched_metadata, dict) else []
-    joins = enriched_metadata.get("joins", []) if isinstance(enriched_metadata, dict) else []
+    if isinstance(enriched_metadata, dict):
+        joins = enriched_metadata.get("certified_joins") or enriched_metadata.get("joins", [])
+        fallback_joins = enriched_metadata.get("join_candidates") or []
+    else:
+        joins = []
+        fallback_joins = []
     certified_kpis = state.get("certified_kpis") or enriched_metadata.get("certified_kpis") or []
     silver_tables = _silver_tables_by_name(results)
     warnings: List[str] = []
@@ -704,8 +711,10 @@ def _build_gold_generation_contract(
             warnings.append(f"KPI '{kpi_name}' maps to table '{measure_table}', but no silver script is registered for that table.")
         if aggregation == "RATIO":
             warnings.append(f"KPI '{kpi_name}' needs numerator/denominator formula certification before gold SQL is production-safe.")
-        if join_paths and not any(path["certified"] for path in join_paths):
-            warnings.append(f"KPI '{kpi_name}' has join candidates, but none are certified.")
+        if not join_paths:
+            heuristic_paths = _join_paths_for_table(fallback_joins, measure_table)
+            if heuristic_paths:
+                warnings.append(f"KPI '{kpi_name}' has heuristic join candidates, but no certified FK-backed joins.")
 
         kpi_mappings.append(
             {
@@ -763,6 +772,7 @@ def _build_gold_generation_contract(
         ],
         "kpi_mappings": kpi_mappings,
         "available_joins": joins,
+        "join_candidates": fallback_joins,
         "warnings": sorted(set(warnings)),
         "next_gate_required": "GOLD_CONTRACT_REVIEW",
     }

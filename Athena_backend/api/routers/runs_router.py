@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 from api.services.ui_service import ui_run, ui_run_summary
 from services.pipeline_runtime import (
-    BACKGROUND_EXECUTOR,
+    build_run_lineage,
     list_runs,
     load_bronze_scripts,
     load_checkpoint_state,
@@ -17,6 +17,7 @@ from services.pipeline_runtime import (
 from utilis.logger import logger
 
 router = APIRouter()
+RUN_LIST_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_LIST_WORKERS", "2"))))
 RUN_SUMMARY_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_SUMMARY_WORKERS", "2"))))
 RUN_DETAIL_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_DETAIL_WORKERS", "2"))))
 
@@ -50,6 +51,48 @@ def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "sftp_entity": row.get("sftp_entity"),
         "source_row_count": row.get("source_row_count"),
         "source_columns": row.get("source_columns") or [],
+    }
+
+
+def _status_from_checkpoint(checkpoint: Dict[str, Any]) -> str:
+    status = str(checkpoint.get("status") or "UNKNOWN").upper()
+    if checkpoint.get("background_stage") or status in {"RUNNING", "PROCESSING", "PENDING", "SUBMITTED", "IN_PROGRESS"}:
+        return "RUNNING"
+    if checkpoint.get("next_gate") or status in {"HITL_WAIT", "PAUSED_FOR_HITL"}:
+        return "HITL_WAIT"
+    if status == "PAUSED_FOR_STAGE_CONFIRMATION":
+        return "PAUSED_FOR_STAGE_CONFIRMATION"
+    if status in {"PIPELINE_COMPLETED", "COMPLETED", "SUCCESS"}:
+        return "SUCCESS"
+    if status == "FAILED":
+        return "FAILED"
+    if status == "ABORTED":
+        return "ABORTED"
+    return status
+
+
+def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = str(row.get("run_id") or row.get("id") or "")
+    checkpoint = load_checkpoint_state(run_id) or {}
+    return {
+        **_fallback_run_summary(row),
+        "brd_filename": checkpoint.get("brd_filename") or checkpoint.get("display_name") or row.get("brd_filename") or run_id,
+        "source": checkpoint.get("source") or row.get("source") or "database",
+        "status": _status_from_checkpoint(checkpoint),
+        "provider": checkpoint.get("provider") or row.get("provider") or "azure_openai",
+        "deployment": checkpoint.get("deployment") or row.get("deployment"),
+        "started_at": checkpoint.get("started_at") or row.get("started_at") or row.get("last_activity"),
+        "completed_at": checkpoint.get("completed_at"),
+        "next_gate": checkpoint.get("next_gate"),
+        "resume_message": checkpoint.get("resume_message"),
+        "stage_confirmation": checkpoint.get("stage_confirmation"),
+        "failed_stage_key": checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key"),
+        "failed_stage_label": checkpoint.get("failed_stage_label"),
+        "error": checkpoint.get("error") or row.get("error"),
+        "updated_at": checkpoint.get("updated_at") or checkpoint.get("checkpoint_at") or row.get("last_activity"),
+        "sftp_entity": checkpoint.get("sftp_entity") or row.get("sftp_entity"),
+        "source_row_count": checkpoint.get("source_row_count") or row.get("source_row_count"),
+        "source_columns": checkpoint.get("source_columns") or row.get("source_columns") or [],
     }
 
 
@@ -92,14 +135,27 @@ def runs() -> List[Dict[str, Any]]:
         # ✅ configurable timeout with safe minimum
         timeout_seconds = max(1, int(os.getenv("ATHENA_RUNS_ENDPOINT_TIMEOUT_SECONDS", "5")))
         run_limit = max(1, min(100, int(os.getenv("ATHENA_RUNS_LIST_LIMIT", "25"))))
+        fast_summary = str(os.getenv("ATHENA_RUNS_FAST_SUMMARY", "true")).lower() not in {"0", "false", "no"}
         deadline = time.monotonic() + timeout_seconds
 
         logger.debug("Fetching runs list", extra={"timeout_seconds": timeout_seconds, "limit": run_limit})
 
-        future = BACKGROUND_EXECUTOR.submit(list_runs, run_limit)
+        future = RUN_LIST_EXECUTOR.submit(list_runs, run_limit)
         rows = future.result(timeout=timeout_seconds)
 
         results: List[Dict[str, Any]] = []
+
+        if fast_summary:
+            for row in rows:
+                run_id = row.get("run_id")
+                if not run_id:
+                    continue
+                try:
+                    results.append(_checkpoint_run_summary(row))
+                except Exception:
+                    logger.warning("Failed to build checkpoint run summary; returning fallback summary", extra={"run_id": run_id})
+                    results.append(_fallback_run_summary(row))
+            return results
 
         for row in rows:
             run_id = row.get("run_id")
@@ -130,6 +186,10 @@ def runs() -> List[Dict[str, Any]]:
 
     except FutureTimeoutError:
         logger.warning("GET /runs timed out while listing runs; returning empty list")
+        try:
+            future.cancel()
+        except Exception:
+            pass
         return []
 
     except Exception:
@@ -183,3 +243,17 @@ def run_scripts(run_id: str) -> Dict[str, Any]:
             extra={"run_id": run_id},
         )
         raise HTTPException(status_code=503, detail="Failed to fetch run scripts")
+
+
+@router.get("/run-lineage/{run_id}")
+def run_lineage(run_id: str) -> Dict[str, Any]:
+    try:
+        checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+        return build_run_lineage(run_id, checkpoint)
+    except Exception:
+        logger.error(
+            "Failed to build run lineage",
+            exc_info=True,
+            extra={"run_id": run_id},
+        )
+        raise HTTPException(status_code=503, detail="Failed to fetch run lineage")

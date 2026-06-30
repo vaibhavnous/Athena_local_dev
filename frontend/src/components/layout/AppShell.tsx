@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Outlet } from 'react-router-dom'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, Clock3, PlayCircle, RotateCcw, X } from 'lucide-react'
 import Sidebar from './Sidebar'
@@ -22,8 +22,13 @@ import { getGateDisplayName, getPhaseGroups } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
 const PAUSED_BANNER_DELAY_MS = 2500
+const REVIEW_AUTO_OPEN_KEY = 'athena.reviewAutoOpen'
 const REVIEW_READY_NOTIFICATIONS_KEY = 'athena.reviewReadyNotifications'
 const REVIEW_READY_NOTIFICATION_DELAY_MS = 3000
+const RUNS_POLL_SUCCESS_MS = 10000
+const RUNS_POLL_ERROR_BASE_MS = 15000
+const RUNS_POLL_ERROR_MAX_MS = 60000
+const RUNS_HYDRATION_WARN_INTERVAL_MS = 60000
 
 function loadJsonMap(key) {
   if (typeof window === 'undefined') return {}
@@ -51,6 +56,7 @@ function persistJsonMap(key, value) {
  */
 function AppShell() {
   const navigate = useNavigate()
+  const location = useLocation()
   const {
     runs,
     sidebarCollapsed,
@@ -66,8 +72,11 @@ function AppShell() {
   usePipelineSocket()
 
   const runsRequestInFlightRef = useRef(false)
+  const runsHydrationFailuresRef = useRef(0)
+  const lastRunsHydrationWarningRef = useRef(0)
   const pausedDetailKeyRef = useRef<string | null>(null)
   const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadJsonMap(PAUSED_BANNER_DISMISSALS_KEY))
+  const [reviewAutoOpenHistory, setReviewAutoOpenHistory] = useState(() => loadJsonMap(REVIEW_AUTO_OPEN_KEY))
   const [reviewReadyNotifications, setReviewReadyNotifications] = useState(() => loadJsonMap(REVIEW_READY_NOTIFICATIONS_KEY))
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
   const [readyPausedBannerKey, setReadyPausedBannerKey] = useState<string | null>(null)
@@ -76,9 +85,9 @@ function AppShell() {
     let cancelled = false
     let timer: number | null = null
 
-    const scheduleNext = () => {
+    const scheduleNext = (delay = RUNS_POLL_SUCCESS_MS) => {
       if (!cancelled) {
-        timer = window.setTimeout(loadRuns, 5000)
+        timer = window.setTimeout(loadRuns, delay)
       }
     }
 
@@ -89,10 +98,12 @@ function AppShell() {
       }
 
       runsRequestInFlightRef.current = true
+      let nextPollDelay = RUNS_POLL_SUCCESS_MS
       try {
         const backendRuns = await getRuns()
         if (cancelled || !Array.isArray(backendRuns)) return
         setServerOnline(true)
+        runsHydrationFailuresRef.current = 0
 
         setRuns(backendRuns)
         if (!activeRunId && backendRuns.length > 0) {
@@ -101,12 +112,22 @@ function AppShell() {
         }
       } catch (error) {
         if (!cancelled) {
+          runsHydrationFailuresRef.current += 1
+          const failureCount = runsHydrationFailuresRef.current
+          nextPollDelay = Math.min(
+            RUNS_POLL_ERROR_MAX_MS,
+            RUNS_POLL_ERROR_BASE_MS * Math.max(1, failureCount)
+          )
           setServerOnline(false)
-          console.warn('[AppShell] Failed to hydrate backend runs', error)
+          const now = Date.now()
+          if (now - lastRunsHydrationWarningRef.current > RUNS_HYDRATION_WARN_INTERVAL_MS) {
+            lastRunsHydrationWarningRef.current = now
+            console.warn('[AppShell] Failed to hydrate backend runs; keeping last known UI state', error)
+          }
         }
       } finally {
         runsRequestInFlightRef.current = false
-        scheduleNext()
+        scheduleNext(nextPollDelay)
       }
     }
 
@@ -235,6 +256,13 @@ function AppShell() {
       if (changed) persistJsonMap(PAUSED_BANNER_DISMISSALS_KEY, next)
       return changed ? next : current
     })
+    setReviewAutoOpenHistory((current) => {
+      const activeKeys = new Set(pausedKeys)
+      const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
+      const changed = Object.keys(next).length !== Object.keys(current).length
+      if (changed) persistJsonMap(REVIEW_AUTO_OPEN_KEY, next)
+      return changed ? next : current
+    })
     setReviewReadyNotifications((current) => {
       const activeKeys = new Set(pausedKeys)
       const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
@@ -243,6 +271,46 @@ function AppShell() {
       return changed ? next : current
     })
   }, [runs])
+
+  useEffect(() => {
+    if (!pausedRun || !pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return
+    if (readyPausedBannerKey !== pausedBannerKey) return
+    if (reviewAutoOpenHistory[pausedBannerKey]) return
+    if (location.pathname === '/app/hitl') return
+
+    const timer = window.setTimeout(() => {
+      setActiveRun(pausedRun.id)
+      navigate('/app/hitl')
+      addNotification({
+        type: 'amber',
+        title: `${pausedGateLabel} opened automatically`,
+        message: pausedResumeMessage,
+        duration: 5000,
+      })
+
+      setReviewAutoOpenHistory((current) => {
+        if (current[pausedBannerKey]) return current
+        const next = { ...current, [pausedBannerKey]: true }
+        persistJsonMap(REVIEW_AUTO_OPEN_KEY, next)
+        return next
+      })
+    }, 800)
+
+    return () => window.clearTimeout(timer)
+  }, [
+    addNotification,
+    location.pathname,
+    navigate,
+    pausedBannerKey,
+    pausedGateLabel,
+    pausedResumeMessage,
+    pausedRun,
+    pausedRunDetail,
+    pausedRunSummary,
+    readyPausedBannerKey,
+    reviewAutoOpenHistory,
+    setActiveRun,
+  ])
 
   useEffect(() => {
     if (!pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return

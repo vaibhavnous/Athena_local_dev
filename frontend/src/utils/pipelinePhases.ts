@@ -23,14 +23,17 @@ export function formatPipelineStepLabel(label?: string, key?: string) {
   if (normalizedKey === 'ingestion' || normalizedLabel === 'ingestion') return 'BRD Ingest'
   if (normalizedKey === 'requirements' || normalizedLabel === 'req extract') return 'Requirement Extraction'
   if (normalizedKey === 'kpis' || normalizedLabel === 'kpi extract') return 'KPI Extraction'
-  if (normalizedKey === 'nomination' || normalizedLabel === 'nomination') return 'Table Nomination'
+  if (normalizedKey === 'nomination' || normalizedLabel === 'nomination' || normalizedLabel === 'table nomination') return 'Table Extraction'
+  if (['discovery', 'profiling', 'enrichment', 'schema'].includes(normalizedKey)) return 'Column Extraction'
+  if (normalizedLabel === 'metadata discovery' || normalizedLabel === 'column profiling' || normalizedLabel === 'semantic enrichment') return 'Column Extraction'
+  if (normalizedKey === 'gate3' || normalizedLabel === 'enrichment review') return 'Column Review'
   return cleanLabel || fallbackStepLabel(normalizedKey)
 }
 
 export function getGateDisplayName(gate: number, sourceType?: string) {
   if (gate === 1) return 'KPI Review'
   if (gate === 2) return ['sftp', 'adls_gen2'].includes(String(sourceType || '').toLowerCase()) ? 'Feed Review' : 'Table Review'
-  if (gate === 3) return 'Enrichment Review'
+  if (gate === 3) return 'Column Review'
   if (gate === 4) return 'Bronze Review'
   if (gate === 5) return 'Silver Review'
   return `Gate ${gate}`
@@ -186,13 +189,13 @@ function fallbackStepLabel(key) {
     requirements: 'Requirement Extraction',
     kpis: 'KPI Extraction',
     gate1: 'KPI Review',
-    nomination: 'Table Nomination',
+    nomination: 'Table Extraction',
     gate2: 'Table Review',
-    discovery: 'Metadata Discovery',
-    schema: 'Schema Snapshot',
-    profiling: 'Column Profiling',
-    enrichment: 'Semantic Enrichment',
-    gate3: 'Enrichment Review',
+    discovery: 'Column Extraction',
+    schema: 'Column Extraction',
+    profiling: 'Column Extraction',
+    enrichment: 'Column Extraction',
+    gate3: 'Column Review',
     pre_bronze: 'Pre-Bronze Readiness',
     bronze: 'Bronze Scripts',
     gate4: 'Bronze Review',
@@ -239,7 +242,7 @@ function buildStepDetail(run, key, state, existingDetail) {
           : 'Table review is ready. Confirm the nominated tables before metadata discovery continues.'
       )
     case 'gate3':
-      return readyGateMessage('Enrichment review', 'Enrichment review is ready. Validate semantic enrichment before Bronze generation starts.')
+      return readyGateMessage('Column review', 'Column review is ready. Validate extracted and enriched column metadata before Bronze generation starts.')
     case 'gate4':
       return readyGateMessage('Bronze review', 'Bronze review is ready. Validate generated Bronze artifacts before Silver generation starts.')
     case 'gate5':

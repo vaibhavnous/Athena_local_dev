@@ -226,8 +226,10 @@ function RunHistoryPage() {
               </div>
 
               <div className="mt-7">
-                <h3 className="mb-3 text-sm font-semibold text-white">Stages by Phase</h3>
-                <div className="overflow-hidden rounded-lg border border-[#253044] bg-[#111827]">
+                <div className="mb-3 text-[10px] font-semibold uppercase tracking-[0.28em] text-[#6e7b96]">
+                  Pipeline - Business Requirements Document - {selectedRun.brd_filename || 'Untitled run'}
+                </div>
+                <div className="space-y-2 rounded-xl border border-[#1f2c45] bg-[#070d1b] p-3 shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
                   {phases.map((phase, index) => (
                     <PhaseRow key={phase.id} phase={phase} index={index + 1} />
                   ))}
@@ -261,9 +263,14 @@ function InfoRow({ icon: Icon, label, value }) {
 }
 
 function PhaseRow({ phase, index }) {
+  const [expanded, setExpanded] = useState(true)
+  const displaySteps = getHistoryDisplaySteps(phase)
+  const completed = displaySteps.filter((step) => isCompletedStep(step.state)).length
+  const total = displaySteps.length || phase.total || 0
   const tone = statusTone(phase.status)
   const done = phase.status === 'Done'
   const running = phase.status === 'Running'
+  const review = phase.status === 'Review'
   const toneText =
     tone === 'emerald'
       ? 'text-emerald-400'
@@ -276,37 +283,201 @@ function PhaseRow({ phase, index }) {
       : 'text-[#64748b]'
 
   return (
-    <div className="flex items-center justify-between border-b border-[#253044] px-5 py-4 last:border-b-0">
-      <div className="flex items-center gap-4">
-        <div className="relative h-8 w-8 flex-shrink-0">
-          {running && (
-            <>
-              <span className="absolute inset-0 rounded-full border border-[#3f82ff]/35 animate-ping" />
-              <span className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#3f82ff] animate-spin" />
-            </>
-          )}
-          <div className={`relative flex h-8 w-8 items-center justify-center rounded-full border bg-[#111827] ${
-            done
-              ? 'border-emerald-500 text-emerald-400'
-              : running
-              ? 'border-[#3f82ff] text-[#3f82ff]'
-              : 'border-[#253044] text-[#64748b]'
-          }`}>
-            {done ? <CheckCircle2 size={15} /> : <span className="text-sm font-semibold">{index}</span>}
+    <div className="overflow-hidden rounded-lg border border-[#1d2940] bg-[#090f20]">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        className="flex w-full items-center justify-between px-4 py-3 text-left transition-colors hover:bg-[#0d1730]"
+      >
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="relative h-8 w-8 flex-shrink-0">
+            {running && (
+              <>
+                <span className="absolute inset-0 rounded-full border border-[#27d6a2]/35 animate-ping" />
+                <span className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#27d6a2] animate-spin" />
+              </>
+            )}
+            <div className={`relative flex h-8 w-8 items-center justify-center rounded-full border bg-[#0c1426] ${
+              done
+                ? 'border-emerald-500 text-emerald-400'
+                : running
+                ? 'border-[#3f82ff] text-[#3f82ff]'
+                : review
+                ? 'border-amber-300 text-amber-300'
+                : 'border-[#263753] text-[#60708d]'
+            }`}>
+              {done ? <CheckCircle2 size={15} /> : <span className="text-xs font-bold">{index}</span>}
+            </div>
+          </div>
+          <div className="min-w-0">
+            <div className={`truncate text-sm font-bold ${done || running || review ? 'text-white' : 'text-[#8da1c8]'}`}>
+              {phase.label}
+            </div>
+            <div className="mt-1 text-xs text-[#91a4cb]">{completed}/{total} stages complete</div>
           </div>
         </div>
-        <div>
-          <div className={`text-sm font-semibold ${done || running ? 'text-white' : 'text-[#7d8daa]'}`}>{phase.label}</div>
-          {(done || running) && <div className="mt-1 text-xs text-white">{phase.completed}/{phase.total} stages</div>}
+        <div className={`flex items-center gap-3 text-xs font-bold ${toneText}`}>
+          <span className={`h-2 w-2 rounded-full bg-current ${running ? 'animate-pulse' : ''}`} />
+          {phase.status}
+          <ChevronDown size={15} className={`text-[#667795] transition-transform ${expanded ? 'rotate-180' : ''}`} />
         </div>
-      </div>
-      <div className={`flex items-center gap-3 text-xs font-semibold ${toneText}`}>
-        <span className={`h-2 w-2 rounded-full bg-current ${running ? 'animate-pulse' : ''}`} />
-        {phase.status}
-        <ChevronDown size={14} className="text-[#64748b]" />
+      </button>
+
+      {expanded && (
+        <div className="pb-4 pl-9 pr-4">
+          <div className="border-l border-[#23324f] pl-4">
+            {displaySteps.map((step) => (
+              <StageTreeRow key={step.key} step={step} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function StageTreeRow({ step }) {
+  const state = String(step.state || '').toUpperCase()
+  const done = isCompletedStep(state)
+  const running = ['RUNNING', 'PROCESSING', 'IN_PROGRESS', 'SUBMITTED'].includes(state)
+  const review = ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(state) || step.key.includes('review') || step.key.startsWith('gate')
+  const failed = state === 'FAILED'
+  const toneClass = failed
+    ? 'border-red-400 text-red-400'
+    : done
+    ? 'border-emerald-500 text-emerald-400'
+    : running
+    ? 'border-[#3f82ff] text-[#3f82ff]'
+    : review
+    ? 'border-amber-300 text-amber-300'
+    : 'border-[#2a3a58] text-[#6f809e]'
+
+  return (
+    <div className="relative flex min-h-[36px] items-center gap-3">
+      <span className="absolute -left-[21px] top-1/2 h-px w-4 -translate-y-1/2 bg-[#23324f]" />
+      <span className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border bg-[#0b1326] ${toneClass}`}>
+        <span className={`h-1.5 w-1.5 rounded-full bg-current ${running ? 'animate-pulse' : ''}`} />
+      </span>
+      <div className={`text-xs font-bold ${done || running || review ? 'text-white' : 'text-[#7f91b4]'}`}>
+        {step.label}
       </div>
     </div>
   )
+}
+
+function getHistoryDisplaySteps(phase) {
+  const steps = Array.isArray(phase.steps) ? phase.steps : []
+  const byKey = new Map(steps.map((step) => [step.key, step]))
+  const phaseState = phaseStatusToStepState(phase.status)
+
+  const actual = (key, label, fallbackState = phaseState) => {
+    const step = byKey.get(key)
+    return {
+      key,
+      label,
+      state: step?.state || fallbackState,
+      detail: step?.detail || '',
+    }
+  }
+
+  if (phase.id === 'phase-1') {
+    return [
+      actual('ingestion', 'BRD Ingestion'),
+      actual('memory', 'Memory Intelligence'),
+      actual('requirements', 'Requirement Extraction'),
+      actual('kpis', 'KPI Extraction'),
+      actual('gate1', 'KPI Review', reviewAwareState(byKey.get('gate1'), phase)),
+    ]
+  }
+
+  if (phase.id === 'phase-2') {
+    return [
+      actual('nomination', 'Table Extraction'),
+      actual('gate2', 'Table Review', reviewAwareState(byKey.get('gate2'), phase)),
+      {
+        key: 'column_extraction',
+        label: 'Column Extraction',
+        state: combineStepStates(
+          byKey.get('discovery')?.state,
+          byKey.get('profiling')?.state,
+          byKey.get('enrichment')?.state,
+          phaseState
+        ),
+      },
+      actual('gate3', 'Column Review', reviewAwareState(byKey.get('gate3'), phase)),
+    ]
+  }
+
+  if (phase.id === 'phase-3') {
+    const bronzeState = byKey.get('bronze')?.state || phaseState
+    return [
+      actual('bronze', 'Bronze Code Generation'),
+      actual('gate4', 'Bronze Review', reviewAwareState(byKey.get('gate4'), phase)),
+      { key: 'bronze_code_execution', label: 'Bronze Code Execution', state: inferExecutionState(bronzeState, byKey.get('gate4')?.state, phase.status) },
+    ]
+  }
+
+  if (phase.id === 'phase-4') {
+    const silverState = byKey.get('silver')?.state || phaseState
+    return [
+      actual('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverState),
+      actual('silver_merge_key_review', 'Silver Merge Key Review', reviewAwareState(byKey.get('gate5'), phase)),
+      actual('silver', 'Silver Code Generation'),
+      actual('gate5', 'Silver Review', reviewAwareState(byKey.get('gate5'), phase)),
+      { key: 'silver_code_execution', label: 'Silver Code Execution', state: inferExecutionState(silverState, byKey.get('gate5')?.state, phase.status) },
+    ]
+  }
+
+  if (phase.id === 'phase-5') {
+    const goldState = byKey.get('gold')?.state || phaseState
+    return [
+      actual('gold', 'Gold Code Generation'),
+      { key: 'gold_code_execution', label: 'Gold Code Execution', state: inferExecutionState(goldState, undefined, phase.status) },
+    ]
+  }
+
+  return steps.map((step) => ({ ...step, label: step.label || step.key }))
+}
+
+function phaseStatusToStepState(status) {
+  const value = String(status || '').toLowerCase()
+  if (value === 'done') return 'COMPLETED'
+  if (value === 'running') return 'RUNNING'
+  if (value === 'review') return 'HITL_WAIT'
+  if (value === 'failed') return 'FAILED'
+  return 'PENDING'
+}
+
+function reviewAwareState(step, phase) {
+  if (step?.state) return step.state
+  if (phase.status === 'Review') return 'HITL_WAIT'
+  return phaseStatusToStepState(phase.status)
+}
+
+function inferExecutionState(generationState, reviewState, phaseStatus) {
+  const normalizedGeneration = String(generationState || '').toUpperCase()
+  const normalizedReview = String(reviewState || '').toUpperCase()
+  if (phaseStatus === 'Done') return 'COMPLETED'
+  if (normalizedReview === 'COMPLETED' && normalizedGeneration === 'COMPLETED') return 'COMPLETED'
+  if (normalizedReview === 'HITL_WAIT' || normalizedReview === 'PAUSED_FOR_HITL') return 'PENDING'
+  if (normalizedGeneration === 'RUNNING') return 'PENDING'
+  return phaseStatusToStepState(phaseStatus) === 'FAILED' ? 'FAILED' : 'PENDING'
+}
+
+function combineStepStates(...statesWithFallback) {
+  const fallbackState = statesWithFallback[statesWithFallback.length - 1] || 'PENDING'
+  const states = statesWithFallback
+    .slice(0, -1)
+    .map((state) => String(state || fallbackState || 'PENDING').toUpperCase())
+  if (states.includes('FAILED')) return 'FAILED'
+  if (states.includes('RUNNING') || states.includes('PROCESSING') || states.includes('IN_PROGRESS')) return 'RUNNING'
+  if (states.includes('HITL_WAIT') || states.includes('PAUSED_FOR_HITL') || states.includes('PENDING_REVIEW')) return 'HITL_WAIT'
+  if (states.every((state) => isCompletedStep(state))) return 'COMPLETED'
+  return fallbackState || 'PENDING'
+}
+
+function isCompletedStep(state) {
+  return ['COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'].includes(String(state || '').toUpperCase())
 }
 
 function StatusPill({ status, tone, large = false }) {

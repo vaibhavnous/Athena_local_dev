@@ -4,11 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import io
 import traceback
 import uuid
 from datetime import datetime, timezone
-from contextlib import redirect_stderr, redirect_stdout
 from typing import Optional
 
 import docx
@@ -19,6 +17,7 @@ from pydantic import ValidationError
 from schema import BRDSchema
 from state import Stage01State
 from utilis.db import config, get_pipeline_connection
+from utilis.embeddings import get_embedding_model
 from utilis.env import load_backend_env
 from utilis.logger import logger
 from utilis.db import execute_source_sql
@@ -48,53 +47,8 @@ except Exception as e:
     logger.warning("Pinecone init failed: %s", e, extra={"node": "ingestion_bootstrap"})
 
 
-try:
-    # Do not initialize embeddings at import-time. Some environments have restricted
-    # outbound network (HF downloads) and we still want the backend to import cleanly.
-    _embedding_model = None
-except Exception as e:
-    # Keep a conservative fallback. Errors here should not block module import.
-    logger.warning("Embedding model bootstrap skipped: %s", e, extra={"node": "ingestion_bootstrap"})
-    _embedding_model = None
-
-
-def _get_embedding_model(*, log_context: dict) -> Optional[HuggingFaceEmbeddings]:
-    global _embedding_model
-    if _embedding_model is not None:
-        return _embedding_model
-
-    try:
-        if os.getenv("ATHENA_ENABLE_EMBEDDINGS", "").strip().lower() not in {"1", "true", "yes", "on"}:
-            logger.info("Semantic indexing deferred; continuing with catalog-driven analysis", extra=log_context)
-            return None
-
-        from langchain_huggingface import HuggingFaceEmbeddings
-
-        logger.info("Initializing local embedding model", extra={"node": "ingestion_bootstrap"})
-        os.environ["TRANSFORMERS_NO_ADVISE"] = "1"
-        os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-        if DEV_MODE:
-            _embedding_model = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
-                model_kwargs={"local_files_only": True, "trust_remote_code": False},
-                encode_kwargs={"normalize_embeddings": False},
-            )
-            _embedding_model.embed_query("hello world")
-        else:
-            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                _embedding_model = HuggingFaceEmbeddings(
-                    model_name="sentence-transformers/all-MiniLM-L6-v2",
-                    model_kwargs={"local_files_only": True, "trust_remote_code": False},
-                    encode_kwargs={"normalize_embeddings": False},
-                )
-                _embedding_model.embed_query("hello world")
-
-        return _embedding_model
-    except Exception as exc:
-        logger.info("Semantic indexing deferred; continuing with catalog-driven analysis: %s", exc, extra=log_context)
-        _embedding_model = None
-        return None
+def _get_embedding_model(*, log_context: dict) -> Optional[object]:
+    return get_embedding_model(log_context=log_context)
 
 
 db_conf = config["azure_sql"]
@@ -675,11 +629,19 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
 
         logger.info(f"Upserting {len(all_vectors)} schema vectors", extra=log_context)
 
-        # Optional: clear old schema embeddings
-        try:
-            index.delete(delete_all=True, namespace=namespace)
-        except Exception:
-            pass
+        for db in source_databases:
+            try:
+                index.delete(
+                    filter={"database_name": {"$eq": str(db).lower()}},
+                    namespace=namespace,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Scoped schema vector delete skipped for %s: %s",
+                    db,
+                    exc,
+                    extra=log_context,
+                )
 
         index.upsert(vectors=all_vectors, namespace=namespace)
 

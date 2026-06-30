@@ -12,7 +12,8 @@ const api = axios.create({
 })
 
 const READ_TIMEOUT = 15000
-const RUNS_TIMEOUT = 30000
+const RUNS_LIST_TIMEOUT = 10000
+const RUN_DETAIL_TIMEOUT = 30000
 const REVIEW_TIMEOUT = 90000
 const WRITE_TIMEOUT = 90000
 const UPLOAD_TIMEOUT = 45000
@@ -66,10 +67,11 @@ export const getRunStatus = (runId: string) => api.get(`/pipeline/${runId}/statu
 
 export const getPipelineKpis = (runId: string) => api.get(`/kpi-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 
-export const getRuns = () => api.get('/runs', { timeout: RUNS_TIMEOUT })
+export const getRuns = () => api.get('/runs', { timeout: RUNS_LIST_TIMEOUT })
 
-export const getRun = (runId: string) => api.get(`/runs/${runId}`, { timeout: RUNS_TIMEOUT })
+export const getRun = (runId: string) => api.get(`/runs/${runId}`, { timeout: RUN_DETAIL_TIMEOUT })
 export const getRunScripts = (runId: string) => api.get(`/run-scripts/${runId}`, { timeout: REVIEW_TIMEOUT })
+export const getRunLineage = (runId: string) => api.get(`/run-lineage/${runId}`, { timeout: REVIEW_TIMEOUT })
 export const getTableReviews = (runId: string) => api.get(`/table-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 export const submitTableReviews = (runId: string, approvedTables: string[]) =>
   api.post(`/table-reviews/${runId}`, { approved_tables: approvedTables }, { timeout: WRITE_TIMEOUT })

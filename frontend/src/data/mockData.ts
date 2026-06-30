@@ -147,7 +147,7 @@ export const MOCK_RUNS = [
       },
       {
         id: 'stage_06',
-        name: 'Table Nomination',
+        name: 'Table Extraction',
         icon: 'CheckCircle',
         status: 'PENDING',
         tokens: 0,
@@ -161,7 +161,7 @@ export const MOCK_RUNS = [
       },
       {
         id: 'stage_07',
-        name: 'Metadata Discovery',
+        name: 'Column Extraction',
         icon: 'CheckCircle',
         status: 'PENDING',
         tokens: 0,
@@ -175,7 +175,7 @@ export const MOCK_RUNS = [
       },
       {
         id: 'stage_08',
-        name: 'Column Profiling',
+        name: 'Column Extraction',
         icon: 'CheckCircle',
         status: 'PENDING',
         tokens: 0,
@@ -189,7 +189,7 @@ export const MOCK_RUNS = [
       },
       {
         id: 'stage_09',
-        name: 'Semantic Enrichment',
+        name: 'Column Extraction',
         icon: 'CheckCircle',
         status: 'PENDING',
         tokens: 0,

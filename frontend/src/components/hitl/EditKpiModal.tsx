@@ -9,15 +9,11 @@ import { X, Save } from 'lucide-react'
 function EditKpiModal({ kpi, isOpen, onClose, onSave }) {
   const [name, setName] = useState('')
   const [definition, setDefinition] = useState('')
-  const [reviewer, setReviewer] = useState('')
-  const [notes, setNotes] = useState('')
 
   useEffect(() => {
     if (kpi) {
       setName(kpi.name || '')
       setDefinition(kpi.definition || '')
-      setReviewer('')
-      setNotes('')
     }
   }, [kpi])
 
@@ -28,8 +24,8 @@ function EditKpiModal({ kpi, isOpen, onClose, onSave }) {
     onSave(kpi.id, {
       name: name.trim(),
       definition: definition.trim(),
-      reviewer: reviewer.trim() || 'analyst',
-      notes: notes.trim()
+      reviewer: 'analyst',
+      notes: ''
     })
     onClose()
   }
@@ -57,31 +53,31 @@ function EditKpiModal({ kpi, isOpen, onClose, onSave }) {
       >
         <div
           style={{ pointerEvents: 'auto', width: '100%', maxWidth: '32rem' }}
-          className="bg-bg-card border border-bg-border rounded-2xl shadow-2xl overflow-hidden"
+          className="overflow-hidden rounded-[24px] border border-[#24344d] bg-[#141d2d] shadow-[0_28px_90px_rgba(0,0,0,0.46)]"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-bg-border">
+          <div className="flex items-center justify-between border-b border-[#22304b] px-7 py-5">
             <div>
-              <h3 className="text-base font-bold text-text-primary">Edit KPI</h3>
-              <p className="text-xs text-text-tertiary mt-0.5">Modify before approving to the pipeline</p>
+              <h3 className="text-[18px] font-bold text-white">Edit KPI</h3>
+              <p className="mt-1 text-sm text-[#9eb0ca]">Update the KPI details before approving</p>
             </div>
             <button
               onClick={onClose}
-              className="w-8 h-8 rounded-lg flex items-center justify-center text-text-tertiary hover:text-text-secondary hover:bg-bg-hover transition-colors"
+              className="flex h-9 w-9 items-center justify-center rounded-lg text-[#8b98ad] transition-colors hover:bg-[#1d2940] hover:text-white"
             >
               <X size={16} />
             </button>
           </div>
 
           {/* Body */}
-          <div className="px-6 py-5 space-y-4">
+          <div className="space-y-5 px-7 py-6">
             <div>
-              <label className="label">KPI Name</label>
+              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[#c8d2e5]">KPI Name</label>
               <input
                 autoFocus
                 type="text"
-                className="input-field"
+                className="h-11 w-full rounded-[10px] border border-[#24344d] bg-[#0b1322] px-4 text-base text-white outline-none transition-colors placeholder:text-[#73829f] focus:border-[#4a81e8]"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="KPI name..."
@@ -89,51 +85,32 @@ function EditKpiModal({ kpi, isOpen, onClose, onSave }) {
             </div>
 
             <div>
-              <label className="label">Definition</label>
+              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[#c8d2e5]">Description</label>
               <textarea
-                className="input-field resize-none"
-                rows={4}
+                className="w-full resize-none rounded-[10px] border border-[#24344d] bg-[#0b1322] px-4 py-3 text-base leading-7 text-white outline-none transition-colors placeholder:text-[#73829f] focus:border-[#4a81e8]"
+                rows={5}
                 value={definition}
                 onChange={(e) => setDefinition(e.target.value)}
-                placeholder="Clear, measurable definition..."
-              />
-            </div>
-
-            <div>
-              <label className="label">Reviewer ID</label>
-              <input
-                type="text"
-                className="input-field"
-                value={reviewer}
-                onChange={(e) => setReviewer(e.target.value)}
-                placeholder="e.g. analyst_01"
-              />
-            </div>
-
-            <div>
-              <label className="label">Notes (optional)</label>
-              <input
-                type="text"
-                className="input-field"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="Reason for edit..."
+                placeholder="Clear, measurable description..."
               />
             </div>
           </div>
 
           {/* Footer */}
-          <div className="px-6 py-4 border-t border-bg-border flex gap-3">
-            <button onClick={onClose} className="flex-1 btn-secondary">
+          <div className="flex gap-3 border-t border-[#22304b] px-7 py-5">
+            <button
+              onClick={onClose}
+              className="flex-1 rounded-[10px] bg-[#273244] px-4 py-3 text-base font-semibold text-white transition-colors hover:bg-[#313d52]"
+            >
               Cancel
             </button>
             <button
               onClick={handleSave}
               disabled={!name.trim() || !definition.trim()}
-              className="flex-1 flex items-center justify-center gap-2 btn-amber disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex-1 inline-flex items-center justify-center gap-2 rounded-[10px] bg-[#4a81e8] px-4 py-3 text-base font-semibold text-white transition-colors hover:bg-[#5a8df0] disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Save size={14} />
-              Save Edit
+              Save Changes
             </button>
           </div>
         </div>

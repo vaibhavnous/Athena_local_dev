@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from pinecone import Pinecone
 
 from utilis.db import config, execute_source_sql
+from utilis.embeddings import get_embedding_model
 from utilis.env import load_backend_env
 from utilis.logger import logger
 
@@ -22,9 +23,6 @@ KB_CONTENT_MEASURE = "MEASURE_PATTERN"
 DEFAULT_KB_INDEX_NAME = "knowledgebase"
 DEFAULT_KB_ID = "PC_Insurance_V1"
 DEFAULT_DOMAIN_PROFILE = "Insurance"
-
-_embedding_model: Optional[HuggingFaceEmbeddings] = None
-
 
 @dataclass(frozen=True)
 class DomainKBConfig:
@@ -60,31 +58,6 @@ def get_domain_kb_config() -> DomainKBConfig:
         max_chars_enrichment=max(500, int(os.getenv("ATHENA_KB_MAX_CHARS_ENRICHMENT", "4000"))),
         max_chars_gold=max(500, int(os.getenv("ATHENA_KB_MAX_CHARS_GOLD", "5000"))),
     )
-
-
-def _get_embedding_model() -> Optional[HuggingFaceEmbeddings]:
-    global _embedding_model
-    if _embedding_model is not None:
-        return _embedding_model
-    if not _env_enabled("ATHENA_ENABLE_EMBEDDINGS"):
-        logger.info("Domain knowledge retrieval using configured catalog fallback")
-        return None
-
-    try:
-        from langchain_huggingface import HuggingFaceEmbeddings
-
-        os.environ["TRANSFORMERS_NO_ADVISE"] = "1"
-        os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        _embedding_model = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={"local_files_only": True, "trust_remote_code": False},
-            encode_kwargs={"normalize_embeddings": False},
-        )
-        _embedding_model.embed_query("domain knowledge base")
-        return _embedding_model
-    except Exception as exc:
-        logger.info("Domain knowledge retrieval using configured catalog fallback: %s", exc)
-        return None
 
 
 def _pinecone_index(index_name: str):
@@ -396,7 +369,7 @@ def upsert_kb_rows_to_pinecone(
             "integrated_embedding": True,
         }
 
-    model = _get_embedding_model()
+    model = get_embedding_model(log_context={"node": "domain_kb", "stage": "index"})
     if model is None:
         raise RuntimeError("Domain KB embedding model is unavailable")
 
@@ -484,7 +457,7 @@ def load_domain_kb(
             if matches is None and isinstance(result, dict):
                 matches = result.get("hits", [])
         else:
-            model = _get_embedding_model()
+            model = get_embedding_model(log_context={"node": "domain_kb", "stage": "query"})
             if model is None:
                 return {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_id}
             vector = model.embed_query(str(query_text or "domain knowledge"))

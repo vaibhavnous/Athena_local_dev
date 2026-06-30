@@ -392,6 +392,8 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         )
         enriched_columns = _safe_list(enriched_payload.get("columns"))
         enriched_joins = _safe_list(enriched_payload.get("joins"))
+        certified_joins = _safe_list(enriched_payload.get("certified_joins"))
+        join_candidates = _safe_list(enriched_payload.get("join_candidates"))
         semantic_counts = _safe_dict(enriched_payload.get("semantic_counts"))
         semantic_enrichment_completed = bool(
             "ENRICHED_METADATA" in artifact_types
@@ -483,6 +485,8 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
             "enriched_metadata": enriched_payload,
             "enriched_columns": enriched_columns,
             "enriched_joins": enriched_joins,
+            "certified_joins": certified_joins,
+            "join_candidates": join_candidates,
             "semantic_counts": semantic_counts,
             "pii_columns": [c for c in enriched_columns if isinstance(c, dict) and c.get("is_pii")],
             "join_key_columns": [c for c in enriched_columns if isinstance(c, dict) and c.get("is_primary_key")],

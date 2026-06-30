@@ -7,6 +7,7 @@ column-level JSON artifact that can be used later for SQL generation.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 import os
@@ -47,6 +48,9 @@ class TableMetadata(TypedDict, total=False):
     table_status: Literal["COMPLETED", "FAILED"]
     column_count: int
     columns: List[ColumnMetadata]
+    primary_keys: List[Dict[str, Any]]
+    unique_keys: List[Dict[str, Any]]
+    foreign_keys: List[Dict[str, Any]]
     error: str
 
 
@@ -58,6 +62,9 @@ class DiscoveredMetadataPayload(TypedDict):
     table_count: int
     successful_table_count: int
     failed_table_count: int
+    primary_keys: List[Dict[str, Any]]
+    foreign_keys: List[Dict[str, Any]]
+    table_relationships: List[Dict[str, Any]]
     tables: List[TableMetadata]
 
 
@@ -179,6 +186,132 @@ def _fetch_table_columns(cursor: pyodbc.Cursor, schema_name: str, table_name: st
     return columns
 
 
+def _fetch_key_constraints(
+    cursor: pyodbc.Cursor,
+    schema_name: str,
+    table_name: str,
+    constraint_type: str,
+) -> List[Dict[str, Any]]:
+    query = """
+        SELECT
+            tc.CONSTRAINT_NAME,
+            kcu.COLUMN_NAME,
+            kcu.ORDINAL_POSITION
+        FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+        JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+            ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+           AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+           AND tc.TABLE_NAME = kcu.TABLE_NAME
+        WHERE tc.TABLE_SCHEMA = ?
+          AND tc.TABLE_NAME = ?
+          AND tc.CONSTRAINT_TYPE = ?
+        ORDER BY tc.CONSTRAINT_NAME, kcu.ORDINAL_POSITION
+    """
+    cursor.execute(query, (schema_name, table_name, constraint_type))
+    return [
+        {
+            "constraint_name": str(row.CONSTRAINT_NAME),
+            "column_name": str(row.COLUMN_NAME),
+            "ordinal_position": int(row.ORDINAL_POSITION),
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+def _fetch_foreign_keys(cursor: pyodbc.Cursor, schema_name: str, table_name: str) -> List[Dict[str, Any]]:
+    query = """
+        SELECT
+            fk.name AS constraint_name,
+            src_schema.name AS source_schema_name,
+            src_table.name AS source_table_name,
+            src_col.name AS source_column_name,
+            ref_schema.name AS referenced_schema_name,
+            ref_table.name AS referenced_table_name,
+            ref_col.name AS referenced_column_name,
+            fkc.constraint_column_id AS ordinal_position,
+            fk.delete_referential_action_desc AS delete_rule,
+            fk.update_referential_action_desc AS update_rule
+        FROM sys.foreign_keys fk
+        JOIN sys.foreign_key_columns fkc
+            ON fk.object_id = fkc.constraint_object_id
+        JOIN sys.tables src_table
+            ON fk.parent_object_id = src_table.object_id
+        JOIN sys.schemas src_schema
+            ON src_table.schema_id = src_schema.schema_id
+        JOIN sys.columns src_col
+            ON src_col.object_id = src_table.object_id
+           AND src_col.column_id = fkc.parent_column_id
+        JOIN sys.tables ref_table
+            ON fk.referenced_object_id = ref_table.object_id
+        JOIN sys.schemas ref_schema
+            ON ref_table.schema_id = ref_schema.schema_id
+        JOIN sys.columns ref_col
+            ON ref_col.object_id = ref_table.object_id
+           AND ref_col.column_id = fkc.referenced_column_id
+        WHERE src_schema.name = ?
+          AND src_table.name = ?
+        ORDER BY fk.name, fkc.constraint_column_id
+    """
+    cursor.execute(query, (schema_name, table_name))
+    return [
+        {
+            "constraint_name": str(row.constraint_name),
+            "source_schema_name": str(row.source_schema_name),
+            "source_table_name": str(row.source_table_name),
+            "source_column_name": str(row.source_column_name),
+            "referenced_schema_name": str(row.referenced_schema_name),
+            "referenced_table_name": str(row.referenced_table_name),
+            "referenced_column_name": str(row.referenced_column_name),
+            "ordinal_position": int(row.ordinal_position),
+            "delete_rule": str(row.delete_rule),
+            "update_rule": str(row.update_rule),
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+def _build_table_relationships(
+    *,
+    database_name: str,
+    foreign_keys: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in foreign_keys:
+        grouped[str(row["constraint_name"])].append(row)
+
+    relationships: List[Dict[str, Any]] = []
+    for constraint_name, rows in grouped.items():
+        ordered = sorted(rows, key=lambda item: int(item.get("ordinal_position") or 0))
+        first = ordered[0]
+        relationships.append(
+            {
+                "relationship_id": f"{database_name}.{first['source_schema_name']}.{first['source_table_name']}:{constraint_name}",
+                "constraint_name": constraint_name,
+                "relationship_type": "FOREIGN_KEY",
+                "cardinality": "MANY_TO_ONE",
+                "source": "METADATA_DISCOVERY",
+                "confidence": 1.0,
+                "certified": True,
+                "database_name": database_name,
+                "source_schema_name": first["source_schema_name"],
+                "source_table_name": first["source_table_name"],
+                "referenced_schema_name": first["referenced_schema_name"],
+                "referenced_table_name": first["referenced_table_name"],
+                "column_mapping": [
+                    {
+                        "source_column_name": row["source_column_name"],
+                        "referenced_column_name": row["referenced_column_name"],
+                        "ordinal_position": row["ordinal_position"],
+                    }
+                    for row in ordered
+                ],
+                "update_rule": first["update_rule"],
+                "delete_rule": first["delete_rule"],
+            }
+        )
+    return relationships
+
+
 def _close_connections(connections: Iterable[pyodbc.Connection]) -> None:
     for connection in connections:
         try:
@@ -192,6 +325,9 @@ def _persist_discovered_metadata(
     run_id: str,
     fingerprint: str,
     certified_kpis: List[Any],
+    primary_keys: List[Dict[str, Any]],
+    foreign_keys: List[Dict[str, Any]],
+    table_relationships: List[Dict[str, Any]],
     tables: List[TableMetadata],
 ) -> None:
     payload: DiscoveredMetadataPayload = {
@@ -202,6 +338,9 @@ def _persist_discovered_metadata(
         "table_count": len(tables),
         "successful_table_count": sum(1 for table in tables if table["table_status"] == "COMPLETED"),
         "failed_table_count": sum(1 for table in tables if table["table_status"] == "FAILED"),
+        "primary_keys": primary_keys,
+        "foreign_keys": foreign_keys,
+        "table_relationships": table_relationships,
         "tables": tables,
     }
 
@@ -243,6 +382,9 @@ def metadata_discovery_node(state: Stage01State) -> Stage01State:
     certified_kpis = list(new_state.get("certified_kpis") or [])
 
     tables_metadata: List[TableMetadata] = []
+    discovered_primary_keys: List[Dict[str, Any]] = []
+    discovered_foreign_keys: List[Dict[str, Any]] = []
+    discovered_relationships: List[Dict[str, Any]] = []
     connections: Dict[str, pyodbc.Connection] = {}
 
     try:
@@ -257,12 +399,39 @@ def metadata_discovery_node(state: Stage01State) -> Stage01State:
                     connection = get_azure_sql_connection(database_name)
                     connections[database_name] = connection
 
-                columns = _fetch_table_columns(connection.cursor(), schema_name, table_name)
+                cursor = connection.cursor()
+                columns = _fetch_table_columns(cursor, schema_name, table_name)
                 if not columns:
                     raise ValueError(
                         f"No column metadata found for {database_name}.{schema_name}.{table_name}. "
                         "Table may not exist, schema may be wrong, or access may be blocked."
                     )
+
+                primary_keys = _fetch_key_constraints(cursor, schema_name, table_name, "PRIMARY KEY")
+                unique_keys = _fetch_key_constraints(cursor, schema_name, table_name, "UNIQUE")
+                foreign_keys = _fetch_foreign_keys(cursor, schema_name, table_name)
+                table_relationships = _build_table_relationships(
+                    database_name=database_name,
+                    foreign_keys=foreign_keys,
+                )
+
+                discovered_primary_keys.extend(
+                    {
+                        "database_name": database_name,
+                        "schema_name": schema_name,
+                        "table_name": table_name,
+                        **item,
+                    }
+                    for item in primary_keys
+                )
+                discovered_foreign_keys.extend(
+                    {
+                        "database_name": database_name,
+                        **item,
+                    }
+                    for item in foreign_keys
+                )
+                discovered_relationships.extend(table_relationships)
 
                 tables_metadata.append(
                     {
@@ -272,6 +441,9 @@ def metadata_discovery_node(state: Stage01State) -> Stage01State:
                         "table_status": "COMPLETED",
                         "column_count": len(columns),
                         "columns": columns,
+                        "primary_keys": primary_keys,
+                        "unique_keys": unique_keys,
+                        "foreign_keys": foreign_keys,
                     }
                 )
 
@@ -320,6 +492,9 @@ def metadata_discovery_node(state: Stage01State) -> Stage01State:
             run_id=run_id,
             fingerprint=fingerprint,
             certified_kpis=certified_kpis,
+            primary_keys=discovered_primary_keys,
+            foreign_keys=discovered_foreign_keys,
+            table_relationships=discovered_relationships,
             tables=tables_metadata,
         )
     except Exception as exc:
@@ -330,6 +505,9 @@ def metadata_discovery_node(state: Stage01State) -> Stage01State:
                 "metadata_error": f"Metadata extracted but persistence failed: {exc}",
                 "discovered_metadata": {
                     "certified_kpis": certified_kpis,
+                    "primary_keys": discovered_primary_keys,
+                    "foreign_keys": discovered_foreign_keys,
+                    "table_relationships": discovered_relationships,
                     "tables": tables_metadata,
                 },
             }
@@ -353,8 +531,14 @@ def metadata_discovery_node(state: Stage01State) -> Stage01State:
         {
             "discovered_metadata": {
                 "certified_kpis": certified_kpis,
+                "primary_keys": discovered_primary_keys,
+                "foreign_keys": discovered_foreign_keys,
+                "table_relationships": discovered_relationships,
                 "tables": tables_metadata,
             },
+            "primary_keys": discovered_primary_keys,
+            "foreign_keys": discovered_foreign_keys,
+            "table_relationships": discovered_relationships,
             "metadata_status": metadata_status,
             "metadata_error": metadata_error,
         }

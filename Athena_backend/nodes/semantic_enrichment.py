@@ -9,7 +9,7 @@ Responsibilities:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from datetime import datetime, timezone
 
 from langgraph.graph import StateGraph
@@ -55,11 +55,15 @@ def rule_based_semantic_classification(column: Dict[str, Any]) -> Dict[str, Any]
     name = str(column.get("column_name", "")).lower()
     data_type = str(column.get("data_type", "")).lower()
     cardinality = column.get("cardinality")
+    is_primary_key = bool(column.get("is_primary_key"))
+    is_foreign_key = bool(column.get("is_foreign_key"))
 
     semantic: SemanticType = "UNKNOWN"
     suggested_agg: AggType = "NONE"
 
-    if name.endswith("_id") or name == "id":
+    if is_primary_key:
+        semantic = "SURROGATE_KEY" if name == "id" else "ID"
+    elif is_foreign_key or name.endswith("_id") or name == "id":
         semantic = "ID"
     elif name.startswith(("is_", "has_")) or data_type == "bit":
         semantic = "FLAG"
@@ -87,6 +91,7 @@ def rule_based_semantic_classification(column: Dict[str, Any]) -> Dict[str, Any]
         "is_pii_candidate": is_pii,
         "suggested_aggregation": suggested_agg,
         "needs_llm": semantic in {"UNKNOWN", "MEASURE", "DIMENSION"},
+        "is_join_key": is_primary_key or is_foreign_key or semantic in {"ID", "SURROGATE_KEY"},
     }
 
 
@@ -155,9 +160,47 @@ def llm_enrich_column(column: Dict[str, Any], domain_context: Dict[str, Any]) ->
 # JOIN DISCOVERY (SAFE, RULE-BASED)
 # ------------------------------------------------------------------------------------
 
-def discover_joins(tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _relationship_signature(join: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    return (
+        str(join.get("left_table") or ""),
+        str(join.get("left_column") or ""),
+        str(join.get("right_table") or ""),
+        str(join.get("right_column") or ""),
+    )
+
+
+def metadata_backed_joins(relationships: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    joins: List[Dict[str, Any]] = []
+    for relationship in relationships:
+        source_table = str(relationship.get("source_table_name") or "")
+        referenced_table = str(relationship.get("referenced_table_name") or "")
+        constraint_name = str(relationship.get("constraint_name") or "")
+        for mapping in relationship.get("column_mapping", []) or []:
+            joins.append(
+                {
+                    "left_table": source_table,
+                    "left_column": mapping.get("source_column_name"),
+                    "right_table": referenced_table,
+                    "right_column": mapping.get("referenced_column_name"),
+                    "cardinality": relationship.get("cardinality", "MANY_TO_ONE"),
+                    "join_type": "INNER",
+                    "confidence": relationship.get("confidence", 1.0),
+                    "source": "FOREIGN_KEY",
+                    "constraint_name": constraint_name,
+                    "relationship_id": relationship.get("relationship_id"),
+                    "certified": True,
+                }
+            )
+    return joins
+
+
+def discover_joins(tables: List[Dict[str, Any]], existing_joins: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     joins: List[Dict[str, Any]] = []
     index: Dict[str, List[Dict[str, Any]]] = {}
+    existing_signatures: Set[Tuple[str, str, str, str]] = {
+        _relationship_signature(join)
+        for join in (existing_joins or [])
+    }
 
     for table in tables:
         for col in table["columns"]:
@@ -177,17 +220,20 @@ def discover_joins(tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 if left["table"] == right["table"]:
                     continue
 
-                joins.append({
+                candidate = {
                     "left_table": left["table"],
                     "left_column": left["column"],
                     "right_table": right["table"],
                     "right_column": right["column"],
                     "cardinality": "MANY_TO_ONE",
                     "join_type": "INNER",
-                    "confidence": 0.8,
-                    "source": "RULES",
+                    "confidence": 0.55,
+                    "source": "HEURISTIC",
                     "certified": False,
-                })
+                }
+                if _relationship_signature(candidate) in existing_signatures:
+                    continue
+                joins.append(candidate)
 
     return joins
 
@@ -246,6 +292,16 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
         "domain_knowledge_context": kb_result.get("context_text", ""),
     }
 
+    discovered_relationships = discovered.get("table_relationships", []) if isinstance(discovered, dict) else []
+    primary_keys = discovered.get("primary_keys", []) if isinstance(discovered, dict) else []
+    foreign_keys = discovered.get("foreign_keys", []) if isinstance(discovered, dict) else []
+    primary_key_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    foreign_key_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for item in primary_keys:
+        primary_key_map[(str(item.get("table_name") or ""), str(item.get("column_name") or ""))] = item
+    for item in foreign_keys:
+        foreign_key_map[(str(item.get("source_table_name") or ""), str(item.get("source_column_name") or ""))] = item
+
     enriched_columns: List[Dict[str, Any]] = []
     enriched_tables: List[Dict[str, Any]] = []
 
@@ -258,7 +314,19 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
                  and p["table_name"] == table["table_name"]),
                 {},
             )
-            merged = {**col, **profile, "table_name": table["table_name"]}
+            pk_info = primary_key_map.get((str(table.get("table_name") or ""), str(col.get("column_name") or "")), {})
+            fk_info = foreign_key_map.get((str(table.get("table_name") or ""), str(col.get("column_name") or "")), {})
+            merged = {
+                **col,
+                **profile,
+                "table_name": table["table_name"],
+                "is_primary_key": bool(pk_info),
+                "primary_key_constraint_name": pk_info.get("constraint_name"),
+                "is_foreign_key": bool(fk_info),
+                "foreign_key_constraint_name": fk_info.get("constraint_name"),
+                "references_table_name": fk_info.get("referenced_table_name"),
+                "references_column_name": fk_info.get("referenced_column_name"),
+            }
             enriched = enrich_column(merged, domain_context)
             cols.append(enriched)
             enriched_columns.append(enriched)
@@ -268,7 +336,13 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
             "columns": cols,
         })
 
-    joins = discover_joins(enriched_tables)
+    certified_joins = metadata_backed_joins(discovered_relationships)
+    heuristic_joins = discover_joins(enriched_tables, existing_joins=certified_joins)
+    joins = certified_joins + heuristic_joins
+    semantic_counts: Dict[str, int] = {}
+    for column in enriched_columns:
+        semantic_type = str(column.get("semantic_type") or "UNKNOWN")
+        semantic_counts[semantic_type] = semantic_counts.get(semantic_type, 0) + 1
 
     payload = {
         "run_id": state.get("run_id"),
@@ -283,6 +357,10 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
             "content_types": kb_result.get("content_types"),
         },
         "columns": enriched_columns,
+        "semantic_counts": semantic_counts,
+        "table_relationships": discovered_relationships,
+        "certified_joins": certified_joins,
+        "join_candidates": heuristic_joins,
         "joins": joins,
     }
 
@@ -301,6 +379,9 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
     )
 
     new_state["enriched_metadata"] = payload
+    new_state["certified_joins"] = certified_joins
+    new_state["join_candidates"] = heuristic_joins
+    new_state["table_relationships"] = discovered_relationships
     new_state["semantic_enrichment_status"] = "COMPLETED"
     return new_state
 
