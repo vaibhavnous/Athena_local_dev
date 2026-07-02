@@ -158,6 +158,7 @@ function adaptDemoRun(source: any) {
 
   return {
     ...run,
+    kpis: [],
     status: activeProgress?.status || run.status,
     source: run.source || 'database',
     is_demo_fallback: true,

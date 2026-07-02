@@ -492,8 +492,8 @@ function HitlQueue() {
   const gate4Name = getGateDisplayName(4)
   const gate5Name = getGateDisplayName(5)
   const rawQueue = useMemo(
-    () => hitlQueues[selectedRunId] || (currentRun?.kpis || []),
-    [currentRun?.kpis, hitlQueues, selectedRunId]
+    () => (isGate1 ? hitlQueues[selectedRunId] || (currentRun?.kpis || []) : []),
+    [currentRun?.kpis, hitlQueues, isGate1, selectedRunId]
   )
   const queue = useMemo(
     () => filterReviewQueue(rawQueue, selectedRunId, currentRun?.source),
@@ -929,6 +929,7 @@ function HitlQueue() {
       id: selectedRunId,
       status: 'HITL_WAIT',
       next_gate: nextGate,
+      kpis: nextGate === 1 ? currentRun?.kpis || [] : [],
       demo_review_fallback: true,
       review_fallback_reason: 'Backend review submit did not complete, so the saved review path continued locally.',
       resume_message: message,
@@ -1110,6 +1111,7 @@ function HitlQueue() {
           id: selectedRunId,
           status: 'PROCESSING',
           next_gate: 0,
+          kpis: [],
           resume_message: `${gate2Name} submitted. Metadata discovery is starting.`,
         })
         const refreshed = await waitForRunToLeaveGate(selectedRunId, updateRun, 2)
@@ -1276,6 +1278,7 @@ function HitlQueue() {
       storeSubmitDecisions(selectedRunId, decisions)
       const refreshed = hasQueueIds ? await getRun(selectedRunId) : null
       updateRun(selectedRunId, refreshed || { status: 'RUNNING' })
+      updateRun(selectedRunId, { kpis: [] })
       setLocalDecisions({})
       setEditedKpis({})
       setRejectionReasons({})
