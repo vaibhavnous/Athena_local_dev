@@ -922,6 +922,16 @@ function HitlQueue() {
     setSearchParams({ runId, gate: String(gate || '') })
   }
 
+  const shouldRedirectDemoKpiReview = isDemoFallbackRun(currentRun) && isGate1
+
+  useEffect(() => {
+    if (!shouldRedirectDemoKpiReview) return
+    setSelectedRunId(null)
+    setSearchParams({})
+    if (currentRun?.id) setActiveRun(currentRun.id)
+    navigate('/app/data-discovery', { replace: true })
+  }, [currentRun?.id, navigate, setActiveRun, setSearchParams, shouldRedirectDemoKpiReview])
+
   const continueWithLocalGate = (nextGate, message) => {
     if (!selectedRunId) return null
     const fallbackPatch = {
@@ -1310,6 +1320,10 @@ function HitlQueue() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  if (shouldRedirectDemoKpiReview) {
+    return null
   }
 
   if (selectedRunId && isReviewableRun && isGate1) {

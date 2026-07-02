@@ -546,6 +546,7 @@ function hasRenderableRunDetail(run) {
 }
 
 function isReviewPausedRun(run) {
+  if (isDemoFallbackRun(run) && Number(run?.next_gate || 0) === 1) return false
   const status = String(run?.status || '').toUpperCase()
   const terminalStatuses = ['FAILED', 'SUCCESS', 'COMPLETED', 'PIPELINE_COMPLETED']
   return (
