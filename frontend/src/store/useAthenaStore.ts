@@ -179,7 +179,7 @@ const useAthenaStore = create<AthenaState>((set, get) => ({
       const nextActiveRunId =
         activeRunId && mergedRuns.some((run) => run.id === activeRunId)
           ? activeRunId
-          : activeRunId || mergedRuns[0]?.id || null
+          : null
 
       const runsUnchanged = stableStringify(state.runs) === stableStringify(mergedRuns)
       if (runsUnchanged && state.activeRunId === nextActiveRunId) {

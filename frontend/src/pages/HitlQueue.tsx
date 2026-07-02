@@ -466,6 +466,11 @@ function HitlQueue() {
   const [gateDecision, setGateDecision] = useState('')
   const [selectedRunDetail, setSelectedRunDetail] = useState(null)
   const hydrationRequestRef = useRef(0)
+  const requestedGate = Number(searchParams.get('gate') || 0)
+  const shouldSuppressRequestedInitialReview = isSuppressedInitialReviewRun({
+    id: requestedRunId,
+    next_gate: requestedGate,
+  })
 
   const REVIEWER_ID = 'reviewer@nousinfo.com'
   const currentRun = useMemo(() => {
@@ -501,6 +506,15 @@ function HitlQueue() {
   )
 
   useEffect(() => {
+    if (!shouldSuppressRequestedInitialReview) return
+    setSelectedRunId(null)
+    setActiveRun(null)
+    setSearchParams({})
+    navigate('/app/data-discovery', { replace: true })
+  }, [navigate, setActiveRun, setSearchParams, shouldSuppressRequestedInitialReview])
+
+  useEffect(() => {
+    if (shouldSuppressRequestedInitialReview) return
     if (!requestedRunId || requestedRunId === selectedRunId) return
     setSelectedRunId(requestedRunId)
     setActiveRun(requestedRunId)
@@ -508,7 +522,7 @@ function HitlQueue() {
     setEnrichmentReview(null)
     setSelectedTables({})
     setLocalDecisions({})
-  }, [requestedRunId, selectedRunId, setActiveRun])
+  }, [requestedRunId, selectedRunId, setActiveRun, shouldSuppressRequestedInitialReview])
 
   useEffect(() => {
     if (selectedRunId || !activeRunId) return
@@ -550,6 +564,11 @@ function HitlQueue() {
         if (cancelled || !detail?.id) return
         if (!isReviewGateAccessible(detail)) {
           setSelectedRunId(null)
+          if (isSuppressedInitialReviewRun(detail)) {
+            setActiveRun(null)
+            setSearchParams({})
+            navigate('/app/data-discovery', { replace: true })
+          }
           return
         }
 
@@ -569,7 +588,7 @@ function HitlQueue() {
     return () => {
       cancelled = true
     }
-  }, [addRun, currentRun, runs, selectedRunId, updateRun])
+  }, [addRun, currentRun, navigate, runs, selectedRunId, setActiveRun, setSearchParams, updateRun])
 
   useEffect(() => {
     if (requestedRunId) return
@@ -922,15 +941,15 @@ function HitlQueue() {
     setSearchParams({ runId, gate: String(gate || '') })
   }
 
-  const shouldRedirectDemoKpiReview = isDemoFallbackRun(currentRun) && isGate1
+  const shouldRedirectDemoKpiReview = isSuppressedInitialReviewRun(currentRun)
 
   useEffect(() => {
     if (!shouldRedirectDemoKpiReview) return
     setSelectedRunId(null)
     setSearchParams({})
-    if (currentRun?.id) setActiveRun(currentRun.id)
+    setActiveRun(null)
     navigate('/app/data-discovery', { replace: true })
-  }, [currentRun?.id, navigate, setActiveRun, setSearchParams, shouldRedirectDemoKpiReview])
+  }, [navigate, setActiveRun, setSearchParams, shouldRedirectDemoKpiReview])
 
   const continueWithLocalGate = (nextGate, message) => {
     if (!selectedRunId) return null
@@ -2439,7 +2458,21 @@ function hasGatePayload(run) {
   )
 }
 
+function isSuppressedInitialReviewRun(run) {
+  const runId = String(run?.id || run?.run_id || '')
+  return (
+    Number(run?.next_gate || 0) === 1 &&
+    (
+      runId === 'run_a3f8c2' ||
+      isDemoFallbackRun(run) ||
+      Boolean(run?.demo_review_fallback) ||
+      String(run?.review_fallback_reason || '').toLowerCase().includes('fallback')
+    )
+  )
+}
+
 function isReviewGateAccessible(run) {
+  if (isSuppressedInitialReviewRun(run)) return false
   if (!hasReviewGate(run)) return false
   if (run?.stage_confirmation?.awaiting_confirmation) return false
 

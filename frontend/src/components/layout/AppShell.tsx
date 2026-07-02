@@ -120,15 +120,10 @@ function AppShell() {
 
         const currentActiveRun = latestRunsRef.current.find((run) => run.id === latestActiveRunIdRef.current)
         if (isDemoFallbackRun(currentActiveRun) && backendRuns.length > 0) {
-          const resumable = backendRuns.find(isReviewPausedRun)
-          setActiveRun((resumable || backendRuns[0]).id)
+          setActiveRun(null)
         }
 
         setRuns(backendRuns)
-        if (!activeRunId && backendRuns.length > 0) {
-          const resumable = backendRuns.find(isReviewPausedRun)
-          setActiveRun((resumable || backendRuns[0]).id)
-        }
       } catch (error) {
         if (!cancelled) {
           runsHydrationFailuresRef.current += 1
@@ -150,15 +145,10 @@ function AppShell() {
 
           if (ENABLE_DEMO_FALLBACKS && hasOnlyFallbackRuns) {
             const demoRuns = getDemoRuns()
-            const resumable = demoRuns.find(isReviewPausedRun)
             setRuns(demoRuns)
-            if (resumable) {
-              setActiveRun(resumable.id)
-            }
           } else if (ENABLE_DEMO_FALLBACKS && !hasAnyRuns && !demoRunsSeededRef.current) {
             const demoRuns = getDemoRuns()
             setRuns(demoRuns)
-            setActiveRun((demoRuns.find(isReviewPausedRun) || demoRuns[0] || {}).id || null)
             demoRunsSeededRef.current = true
             if (!demoRunsNotifiedRef.current) {
               demoRunsNotifiedRef.current = true
@@ -185,9 +175,10 @@ function AppShell() {
   }, [activeRunId, addNotification, setRuns, setActiveRun, setServerOnline])
 
   const pausedRun = useMemo(() => {
+    if (!activeRunId) return null
     const activeRun = activeRunId ? (runs || []).find((run) => run.id === activeRunId) : null
     if (isReviewPausedRun(activeRun)) return activeRun
-    return (runs || []).find(isReviewPausedRun) || null
+    return null
   }, [activeRunId, runs])
 
   const pausedRunId = pausedRun?.id || null
@@ -545,8 +536,21 @@ function hasRenderableRunDetail(run) {
   )
 }
 
+function isSuppressedInitialReviewRun(run) {
+  const runId = String(run?.id || run?.run_id || '')
+  return (
+    Number(run?.next_gate || 0) === 1 &&
+    (
+      runId === 'run_a3f8c2' ||
+      isDemoFallbackRun(run) ||
+      Boolean(run?.demo_review_fallback) ||
+      String(run?.review_fallback_reason || '').toLowerCase().includes('fallback')
+    )
+  )
+}
+
 function isReviewPausedRun(run) {
-  if (isDemoFallbackRun(run) && Number(run?.next_gate || 0) === 1) return false
+  if (isSuppressedInitialReviewRun(run)) return false
   const status = String(run?.status || '').toUpperCase()
   const terminalStatuses = ['FAILED', 'SUCCESS', 'COMPLETED', 'PIPELINE_COMPLETED']
   return (

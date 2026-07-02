@@ -24,7 +24,7 @@ function isTransientReadError(error) {
 function PipelineMonitor() {
   const navigate = useNavigate()
   const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline, addNotification, addRun } = useAthenaStore()
-  const activeRun = activeRunId ? runs.find((run) => run.id === activeRunId) || null : runs[0] || null
+  const activeRun = activeRunId ? runs.find((run) => run.id === activeRunId) || null : null
   const activeRunStableId = activeRun?.id || null
   const activeRunIsDemoFallback = isDemoFallbackRun(activeRun)
   const activeRunDemoScriptBundles = useMemo(
