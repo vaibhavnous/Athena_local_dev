@@ -1494,12 +1494,13 @@ function buildPipelineDisplayPhase(phase, allSteps = []) {
   } else if (phase.id === 'phase-4') {
     const silverState = byKey.get('silver')?.state || phaseState
     const gate5State = reviewAwareStepState(byKey.get('gate5'), phase)
+    const silverFlow = buildSilverPhaseStates(silverState, gate5State, phase.status)
     displaySteps = [
-      makeSynthetic('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverState),
-      makeSynthetic('silver_merge_key_review', 'Silver Merge Key Review', gate5State),
-      makeStep('silver', 'Silver Code Generation'),
-      makeStep('gate5', 'Silver Review', gate5State),
-      makeSynthetic('silver_code_execution', 'Silver Code Execution', inferExecutionDisplayState(silverState, byKey.get('gate5')?.state, phase.status)),
+      makeSynthetic('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverFlow.mergeResolution),
+      makeSynthetic('silver_merge_key_review', 'Silver Merge Key Review', silverFlow.mergeReview),
+      makeStep('silver', 'Silver Code Generation', silverFlow.codeGeneration),
+      makeStep('gate5', 'Silver Review', silverFlow.reviewGate),
+      makeSynthetic('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution),
     ]
   } else if (phase.id === 'phase-5') {
     const goldState = byKey.get('gold')?.state || phaseState
@@ -1551,6 +1552,70 @@ function inferExecutionDisplayState(generationState, reviewState, phaseStatus) {
   if (normalizedReview === 'HITL_WAIT' || normalizedReview === 'PAUSED_FOR_HITL') return 'PENDING'
   if (normalizedGeneration === 'RUNNING') return 'PENDING'
   return phaseStatusToStepState(phaseStatus) === 'FAILED' ? 'FAILED' : 'PENDING'
+}
+
+function buildSilverPhaseStates(silverState, gate5State, phaseStatus) {
+  const normalizedSilver = String(silverState || '').toUpperCase()
+  const normalizedGate = String(gate5State || '').toUpperCase()
+  const normalizedPhase = String(phaseStatus || '').toLowerCase()
+
+  if (normalizedPhase === 'done') {
+    return {
+      mergeResolution: 'COMPLETED',
+      mergeReview: 'COMPLETED',
+      codeGeneration: 'COMPLETED',
+      reviewGate: 'COMPLETED',
+      codeExecution: 'COMPLETED',
+    }
+  }
+
+  if (normalizedGate === 'HITL_WAIT' || normalizedGate === 'PAUSED_FOR_HITL') {
+    return {
+      mergeResolution: 'COMPLETED',
+      mergeReview: 'COMPLETED',
+      codeGeneration: 'COMPLETED',
+      reviewGate: 'HITL_WAIT',
+      codeExecution: 'PENDING',
+    }
+  }
+
+  if (normalizedSilver === 'RUNNING') {
+    return {
+      mergeResolution: 'RUNNING',
+      mergeReview: 'PENDING',
+      codeGeneration: 'PENDING',
+      reviewGate: 'PENDING',
+      codeExecution: 'PENDING',
+    }
+  }
+
+  if (normalizedSilver === 'COMPLETED' || normalizedSilver === 'SUCCESS' || normalizedSilver === 'PIPELINE_COMPLETED') {
+    return {
+      mergeResolution: 'COMPLETED',
+      mergeReview: 'COMPLETED',
+      codeGeneration: 'COMPLETED',
+      reviewGate: normalizedGate || 'PENDING',
+      codeExecution: inferExecutionDisplayState(silverState, gate5State, phaseStatus),
+    }
+  }
+
+  if (normalizedPhase === 'failed' || normalizedSilver === 'FAILED') {
+    return {
+      mergeResolution: 'FAILED',
+      mergeReview: 'PENDING',
+      codeGeneration: 'PENDING',
+      reviewGate: 'PENDING',
+      codeExecution: 'FAILED',
+    }
+  }
+
+  return {
+    mergeResolution: 'PENDING',
+    mergeReview: 'PENDING',
+    codeGeneration: 'PENDING',
+    reviewGate: normalizedGate || 'PENDING',
+    codeExecution: 'PENDING',
+  }
 }
 
 function isCompletedStepState(state) {

@@ -29,6 +29,14 @@ def _iso(minutes_ago: int) -> str:
     return (_now() - timedelta(minutes=minutes_ago)).isoformat()
 
 
+def _demo_stage_seconds() -> int:
+    raw = str(os.getenv("ATHENA_DEMO_STAGE_SECONDS", "20")).strip()
+    try:
+        return max(20, int(raw))
+    except ValueError:
+        return 20
+
+
 def _stage(key: str, label: str, status: str, index: int) -> Dict[str, Any]:
     active = status in {"COMPLETED", "SUCCESS", "HITL_WAIT", "RUNNING"}
     completed = status in {"COMPLETED", "SUCCESS", "HITL_WAIT"}
@@ -735,7 +743,6 @@ def _qualified_columns(columns: List[Dict[str, Any]], predicate) -> List[str]:
     ]
 
 
-DEMO_STAGE_SECONDS = 5
 DEMO_STAGE_SEQUENCE = [
     "ingestion",
     "memory",
@@ -756,6 +763,14 @@ DEMO_STAGE_SEQUENCE = [
     "gold",
 ]
 DEMO_PROGRESS_SEGMENTS: Dict[str, Dict[str, Any]] = {
+    "start": {
+        "completed_before": [],
+        "running": ["ingestion", "memory", "domain_knowledge", "requirements", "kpis"],
+        "next_gate": 1,
+        "next_gate_key": "gate1",
+        "running_message": "Athena is preparing BRD ingestion, memory intelligence, domain knowledge, requirements, and KPI extraction.",
+        "waiting_message": "KPI Review is ready. Validate the extracted KPIs before the pipeline continues.",
+    },
     "kpi": {
         "completed_before": ["ingestion", "memory", "domain_knowledge", "requirements", "kpis", "gate1"],
         "running": ["nomination"],
@@ -863,7 +878,7 @@ def _demo_progress_snapshot(run_id: str) -> Dict[str, Any]:
 
     elapsed = max(0, time.time() - float(progress.get("started_at") or time.time()))
     running_keys = list(segment["running"])
-    running_index = int(elapsed // DEMO_STAGE_SECONDS)
+    running_index = int(elapsed // _demo_stage_seconds())
     completed_keys = set(segment["completed_before"])
     current_key: Optional[str] = None
     next_gate = segment["next_gate"]

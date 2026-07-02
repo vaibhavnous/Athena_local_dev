@@ -7,7 +7,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from api import utils as api_utils
-from api.demo import demo_action, demo_enabled, demo_status, new_demo_run_id
+from api.demo import demo_action, demo_enabled, demo_start_progress, demo_status, new_demo_run_id
 from api.models import PipelineRunRequest, StageContinueRequest
 from utilis.logger import logger
 
@@ -64,8 +64,9 @@ def health() -> Dict[str, str]:
 def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
     if demo_enabled():
         run_id = new_demo_run_id()
+        demo_start_progress(run_id, "start")
         logger.info("Pipeline run requested", extra={"run_id": run_id})
-        return {"run_id": run_id, "status": "HITL_WAIT"}
+        return {"run_id": run_id, "status": "PROCESSING"}
 
     from api.services.pipeline_service import submit_pipeline_start
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state

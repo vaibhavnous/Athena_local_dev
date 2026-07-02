@@ -93,6 +93,28 @@ def test_pipeline_run_requires_brd_text_for_file_source():
     assert response.json()["detail"] == "brd_text is required"
 
 
+def test_pipeline_run_starts_demo_progress_before_kpi_review(monkeypatch):
+    from api.routers import pipeline_router
+
+    monkeypatch.setattr(pipeline_router, "demo_enabled", lambda: True)
+    monkeypatch.setattr(pipeline_router, "new_demo_run_id", lambda: "demo-run-1")
+
+    recorded = {}
+
+    def fake_demo_start_progress(run_id, segment):
+        recorded["run_id"] = run_id
+        recorded["segment"] = segment
+        return {"run_id": run_id, "status": "PROCESSING"}
+
+    monkeypatch.setattr(pipeline_router, "demo_start_progress", fake_demo_start_progress)
+
+    response = client.post("/pipeline/run", json={"source": "database", "brd_text": "valid brd text"})
+
+    assert response.status_code == 200
+    assert response.json() == {"run_id": "demo-run-1", "status": "PROCESSING"}
+    assert recorded == {"run_id": "demo-run-1", "segment": "start"}
+
+
 def test_pipeline_run_accepts_file_source_with_brd_text(monkeypatch):
     saved = {}
 

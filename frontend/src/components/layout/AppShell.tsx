@@ -306,7 +306,6 @@ function AppShell() {
 
   useEffect(() => {
     if (!pausedRun || !pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return
-    if (readyPausedBannerKey !== pausedBannerKey) return
     if (reviewAutoOpenSessionRef.current?.[pausedBannerKey]) return
 
     const timer = window.setTimeout(() => {
@@ -339,7 +338,6 @@ function AppShell() {
     pausedRun,
     pausedRunDetail,
     pausedRunSummary,
-    readyPausedBannerKey,
     setActiveRun,
   ])
 
