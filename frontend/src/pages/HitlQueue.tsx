@@ -2558,6 +2558,8 @@ function CodeReviewPanel({
     }
     setDraftItems(items)
     setExpandedKey((current) => (items.some((item) => item.key === current) ? current : items[0].key))
+    // Track item identity only; preserving edited draft code while parent objects refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemKeys])
 
   const updateItemCode = (key, code) => {

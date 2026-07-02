@@ -260,7 +260,7 @@ function AppShell() {
     return () => {
       cancelled = true
     }
-  }, [pausedBannerKey, pausedRunGate, pausedRunId])
+  }, [pausedBannerKey, pausedRun, pausedRunGate, pausedRunId])
 
   useEffect(() => {
     if (!pausedRunDetail || !pausedBannerKey) {

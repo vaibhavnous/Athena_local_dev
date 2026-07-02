@@ -101,6 +101,8 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
     setReason(rejectionReason || '')
     setIsEditing(false)
     setExpanded(true)
+    // Reset the local edit surface only when the review item changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
   useEffect(() => {
