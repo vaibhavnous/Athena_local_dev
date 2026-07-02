@@ -2273,6 +2273,32 @@ function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
     }))
   }
 
+  const flatEnrichedColumns = Array.isArray(enrichmentReview.enriched_columns)
+    ? enrichmentReview.enriched_columns
+    : []
+  const groupedColumns = groupSemanticColumnsByTable(flatEnrichedColumns)
+
+  if (groupedColumns.length > 0) {
+    return groupedColumns.map(({ tableName, columns }, index) => ({
+      queue_id: `${runId || 'run'}-semantic-table-${tableName || index}`,
+      item_id: tableName || `Table ${index + 1}`,
+      item_type: 'ENRICHMENT',
+      item_detail: {
+        table_name: tableName || `Table ${index + 1}`,
+        columns: normalizeSemanticColumns(columns),
+        table_summary:
+          enrichmentReview.table_summaries?.[tableName] ||
+          enrichmentReview.enriched_metadata?.table_summaries?.[tableName] ||
+          `${tableName || 'Table'} semantic labels prepared for column review.`,
+      },
+      decision: enrichmentReview.decision,
+      reviewer_id: enrichmentReview.reviewer_id,
+      rejection_reason: enrichmentReview.rejection_reason,
+      queued_at: enrichmentReview.queued_at,
+      decided_at: enrichmentReview.decided_at,
+    }))
+  }
+
   return [
     {
       queue_id: enrichmentReview.queue_id || `${runId || 'run'}-semantic-enrichment`,
@@ -2290,6 +2316,37 @@ function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
       decided_at: enrichmentReview.decided_at,
     },
   ]
+}
+
+function semanticColumnTableName(column) {
+  const value =
+    column?.table_name ||
+    column?.table ||
+    column?.entity ||
+    column?.source_table ||
+    column?.source_table_name ||
+    column?.qualified_table ||
+    ''
+  const text = String(value || '').trim()
+  if (!text) return ''
+  return text.split('.').filter(Boolean).pop() || text
+}
+
+function groupSemanticColumnsByTable(columns) {
+  const grouped = new Map()
+
+  for (const column of columns || []) {
+    const tableName = semanticColumnTableName(column)
+    if (!tableName) continue
+    if (!grouped.has(tableName)) grouped.set(tableName, [])
+    grouped.get(tableName).push(column)
+  }
+
+  if (grouped.size === 0) return []
+  return Array.from(grouped.entries()).map(([tableName, groupedColumns]) => ({
+    tableName,
+    columns: groupedColumns,
+  }))
 }
 
 function semanticReviewItemKey(item) {

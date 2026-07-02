@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Outlet } from 'react-router-dom'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -290,6 +290,13 @@ function AppShell() {
   }, [pausedRun, pausedRunDetail])
   const pausedGateLabel = pausedRunSummary?.gateLabel || ''
   const pausedResumeMessage = pausedRunSummary?.resumeMessage || ''
+  const isPausedBannerStillCurrent = useCallback((key) => {
+    if (!key) return false
+    return latestRunsRef.current.some((run) => {
+      if (!isReviewPausedRun(run)) return false
+      return `${run.id}:${Number(run.next_gate || 0)}` === key
+    })
+  }, [])
 
   useEffect(() => {
     const pausedKeys = (runs || [])
@@ -320,6 +327,7 @@ function AppShell() {
     if (reviewAutoOpenSessionRef.current?.[pausedBannerKey]) return
 
     const timer = window.setTimeout(() => {
+      if (!isPausedBannerStillCurrent(pausedBannerKey)) return
       const targetPath = `/app/hitl?runId=${encodeURIComponent(pausedRun.id)}&gate=${Number(pausedRun.next_gate || 0)}`
       setActiveRun(pausedRun.id)
       if (`${location.pathname}${location.search}` !== targetPath) {
@@ -340,6 +348,7 @@ function AppShell() {
     return () => window.clearTimeout(timer)
   }, [
     addNotification,
+    isPausedBannerStillCurrent,
     location.pathname,
     location.search,
     navigate,
@@ -358,6 +367,7 @@ function AppShell() {
     if (reviewReadyNotifications[pausedBannerKey]) return
 
     const timer = window.setTimeout(() => {
+      if (!isPausedBannerStillCurrent(pausedBannerKey)) return
       addNotification({
         type: 'amber',
         title: `${pausedGateLabel} ready for review`,
@@ -376,6 +386,7 @@ function AppShell() {
     return () => window.clearTimeout(timer)
   }, [
     addNotification,
+    isPausedBannerStillCurrent,
     pausedBannerKey,
     pausedRunDetail,
     pausedGateLabel,

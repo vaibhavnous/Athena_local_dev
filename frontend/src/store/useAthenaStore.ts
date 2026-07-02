@@ -70,7 +70,7 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
       'enriched_columns',
       'enriched_joins',
     ]) {
-      if (existing[key] !== undefined) merged[key] = existing[key]
+      if (existing[key] !== undefined && incoming[key] === undefined) merged[key] = existing[key]
     }
   }
 
