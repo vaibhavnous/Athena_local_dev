@@ -1194,15 +1194,16 @@ function buildPipelineDisplayPhase(phase, allSteps = []) {
   const steps = Array.isArray(phase?.steps) ? phase.steps : []
   const byKey = new Map([...allSteps, ...steps].map((step) => [step.key, step]))
   const phaseState = phaseStatusToStepState(phase.status)
-  const makeStep = (key, label, fallbackState = phaseState) => {
+  const makeStep = (key, label, fallbackState = phaseState, forceState = false) => {
     const step = byKey.get(key)
+    const state = forceState ? fallbackState : (step?.state || fallbackState)
     return {
       ...(step || {}),
       key,
       label,
-      state: step?.state || fallbackState,
+      state,
       detail: step?.detail || '',
-      complete: isCompletedStepState(step?.state || fallbackState),
+      complete: isCompletedStepState(state),
     }
   }
   const makeSynthetic = (key, label, state) => ({
@@ -1247,7 +1248,7 @@ function buildPipelineDisplayPhase(phase, allSteps = []) {
     displaySteps = [
       makeSynthetic('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverFlow.mergeResolution),
       makeSynthetic('silver_merge_key_review', 'Silver Merge Key Review', silverFlow.mergeReview),
-      makeStep('silver', 'Silver Code Generation', silverFlow.codeGeneration),
+      makeStep('silver', 'Silver Code Generation', silverFlow.codeGeneration, true),
       makeStep('gate5', 'Silver Review', silverFlow.reviewGate),
       makeSynthetic('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution),
     ]

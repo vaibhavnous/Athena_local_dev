@@ -464,6 +464,7 @@ function HitlQueue() {
   const [silverReview, setSilverReview] = useState(null)
   const [gate3Decision, setGate3Decision] = useState('APPROVED')
   const [gateDecision, setGateDecision] = useState('')
+  const [codeReviewDecisions, setCodeReviewDecisions] = useState({})
   const [selectedRunDetail, setSelectedRunDetail] = useState(null)
   const hydrationRequestRef = useRef(0)
   const requestedGate = Number(searchParams.get('gate') || 0)
@@ -628,6 +629,7 @@ function HitlQueue() {
     setTableReviewDecisions({})
     setSelectedTables({})
     setGateDecision('')
+    setCodeReviewDecisions({})
     hydrationRequestRef.current += 1
   }, [selectedRunId, currentRun?.source, gateToReview])
 
@@ -895,8 +897,25 @@ function HitlQueue() {
   const reviewedTableCount = availableTableReviews.filter((table) => tableReviewDecisions[tableReviewKey(table)]).length
   const selectedFeedCount = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length
   const totalFeedCount = availableSftpFeeds.length
-  const bronzeReviewFeeds = bronzeReview?.bronze_review_artifact?.feeds || []
-  const silverReviewItems = silverReview?.silver_review_artifact?.items || []
+  const bronzeReviewFeeds = useMemo(
+    () => bronzeReview?.bronze_review_artifact?.feeds || [],
+    [bronzeReview]
+  )
+  const silverReviewItems = useMemo(
+    () => silverReview?.silver_review_artifact?.items || [],
+    [silverReview]
+  )
+  const bronzeCodeReviewItems = useMemo(
+    () => buildBronzeCodeReviewItems(bronzeReviewFeeds),
+    [bronzeReviewFeeds]
+  )
+  const silverCodeReviewItems = useMemo(
+    () => buildSilverCodeReviewItems(silverReviewItems),
+    [silverReviewItems]
+  )
+  const activeCodeReviewItems = isGate4 ? bronzeCodeReviewItems : isGate5 ? silverCodeReviewItems : []
+  const reviewedCodeReviewCount = activeCodeReviewItems.filter((item) => codeReviewDecisions[item.key]).length
+  const codeReviewGateDecision = getCodeReviewGateDecision(activeCodeReviewItems, codeReviewDecisions)
   const semanticReviewSource = useMemo(
     () => buildSemanticReviewSource(enrichmentReview, currentRun, selectedRunId),
     [enrichmentReview, currentRun, selectedRunId]
@@ -1038,6 +1057,32 @@ function HitlQueue() {
         edited_definition: edited?.definition || null
       }
     })
+  }
+
+  const setCodeReviewDecision = (itemKey, decision) => {
+    if (!itemKey) return
+    setCodeReviewDecisions((prev) => ({ ...prev, [itemKey]: decision }))
+    setGateDecision('')
+  }
+
+  const handleAutoApproveCodeReviewItems = () => {
+    setCodeReviewDecisions((prev) => {
+      const next = { ...prev }
+      activeCodeReviewItems.forEach((item) => {
+        if (!next[item.key]) next[item.key] = 'APPROVED'
+      })
+      return next
+    })
+    setGateDecision('')
+  }
+
+  const setAllCodeReviewItemsDecision = (decision) => {
+    const next = {}
+    activeCodeReviewItems.forEach((item) => {
+      next[item.key] = decision
+    })
+    setCodeReviewDecisions((prev) => ({ ...prev, ...next }))
+    setGateDecision(decision)
   }
 
   const handleApproveSemanticItem = (id) => {
@@ -1221,7 +1266,7 @@ function HitlQueue() {
     if (isGate4) {
       setSubmitting(true)
       try {
-        const reviewAction = gateDecision || 'APPROVED'
+        const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
         await submitBronzeReview(selectedRunId, reviewAction)
         const refreshed = reviewAction === 'APPROVED'
           ? await waitForRunGate(selectedRunId, updateRun, 5)
@@ -1259,7 +1304,7 @@ function HitlQueue() {
     if (isGate5) {
       setSubmitting(true)
       try {
-        const reviewAction = gateDecision || 'APPROVED'
+        const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
         await submitSilverReview(selectedRunId, reviewAction)
         const refreshed = reviewAction === 'APPROVED'
           ? await waitForGoldScripts(selectedRunId, updateRun)
@@ -1743,7 +1788,7 @@ function HitlQueue() {
             )}
 
             <button
-              onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
+              onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isGate5) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
               className="inline-flex h-12 items-center gap-2 rounded-[10px] bg-[#202b3a] px-5 text-[17px] font-bold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
             >
               <CheckCircle size={18} className="text-[#12b886]" />
@@ -1795,11 +1840,14 @@ function HitlQueue() {
               lineageLabel="View Source -> Bronze -> Silver Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
               emptyMessage={`Silver scripts are not loaded yet. Submit is still available if ${gate5Name} is pending.`}
-              items={buildSilverCodeReviewItems(silverReview?.silver_review_artifact?.items || [])}
-              reviewedCount={gateDecision ? silverReviewItems.length : 0}
-              totalCount={silverReviewItems.length}
-              decision={gateDecision}
-              setDecision={setGateDecision}
+              items={silverCodeReviewItems}
+              reviewedCount={reviewedCodeReviewCount}
+              totalCount={silverCodeReviewItems.length}
+              gateDecision={codeReviewGateDecision || gateDecision}
+              decisions={codeReviewDecisions}
+              onSetItemDecision={setCodeReviewDecision}
+              onAutoApprovePending={handleAutoApproveCodeReviewItems}
+              onSetAllDecision={setAllCodeReviewItemsDecision}
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
@@ -1813,11 +1861,14 @@ function HitlQueue() {
               lineageLabel="View Source -> Bronze Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
               emptyMessage={`Bronze scripts are not loaded yet. Submit is still available if ${gate4Name} is pending.`}
-              items={buildBronzeCodeReviewItems(bronzeReview?.bronze_review_artifact?.feeds || [])}
-              reviewedCount={gateDecision ? bronzeReviewFeeds.length : 0}
-              totalCount={bronzeReviewFeeds.length}
-              decision={gateDecision}
-              setDecision={setGateDecision}
+              items={bronzeCodeReviewItems}
+              reviewedCount={reviewedCodeReviewCount}
+              totalCount={bronzeCodeReviewItems.length}
+              gateDecision={codeReviewGateDecision || gateDecision}
+              decisions={codeReviewDecisions}
+              onSetItemDecision={setCodeReviewDecision}
+              onAutoApprovePending={handleAutoApproveCodeReviewItems}
+              onSetAllDecision={setAllCodeReviewItemsDecision}
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
@@ -2011,12 +2062,14 @@ function HitlQueue() {
                 ) : isGate4 ? (
                 <>
                   <CountRow label="Bronze Plans" value={bronzeReviewFeeds.length} color="text-gray-300" />
-                  <CountRow label="Decision" value={gateDecision === 'APPROVED' ? 'Approve' : gateDecision === 'REJECTED' ? 'Reject' : 'Regenerate'} color={gateDecision === 'APPROVED' ? 'text-accent-green' : gateDecision === 'REJECTED' ? 'text-accent-red' : 'text-accent-blue'} pulse />
+                  <CountRow label="Reviewed" value={reviewedCodeReviewCount} color="text-accent-green" pulse={reviewedCodeReviewCount > 0} />
+                  <CountRow label="Pending" value={Math.max(0, bronzeCodeReviewItems.length - reviewedCodeReviewCount)} color="text-accent-amber" />
                 </>
                 ) : isGate5 ? (
                 <>
                   <CountRow label="Silver Scripts" value={silverReviewItems.length} color="text-gray-300" />
-                  <CountRow label="Decision" value={gateDecision === 'APPROVED' ? 'Approve' : gateDecision === 'REJECTED' ? 'Reject' : 'Regenerate'} color={gateDecision === 'APPROVED' ? 'text-accent-green' : gateDecision === 'REJECTED' ? 'text-accent-red' : 'text-accent-blue'} pulse />
+                  <CountRow label="Reviewed" value={reviewedCodeReviewCount} color="text-accent-green" pulse={reviewedCodeReviewCount > 0} />
+                  <CountRow label="Pending" value={Math.max(0, silverCodeReviewItems.length - reviewedCodeReviewCount)} color="text-accent-amber" />
                 </>
                 ) : (
                 <>
@@ -2040,7 +2093,7 @@ function HitlQueue() {
                     width: `${isGate3
                       ? 100
                       : isGate4 || isGate5
-                      ? (gateReviewReady ? 100 : 0)
+                      ? (activeCodeReviewItems.length > 0 ? (reviewedCodeReviewCount / activeCodeReviewItems.length) * 100 : (gateReviewReady ? 100 : 0))
                       : isGate2
                       ? (isSftpRun
                           ? (totalFeedCount > 0 ? (selectedFeedCount / totalFeedCount) * 100 : 0)
@@ -2062,11 +2115,11 @@ function HitlQueue() {
           </div>
 
           <button
-            onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isGate5) ? () => setGateDecision('APPROVED') : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
+            onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isGate5) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
             className="flex items-center justify-center gap-2 px-4 py-3 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/25 text-accent-green text-sm font-semibold rounded-xl transition-colors"
           >
             <CheckCircle size={15} />
-            {isGate3 ? 'Auto-Approve Pending' : isGate4 || isGate5 ? 'Set Approve' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
+            {isGate3 ? 'Auto-Approve Pending' : isGate4 || isGate5 ? 'Auto-Approve Pending' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
           </button>
 
           <div className="rounded-[20px] border border-[#22304b] bg-[#0d1729] p-3">
@@ -2643,8 +2696,11 @@ function CodeReviewPanel({
   items,
   reviewedCount,
   totalCount,
-  decision,
-  setDecision,
+  gateDecision,
+  decisions,
+  onSetItemDecision,
+  onAutoApprovePending,
+  onSetAllDecision,
   onPause,
   onSubmit,
   submitting,
@@ -2676,14 +2732,14 @@ function CodeReviewPanel({
   }
 
   const decisionLabel =
-    decision === 'APPROVED' ? 'Approve selected' :
-    decision === 'REJECTED' ? 'Reject selected' :
-    decision === 'REGENERATE' ? 'Regenerate selected' :
-    'No decision selected'
+    gateDecision === 'APPROVED' ? 'All approved' :
+    gateDecision === 'REJECTED' ? 'Rejected item selected' :
+    gateDecision === 'REGENERATE' ? 'Regenerate item selected' :
+    `${reviewedCount}/${totalCount} reviewed`
   const decisionTone =
-    decision === 'APPROVED' ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-300' :
-    decision === 'REJECTED' ? 'border-red-500/35 bg-red-500/10 text-red-300' :
-    decision === 'REGENERATE' ? 'border-[#3f82ff]/35 bg-[#3f82ff]/10 text-[#78a9ff]' :
+    gateDecision === 'APPROVED' ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-300' :
+    gateDecision === 'REJECTED' ? 'border-red-500/35 bg-red-500/10 text-red-300' :
+    gateDecision === 'REGENERATE' ? 'border-[#3f82ff]/35 bg-[#3f82ff]/10 text-[#78a9ff]' :
     'border-amber-500/35 bg-amber-500/10 text-amber-300'
 
   return (
@@ -2714,7 +2770,7 @@ function CodeReviewPanel({
           )}
           <button
             type="button"
-            onClick={() => setDecision('APPROVED')}
+            onClick={onAutoApprovePending}
             className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#202b3a] px-4 text-sm font-bold text-[#c6d2e8] transition-colors hover:bg-[#263449] hover:text-white"
           >
             <CheckCircle size={14} className="text-[#12b886]" />
@@ -2736,9 +2792,10 @@ function CodeReviewPanel({
               expanded={expandedKey === item.key}
               onToggle={() => setExpandedKey((current) => (current === item.key ? null : item.key))}
               onCodeChange={(code) => updateItemCode(item.key, code)}
-              onApprove={() => setDecision('APPROVED')}
-              onReject={() => setDecision('REJECTED')}
-              decision={decision}
+              onApprove={() => onSetItemDecision(item.key, 'APPROVED')}
+              onReject={() => onSetItemDecision(item.key, 'REJECTED')}
+              onRegenerate={() => onSetItemDecision(item.key, 'REGENERATE')}
+              decision={decisions[item.key] || ''}
             />
           ))
         )}
@@ -2752,10 +2809,10 @@ function CodeReviewPanel({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => setDecision('APPROVED')}
-              aria-pressed={decision === 'APPROVED'}
+              onClick={() => onSetAllDecision('APPROVED')}
+              aria-pressed={gateDecision === 'APPROVED'}
               className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
-                decision === 'APPROVED'
+                gateDecision === 'APPROVED'
                   ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300'
                   : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/15'
               }`}
@@ -2767,10 +2824,10 @@ function CodeReviewPanel({
             </button>
             <button
               type="button"
-              onClick={() => setDecision('REJECTED')}
-              aria-pressed={decision === 'REJECTED'}
+              onClick={() => onSetAllDecision('REJECTED')}
+              aria-pressed={gateDecision === 'REJECTED'}
               className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
-                decision === 'REJECTED'
+                gateDecision === 'REJECTED'
                   ? 'border-red-400 bg-red-500/20 text-red-300'
                   : 'border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/15'
               }`}
@@ -2782,10 +2839,10 @@ function CodeReviewPanel({
             </button>
             <button
               type="button"
-              onClick={() => setDecision('REGENERATE')}
-              aria-pressed={decision === 'REGENERATE'}
+              onClick={() => onSetAllDecision('REGENERATE')}
+              aria-pressed={gateDecision === 'REGENERATE'}
               className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
-                decision === 'REGENERATE'
+                gateDecision === 'REGENERATE'
                   ? 'border-[#3f82ff] bg-[#3f82ff]/20 text-[#78a9ff]'
                   : 'border-[#3f82ff]/30 bg-[#3f82ff]/10 text-[#78a9ff] hover:bg-[#3f82ff]/15'
               }`}
@@ -2814,9 +2871,10 @@ function CodeReviewPanel({
   )
 }
 
-function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onReject, decision }) {
+function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onReject, onRegenerate, decision }) {
   const approved = decision === 'APPROVED'
   const rejected = decision === 'REJECTED'
+  const regenerate = decision === 'REGENERATE'
 
   return (
     <div className="rounded-xl border border-[#22304b] bg-[#101827] p-5">
@@ -2879,7 +2937,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onR
         </div>
       )}
 
-      <div className="mt-4 grid gap-2 md:grid-cols-2">
+      <div className="mt-4 grid gap-2 md:grid-cols-3">
         <button
           type="button"
           onClick={(event) => {
@@ -2910,6 +2968,21 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onR
         >
           × Reject
         </button>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation()
+            onRegenerate()
+          }}
+          aria-pressed={regenerate}
+          className={`inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2 text-sm font-bold transition-colors ${
+            regenerate
+              ? 'border-[#3f82ff] bg-[#3f82ff]/20 text-[#78a9ff]'
+              : 'border-[#3f82ff]/35 bg-[#3f82ff]/10 text-[#78a9ff] hover:bg-[#3f82ff]/15'
+          }`}
+        >
+          Regenerate
+        </button>
       </div>
     </div>
   )
@@ -2917,7 +2990,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onR
 
 function buildBronzeCodeReviewItems(feeds) {
   return feeds.map((feed, index) => ({
-    key: `bronze-${feed.entity || feed.vendor || index}`,
+    key: `bronze-${feed.entity || feed.feed_name || feed.table_name || feed.vendor || 'script'}-${index}`,
     title: [feed.vendor, feed.entity || feed.feed_name || feed.table_name].filter(Boolean).join('.') || `bronze_script_${index + 1}`,
     type: 'BRONZE',
     queuedAt: formatReviewTimestamp(feed.queued_at || feed.created_at || feed.updated_at),
@@ -2938,6 +3011,14 @@ function buildSilverCodeReviewItems(items) {
       fileName: `${title}.py`,
     }
   })
+}
+
+function getCodeReviewGateDecision(items, decisions) {
+  const itemDecisions = items.map((item) => decisions[item.key]).filter(Boolean)
+  if (!itemDecisions.length) return ''
+  if (itemDecisions.includes('REJECTED')) return 'REJECTED'
+  if (itemDecisions.includes('REGENERATE')) return 'REGENERATE'
+  return 'APPROVED'
 }
 
 function stripEmptyReviewFields(value) {
