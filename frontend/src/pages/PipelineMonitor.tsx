@@ -6,7 +6,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Co
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
 import { formatPipelineStepLabel, getPhaseGroups, getPipelineSteps, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
-import { ENABLE_DEMO_FALLBACKS, isDemoFallbackRun } from '../utils/demoFallbacks'
+import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { abortRun, continueStage, getRun, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
 const MIN_STAGE_VISIBLE_MS = 60000
@@ -203,7 +203,8 @@ function PipelineMonitor() {
 
     const refreshRuns = async () => {
       if (ENABLE_DEMO_FALLBACKS && runs.length > 0 && runs.every((run) => isDemoFallbackRun(run))) {
-        scheduleNext(30000)
+        setRuns(getDemoRuns())
+        scheduleNext(2000)
         return
       }
 

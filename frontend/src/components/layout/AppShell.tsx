@@ -145,7 +145,17 @@ function AppShell() {
           }
 
           const hasAnyRuns = latestRunsRef.current.length > 0
-          if (ENABLE_DEMO_FALLBACKS && !hasAnyRuns && !demoRunsSeededRef.current) {
+          const hasOnlyFallbackRuns =
+            hasAnyRuns && latestRunsRef.current.every((run) => isDemoFallbackRun(run))
+
+          if (ENABLE_DEMO_FALLBACKS && hasOnlyFallbackRuns) {
+            const demoRuns = getDemoRuns()
+            const resumable = demoRuns.find(isReviewPausedRun)
+            setRuns(demoRuns)
+            if (resumable) {
+              setActiveRun(resumable.id)
+            }
+          } else if (ENABLE_DEMO_FALLBACKS && !hasAnyRuns && !demoRunsSeededRef.current) {
             const demoRuns = getDemoRuns()
             setRuns(demoRuns)
             setActiveRun((demoRuns.find(isReviewPausedRun) || demoRuns[0] || {}).id || null)
@@ -196,6 +206,11 @@ function AppShell() {
     if (pausedDetailKeyRef.current !== pausedBannerKey) {
       pausedDetailKeyRef.current = pausedBannerKey
       setPausedRunDetail(null)
+    }
+
+    if (isDemoFallbackRun(pausedRun)) {
+      setPausedRunDetail(pausedRun)
+      return
     }
 
     const hydratePausedRun = async () => {

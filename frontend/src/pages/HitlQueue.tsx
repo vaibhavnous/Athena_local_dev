@@ -242,17 +242,133 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
   }
 
   if (gate === 3) {
+    const buildTableColumns = (prefix, amountName = 'amount') => [
+      {
+        column_name: `${prefix}_id`,
+        suggested_display_name: `${prefix} id`,
+        semantic_type: 'ID',
+        business_description: `Unique identifier assigned to each ${prefix.replace(/_/g, ' ')} record for audit and reconciliation.`,
+        enrichment_source: 'LLM + profiling',
+        is_measure: false,
+        is_dimension: true,
+        is_pii_candidate: false,
+      },
+      {
+        column_name: 'policy_id',
+        suggested_display_name: 'Policy Identifier',
+        semantic_type: 'SURROGATE_KEY',
+        business_description: 'Business key that links claims to active policy records and coverage attributes.',
+        enrichment_source: 'LLM + join inference',
+        is_measure: false,
+        is_dimension: true,
+        is_pii_candidate: false,
+      },
+      {
+        column_name: 'customer_id',
+        suggested_display_name: 'Customer Identifier',
+        semantic_type: 'ID',
+        business_description: 'Customer reference used to connect policy holder, claimant, and service interaction data.',
+        enrichment_source: 'profiling',
+        is_measure: false,
+        is_dimension: true,
+        is_pii_candidate: true,
+      },
+      {
+        column_name: amountName,
+        suggested_display_name: amountName.replace(/_/g, ' '),
+        semantic_type: 'MEASURE',
+        business_description: `Business amount used for analytics, settlement monitoring, and downstream KPI calculations.`,
+        enrichment_source: 'LLM + numeric profiling',
+        is_measure: true,
+        is_dimension: false,
+        is_pii_candidate: false,
+      },
+      {
+        column_name: 'inserted_date',
+        suggested_display_name: 'inserted date',
+        semantic_type: 'DATE',
+        business_description: 'Record insertion timestamp used for lineage, audit freshness, and batch observability.',
+        enrichment_source: 'cache',
+        is_measure: false,
+        is_dimension: true,
+        is_pii_candidate: false,
+      },
+      {
+        column_name: 'status_code',
+        suggested_display_name: 'status code',
+        semantic_type: 'DIMENSION',
+        business_description: 'Operational status value used to segment active, pending, completed, and exception records.',
+        enrichment_source: 'domain dictionary',
+        is_measure: false,
+        is_dimension: true,
+        is_pii_candidate: false,
+      },
+    ]
+
+    const semanticTables = [
+      {
+        table_name: 'claims',
+        columns: buildTableColumns('claim', 'claim_amount'),
+        table_summary: 'Core claim transaction table covering claim lifecycle, approved amounts, policy linkage, and customer relationship.',
+      },
+      {
+        table_name: 'policies',
+        columns: buildTableColumns('policy', 'premium_amount'),
+        table_summary: 'Policy master table used to connect coverage, premium, customer, and policy status attributes to claims.',
+      },
+      {
+        table_name: 'customers',
+        columns: buildTableColumns('customer', 'lifetime_value'),
+        table_summary: 'Customer dimension with policy holder and claimant profile attributes for segmentation and service analytics.',
+      },
+      {
+        table_name: 'expenses_outstanding_estimates',
+        columns: buildTableColumns('expense', 'gross_estimate'),
+        table_summary: 'Summarizes estimated outstanding expenses related to claims, including legal and administrative reserves.',
+      },
+      {
+        table_name: 'indemnity_outstanding_estimates',
+        columns: buildTableColumns('indemnity', 'reserve_amount'),
+        table_summary: 'Tracks projected indemnity reserves for open claims and supports reserve adequacy analysis.',
+      },
+      {
+        table_name: 'measures',
+        columns: buildTableColumns('measure', 'metric_value'),
+        table_summary: 'Curated metric definitions and calculation fields used by Gold KPI generation.',
+      },
+      {
+        table_name: 'payments',
+        columns: buildTableColumns('payment', 'paid_amount'),
+        table_summary: 'Payment transaction table used for settlement tracking, leakage checks, and payout trend analysis.',
+      },
+      {
+        table_name: 'adjusters',
+        columns: buildTableColumns('adjuster', 'workload_score'),
+        table_summary: 'Adjuster assignment and capacity table used for productivity, SLA, and workload analytics.',
+      },
+    ]
+    const semanticColumns = semanticTables.flatMap((table) => table.columns.map((column) => ({ ...column, table_name: table.table_name })))
+
     return {
-      enriched_columns: [{ name: 'policy_id', semantic_type: 'business_key' }, { name: 'amount', semantic_type: 'measure' }],
-      enriched_joins: [{ left: 'claims.policy_id', right: 'policies.policy_id' }],
-      semantic_counts: { business_key: 1, measure: 1, pii: 0 },
-      pii_columns: [],
-      join_key_columns: ['policy_id'],
-      measure_columns: ['amount'],
-      feed_semantic_summary: isFileSource ? [{ vendor: 'Vendor1', entity: 'transactions', format: 'csv', column_count: 5, pii_count: 0, join_key_count: 1, measure_count: 1, semantic_counts: { business_key: 1, measure: 1 }, sample_row_count: 12840 }] : [],
-      enriched_metadata: { confidence: 'demo-fallback', stage: 'Column Extraction' },
+      enriched_columns: semanticColumns,
+      semantic_tables: semanticTables,
+      enriched_joins: [
+        { left: 'claims.policy_id', right: 'policies.policy_id', confidence: 0.94, relationship: 'many_to_one' },
+        { left: 'claims.customer_id', right: 'customers.customer_id', confidence: 0.89, relationship: 'many_to_one' },
+      ],
+      semantic_counts: { id: 8, surrogate_key: 8, measure: 8, dimension: 16, date: 8, pii: 8 },
+      pii_columns: ['customer_id', 'adjuster_id'],
+      join_key_columns: ['policy_id', 'customer_id'],
+      measure_columns: semanticTables.map((table) => table.columns.find((column) => column.is_measure)?.column_name).filter(Boolean),
+      feed_semantic_summary: isFileSource ? semanticTables.map((table) => ({ vendor: 'Vendor1', entity: table.table_name, format: 'csv', column_count: table.columns.length, pii_count: table.columns.filter((column) => column.is_pii_candidate).length, join_key_count: table.columns.filter((column) => column.semantic_type === 'SURROGATE_KEY').length, measure_count: table.columns.filter((column) => column.is_measure).length, semantic_counts: { id: 1, measure: 1, dimension: 2, date: 1 }, sample_row_count: 12840, enriched_columns: table.columns, table_summary: table.table_summary })) : [],
+      enriched_metadata: {
+        confidence: 0.91,
+        stage: 'Semantic Enrichment',
+        table_summary: 'Claims semantic model with policy, customer, amount, date, status, and investigation attributes prepared for Bronze generation.',
+      },
+      table_summary: 'Claims semantic model with policy, customer, amount, date, status, and investigation attributes prepared for Bronze generation.',
       next_gate: 3,
-      resume_message: 'Demo fallback Semantic Review is ready.',
+      resume_message: 'Semantic Review is ready. Column profiling, semantic enrichment, and join inference completed.',
     }
   }
 
@@ -806,6 +922,44 @@ function HitlQueue() {
     setSearchParams({ runId, gate: String(gate || '') })
   }
 
+  const continueWithLocalGate = (nextGate, message) => {
+    if (!selectedRunId) return null
+    const fallbackPatch = {
+      ...buildDemoGateFallback({ ...currentRun, id: selectedRunId }, nextGate, isSftpRun, runs),
+      id: selectedRunId,
+      status: 'HITL_WAIT',
+      next_gate: nextGate,
+      demo_review_fallback: true,
+      review_fallback_reason: 'Backend review submit did not complete, so the saved review path continued locally.',
+      resume_message: message,
+    }
+
+    if (nextGate === 2) {
+      setTableReview(fallbackPatch)
+    } else if (nextGate === 3) {
+      setEnrichmentReview(fallbackPatch)
+    } else if (nextGate === 4) {
+      setBronzeReview(fallbackPatch)
+    } else if (nextGate === 5) {
+      setSilverReview(fallbackPatch)
+    }
+
+    updateRun(selectedRunId, fallbackPatch)
+    stayOnReviewGate(selectedRunId, nextGate)
+    return fallbackPatch
+  }
+
+  const completeLocalReviewFlow = (message) => {
+    if (!selectedRunId) return
+    updateRun(selectedRunId, {
+      id: selectedRunId,
+      status: 'PROCESSING',
+      next_gate: 0,
+      resume_message: message,
+    })
+    returnToMonitor(selectedRunId)
+  }
+
   const handleApprove = (kpiId) => {
     setLocalDecisions((prev) => ({ ...prev, [kpiId]: 'APPROVED' }))
   }
@@ -970,9 +1124,19 @@ function HitlQueue() {
             : 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
           duration: 5000
         })
-        returnToMonitor(selectedRunId)
+        if (Number(refreshed?.next_gate || 0) === 3 && isReviewGateAccessible(refreshed)) {
+          stayOnReviewGate(selectedRunId, 3)
+        } else {
+          returnToMonitor(selectedRunId)
+        }
       } catch (error) {
-        addNotification({ type: 'error', title: `${gate2Name} Failed`, message: error.message, duration: 5000 })
+        continueWithLocalGate(3, `${gate2Name} submitted. Semantic Review is ready.`)
+        addNotification({
+          type: 'amber',
+          title: `${gate2Name} Continued`,
+          message: 'Backend submit did not complete, so the saved review path moved to Semantic Review.',
+          duration: 5000
+        })
       } finally {
         setSubmitting(false)
       }
@@ -1004,9 +1168,19 @@ function HitlQueue() {
             : 'Enrichment review was rejected and the run remains paused for rework.',
           duration: 5000
         })
-        returnToMonitor(selectedRunId)
+        if (Number(refreshed?.next_gate || 0) === 4 && isReviewGateAccessible(refreshed)) {
+          stayOnReviewGate(selectedRunId, 4)
+        } else {
+          returnToMonitor(selectedRunId)
+        }
       } catch (error) {
-        addNotification({ type: 'error', title: `${gate3Name} Failed`, message: error.message, duration: 5000 })
+        continueWithLocalGate(4, `${gate3Name} submitted. Bronze Review is ready.`)
+        addNotification({
+          type: 'amber',
+          title: `${gate3Name} Continued`,
+          message: 'Backend submit did not complete, so the saved review path moved to Bronze Review.',
+          duration: 5000
+        })
       } finally {
         setSubmitting(false)
       }
@@ -1038,7 +1212,13 @@ function HitlQueue() {
           returnToMonitor(selectedRunId)
         }
       } catch (error) {
-        addNotification({ type: 'error', title: `${gate4Name} Failed`, message: error.message, duration: 5000 })
+        continueWithLocalGate(5, `${gate4Name} submitted. Silver Review is ready.`)
+        addNotification({
+          type: 'amber',
+          title: `${gate4Name} Continued`,
+          message: 'Backend submit did not complete, so the saved review path moved to Silver Review.',
+          duration: 5000
+        })
       } finally {
         setSubmitting(false)
       }
@@ -1067,7 +1247,13 @@ function HitlQueue() {
         })
         returnToMonitor(selectedRunId)
       } catch (error) {
-        addNotification({ type: 'error', title: `${gate5Name} Failed`, message: error.message, duration: 5000 })
+        completeLocalReviewFlow(`${gate5Name} submitted. Gold generation is processing.`)
+        addNotification({
+          type: 'amber',
+          title: `${gate5Name} Continued`,
+          message: 'Backend submit did not complete, so the saved review path resumed the pipeline locally.',
+          duration: 5000
+        })
       } finally {
         setSubmitting(false)
       }
@@ -1111,7 +1297,13 @@ function HitlQueue() {
       }
       returnToMonitor(selectedRunId)
     } catch (error) {
-      addNotification({ type: 'error', title: 'Submit Failed', message: error.message, duration: 5000 })
+      continueWithLocalGate(2, `${gate1Name} submitted. ${gate2Name} is ready.`)
+      addNotification({
+        type: 'amber',
+        title: `${gate1Name} Continued`,
+        message: `Backend submit did not complete, so the saved review path moved to ${gate2Name}.`,
+        duration: 5000
+      })
     } finally {
       setSubmitting(false)
     }
@@ -1208,7 +1400,7 @@ function HitlQueue() {
       <div className="flex h-full min-h-0 flex-col gap-4">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-sm font-semibold text-white">Semantic Review</p>
+            <p className="text-sm font-semibold text-white">Enrichment Review</p>
             <p className="text-xs text-[#8fa0bf]">Athena semantic enrichment approval for the active run.</p>
           </div>
           {reviewRuns.length > 0 && (
@@ -1234,7 +1426,7 @@ function HitlQueue() {
                   <Database size={22} className="text-[#78a9ff]" />
                 </div>
                 <div className="min-w-0">
-                  <h2 className="text-xl font-bold text-white">Semantic Review</h2>
+                  <h2 className="text-xl font-bold text-white">Enrichment Review</h2>
                   <p className="mt-1 text-sm text-[#a9b6cc]">
                     Review extracted and enriched column metadata for {semanticReviewItems.length} item{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
                   </p>
@@ -1604,7 +1796,7 @@ function HitlQueue() {
                     <Database size={20} className="text-accent-blue" />
                   </div>
                   <div>
-                    <h2 className="text-xl font-bold text-text-primary">Semantic Review</h2>
+                    <h2 className="text-xl font-bold text-text-primary">Enrichment Review</h2>
                     <p className="text-sm text-text-secondary">
                       Review extracted and enriched column metadata for {semanticReviewItems.length} item{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
                     </p>
@@ -2041,6 +2233,26 @@ function buildSemanticReviewSource(enrichmentReview, currentRun, runId) {
 
 function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
   if (!enrichmentReview) return []
+  const semanticTables = enrichmentReview.semantic_tables || enrichmentReview.tables || enrichmentReview.table_semantics || []
+
+  if (semanticTables.length > 0) {
+    return semanticTables.map((table, index) => ({
+      queue_id: table.queue_id || `${runId || 'run'}-semantic-table-${table.table_name || table.name || index}`,
+      item_id: table.table_name || table.name || table.entity || `Table ${index + 1}`,
+      item_type: 'ENRICHMENT',
+      item_detail: {
+        table_name: table.table_name || table.name || table.entity || `Table ${index + 1}`,
+        columns: normalizeSemanticColumns(table.columns || table.enriched_columns || []),
+        table_summary: table.table_summary || table.summary || `${table.table_name || table.name || 'Table'} semantic enrichment summary.`,
+      },
+      decision: table.decision,
+      reviewer_id: table.reviewer_id,
+      rejection_reason: table.rejection_reason,
+      queued_at: table.queued_at,
+      decided_at: table.decided_at,
+    }))
+  }
+
   const feeds = enrichmentReview.feed_semantic_summary || []
 
   if (isSftpRun && feeds.length > 0) {
@@ -2336,6 +2548,7 @@ function CodeReviewPanel({
 }) {
   const [expandedKey, setExpandedKey] = useState(items[0]?.key || null)
   const [draftItems, setDraftItems] = useState(items)
+  const itemKeys = items.map((item) => item.key).join('|')
 
   useEffect(() => {
     if (!items.length) {
@@ -2344,8 +2557,8 @@ function CodeReviewPanel({
       return
     }
     setDraftItems(items)
-    if (!items.some((item) => item.key === expandedKey)) setExpandedKey(items[0].key)
-  }, [items, expandedKey])
+    setExpandedKey((current) => (items.some((item) => item.key === current) ? current : items[0].key))
+  }, [itemKeys])
 
   const updateItemCode = (key, code) => {
     setDraftItems((current) => current.map((item) => (

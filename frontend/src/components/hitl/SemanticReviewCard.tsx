@@ -101,7 +101,17 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
     setReason(rejectionReason || '')
     setIsEditing(false)
     setExpanded(true)
-  }, [initialColumns, initialSummary, rejectionReason])
+  }, [id])
+
+  useEffect(() => {
+    if (isEditing) return
+    setDraftColumns(initialColumns)
+    setDraftSummary(initialSummary)
+  }, [initialColumns, initialSummary, isEditing])
+
+  useEffect(() => {
+    setReason(rejectionReason || '')
+  }, [rejectionReason])
 
   const updateColumn = (index, field, value) => {
     setDraftColumns((prev) => prev.map((column, columnIndex) => (
