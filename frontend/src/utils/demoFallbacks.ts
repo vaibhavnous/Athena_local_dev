@@ -11,9 +11,8 @@ const DEMO_FALLBACK_STAGE_MS = Number.isFinite(configuredFallbackStageMs)
   : 20000
 
 const PIPELINE_STAGE_ORDER = [
-  { key: 'ingestion', label: 'BRD Ingestion' },
-  { key: 'memory', label: 'Memory Intelligence' },
-  { key: 'domain_knowledge', label: 'Domain Knowledge Check' },
+  { key: 'ingestion', label: 'BRD Ingest' },
+  { key: 'memory', label: 'Memory Check' },
   { key: 'requirements', label: 'Requirement Extraction' },
   { key: 'kpis', label: 'KPI Extraction' },
   { key: 'gate1', label: 'KPI Review' },
@@ -30,7 +29,7 @@ const PIPELINE_STAGE_ORDER = [
   { key: 'gold', label: 'Gold Code Generation' },
 ]
 
-const ACTIVE_FALLBACK_SEQUENCE = PIPELINE_STAGE_ORDER.slice(0, 5)
+const ACTIVE_FALLBACK_SEQUENCE = PIPELINE_STAGE_ORDER.slice(0, 4)
 
 let fallbackStartedAt: number | null = null
 

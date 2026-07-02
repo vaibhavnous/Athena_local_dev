@@ -21,7 +21,6 @@ export function formatPipelineStepLabel(label?: string, key?: string) {
   const normalizedLabel = cleanLabel.toLowerCase()
 
   if (normalizedKey === 'ingestion' || normalizedLabel === 'ingestion') return 'BRD Ingest'
-  if (normalizedKey === 'domain_knowledge' || normalizedKey === 'domain_kb' || normalizedLabel === 'domain knowledge check') return 'Domain Knowledge Check'
   if (normalizedKey === 'requirements' || normalizedLabel === 'req extract') return 'Requirement Extraction'
   if (normalizedKey === 'kpis' || normalizedLabel === 'kpi extract') return 'KPI Extraction'
   if (normalizedKey === 'nomination' || normalizedLabel === 'nomination' || normalizedLabel === 'table nomination') return 'Table Extraction'
@@ -46,7 +45,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-1',
       label: 'Discovery & Requirement Intelligence',
-      keys: ['ingestion', 'memory', 'domain_knowledge', 'requirements', 'kpis', 'gate1'],
+      keys: ['ingestion', 'memory', 'requirements', 'kpis', 'gate1'],
     },
     {
       id: 'phase-2',
@@ -73,7 +72,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-1',
       label: 'Discovery & Requirement Intelligence',
-      keys: ['ingestion', 'domain_knowledge', 'requirements', 'kpis', 'gate1'],
+      keys: ['ingestion', 'requirements', 'kpis', 'gate1'],
     },
     {
       id: 'phase-2',
@@ -188,8 +187,6 @@ function fallbackStepLabel(key) {
   const labels = {
     ingestion: 'BRD Ingest',
     memory: 'Memory Check',
-    domain_knowledge: 'Domain Knowledge Check',
-    domain_kb: 'Domain Knowledge Check',
     requirements: 'Requirement Extraction',
     kpis: 'KPI Extraction',
     gate1: 'KPI Review',
@@ -247,11 +244,6 @@ function buildStepDetail(run, key, state, existingDetail) {
       )
     case 'gate3':
       return readyGateMessage('Semantic review', 'Semantic review is ready. Validate enriched column metadata before Bronze generation starts.')
-    case 'domain_knowledge':
-    case 'domain_kb':
-      if (state === 'COMPLETED') return 'Domain knowledge was checked against the BRD and source context.'
-      if (state === 'RUNNING') return 'Checking reusable domain knowledge and insurance terminology.'
-      return 'Domain knowledge check runs before requirement extraction.'
     case 'gate4':
       return readyGateMessage('Bronze review', 'Bronze review is ready. Validate generated Bronze artifacts before Silver generation starts.')
     case 'gate5':

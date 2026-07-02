@@ -33,3 +33,4 @@ Thumbs.db
 # Misc
 *.bak
 paramiko_debug.log
+.tmp-smoke/ponytail/

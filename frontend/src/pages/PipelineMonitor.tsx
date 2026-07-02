@@ -1468,13 +1468,12 @@ function buildPipelineDisplayPhase(phase, allSteps = []) {
 
   if (phase.id === 'phase-1') {
     displaySteps = [
-      makeStep('ingestion', 'BRD Ingestion'),
-      makeStep('memory', 'Memory Intelligence'),
-      makeStep('domain_knowledge', 'Domain Knowledge Check'),
+      makeStep('ingestion', 'BRD Ingest'),
+      makeStep('memory', 'Memory Check'),
       makeStep('requirements', 'Requirement Extraction'),
       makeStep('kpis', 'KPI Extraction'),
       makeStep('gate1', 'KPI Review', reviewAwareStepState(byKey.get('gate1'), phase)),
-    ].filter((step) => byKey.has(step.key) || !['memory', 'domain_knowledge'].includes(step.key))
+    ].filter((step) => byKey.has(step.key) || step.key !== 'memory')
   } else if (phase.id === 'phase-2') {
     displaySteps = [
       makeStep('nomination', 'Table Extraction'),

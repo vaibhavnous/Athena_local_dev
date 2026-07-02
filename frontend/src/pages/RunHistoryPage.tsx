@@ -382,9 +382,8 @@ function getHistoryDisplaySteps(phase) {
 
   if (phase.id === 'phase-1') {
     return [
-      actual('ingestion', 'BRD Ingestion'),
-      actual('memory', 'Memory Intelligence'),
-      actual('domain_knowledge', 'Domain Knowledge Check'),
+      actual('ingestion', 'BRD Ingest'),
+      actual('memory', 'Memory Check'),
       actual('requirements', 'Requirement Extraction'),
       actual('kpis', 'KPI Extraction'),
       actual('gate1', 'KPI Review', reviewAwareState(byKey.get('gate1'), phase)),

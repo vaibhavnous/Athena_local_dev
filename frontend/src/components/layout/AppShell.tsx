@@ -208,10 +208,8 @@ function AppShell() {
       setPausedRunDetail(null)
     }
 
-    if (isDemoFallbackRun(pausedRun)) {
-      setPausedRunDetail(pausedRun)
-      return
-    }
+    setPausedRunDetail(pausedRun)
+    if (isDemoFallbackRun(pausedRun)) return
 
     const hydratePausedRun = async () => {
       try {
@@ -246,8 +244,6 @@ function AppShell() {
 
         if (detailGate === expectedGate && gateStepReady && reviewDataReady) {
           setPausedRunDetail(detail)
-        } else {
-          setPausedRunDetail((current) => (current && `${current.id}:${Number(current.next_gate || 0)}` === pausedBannerKey ? current : null))
         }
       } catch (error) {
         if (!cancelled) {
