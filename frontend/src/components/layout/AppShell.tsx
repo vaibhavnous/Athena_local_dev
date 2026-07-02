@@ -538,6 +538,7 @@ function hasRenderableRunDetail(run) {
     (Array.isArray(run?.stages) && run.stages.length > 0) ||
     (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length > 0) ||
     run?.stage_confirmation ||
+    Number(run?.next_gate || 0) > 0 ||
     run?.bronze ||
     run?.silver ||
     run?.gold
@@ -546,12 +547,13 @@ function hasRenderableRunDetail(run) {
 
 function isReviewPausedRun(run) {
   const status = String(run?.status || '').toUpperCase()
+  const terminalStatuses = ['FAILED', 'SUCCESS', 'COMPLETED', 'PIPELINE_COMPLETED']
   return (
     hasRenderableRunDetail(run) &&
     hasReviewGate(run) &&
     !run?.stage_confirmation?.awaiting_confirmation &&
     status !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
-    ['HITL_WAIT', 'PAUSED_FOR_HITL'].includes(status)
+    !terminalStatuses.includes(status)
   )
 }
 

@@ -495,6 +495,16 @@ function buildHistorySilverPhaseStates(silverState, gate5State, phaseStatus) {
   }
 
   if (normalizedSilver === 'COMPLETED' || normalizedSilver === 'SUCCESS' || normalizedSilver === 'PIPELINE_COMPLETED') {
+    if (!normalizedGate || normalizedGate === 'PENDING') {
+      return {
+        mergeResolution: 'COMPLETED',
+        mergeReview: 'HITL_WAIT',
+        codeGeneration: 'PENDING',
+        reviewGate: 'PENDING',
+        codeExecution: 'PENDING',
+      }
+    }
+
     return {
       mergeResolution: 'COMPLETED',
       mergeReview: 'COMPLETED',
