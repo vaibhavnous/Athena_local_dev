@@ -9,7 +9,7 @@ import { formatPipelineStepLabel, getPhaseGroups, getPipelineSteps, statusTone, 
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { abortRun, continueStage, getRun, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
-const MIN_STAGE_VISIBLE_MS = 60000
+const MIN_STAGE_VISIBLE_MS = 20000
 const PHASE_AUTO_SWITCH_DELAY_MS = 4000
 const STAGE_TERMINAL_STATES = new Set(['COMPLETED', 'FAILED', 'HITL_WAIT'])
 
@@ -99,9 +99,6 @@ function PipelineMonitor() {
     const now = Date.now()
     const activeStepKeys = new Set(actualSteps.map((step) => step.key))
     const stepIndexByKey = new Map(actualSteps.map((step, index) => [step.key, index]))
-    const actualActiveIndex = actualSteps.reduce((latest, step, index) => {
-      return ['RUNNING', 'HITL_WAIT'].includes(step.state) ? Math.max(latest, index) : latest
-    }, -1)
 
     for (const key of Object.keys(stepHoldTimersRef.current)) {
       if (!activeStepKeys.has(key)) {
@@ -113,9 +110,25 @@ function PipelineMonitor() {
     setStepStateOverrides((current) => {
       const next = { ...current }
       let changed = false
-
-      for (const step of actualSteps) {
+      const heldStepIndex = actualSteps.findIndex((step) => {
         const runningSince = runningStepSinceRef.current[step.key]
+        return Boolean(
+          runningSince &&
+          STAGE_TERMINAL_STATES.has(step.state) &&
+          now - runningSince < MIN_STAGE_VISIBLE_MS
+        )
+      })
+
+      for (const [index, step] of actualSteps.entries()) {
+        const runningSince = runningStepSinceRef.current[step.key]
+
+        if (heldStepIndex >= 0 && index > heldStepIndex && step.state === 'RUNNING') {
+          if (next[step.key] !== 'PENDING') {
+            next[step.key] = 'PENDING'
+            changed = true
+          }
+          continue
+        }
 
         if (step.state === 'RUNNING') {
           if (!runningSince) {
@@ -134,18 +147,6 @@ function PipelineMonitor() {
 
         if (runningSince && STAGE_TERMINAL_STATES.has(step.state)) {
           const stepIndex = stepIndexByKey.get(step.key) ?? -1
-          if (actualActiveIndex > stepIndex) {
-            delete runningStepSinceRef.current[step.key]
-            if (next[step.key]) {
-              delete next[step.key]
-              changed = true
-            }
-            if (stepHoldTimersRef.current[step.key]) {
-              window.clearTimeout(stepHoldTimersRef.current[step.key])
-              delete stepHoldTimersRef.current[step.key]
-            }
-            continue
-          }
 
           const remaining = Math.max(0, MIN_STAGE_VISIBLE_MS - (now - runningSince))
           if (remaining > 0) {
@@ -158,9 +159,13 @@ function PipelineMonitor() {
                 delete runningStepSinceRef.current[step.key]
                 delete stepHoldTimersRef.current[step.key]
                 setStepStateOverrides((latest) => {
-                  if (!latest[step.key]) return latest
                   const updated = { ...latest }
                   delete updated[step.key]
+                  for (const laterStep of actualSteps.slice(stepIndex + 1)) {
+                    if (updated[laterStep.key] === 'PENDING' && laterStep.state === 'RUNNING') {
+                      delete updated[laterStep.key]
+                    }
+                  }
                   return updated
                 })
               }, remaining)
@@ -357,8 +362,8 @@ function PipelineMonitor() {
     })
   }, [phases, shouldDebouncePhaseSwitch, visiblePhaseIndex])
   const renderedPhases = useMemo(
-    () => displayPhases.map((phase) => buildPipelineDisplayPhase(phase, displaySteps)),
-    [displayPhases, displaySteps]
+    () => displayPhases.map((phase) => buildPipelineDisplayPhase(phase, displaySteps, activeRun)),
+    [activeRun, displayPhases, displaySteps]
   )
 
   const defaultExpandedPhase = useMemo(() => {
@@ -1190,7 +1195,7 @@ function formatScriptBody(script) {
   return `${body}\n\n# ---------------- Gold dimension script ----------------\n\n${script.dimension_body}`
 }
 
-function buildPipelineDisplayPhase(phase, allSteps = []) {
+function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
   const steps = Array.isArray(phase?.steps) ? phase.steps : []
   const byKey = new Map([...allSteps, ...steps].map((step) => [step.key, step]))
   const phaseState = phaseStatusToStepState(phase.status)
@@ -1222,20 +1227,20 @@ function buildPipelineDisplayPhase(phase, allSteps = []) {
       makeStep('memory', 'Memory Check'),
       makeStep('requirements', 'Requirement Extraction'),
       makeStep('kpis', 'KPI Extraction'),
-      makeStep('gate1', 'KPI Review', reviewAwareStepState(byKey.get('gate1'), phase)),
+      makeStep('gate1', 'KPI Review', reviewAwareStepState(byKey.get('gate1'), phase, run, 1)),
     ].filter((step) => byKey.has(step.key) || step.key !== 'memory')
   } else if (phase.id === 'phase-2') {
     displaySteps = [
       makeStep('nomination', 'Table Extraction'),
-      makeStep('gate2', byKey.has('gate2') && String(byKey.get('gate2')?.label || '').toLowerCase().includes('feed') ? 'Feed Review' : 'Table Review', reviewAwareStepState(byKey.get('gate2'), phase)),
+      makeStep('gate2', byKey.has('gate2') && String(byKey.get('gate2')?.label || '').toLowerCase().includes('feed') ? 'Feed Review' : 'Table Review', reviewAwareStepState(byKey.get('gate2'), phase, run, 2)),
       makeStep('discovery', 'Column Extraction', byKey.get('discovery')?.state || byKey.get('schema')?.state || phaseState),
       makeStep('profiling', 'Column Profiling', byKey.get('profiling')?.state || phaseState),
       makeStep('enrichment', 'Semantic Enrichment', byKey.get('enrichment')?.state || phaseState),
-      makeStep('gate3', 'Semantic Review', reviewAwareStepState(byKey.get('gate3'), phase)),
+      makeStep('gate3', 'Semantic Review', reviewAwareStepState(byKey.get('gate3'), phase, run, 3)),
     ]
   } else if (phase.id === 'phase-3') {
     const bronzeState = byKey.get('bronze')?.state || phaseState
-    const gate4State = reviewAwareStepState(byKey.get('gate4'), phase)
+    const gate4State = reviewAwareStepState(byKey.get('gate4'), phase, run, 4)
     displaySteps = [
       makeStep('bronze', 'Bronze Code Generation'),
       makeStep('gate4', 'Bronze Review', gate4State),
@@ -1243,7 +1248,7 @@ function buildPipelineDisplayPhase(phase, allSteps = []) {
     ]
   } else if (phase.id === 'phase-4') {
     const silverState = byKey.get('silver')?.state || phaseState
-    const gate5State = reviewAwareStepState(byKey.get('gate5'), phase)
+    const gate5State = reviewAwareStepState(byKey.get('gate5'), phase, run, 5)
     const silverFlow = buildSilverPhaseStates(silverState, gate5State, phase.status)
     displaySteps = [
       makeSynthetic('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverFlow.mergeResolution),
@@ -1288,8 +1293,10 @@ function phaseStatusToStepState(status) {
   return 'PENDING'
 }
 
-function reviewAwareStepState(step, phase) {
+function reviewAwareStepState(step, phase, run = null, gate = 0) {
   if (step?.state) return step.state
+  const status = String(run?.status || '').toUpperCase()
+  if (Number(run?.next_gate || 0) === gate && ['HITL_WAIT', 'PENDING_REVIEW', 'PAUSED_FOR_HITL'].includes(status)) return 'HITL_WAIT'
   if (phase.status === 'Review') return 'HITL_WAIT'
   return phaseStatusToStepState(phase.status)
 }

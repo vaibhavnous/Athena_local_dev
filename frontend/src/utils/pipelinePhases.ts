@@ -55,12 +55,12 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-3',
       label: 'Bronze Layer (Ingestion)',
-      keys: ['bronze'],
+      keys: ['bronze', 'gate4'],
     },
     {
       id: 'phase-4',
       label: 'Silver Layer (Transformation)',
-      keys: ['silver'],
+      keys: ['silver', 'gate5'],
     },
     {
       id: 'phase-5',
@@ -103,23 +103,46 @@ export function isFileSource(run) {
 
 export function getPipelineSteps(run) {
   if (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length) {
-    return run.pipeline_steps.map((step) => ({
+    return withPendingReviewGate(run, run.pipeline_steps.map((step) => ({
       ...step,
       label: formatPipelineStepLabel(step.label, step.key),
       detail: step.detail || buildStepDetail(run, step.key, normalizeState(step.state), step.detail),
       state: normalizeState(step.state),
-    })) as PipelineStep[]
+    })) as PipelineStep[])
   }
   if (Array.isArray(run?.stages) && run.stages.length) {
-    return run.stages.map((stage) => ({
+    return withPendingReviewGate(run, run.stages.map((stage) => ({
       key: stage.key,
       label: formatPipelineStepLabel(stage.name, stage.key),
       detail: stage.error || buildStepDetail(run, stage.key, normalizeState(stage.status), ''),
       state: normalizeState(stage.status),
       complete: normalizeState(stage.status) === 'COMPLETED',
-    })) as PipelineStep[]
+    })) as PipelineStep[])
   }
-  return [] as PipelineStep[]
+  return withPendingReviewGate(run, [] as PipelineStep[])
+}
+
+function withPendingReviewGate(run, steps: PipelineStep[]) {
+  const gate = Number(run?.next_gate || 0)
+  if (gate < 1 || gate > 5) return steps
+
+  const status = normalizeState(run?.status)
+  const reviewReady = ['HITL_WAIT', 'PENDING_REVIEW', 'PAUSED_FOR_HITL'].includes(status)
+  if (!reviewReady) return steps
+
+  const gateKey = `gate${gate}`
+  if (steps.some((step) => step.key === gateKey)) return steps
+
+  return [
+    ...steps,
+    {
+      key: gateKey,
+      label: fallbackStepLabel(gateKey),
+      detail: buildStepDetail(run, gateKey, 'HITL_WAIT', ''),
+      state: 'HITL_WAIT',
+      complete: false,
+    },
+  ]
 }
 
 export function getPhaseGroups(run, stepsOverride?) {

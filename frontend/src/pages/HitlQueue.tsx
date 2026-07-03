@@ -161,12 +161,80 @@ function buildBronzeScriptFromRun(sourceRun, currentRun, isFileSource) {
 function buildSilverScriptFromRun(sourceRun, currentRun, isFileSource) {
   const entity = isFileSource ? (currentRun?.sftp_entity || 'transactions') : 'claims'
   const sourceName = sourceRun?.brd_filename || sourceRun?.id || 'successful_run'
+  const sourceTable = 'bronze.' + entity
+  const targetTable = 'silver.' + entity + '_curated'
+  const quarantineTable = 'silver.' + entity + '_quarantine'
+  const idColumn = isFileSource ? 'transaction_id' : 'claim_id'
+  const dateColumn = isFileSource ? 'transaction_date' : 'loss_date'
+  const amountColumn = isFileSource ? 'transaction_amount' : 'claim_amount'
+  const statusColumn = isFileSource ? 'transaction_status' : 'claim_status'
   return [
-    '-- Demo fallback Silver Code Review artifact',
-    '-- Reused pattern from previous successful run: ' + sourceName,
-    'CREATE OR REPLACE TABLE silver.' + entity + '_curated AS',
-    'SELECT *',
-    'FROM bronze.' + entity + ';',
+    '# Silver transformation script',
+    '# Pattern reused from previous successful run: ' + sourceName,
+    '# Purpose: validate, standardize, deduplicate, quarantine bad records, and upsert curated Delta rows.',
+    'from delta.tables import DeltaTable',
+    'from pyspark.sql import Window',
+    'from pyspark.sql import functions as F',
+    '',
+    'SOURCE_TABLE = "' + sourceTable + '"',
+    'TARGET_TABLE = "' + targetTable + '"',
+    'QUARANTINE_TABLE = "' + quarantineTable + '"',
+    'BUSINESS_KEYS = ["' + idColumn + '", "policy_id"]',
+    'WATERMARK_COLUMN = "_ingested_at"',
+    '',
+    'bronze_df = spark.table(SOURCE_TABLE)',
+    '',
+    'standardized_df = (',
+    '    bronze_df',
+    '    .withColumn("' + idColumn + '", F.trim(F.col("' + idColumn + '").cast("string")))',
+    '    .withColumn("policy_id", F.trim(F.col("policy_id").cast("string")))',
+    '    .withColumn("customer_id", F.trim(F.col("customer_id").cast("string")))',
+    '    .withColumn("' + statusColumn + '", F.upper(F.trim(F.col("' + statusColumn + '").cast("string"))))',
+    '    .withColumn("' + dateColumn + '", F.to_date(F.col("' + dateColumn + '")))',
+    '    .withColumn("' + amountColumn + '", F.col("' + amountColumn + '").cast("decimal(18,2)"))',
+    '    .withColumn("_source_system", F.coalesce(F.col("source_system"), F.lit("athena")))',
+    '    .withColumn("_silver_loaded_at", F.current_timestamp())',
+    ')',
+    '',
+    'valid_condition = (',
+    '    F.col("' + idColumn + '").isNotNull()',
+    '    & F.col("policy_id").isNotNull()',
+    '    & F.col("' + dateColumn + '").isNotNull()',
+    '    & (F.col("' + amountColumn + '") >= F.lit(0))',
+    ')',
+    '',
+    'valid_df = standardized_df.filter(valid_condition)',
+    'quarantine_df = (',
+    '    standardized_df',
+    '    .filter(~valid_condition)',
+    '    .withColumn("quarantine_reason", F.lit("missing key/date or invalid amount"))',
+    '    .withColumn("quarantined_at", F.current_timestamp())',
+    ')',
+    '',
+    'dedupe_window = Window.partitionBy(*BUSINESS_KEYS).orderBy(F.col(WATERMARK_COLUMN).desc_nulls_last())',
+    'curated_df = (',
+    '    valid_df',
+    '    .withColumn("_rn", F.row_number().over(dedupe_window))',
+    '    .filter(F.col("_rn") == 1)',
+    '    .drop("_rn")',
+    '    .withColumn("silver_record_key", F.sha2(F.concat_ws("||", *[F.col(key) for key in BUSINESS_KEYS]), 256))',
+    '    .withColumn("record_hash", F.sha2(F.to_json(F.struct(*[F.col(c) for c in valid_df.columns])), 256))',
+    ')',
+    '',
+    'quarantine_df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(QUARANTINE_TABLE)',
+    '',
+    'if spark.catalog.tableExists(TARGET_TABLE):',
+    '    (',
+    '        DeltaTable.forName(spark, TARGET_TABLE).alias("target")',
+    '        .merge(curated_df.alias("source"), "target.silver_record_key = source.silver_record_key")',
+    '        .whenMatchedUpdateAll()',
+    '        .whenNotMatchedInsertAll()',
+    '        .execute()',
+    '    )',
+    'else:',
+    '    curated_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(TARGET_TABLE)',
+    '',
+    'spark.sql(f"OPTIMIZE {TARGET_TABLE}")',
   ].join('\n')
 }
 
@@ -407,7 +475,7 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
             type_casts: ['amount -> decimal(18,2)'],
             dq_rules: ['policy_id not null'],
             pii_masking_rules: [],
-            merge_strategy: 'upsert',
+            processing_mode: 'delta_upsert',
             generated_silver_script: buildSilverScriptFromRun(previousSuccessfulRun, run, isFileSource),
           },
         ],
@@ -3000,17 +3068,29 @@ function buildBronzeCodeReviewItems(feeds) {
 }
 
 function buildSilverCodeReviewItems(items) {
-  return items.map((item, index) => {
+  return items.filter((item) => !isMergeKeyReviewItem(item)).map((item, index) => {
     const title = item.script_name || item.entity || item.target_table || item.table_name || `silver_script_${index + 1}`
     return {
       key: `silver-${title}-${index}`,
       title,
-      type: title.toLowerCase().includes('merge_key') || item.merge_strategy || item.merge_key_source ? 'MERGE_KEY' : 'SILVER',
+      type: 'SILVER',
       queuedAt: formatReviewTimestamp(item.queued_at || item.created_at || item.updated_at),
       code: item.generated_silver_script || item.script_body || JSON.stringify(stripEmptyReviewFields(item), null, 2),
       fileName: `${title}.py`,
     }
   })
+}
+
+function isMergeKeyReviewItem(item) {
+  const title = String(item?.script_name || item?.entity || item?.target_table || item?.table_name || item?.type || item?.item_type || '').toLowerCase()
+  return Boolean(
+    title.includes('merge_key') ||
+    title.includes('merge key') ||
+    item?.merge_key_source ||
+    item?.merge_key_candidates ||
+    item?.review_type === 'merge_key' ||
+    item?.item_type === 'MERGE_KEY'
+  )
 }
 
 function getCodeReviewGateDecision(items, decisions) {
