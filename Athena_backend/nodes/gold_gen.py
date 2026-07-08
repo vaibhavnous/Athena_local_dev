@@ -7,7 +7,6 @@ generation contract produced after silver generation.
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
@@ -54,7 +53,6 @@ def _ui_path() -> str:
 
 def _validate_python(code: str) -> None:
     compile(code, "<gold_generated>", "exec")
-    ast.parse(code)
 
 
 def _safe_identifier(value: str, fallback: str = "kpi") -> str:

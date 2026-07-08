@@ -8,7 +8,6 @@ that bronze tables exist.
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
@@ -68,7 +67,6 @@ def _silver_ui_path() -> str:
 
 def _validate_python(code: str) -> None:
     compile(code, "<silver_generated>", "exec")
-    ast.parse(code)
 
 
 def _load_bronze_bundle() -> Dict[str, Any]:

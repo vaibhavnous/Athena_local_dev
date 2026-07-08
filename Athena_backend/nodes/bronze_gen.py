@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
@@ -173,7 +172,6 @@ def _resolve_tables_for_bronze(state: Stage01State) -> List[BronzeTableRef]:
 
 def _validate_python(code: str) -> None:
     compile(code, "<bronze_generated>", "exec")
-    ast.parse(code)
 
 
 def _detect_dangerous_sql(code: str) -> None:
