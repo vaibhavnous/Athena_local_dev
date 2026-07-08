@@ -1349,12 +1349,10 @@ function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeStep('gate3', 'Semantic Review', reviewAwareStepState(byKey.get('gate3'), phase, run, 3)),
     ]
   } else if (phase.id === 'phase-3') {
-    const bronzeState = byKey.get('bronze')?.state || phaseState
     const gate4State = reviewAwareStepState(byKey.get('gate4'), phase, run, 4)
     displaySteps = [
       makeStep('bronze', 'Bronze Code Generation'),
       makeStep('gate4', 'Bronze Review', gate4State),
-      makeSynthetic('bronze_code_execution', 'Bronze Code Execution', inferExecutionDisplayState(bronzeState, byKey.get('gate4')?.state, phase.status), 'UI-only marker: Bronze scripts are exported for external execution, not run inside Athena.'),
     ]
   } else if (phase.id === 'phase-4') {
     const silverState = byKey.get('silver')?.state || phaseState
@@ -1366,13 +1364,10 @@ function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeSynthetic('silver_merge_key_review', 'Silver Merge Key Review', silverFlow.mergeReview),
       makeStep('silver', 'Silver Code Generation', silverFlow.codeGeneration, true),
       makeStep('gate5', 'Silver Review', silverFlow.reviewGate),
-      makeSynthetic('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution, 'UI-only marker: Silver scripts are exported for external execution, not run inside Athena.'),
     ]
   } else if (phase.id === 'phase-5') {
-    const goldState = byKey.get('gold')?.state || phaseState
     displaySteps = [
       makeStep('gold', 'Gold Code Generation'),
-      makeSynthetic('gold_code_execution', 'Gold Code Execution', inferExecutionDisplayState(goldState, undefined, phase.status), 'UI-only marker: Gold scripts are exported for external execution, not run inside Athena.'),
     ]
   }
 
@@ -1412,16 +1407,6 @@ function reviewAwareStepState(step, phase, run = null, gate = 0) {
   return phaseStatusToStepState(phase.status)
 }
 
-function inferExecutionDisplayState(generationState, reviewState, phaseStatus) {
-  const normalizedGeneration = String(generationState || '').toUpperCase()
-  const normalizedReview = String(reviewState || '').toUpperCase()
-  if (phaseStatus === 'Done') return 'COMPLETED'
-  if (normalizedReview === 'COMPLETED' && normalizedGeneration === 'COMPLETED') return 'COMPLETED'
-  if (normalizedReview === 'HITL_WAIT' || normalizedReview === 'PAUSED_FOR_HITL') return 'PENDING'
-  if (normalizedGeneration === 'RUNNING') return 'PENDING'
-  return phaseStatusToStepState(phaseStatus) === 'FAILED' ? 'FAILED' : 'PENDING'
-}
-
 function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus) {
   const normalizedSilver = String(silverState || '').toUpperCase()
   const normalizedGate4 = String(gate4State || '').toUpperCase()
@@ -1434,7 +1419,6 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
       mergeReview: 'COMPLETED',
       codeGeneration: 'COMPLETED',
       reviewGate: 'COMPLETED',
-      codeExecution: 'COMPLETED',
     }
   }
 
@@ -1444,7 +1428,6 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
       mergeReview: 'COMPLETED',
       codeGeneration: 'COMPLETED',
       reviewGate: 'HITL_WAIT',
-      codeExecution: 'PENDING',
     }
   }
 
@@ -1454,7 +1437,6 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
       mergeReview: 'HITL_WAIT',
       codeGeneration: 'PENDING',
       reviewGate: 'PENDING',
-      codeExecution: 'PENDING',
     }
   }
 
@@ -1464,7 +1446,6 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
       mergeReview: 'COMPLETED',
       codeGeneration: 'RUNNING',
       reviewGate: 'PENDING',
-      codeExecution: 'PENDING',
     }
   }
 
@@ -1475,7 +1456,6 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
         mergeReview: 'HITL_WAIT',
         codeGeneration: 'PENDING',
         reviewGate: 'PENDING',
-        codeExecution: 'PENDING',
       }
     }
 
@@ -1484,7 +1464,6 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
       mergeReview: 'COMPLETED',
       codeGeneration: 'COMPLETED',
       reviewGate: normalizedGate || 'PENDING',
-      codeExecution: inferExecutionDisplayState(silverState, gate5State, phaseStatus),
     }
   }
 
@@ -1494,7 +1473,6 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
       mergeReview: 'PENDING',
       codeGeneration: 'PENDING',
       reviewGate: 'PENDING',
-      codeExecution: 'FAILED',
     }
   }
 
@@ -1503,7 +1481,6 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
     mergeReview: 'PENDING',
     codeGeneration: 'PENDING',
     reviewGate: normalizedGate || 'PENDING',
-    codeExecution: 'PENDING',
   }
 }
 

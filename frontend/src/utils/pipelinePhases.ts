@@ -55,17 +55,17 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-3',
       label: 'Bronze Layer (Ingestion)',
-      keys: ['bronze', 'gate4', 'bronze_code_execution'],
+      keys: ['bronze', 'gate4'],
     },
     {
       id: 'phase-4',
       label: 'Silver Layer (Transformation)',
-      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution'],
+      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5'],
     },
     {
       id: 'phase-5',
       label: 'Gold Layer (Analytics)',
-      keys: ['gold', 'gold_code_execution'],
+      keys: ['gold'],
     },
   ],
   file: [
@@ -82,17 +82,17 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-3',
       label: 'Bronze Layer (Ingestion)',
-      keys: ['bronze', 'gate4', 'bronze_code_execution'],
+      keys: ['bronze', 'gate4'],
     },
     {
       id: 'phase-4',
       label: 'Silver Layer (Transformation)',
-      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution'],
+      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5'],
     },
     {
       id: 'phase-5',
       label: 'Gold Layer (Analytics)',
-      keys: ['gold', 'gold_code_execution'],
+      keys: ['gold'],
     },
   ],
 }

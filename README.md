@@ -9,6 +9,7 @@ Single repo containing:
 
 - Node.js **20.x** (recommended) for `react-scripts@5`
 - Python **3.11.x** for backend
+- Microsoft ODBC Driver 17 or 18 for SQL Server for Azure SQL connectivity
 - (Backend) Access to:
   - Azure SQL (ODBC)
   - Pinecone
@@ -38,13 +39,28 @@ copy .env.example .env
 Fill in values in `Athena_backend/.env`, then:
 
 ```powershell
+python -m venv Athena_backend\.venv
+Athena_backend\.venv\Scripts\python -m pip install --upgrade pip
+Athena_backend\.venv\Scripts\python -m pip install -r requirements.txt
 cd Athena_backend
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python -m uvicorn api.main:app --reload --port 8000
 ```
 
 Backend: `http://localhost:8000`
+
+The root `requirements.txt` delegates to `Athena_backend/requirements.txt`, so a fresh clone can install backend packages from the repository root. If you are already inside `Athena_backend`, this equivalent command also works:
+
+```powershell
+.venv\Scripts\python -m pip install -r requirements.txt
+```
+
+Optional local HuggingFace embeddings are kept separate because they can install large Torch wheels:
+
+```powershell
+.venv\Scripts\python -m pip install -r requirements-embeddings.txt
+```
+
+Do not install `requirements-embeddings.txt` in the default Azure App Service deployment unless local HuggingFace embeddings are intentionally required.
 
 ## Configuration
 
@@ -92,7 +108,8 @@ npm run build
 
 GitHub Actions:
 - Builds `frontend/`
-- Runs `python -m compileall` for `Athena_backend/`
+- Installs `Athena_backend/requirements.txt`
+- Runs backend health/import tests and `python -m compileall` for `Athena_backend/`
 
 ## Notes
 

@@ -402,11 +402,9 @@ function getHistoryDisplaySteps(phase) {
   }
 
   if (phase.id === 'phase-3') {
-    const bronzeState = byKey.get('bronze')?.state || phaseState
     return [
       actual('bronze', 'Bronze Code Generation'),
       actual('gate4', 'Bronze Review', reviewAwareState(byKey.get('gate4'), phase)),
-      { key: 'bronze_code_execution', label: 'Bronze Code Execution', state: inferExecutionState(bronzeState, byKey.get('gate4')?.state, phase.status) },
     ]
   }
 
@@ -420,15 +418,12 @@ function getHistoryDisplaySteps(phase) {
       actual('silver_merge_key_review', 'Silver Merge Key Review', silverFlow.mergeReview),
       actual('silver', 'Silver Code Generation', silverFlow.codeGeneration),
       actual('gate5', 'Silver Review', silverFlow.reviewGate),
-      { key: 'silver_code_execution', label: 'Silver Code Execution', state: silverFlow.codeExecution },
     ]
   }
 
   if (phase.id === 'phase-5') {
-    const goldState = byKey.get('gold')?.state || phaseState
     return [
       actual('gold', 'Gold Code Generation'),
-      { key: 'gold_code_execution', label: 'Gold Code Execution', state: inferExecutionState(goldState, undefined, phase.status) },
     ]
   }
 
@@ -450,16 +445,6 @@ function reviewAwareState(step, phase) {
   return phaseStatusToStepState(phase.status)
 }
 
-function inferExecutionState(generationState, reviewState, phaseStatus) {
-  const normalizedGeneration = String(generationState || '').toUpperCase()
-  const normalizedReview = String(reviewState || '').toUpperCase()
-  if (phaseStatus === 'Done') return 'COMPLETED'
-  if (normalizedReview === 'COMPLETED' && normalizedGeneration === 'COMPLETED') return 'COMPLETED'
-  if (normalizedReview === 'HITL_WAIT' || normalizedReview === 'PAUSED_FOR_HITL') return 'PENDING'
-  if (normalizedGeneration === 'RUNNING') return 'PENDING'
-  return phaseStatusToStepState(phaseStatus) === 'FAILED' ? 'FAILED' : 'PENDING'
-}
-
 function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phaseStatus) {
   const normalizedSilver = String(silverState || '').toUpperCase()
   const normalizedGate4 = String(gate4State || '').toUpperCase()
@@ -472,7 +457,6 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
       mergeReview: 'COMPLETED',
       codeGeneration: 'COMPLETED',
       reviewGate: 'COMPLETED',
-      codeExecution: 'COMPLETED',
     }
   }
 
@@ -482,7 +466,6 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
       mergeReview: 'COMPLETED',
       codeGeneration: 'COMPLETED',
       reviewGate: 'HITL_WAIT',
-      codeExecution: 'PENDING',
     }
   }
 
@@ -492,7 +475,6 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
       mergeReview: 'HITL_WAIT',
       codeGeneration: 'PENDING',
       reviewGate: 'PENDING',
-      codeExecution: 'PENDING',
     }
   }
 
@@ -502,7 +484,6 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
       mergeReview: 'COMPLETED',
       codeGeneration: 'RUNNING',
       reviewGate: 'PENDING',
-      codeExecution: 'PENDING',
     }
   }
 
@@ -513,7 +494,6 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
         mergeReview: 'HITL_WAIT',
         codeGeneration: 'PENDING',
         reviewGate: 'PENDING',
-        codeExecution: 'PENDING',
       }
     }
 
@@ -522,7 +502,6 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
       mergeReview: 'COMPLETED',
       codeGeneration: 'COMPLETED',
       reviewGate: normalizedGate || 'PENDING',
-      codeExecution: inferExecutionState(silverState, gate5State, phaseStatus),
     }
   }
 
@@ -532,7 +511,6 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
       mergeReview: 'PENDING',
       codeGeneration: 'PENDING',
       reviewGate: 'PENDING',
-      codeExecution: 'FAILED',
     }
   }
 
@@ -541,7 +519,6 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
     mergeReview: 'PENDING',
     codeGeneration: 'PENDING',
     reviewGate: normalizedGate || 'PENDING',
-    codeExecution: 'PENDING',
   }
 }
 
