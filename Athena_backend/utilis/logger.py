@@ -92,7 +92,11 @@ def get_athena_logger():
             logger.addHandler(console_handler)
 
         PIPELINE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        json_handler = logging.FileHandler(PIPELINE_LOG_PATH, encoding="utf-8")
+        try:
+            json_handler = logging.FileHandler(PIPELINE_LOG_PATH, encoding="utf-8")
+        except PermissionError:
+            fallback_path = PIPELINE_LOG_PATH.with_name(f"{PIPELINE_LOG_PATH.stem}.{os.getpid()}{PIPELINE_LOG_PATH.suffix}")
+            json_handler = logging.FileHandler(fallback_path, encoding="utf-8")
         json_handler.setFormatter(AthenaJsonFormatter())
         logger.addHandler(json_handler)
 

@@ -95,11 +95,13 @@ def run_pipeline_background(
     *,
     run_id: str,
     brd_text: str,
+    brd_filename: Optional[str],
     source: Optional[str],
     source_databases: Optional[List[str]],
     sftp_entity: Optional[str],
     use_domain_kb: bool,
     stage_confirmation_enabled: bool,
+    target_warehouse: str = "databricks",
 ) -> None:
     started_at = time.monotonic()
     try:
@@ -109,24 +111,29 @@ def run_pipeline_background(
             result = start_sftp_pipeline(
                 run_id=run_id,
                 brd_text=brd_text,
+                brd_filename=brd_filename,
                 sftp_entity=sftp_entity,
                 source=str(source or "sftp").lower(),
             )
         else:
             result = start_pipeline(
                 brd_text=brd_text,
+                brd_filename=brd_filename,
                 source=source,
                 source_databases=source_databases,
                 sftp_entity=sftp_entity,
                 run_id=run_id,
                 use_domain_kb=use_domain_kb,
                 stage_confirmation_enabled=stage_confirmation_enabled,
+                target_warehouse=target_warehouse,
             )
         elapsed_seconds = time.monotonic() - started_at
         if elapsed_seconds > _pipeline_timeout_seconds():
             raise TimeoutError(f"Pipeline exceeded timeout after {elapsed_seconds:.1f} seconds.")
 
         state = _validate_pipeline_result(result)
+        if brd_filename and not state.get("brd_filename"):
+            state["brd_filename"] = brd_filename
         pending_gate1 = get_pending_items(run_id, 1)
         file_source = api_utils.is_file_source(state.get("source") or source)
         state["status"] = _next_status(state.get("status"), pending_gate1, file_source=file_source)
@@ -152,14 +159,16 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             run_pipeline_background,
             run_id=run_id,
             brd_text=payload.brd_text,
+            brd_filename=payload.brd_filename,
             source=source,
             source_databases=payload.source_databases
             or ([payload.database_name] if payload.database_name else None),
             sftp_entity=sftp_entity,
             use_domain_kb=use_domain_kb,
             stage_confirmation_enabled=bool(
-                payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else True
+                payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else False
             ),
+            target_warehouse=str(payload.target_warehouse or "databricks").lower(),
         )
         BACKGROUND_JOBS[job_key] = future
 
@@ -187,6 +196,7 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
         deployment=checkpoint.get("deployment"),
         database_name=database_name,
         database_type=checkpoint.get("database_type"),
+        target_warehouse=checkpoint.get("target_warehouse") or "databricks",
         source_databases=source_databases,
         sftp_entity=checkpoint.get("sftp_entity") or "transactions",
         use_domain_kb=bool(checkpoint.get("use_domain_kb")),

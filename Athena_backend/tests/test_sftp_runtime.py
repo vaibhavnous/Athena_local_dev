@@ -21,12 +21,14 @@ def test_start_sftp_pipeline_normalizes_entity_and_invokes_graph(monkeypatch):
     result = sftp_runtime.start_sftp_pipeline(
         run_id="run-sftp",
         brd_text="test",
+        brd_filename="SFTP Upload",
         sftp_entity="invalid",
         source="sftp",
     )
 
     assert result["run_id"] == "run-sftp"
     assert result["result"]["status"] == "COMPLETED"
+    assert captured["state"]["brd_filename"] == "SFTP Upload"
     assert captured["state"]["sftp_entity"] == "transactions"
 
 

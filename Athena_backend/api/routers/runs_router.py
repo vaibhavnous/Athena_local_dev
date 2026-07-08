@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -73,7 +74,11 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state
 
     run_id = str(row.get("run_id") or row.get("id") or "")
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = row.get("checkpoint")
+    if isinstance(checkpoint, str):
+        checkpoint = json.loads(checkpoint)
+    if not isinstance(checkpoint, dict):
+        checkpoint = load_checkpoint_state(run_id) or {}
     return {
         **_fallback_run_summary(row),
         "brd_filename": checkpoint.get("brd_filename") or checkpoint.get("display_name") or row.get("brd_filename") or run_id,
@@ -139,7 +144,7 @@ def runs() -> List[Dict[str, Any]]:
     try:
         # ✅ configurable timeout with safe minimum
         timeout_seconds = max(1, int(os.getenv("ATHENA_RUNS_ENDPOINT_TIMEOUT_SECONDS", "5")))
-        run_limit = max(1, min(100, int(os.getenv("ATHENA_RUNS_LIST_LIMIT", "25"))))
+        run_limit = max(1, min(100, int(os.getenv("ATHENA_RUNS_LIST_LIMIT", "10"))))
         fast_summary = str(os.getenv("ATHENA_RUNS_FAST_SUMMARY", "true")).lower() not in {"0", "false", "no"}
         deadline = time.monotonic() + timeout_seconds
 

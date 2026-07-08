@@ -3,7 +3,7 @@ Refined HITL Controller (Clean + UI-friendly)
 """
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 class HITLController:
@@ -122,6 +122,39 @@ class HITLController:
 hitl_controller = HITLController(mode="auto")
 
 
+def _apply_reviewed_bronze_artifact_to_results(state: Dict[str, Any]) -> Dict[str, Any]:
+    artifact = state.get("bronze_review_artifact") or {}
+    feeds = artifact.get("feeds") or []
+    if not feeds:
+        return state
+
+    reviewed_by_entity = {
+        str(feed.get("entity") or feed.get("feed_name") or feed.get("table_name") or "").strip().lower(): feed
+        for feed in feeds
+        if str(feed.get("entity") or feed.get("feed_name") or feed.get("table_name") or "").strip()
+    }
+    results = []
+    for item in state.get("bronze_generation_results") or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("entity") or item.get("feed_name") or item.get("table_name") or "").strip().lower()
+        reviewed = reviewed_by_entity.get(key)
+        if reviewed:
+            config = dict(item.get("bronze_config") or item.get("generated_bronze_config") or {})
+            reviewed_keys = reviewed.get("primary_keys") or reviewed.get("merge_keys") or []
+            config["primary_keys"] = reviewed_keys
+            item = {
+                **item,
+                "primary_keys": reviewed_keys,
+                "merge_keys": reviewed_keys,
+                "bronze_config": config,
+                "generated_bronze_config": reviewed.get("generated_bronze_config") or config,
+                "generated_bronze_script": reviewed.get("generated_bronze_script") or item.get("generated_bronze_script"),
+            }
+        results.append(item)
+    return {**state, "bronze_generation_results": results}
+
+
 def submit_sftp_gate1_review(run_id: str, approve: bool = True) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
     from sftp_nodes.governance import sftp_feed_discovery_node, sftp_gate1_node, sftp_gate2_node
@@ -187,7 +220,7 @@ def submit_sftp_gate2_review(run_id: str, approve: bool = True) -> Dict[str, Any
     return gate4_state
 
 
-def submit_sftp_gate3_review(run_id: str, approve: bool = True) -> Dict[str, Any]:
+def submit_sftp_gate3_review(run_id: str, approve: bool = True, enriched_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
     from sftp_nodes.bronze_code_generation import sftp_bronze_code_generation_node
     from sftp_nodes.review_gates import source_access_readiness_check_node, sftp_gate4_node, sftp_gate5_node, bronze_validation_node, dq_validation_node
@@ -200,6 +233,8 @@ def submit_sftp_gate3_review(run_id: str, approve: bool = True) -> Dict[str, Any
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
     checkpoint_state["gate3_decision"] = "APPROVED" if approve else "REJECTED"
     checkpoint_state["enrichment_review_decision"] = "APPROVED" if approve else "REJECTED"
+    if enriched_metadata:
+        checkpoint_state["enriched_metadata"] = enriched_metadata
     gate3_state = sftp_gate3_node(checkpoint_state)
     if gate3_state.get("status") == "HITL_WAIT":
         save_checkpoint_state(run_id, gate3_state)
@@ -255,7 +290,7 @@ def submit_sftp_gate3_review(run_id: str, approve: bool = True) -> Dict[str, Any
     return gold_state
 
 
-def submit_sftp_gate4_review(run_id: str, action: str = "APPROVED") -> Dict[str, Any]:
+def submit_sftp_gate4_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
     from sftp_nodes.bronze_code_generation import sftp_bronze_code_generation_node
     from sftp_nodes.review_gates import bronze_validation_node, sftp_gate4_node
@@ -266,6 +301,8 @@ def submit_sftp_gate4_review(run_id: str, action: str = "APPROVED") -> Dict[str,
 
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
     checkpoint_state["bronze_review_decision"] = str(action or "APPROVED").upper()
+    if review_artifact:
+        checkpoint_state["bronze_review_artifact"] = review_artifact
     gate4_state = sftp_gate4_node(checkpoint_state)
     if gate4_state.get("status") == "REGENERATE_REQUIRED":
         regenerated = sftp_bronze_code_generation_node({**checkpoint_state, "bronze_review_decision": None})
@@ -295,6 +332,7 @@ def submit_sftp_gate4_review(run_id: str, action: str = "APPROVED") -> Dict[str,
         save_checkpoint_state(run_id, validated)
         return validated
 
+    validated = _apply_reviewed_bronze_artifact_to_results(validated)
     silver_state = sftp_silver_code_generation_node(validated)
     silver_status = str(silver_state.get("silver_generation_status") or "").upper()
     silver_items = ((silver_state.get("silver_review_artifact") or {}).get("items") or [])
@@ -312,7 +350,7 @@ def submit_sftp_gate4_review(run_id: str, action: str = "APPROVED") -> Dict[str,
     return gate5_state
 
 
-def submit_sftp_gate5_review(run_id: str, action: str = "APPROVED") -> Dict[str, Any]:
+def submit_sftp_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
     from sftp_nodes.gold_code_generation import sftp_gold_code_generation_node
     from sftp_nodes.review_gates import dq_validation_node, sftp_gate5_node
@@ -320,6 +358,8 @@ def submit_sftp_gate5_review(run_id: str, action: str = "APPROVED") -> Dict[str,
 
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
     checkpoint_state["silver_review_decision"] = str(action or "APPROVED").upper()
+    if review_artifact:
+        checkpoint_state["silver_review_artifact"] = review_artifact
     gate5_state = sftp_gate5_node(checkpoint_state)
     if gate5_state.get("status") == "REGENERATE_REQUIRED":
         regenerated = sftp_silver_code_generation_node({**checkpoint_state, "silver_review_decision": None})

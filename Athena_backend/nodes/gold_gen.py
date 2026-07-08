@@ -426,8 +426,9 @@ Expected runtime: Spark / Databricks with Delta support
 DO NOT EDIT MANUALLY
 """
 
+from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import avg, col, count, current_timestamp, date_trunc, expr, lit, max, min, sum
+from pyspark.sql.functions import avg, coalesce, col, concat_ws, count, current_timestamp, date_trunc, expr, lit, max, min, sha2, sum
 
 spark = SparkSession.builder.getOrCreate()
 
@@ -576,15 +577,38 @@ result = (
     .withColumn("gold_processed_timestamp", current_timestamp())
 )
 
+grain_columns = [
+    name for name in result.columns
+    if name not in {{VALUE_COLUMN, "gold_processed_timestamp", "gold_run_id"}}
+]
+result = result.withColumn(
+    "gold_upsert_key",
+    sha2(
+        concat_ws(
+            "||",
+            *[coalesce(col(name).cast("string"), lit("__NULL__")) for name in grain_columns]
+        ),
+        256,
+    ),
+)
+
 if spark.catalog.tableExists(TARGET_TABLE):
-    writer = result.write.format("delta").mode("append")
+    delta_target = DeltaTable.forName(spark, TARGET_TABLE)
+    (
+        delta_target.alias("target")
+        .merge(
+            result.alias("source"),
+            "target.gold_upsert_key = source.gold_upsert_key",
+        )
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
 else:
     writer = result.write.format("delta").mode("overwrite").option("overwriteSchema", "true")
-
-if "period_start" in result.columns:
-    writer = writer.partitionBy("period_start")
-
-writer.saveAsTable(TARGET_TABLE)
+    if "period_start" in result.columns:
+        writer = writer.partitionBy("period_start")
+    writer.saveAsTable(TARGET_TABLE)
 
 print(f"SUCCESS: Gold KPI generation completed for {{TARGET_TABLE}}")
 '''

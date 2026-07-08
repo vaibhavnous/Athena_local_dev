@@ -137,10 +137,10 @@ def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict
     logger.info("Submitting enrichment review", extra={"run_id": run_id})
 
     if api_utils.is_file_source(checkpoint.get("source")):
-        submit_background(run_id, "gate3", submit_sftp_gate3_review, run_id, payload.approve)
+        submit_background(run_id, "gate3", submit_sftp_gate3_review, run_id, payload.approve, payload.enriched_metadata)
         return {"run_id": run_id, "status": "SUBMITTED", "approve": payload.approve}
 
-    submit_background(run_id, "gate3", submit_gate3_review, run_id, payload.approve)
+    submit_background(run_id, "gate3", submit_gate3_review, run_id, payload.approve, payload.enriched_metadata)
 
     return {"run_id": run_id, "status": "SUBMITTED", "approve": payload.approve}
 
@@ -185,12 +185,16 @@ def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
     if demo_enabled():
         return demo_action(run_id, segment="bronze" if payload.action == "APPROVED" else None, action=payload.action)
 
-    from services.pipeline_runtime import submit_background
+    from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate4_review
     from sftp_nodes.hitl import submit_sftp_gate4_review
 
     logger.info("Submitting bronze review", extra={"run_id": run_id, "action": payload.action})
 
-    submit_background(run_id, "gate4", submit_sftp_gate4_review, run_id, payload.action)
+    checkpoint = load_checkpoint_state(run_id) or {}
+    if api_utils.is_file_source(checkpoint.get("source")):
+        submit_background(run_id, "gate4", submit_sftp_gate4_review, run_id, payload.action, payload.review_artifact)
+    else:
+        submit_background(run_id, "gate4", submit_gate4_review, run_id, payload.action, payload.review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
 
@@ -235,11 +239,15 @@ def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
     if demo_enabled():
         return demo_action(run_id, segment="silver" if payload.action == "APPROVED" else None, action=payload.action)
 
-    from services.pipeline_runtime import submit_background
+    from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate5_review
     from sftp_nodes.hitl import submit_sftp_gate5_review
 
     logger.info("Submitting silver review", extra={"run_id": run_id, "action": payload.action})
 
-    submit_background(run_id, "gate5", submit_sftp_gate5_review, run_id, payload.action)
+    checkpoint = load_checkpoint_state(run_id) or {}
+    if api_utils.is_file_source(checkpoint.get("source")):
+        submit_background(run_id, "gate5", submit_sftp_gate5_review, run_id, payload.action, payload.review_artifact)
+    else:
+        submit_background(run_id, "gate5", submit_gate5_review, run_id, payload.action, payload.review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}

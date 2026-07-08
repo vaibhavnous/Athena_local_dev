@@ -18,6 +18,8 @@ export interface PipelineLog {
   logged_at: string
 }
 
+type NewLogsHandler = (logs: PipelineLog[]) => void
+
 function stableLogKey(log: PipelineLog) {
   return [
     log.log_id,
@@ -34,10 +36,12 @@ function stableLogKey(log: PipelineLog) {
 export function usePipelineLogs(
   runId: string | null | undefined,
   isActive = true,
+  onNewLogs?: NewLogsHandler,
 ) {
   const serverOnline = useAthenaStore((s) => s.serverOnline)
   const logIdsRef = useRef(new Set<string>())
   const isFetchingRef = useRef(false)
+  const onNewLogsRef = useRef<NewLogsHandler | undefined>(onNewLogs)
 
   const [discoveredRunId, setDiscoveredRunId] = useState<string | null>(null)
   const [isDiscovering, setIsDiscovering] = useState(false)
@@ -49,6 +53,10 @@ export function usePipelineLogs(
   const [logsError, setLogsError] = useState<string | null>(null)
   const [lastLogTimestamp, setLastLogTimestamp] = useState<string | null>(null)
   const [terminalLogs] = useState<{ message: string; timestamp: string }[]>([])
+
+  useEffect(() => {
+    onNewLogsRef.current = onNewLogs
+  }, [onNewLogs])
 
   const fetchLogs = useCallback(
     async (
@@ -92,6 +100,7 @@ export function usePipelineLogs(
     unique.forEach((log) => logIdsRef.current.add(stableLogKey(log)))
     setLogs((prev) => [...prev, ...unique])
     setLastLogTimestamp(unique[unique.length - 1].logged_at)
+    onNewLogsRef.current?.(unique)
   }, [])
 
   const startLogsPolling = useCallback(

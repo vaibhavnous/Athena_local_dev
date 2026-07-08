@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { AlertTriangle, CheckCircle, CheckCircle2, Copy, Database, Download, Inbox, Loader2, PlusCircle, RotateCcw, Send, Shield, Table2, Timer, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle, CheckCircle2, ChevronDown, ChevronRight, Copy, Database, Download, Inbox, KeyRound, Loader2, PlusCircle, RotateCcw, Send, Shield, Table2, Timer, XCircle } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import KpiReviewCard from '../components/hitl/KpiReviewCard'
 import EditKpiModal from '../components/hitl/EditKpiModal'
@@ -28,21 +28,23 @@ import { getGateDisplayName } from '../utils/pipelinePhases'
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const REVIEW_HYDRATION_ATTEMPTS = 12
 const REVIEW_HYDRATION_DELAY_MS = 2500
+const PIPELINE_ADVANCE_ATTEMPTS = 60
+const PIPELINE_ADVANCE_DELAY_MS = 2000
 const ENABLE_DEMO_REVIEW_FALLBACKS = ENABLE_DEMO_FALLBACKS
 
-async function waitForRunGate(runId, updateRun, targetGate, attempts = 20) {
+async function waitForRunGate(runId, updateRun, targetGate, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
   let latest = null
   for (let index = 0; index < attempts; index += 1) {
     latest = await getRun(runId)
     updateRun(runId, latest)
     if (Number(latest?.next_gate || 0) === targetGate) return latest
     if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
-    await sleep(1500)
+    await sleep(PIPELINE_ADVANCE_DELAY_MS)
   }
   return latest
 }
 
-async function waitForRunToLeaveGate(runId, updateRun, currentGate, attempts = 12) {
+async function waitForRunToLeaveGate(runId, updateRun, currentGate, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
   let latest = null
   for (let index = 0; index < attempts; index += 1) {
     latest = await getRun(runId)
@@ -53,7 +55,7 @@ async function waitForRunToLeaveGate(runId, updateRun, currentGate, attempts = 1
     if (nextGate !== Number(currentGate || 0) || ['RUNNING', 'PROCESSING', 'SUBMITTED'].includes(status)) {
       return latest
     }
-    await sleep(1500)
+    await sleep(PIPELINE_ADVANCE_DELAY_MS)
   }
   return latest
 }
@@ -111,14 +113,14 @@ function hasGoldScripts(run) {
   )
 }
 
-async function waitForGoldScripts(runId, updateRun, attempts = 24) {
+async function waitForGoldScripts(runId, updateRun, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
   let latest = null
   for (let index = 0; index < attempts; index += 1) {
     latest = await getRun(runId)
     updateRun(runId, latest)
     if (hasGoldScripts(latest)) return latest
     if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
-    await sleep(1500)
+    await sleep(PIPELINE_ADVANCE_DELAY_MS)
   }
   return latest
 }
@@ -129,7 +131,10 @@ function isSuccessfulRun(run) {
 
 function findPreviousSuccessfulRun(allRuns, currentRun, isFileSource) {
   const targetRunId = String(currentRun?.id || currentRun?.run_id || '')
-  const candidates = [...(allRuns || []), ...getDemoRuns()]
+  const candidates = [
+    ...(allRuns || []),
+    ...(ENABLE_DEMO_FALLBACKS ? getDemoRuns() : []),
+  ]
     .filter((run) => run && String(run.id || run.run_id || '') !== targetRunId)
     .filter(isSuccessfulRun)
     .filter((run) => {
@@ -526,6 +531,7 @@ function HitlQueue() {
   const [selectedTables, setSelectedTables] = useState({})
   const [enrichmentReview, setEnrichmentReview] = useState(null)
   const [semanticDecisions, setSemanticDecisions] = useState({})
+  const [semanticDrafts, setSemanticDrafts] = useState({})
   const [semanticRejectionReasons, setSemanticRejectionReasons] = useState({})
   const [semanticValidationError, setSemanticValidationError] = useState('')
   const [bronzeReview, setBronzeReview] = useState(null)
@@ -533,8 +539,10 @@ function HitlQueue() {
   const [gate3Decision, setGate3Decision] = useState('APPROVED')
   const [gateDecision, setGateDecision] = useState('')
   const [codeReviewDecisions, setCodeReviewDecisions] = useState({})
+  const [codeReviewDraftItems, setCodeReviewDraftItems] = useState([])
   const [selectedRunDetail, setSelectedRunDetail] = useState(null)
   const hydrationRequestRef = useRef(0)
+  const reviewSessionKeyRef = useRef('')
   const requestedGate = Number(searchParams.get('gate') || 0)
   const shouldSuppressRequestedInitialReview = isSuppressedInitialReviewRun({
     id: requestedRunId,
@@ -552,16 +560,17 @@ function HitlQueue() {
     }
     return summaryRun
   }, [runs, selectedRunDetail, selectedRunId])
-  const gateToReview = Number(currentRun?.next_gate || 0)
-  const isReviewableRun = isReviewGateAccessible(currentRun)
+  const gateToReview = Number(currentRun?.next_gate || requestedGate || 0)
+  const isReviewableRun = isReviewGateAccessible(currentRun) || (Boolean(selectedRunId) && gateToReview > 0)
   const isGate1 = gateToReview === 1
   const isGate2 = gateToReview === 2
   const isGate3 = gateToReview === 3
   const isGate4 = gateToReview === 4
   const isGate5 = gateToReview === 5
-  const isSftpRun = currentRun?.source === 'sftp' || currentRun?.source === 'adls_gen2'
+  const runSource = currentRun?.source || selectedRunDetail?.source || ''
+  const isSftpRun = runSource === 'sftp' || runSource === 'adls_gen2'
   const gate1Name = getGateDisplayName(1)
-  const gate2Name = getGateDisplayName(2, currentRun?.source)
+  const gate2Name = getGateDisplayName(2, runSource)
   const gate3Name = getGateDisplayName(3)
   const gate4Name = getGateDisplayName(4)
   const gate5Name = getGateDisplayName(5)
@@ -570,8 +579,8 @@ function HitlQueue() {
     [currentRun?.kpis, hitlQueues, isGate1, selectedRunId]
   )
   const queue = useMemo(
-    () => filterReviewQueue(rawQueue, selectedRunId, currentRun?.source),
-    [rawQueue, selectedRunId, currentRun?.source]
+    () => filterReviewQueue(rawQueue, selectedRunId, runSource),
+    [rawQueue, selectedRunId, runSource]
   )
 
   useEffect(() => {
@@ -591,6 +600,7 @@ function HitlQueue() {
     setEnrichmentReview(null)
     setSelectedTables({})
     setLocalDecisions({})
+    setSemanticDrafts({})
   }, [requestedRunId, selectedRunId, setActiveRun, shouldSuppressRequestedInitialReview])
 
   useEffect(() => {
@@ -667,6 +677,7 @@ function HitlQueue() {
       setEnrichmentReview(null)
       setSelectedTables({})
       setLocalDecisions({})
+      setSemanticDrafts({})
       return
     }
 
@@ -683,13 +694,19 @@ function HitlQueue() {
       setEnrichmentReview(null)
       setSelectedTables({})
       setLocalDecisions({})
+      setSemanticDrafts({})
     }
   }, [runs, selectedRunId, currentRun, isReviewableRun, activeRunId, selectedRunDetail?.id, requestedRunId])
 
   useEffect(() => {
+    const nextSessionKey = `${selectedRunId || 'none'}:${gateToReview || 0}`
+    if (reviewSessionKeyRef.current === nextSessionKey) return
+
+    reviewSessionKeyRef.current = nextSessionKey
     setTableReview(null)
     setEnrichmentReview(null)
     setSemanticDecisions({})
+    setSemanticDrafts({})
     setSemanticRejectionReasons({})
     setSemanticValidationError('')
     setBronzeReview(null)
@@ -698,8 +715,9 @@ function HitlQueue() {
     setSelectedTables({})
     setGateDecision('')
     setCodeReviewDecisions({})
+    setCodeReviewDraftItems([])
     hydrationRequestRef.current += 1
-  }, [selectedRunId, currentRun?.source, gateToReview])
+  }, [selectedRunId, gateToReview])
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -757,8 +775,9 @@ function HitlQueue() {
         if (isGate3) {
           const review = await waitForRenderableReview(() => getEnrichmentReviews(selectedRunId), 3)
           if (!isCurrentHydration()) return
-          if (!reviewPayloadMatchesRun(review, selectedRunId, currentRun?.source)) return
+          if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setEnrichmentReview(review)
+          setSemanticDrafts({})
           setGate3Decision('APPROVED')
           updateRun(selectedRunId, {
             enriched_metadata: review.enriched_metadata || {},
@@ -773,42 +792,42 @@ function HitlQueue() {
             resume_message: review.resume_message,
             gate3_approved: review.gate3_approved
           })
-          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 3, source: currentRun?.source } }))
+          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 3, source: runSource } }))
           return
         }
 
         if (isGate4) {
           const review = await waitForRenderableReview(() => getBronzeReview(selectedRunId), 4)
           if (!isCurrentHydration()) return
-          if (!reviewPayloadMatchesRun(review, selectedRunId, currentRun?.source)) return
+          if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setBronzeReview(review)
           updateRun(selectedRunId, {
             next_gate: review.next_gate,
             resume_message: review.resume_message,
             bronze_review_artifact: review.bronze_review_artifact || {}
           })
-          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 4, source: currentRun?.source } }))
+          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 4, source: runSource } }))
           return
         }
 
         if (isGate5) {
           const review = await waitForRenderableReview(() => getSilverReview(selectedRunId), 5)
           if (!isCurrentHydration()) return
-          if (!reviewPayloadMatchesRun(review, selectedRunId, currentRun?.source)) return
+          if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setSilverReview(review)
           updateRun(selectedRunId, {
             next_gate: review.next_gate,
             resume_message: review.resume_message,
             silver_review_artifact: review.silver_review_artifact || {}
           })
-          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 5, source: currentRun?.source } }))
+          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 5, source: runSource } }))
           return
         }
 
         if (isGate2) {
           const review = await waitForRenderableReview(() => getTableReviews(selectedRunId), 2, isSftpRun)
           if (!isCurrentHydration()) return
-          if (!reviewPayloadMatchesRun(review, selectedRunId, currentRun?.source)) return
+          if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setTableReview(review)
           setSelectedTables((prev) => {
             const next = { ...prev }
@@ -827,11 +846,11 @@ function HitlQueue() {
             next_gate: review.next_gate,
             resume_message: review.resume_message
           })
-          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 2, source: currentRun?.source } }))
+          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 2, source: runSource } }))
           return
         }
 
-        let expectedSource = currentRun?.source
+        let expectedSource = runSource
         if (!expectedSource) {
           try {
             const detail = await getRun(selectedRunId)
@@ -940,7 +959,7 @@ function HitlQueue() {
     // Hydration is keyed by run, gate, and source. Full currentRun/runs objects would restart
     // in-flight review requests after every store merge.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRunId, isGate2, isGate3, isGate4, isGate5, gate1Name, gate2Name, gate3Name, gate4Name, gate5Name, isSftpRun, setHitlQueue, setHitlSourceRunId, updateRun, addNotification, currentRun?.source])
+  }, [selectedRunId, isGate2, isGate3, isGate4, isGate5, gate1Name, gate2Name, gate3Name, gate4Name, gate5Name, isSftpRun, setHitlQueue, setHitlSourceRunId, updateRun, addNotification, runSource])
 
   const filteredQueue = useMemo(() => {
     if (statusFilter === 'All') return queue
@@ -1038,43 +1057,19 @@ function HitlQueue() {
     navigate('/app/data-discovery', { replace: true })
   }, [navigate, setActiveRun, setSearchParams, shouldRedirectDemoKpiReview])
 
-  const continueWithLocalGate = (nextGate, message) => {
+  const refreshRunAfterSubmitError = async (fallbackMessage) => {
     if (!selectedRunId) return null
-    const fallbackPatch = {
-      ...buildDemoGateFallback({ ...currentRun, id: selectedRunId }, nextGate, isSftpRun, runs),
-      id: selectedRunId,
-      status: 'HITL_WAIT',
-      next_gate: nextGate,
-      kpis: nextGate === 1 ? currentRun?.kpis || [] : [],
-      demo_review_fallback: true,
-      review_fallback_reason: 'Backend review submit did not complete, so the saved review path continued locally.',
-      resume_message: message,
+    try {
+      const refreshed = await getRun(selectedRunId)
+      updateRun(selectedRunId, refreshed)
+      return refreshed
+    } catch {
+      updateRun(selectedRunId, {
+        id: selectedRunId,
+        resume_message: fallbackMessage,
+      })
+      return null
     }
-
-    if (nextGate === 2) {
-      setTableReview(fallbackPatch)
-    } else if (nextGate === 3) {
-      setEnrichmentReview(fallbackPatch)
-    } else if (nextGate === 4) {
-      setBronzeReview(fallbackPatch)
-    } else if (nextGate === 5) {
-      setSilverReview(fallbackPatch)
-    }
-
-    updateRun(selectedRunId, fallbackPatch)
-    stayOnReviewGate(selectedRunId, nextGate)
-    return fallbackPatch
-  }
-
-  const completeLocalReviewFlow = (message) => {
-    if (!selectedRunId) return
-    updateRun(selectedRunId, {
-      id: selectedRunId,
-      status: 'PROCESSING',
-      next_gate: 0,
-      resume_message: message,
-    })
-    returnToMonitor(selectedRunId)
   }
 
   const handleApprove = (kpiId) => {
@@ -1153,9 +1148,15 @@ function HitlQueue() {
     setGateDecision(decision)
   }
 
-  const handleApproveSemanticItem = (id) => {
+  const handleApproveSemanticItem = (id, draft) => {
     setSemanticValidationError('')
+    if (draft) handleSemanticDraftChange(id, draft)
     setSemanticDecisions((prev) => ({ ...prev, [id]: 'APPROVED' }))
+  }
+
+  const handleSemanticDraftChange = (id, draft) => {
+    if (!id) return
+    setSemanticDrafts((prev) => ({ ...prev, [id]: draft }))
   }
 
   const handleRejectSemanticItem = (id, reason) => {
@@ -1181,6 +1182,45 @@ function HitlQueue() {
       next[key] = semanticDecisions[key] || item.decision || 'APPROVED'
     })
     return next
+  }
+
+  const buildEditedEnrichmentMetadata = () => {
+    const baseMetadata = semanticReviewSource?.enriched_metadata || enrichmentReview?.enriched_metadata || {}
+    const baseColumns = Array.isArray(baseMetadata?.columns)
+      ? baseMetadata.columns
+      : Array.isArray(semanticReviewSource?.enriched_columns)
+      ? semanticReviewSource.enriched_columns
+      : []
+    const draftByColumn = new Map()
+    const tableSummaries = { ...(baseMetadata?.table_summaries || {}) }
+
+    semanticReviewItems.forEach((item) => {
+      const key = semanticReviewItemKey(item)
+      const draft = semanticDrafts[key] || item.item_detail || {}
+      const tableName = draft.table_name || item.item_detail?.table_name || item.item_id || ''
+      if (tableName) tableSummaries[tableName] = draft.table_summary || item.item_detail?.table_summary || ''
+      ;(draft.columns || []).forEach((column) => {
+        const columnName = column.column_name || column.name || column.column
+        if (!columnName) return
+        draftByColumn.set(`${tableName}.${columnName}`, { ...column, table_name: tableName })
+      })
+    })
+
+    const mergedColumns = baseColumns.length
+      ? baseColumns.map((column) => {
+          const tableName = semanticColumnTableName(column)
+          const columnName = column.column_name || column.name || column.column
+          const draft = draftByColumn.get(`${tableName}.${columnName}`)
+          return draft ? { ...column, ...draft, table_name: column.table_name || tableName } : column
+        })
+      : Array.from(draftByColumn.values())
+
+    return {
+      ...baseMetadata,
+      run_id: baseMetadata?.run_id || semanticReviewSource?.run_id || selectedRunId,
+      columns: mergedColumns,
+      table_summaries: tableSummaries,
+    }
   }
 
   const handleSelectAllTables = () => {
@@ -1274,13 +1314,14 @@ function HitlQueue() {
           returnToMonitor(selectedRunId)
         }
       } catch (error) {
-        continueWithLocalGate(3, `${gate2Name} submitted. Semantic Review is ready.`)
+        await refreshRunAfterSubmitError(`${gate2Name} submit did not complete. Waiting on backend state.`)
         addNotification({
-          type: 'amber',
-          title: `${gate2Name} Continued`,
-          message: 'Backend submit did not complete, so the saved review path moved to Semantic Review.',
+          type: 'error',
+          title: `${gate2Name} Submit Failed`,
+          message: error.message || 'Backend submit did not complete. Pipeline state was not advanced locally.',
           duration: 5000
         })
+        returnToMonitor(selectedRunId)
       } finally {
         setSubmitting(false)
       }
@@ -1297,11 +1338,13 @@ function HitlQueue() {
           const key = semanticReviewItemKey(item)
           return nextSemanticDecisions[key] === 'REJECTED'
         })
-        await submitEnrichmentReview(selectedRunId, !hasRejectedSemanticItem)
+        const editedEnrichmentMetadata = hasRejectedSemanticItem ? undefined : buildEditedEnrichmentMetadata()
+        await submitEnrichmentReview(selectedRunId, !hasRejectedSemanticItem, editedEnrichmentMetadata)
         const refreshed = await getRun(selectedRunId)
         updateRun(selectedRunId, refreshed)
         setEnrichmentReview(null)
         setSemanticDecisions({})
+        setSemanticDrafts({})
         setSemanticRejectionReasons({})
         setSemanticValidationError('')
         addNotification({
@@ -1318,13 +1361,14 @@ function HitlQueue() {
           returnToMonitor(selectedRunId)
         }
       } catch (error) {
-        continueWithLocalGate(4, `${gate3Name} submitted. Bronze Review is ready.`)
+        await refreshRunAfterSubmitError(`${gate3Name} submit did not complete. Waiting on backend state.`)
         addNotification({
-          type: 'amber',
-          title: `${gate3Name} Continued`,
-          message: 'Backend submit did not complete, so the saved review path moved to Bronze Review.',
+          type: 'error',
+          title: `${gate3Name} Submit Failed`,
+          message: error.message || 'Backend submit did not complete. Pipeline state was not advanced locally.',
           duration: 5000
         })
+        returnToMonitor(selectedRunId)
       } finally {
         setSubmitting(false)
       }
@@ -1335,12 +1379,13 @@ function HitlQueue() {
       setSubmitting(true)
       try {
         const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
-        await submitBronzeReview(selectedRunId, reviewAction)
+        await submitBronzeReview(selectedRunId, reviewAction, buildCodeReviewArtifact('bronze', codeReviewDraftItems, bronzeReview, codeReviewDecisions))
         const refreshed = reviewAction === 'APPROVED'
           ? await waitForRunGate(selectedRunId, updateRun, 5)
           : await getRun(selectedRunId)
         updateRun(selectedRunId, refreshed)
         setBronzeReview(null)
+        setCodeReviewDraftItems([])
         addNotification({
           type: 'success',
           title: `${gate4Name} Submitted`,
@@ -1356,13 +1401,14 @@ function HitlQueue() {
           returnToMonitor(selectedRunId)
         }
       } catch (error) {
-        continueWithLocalGate(5, `${gate4Name} submitted. Silver Review is ready.`)
+        await refreshRunAfterSubmitError(`${gate4Name} submit did not complete. Waiting on backend state.`)
         addNotification({
-          type: 'amber',
-          title: `${gate4Name} Continued`,
-          message: 'Backend submit did not complete, so the saved review path moved to Silver Review.',
+          type: 'error',
+          title: `${gate4Name} Submit Failed`,
+          message: error.message || 'Backend submit did not complete. Pipeline state was not advanced locally.',
           duration: 5000
         })
+        returnToMonitor(selectedRunId)
       } finally {
         setSubmitting(false)
       }
@@ -1373,12 +1419,13 @@ function HitlQueue() {
       setSubmitting(true)
       try {
         const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
-        await submitSilverReview(selectedRunId, reviewAction)
+        await submitSilverReview(selectedRunId, reviewAction, buildCodeReviewArtifact('silver', codeReviewDraftItems, silverReview, codeReviewDecisions))
         const refreshed = reviewAction === 'APPROVED'
           ? await waitForGoldScripts(selectedRunId, updateRun)
           : await getRun(selectedRunId)
         updateRun(selectedRunId, refreshed)
         setSilverReview(null)
+        setCodeReviewDraftItems([])
         addNotification({
           type: 'success',
           title: `${gate5Name} Submitted`,
@@ -1391,13 +1438,14 @@ function HitlQueue() {
         })
         returnToMonitor(selectedRunId)
       } catch (error) {
-        completeLocalReviewFlow(`${gate5Name} submitted. Gold generation is processing.`)
+        await refreshRunAfterSubmitError(`${gate5Name} submit did not complete. Waiting on backend state.`)
         addNotification({
-          type: 'amber',
-          title: `${gate5Name} Continued`,
-          message: 'Backend submit did not complete, so the saved review path resumed the pipeline locally.',
+          type: 'error',
+          title: `${gate5Name} Submit Failed`,
+          message: error.message || 'Backend submit did not complete. Pipeline state was not advanced locally.',
           duration: 5000
         })
+        returnToMonitor(selectedRunId)
       } finally {
         setSubmitting(false)
       }
@@ -1442,13 +1490,14 @@ function HitlQueue() {
       }
       returnToMonitor(selectedRunId)
     } catch (error) {
-      continueWithLocalGate(2, `${gate1Name} submitted. ${gate2Name} is ready.`)
+      await refreshRunAfterSubmitError(`${gate1Name} submit did not complete. Waiting on backend state.`)
       addNotification({
-        type: 'amber',
-        title: `${gate1Name} Continued`,
-        message: `Backend submit did not complete, so the saved review path moved to ${gate2Name}.`,
+        type: 'error',
+        title: `${gate1Name} Submit Failed`,
+        message: error.message || 'Backend submit did not complete. Pipeline state was not advanced locally.',
         duration: 5000
       })
+      returnToMonitor(selectedRunId)
     } finally {
       setSubmitting(false)
     }
@@ -1621,6 +1670,7 @@ function HitlQueue() {
                       rejectionReason={semanticRejectionReasons[key]}
                       onApprove={handleApproveSemanticItem}
                       onReject={handleRejectSemanticItem}
+                      onDraftChange={handleSemanticDraftChange}
                     />
                   )
                 })
@@ -1899,7 +1949,7 @@ function HitlQueue() {
       </div>
 
       <div className="flex gap-4 flex-1 min-h-0">
-        <div key={`${selectedRunId || 'none'}:${gateToReview || 0}:${currentRun?.source || 'unknown'}`} className="flex-1 overflow-y-auto pr-1 space-y-4 pb-20">
+        <div className="flex-1 overflow-y-auto pr-1 space-y-4 pb-20">
           {selectedRunId && isReviewableRun ? (
             isGate5 ? (
             <CodeReviewPanel
@@ -1913,9 +1963,11 @@ function HitlQueue() {
               totalCount={silverCodeReviewItems.length}
               gateDecision={codeReviewGateDecision || gateDecision}
               decisions={codeReviewDecisions}
+              sessionKey={reviewSessionKeyRef.current}
               onSetItemDecision={setCodeReviewDecision}
               onAutoApprovePending={handleAutoApproveCodeReviewItems}
               onSetAllDecision={setAllCodeReviewItemsDecision}
+              onDraftItemsChange={setCodeReviewDraftItems}
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
@@ -1934,9 +1986,11 @@ function HitlQueue() {
               totalCount={bronzeCodeReviewItems.length}
               gateDecision={codeReviewGateDecision || gateDecision}
               decisions={codeReviewDecisions}
+              sessionKey={reviewSessionKeyRef.current}
               onSetItemDecision={setCodeReviewDecision}
               onAutoApprovePending={handleAutoApproveCodeReviewItems}
               onSetAllDecision={setAllCodeReviewItemsDecision}
+              onDraftItemsChange={setCodeReviewDraftItems}
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
@@ -2776,27 +2830,54 @@ function CodeReviewPanel({
   submitLabel,
   lineageLabel,
   onViewLineage,
+  onDraftItemsChange,
+  sessionKey,
 }) {
   const [expandedKey, setExpandedKey] = useState(items[0]?.key || null)
   const [draftItems, setDraftItems] = useState(items)
   const itemKeys = items.map((item) => item.key).join('|')
 
   useEffect(() => {
+    setDraftItems(items)
+    onDraftItemsChange?.(items)
+    setExpandedKey(items[0]?.key || null)
+    // Reset only when the reviewer actually changes run/gate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey])
+
+  useEffect(() => {
     if (!items.length) {
-      setExpandedKey(null)
-      setDraftItems([])
       return
     }
-    setDraftItems(items)
+    setDraftItems((current) => {
+      const currentByKey = new Map(current.map((item) => [item.key, item]))
+      const next = items.map((item) => currentByKey.has(item.key) ? { ...item, ...currentByKey.get(item.key) } : item)
+      onDraftItemsChange?.(next)
+      return next
+    })
     setExpandedKey((current) => (items.some((item) => item.key === current) ? current : items[0].key))
     // Track item identity only; preserving edited draft code while parent objects refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemKeys])
 
   const updateItemCode = (key, code) => {
-    setDraftItems((current) => current.map((item) => (
-      item.key === key ? { ...item, code, edited: true } : item
-    )))
+    setDraftItems((current) => {
+      const next = current.map((item) => (
+        item.key === key ? { ...item, code, edited: true } : item
+      ))
+      onDraftItemsChange?.(next)
+      return next
+    })
+  }
+
+  const updateItemFields = (key, fields) => {
+    setDraftItems((current) => {
+      const next = current.map((item) => (
+        item.key === key ? { ...item, ...fields, code: patchMergeKeysInCode(item.code, fields.mergeKeys), edited: true } : item
+      ))
+      onDraftItemsChange?.(next)
+      return next
+    })
   }
 
   const decisionLabel =
@@ -2860,6 +2941,7 @@ function CodeReviewPanel({
               expanded={expandedKey === item.key}
               onToggle={() => setExpandedKey((current) => (current === item.key ? null : item.key))}
               onCodeChange={(code) => updateItemCode(item.key, code)}
+              onMergeKeysChange={(mergeKeys) => updateItemFields(item.key, { mergeKeys, primaryKeys: mergeKeys })}
               onApprove={() => onSetItemDecision(item.key, 'APPROVED')}
               onReject={() => onSetItemDecision(item.key, 'REJECTED')}
               onRegenerate={() => onSetItemDecision(item.key, 'REGENERATE')}
@@ -2939,13 +3021,21 @@ function CodeReviewPanel({
   )
 }
 
-function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onReject, onRegenerate, decision }) {
+function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysChange, onApprove, onReject, onRegenerate, decision }) {
   const approved = decision === 'APPROVED'
   const rejected = decision === 'REJECTED'
   const regenerate = decision === 'REGENERATE'
 
   return (
-    <div className="rounded-xl border border-[#22304b] bg-[#101827] p-5">
+    <div className={`rounded-xl border bg-[#101827] p-5 transition-colors ${
+      approved
+        ? 'border-emerald-500/40'
+        : rejected
+        ? 'border-red-500/40'
+        : regenerate
+        ? 'border-[#3f82ff]/45'
+        : 'border-[#22304b]'
+    }`}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
@@ -2962,12 +3052,22 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onR
           </div>
           <div className="mt-3 text-xs text-[#91a4cb]">Queued: {item.queuedAt || 'Pending review'}</div>
         </div>
+        <button
+          type="button"
+          onClick={onToggle}
+          className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#202b3a] px-4 text-sm font-bold text-[#c6d2e8] transition-colors hover:bg-[#263449] hover:text-white"
+        >
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          {expanded ? 'Collapse' : 'Edit'}
+        </button>
       </div>
+
+      <CodeReviewSummary item={item} onMergeKeysChange={onMergeKeysChange} />
 
       <button
         type="button"
         onClick={onToggle}
-        className="mt-3 inline-flex items-center gap-2 text-xs font-bold text-[#c6d2e8] hover:text-white"
+        className="mt-4 inline-flex items-center gap-2 text-xs font-bold text-[#c6d2e8] hover:text-white"
       >
         <span className="text-[10px] text-[#91a4cb]">{expanded ? '⌃' : '⌄'}</span>
         {expanded ? 'Hide code' : 'Preview code'}
@@ -3056,6 +3156,58 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onApprove, onR
   )
 }
 
+function CodeReviewSummary({ item, onMergeKeysChange }) {
+  const keys = item.mergeKeys || item.primaryKeys || []
+  const fields = [
+    ['Target', item.target],
+    ['Source', item.source],
+    ['Strategy', item.strategy],
+    ['Watermark', item.watermark],
+  ].filter(([, value]) => value)
+
+  return (
+    <div className="mt-4 rounded-xl border border-[#22304b] bg-[#0b1424] p-4">
+      {(keys.length > 0 || item.type === 'BRONZE') && (
+        <div>
+          <div className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-[#9ca9bd]">
+            <KeyRound size={13} className="text-[#69a0ff]" />
+            {item.type === 'BRONZE' ? 'Resolve Merge Keys' : 'Resolved Merge Keys'}
+          </div>
+          {item.type === 'BRONZE' ? (
+            <input
+              value={keys.join(', ')}
+              onChange={(event) => onMergeKeysChange?.(
+                event.target.value.split(',').map((value) => value.trim()).filter(Boolean)
+              )}
+              className="h-10 w-full rounded-lg border border-[#31415f] bg-[#0a1220] px-3 font-mono text-xs text-[#d7e2f2] outline-none focus:border-[#78a9ff]"
+              placeholder="ClaimID, PaymentID"
+            />
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {keys.map((key) => (
+                <span key={`${item.key}:${key}`} className="rounded-md border border-[#2d64c3] bg-[#122a52] px-2 py-1 text-[10px] font-bold text-[#69a0ff]">
+                  {key}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {fields.length > 0 && (
+        <div className={`${keys.length ? 'mt-4 border-t border-[#22304b] pt-3' : ''} grid gap-2 text-xs text-[#c6d2e8] md:grid-cols-2`}>
+          {fields.map(([label, value]) => (
+            <div key={`${item.key}:${label}`} className="rounded-lg border border-[#1d2940] bg-[#101827] px-3 py-2">
+              <div className="text-[10px] font-bold uppercase text-[#7787a3]">{label}</div>
+              <div className="mt-1 break-all font-semibold text-[#d7e2f2]">{value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function buildBronzeCodeReviewItems(feeds) {
   return feeds.map((feed, index) => ({
     key: `bronze-${feed.entity || feed.feed_name || feed.table_name || feed.vendor || 'script'}-${index}`,
@@ -3064,6 +3216,12 @@ function buildBronzeCodeReviewItems(feeds) {
     queuedAt: formatReviewTimestamp(feed.queued_at || feed.created_at || feed.updated_at),
     code: feed.generated_bronze_script || feed.script_body || JSON.stringify(stripEmptyReviewFields(feed), null, 2),
     fileName: `${feed.entity || feed.feed_name || `bronze_script_${index + 1}`}.py`,
+    primaryKeys: feed.primary_keys || feed.merge_keys || [],
+    target: feed.target_table || feed.bronze_output_path,
+    source: feed.landing_path || feed.source_type,
+    strategy: feed.file_format || 'Bronze ingestion',
+    watermark: feed.watermark_column,
+    reviewPayload: feed,
   }))
 }
 
@@ -3077,8 +3235,58 @@ function buildSilverCodeReviewItems(items) {
       queuedAt: formatReviewTimestamp(item.queued_at || item.created_at || item.updated_at),
       code: item.generated_silver_script || item.script_body || JSON.stringify(stripEmptyReviewFields(item), null, 2),
       fileName: `${title}.py`,
+      primaryKeys: item.primary_keys || item.merge_keys || [],
+      mergeKeys: item.merge_keys || item.primary_keys || [],
+      mergeKeySource: item.merge_key_source,
+      target: item.silver_target || item.target_table || item.silver_table,
+      source: item.bronze_source || item.source_table || item.bronze_table,
+      strategy: item.merge_strategy || 'Silver transform',
+      watermark: item.watermark_column,
+      reviewPayload: item,
     }
   })
+}
+
+function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
+  const items = Array.isArray(draftItems) ? draftItems : []
+  if (layer === 'bronze') {
+    return {
+      ...(review?.bronze_review_artifact || {}),
+      feeds: items.map((item) => ({
+        ...(item.reviewPayload || {}),
+        generated_bronze_script: item.code,
+        script_body: item.code,
+        primary_keys: item.primaryKeys || item.mergeKeys || [],
+        merge_keys: item.mergeKeys || item.primaryKeys || [],
+        review_status: decisions[item.key] || item.reviewStatus || 'PENDING',
+      })),
+    }
+  }
+
+  return {
+    ...(review?.silver_review_artifact || {}),
+    items: items.map((item) => ({
+      ...(item.reviewPayload || {}),
+      generated_silver_script: item.code,
+      script_body: item.code,
+      primary_keys: item.primaryKeys || item.mergeKeys || [],
+      merge_keys: item.mergeKeys || item.primaryKeys || [],
+      merge_key_source: item.mergeKeySource || item.reviewPayload?.merge_key_source || 'reviewed_gate4',
+      review_status: decisions[item.key] || item.reviewStatus || 'PENDING',
+    })),
+  }
+}
+
+function patchMergeKeysInCode(code, mergeKeys) {
+  if (!Array.isArray(mergeKeys) || typeof code !== 'string') return code
+  const value = JSON.stringify(mergeKeys)
+  if (/^KEY_COLUMNS\s*=.*$/m.test(code)) {
+    return code.replace(/^KEY_COLUMNS\s*=.*$/m, `KEY_COLUMNS = ${value}`)
+  }
+  if (/^primary_keys\s*=.*$/im.test(code)) {
+    return code.replace(/^primary_keys\s*=.*$/im, `primary_keys = ${value}`)
+  }
+  return code
 }
 
 function isMergeKeyReviewItem(item) {

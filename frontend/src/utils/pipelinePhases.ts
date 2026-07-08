@@ -55,17 +55,17 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-3',
       label: 'Bronze Layer (Ingestion)',
-      keys: ['bronze', 'gate4'],
+      keys: ['bronze', 'gate4', 'bronze_code_execution'],
     },
     {
       id: 'phase-4',
       label: 'Silver Layer (Transformation)',
-      keys: ['silver', 'gate5'],
+      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution'],
     },
     {
       id: 'phase-5',
       label: 'Gold Layer (Analytics)',
-      keys: ['gold'],
+      keys: ['gold', 'gold_code_execution'],
     },
   ],
   file: [
@@ -82,17 +82,17 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-3',
       label: 'Bronze Layer (Ingestion)',
-      keys: ['pre_bronze', 'bronze', 'gate4', 'pull', 'bronze_validation'],
+      keys: ['bronze', 'gate4', 'bronze_code_execution'],
     },
     {
       id: 'phase-4',
       label: 'Silver Layer (Transformation)',
-      keys: ['silver', 'gate5', 'dq_validation'],
+      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution'],
     },
     {
       id: 'phase-5',
       label: 'Gold Layer (Analytics)',
-      keys: ['gold'],
+      keys: ['gold', 'gold_code_execution'],
     },
   ],
 }
@@ -159,8 +159,8 @@ export function getPhaseGroups(run, stepsOverride?) {
           key,
           label: fallbackStepLabel(key),
           detail: '',
-          state: 'PENDING',
-          complete: false,
+          state: syntheticStepState(key, byKey),
+          complete: syntheticStepState(key, byKey) === 'COMPLETED',
         }
       )
     })
@@ -220,17 +220,46 @@ function fallbackStepLabel(key) {
     profiling: 'Column Profiling',
     enrichment: 'Semantic Enrichment',
     gate3: 'Semantic Review',
-    pre_bronze: 'Pre-Bronze Readiness',
-    bronze: 'Bronze Scripts',
+    bronze: 'Bronze Code Generation',
     gate4: 'Bronze Review',
-    pull: 'SFTP Pull',
-    bronze_validation: 'Bronze Validation',
-    silver: 'Silver Scripts',
+    bronze_code_execution: 'Bronze Code Execution',
+    silver_merge_key_resolution: 'Silver Merge Key Resolution',
+    silver_merge_key_review: 'Silver Merge Key Review',
+    silver: 'Silver Code Generation',
     gate5: 'Silver Review',
-    dq_validation: 'DQ Validation',
-    gold: 'Gold Scripts',
+    silver_code_execution: 'Silver Code Execution',
+    gold: 'Gold Code Generation',
+    gold_code_execution: 'Gold Code Execution',
   }
   return labels[key] || key
+}
+
+function syntheticStepState(key, byKey: Map<string, PipelineStep>) {
+  const state = (stepKey: string) => normalizeState(byKey.get(stepKey)?.state)
+  const bronze = state('bronze')
+  const gate4 = state('gate4')
+  const silver = state('silver')
+  const gate5 = state('gate5')
+  const gold = state('gold')
+
+  if (key === 'bronze_code_execution') {
+    if (gate4 === 'COMPLETED' || bronze === 'COMPLETED') return 'COMPLETED'
+    if (bronze === 'RUNNING') return 'PENDING'
+  }
+  if (key === 'silver_merge_key_resolution') {
+    if (gate4 === 'COMPLETED' || gate4 === 'HITL_WAIT' || silver === 'RUNNING' || silver === 'COMPLETED') return 'COMPLETED'
+  }
+  if (key === 'silver_merge_key_review') {
+    if (gate4 === 'COMPLETED' || silver === 'RUNNING' || silver === 'COMPLETED') return 'COMPLETED'
+    if (gate4 === 'HITL_WAIT') return 'HITL_WAIT'
+  }
+  if (key === 'silver_code_execution') {
+    if (gate5 === 'COMPLETED' || gold === 'RUNNING' || gold === 'COMPLETED') return 'COMPLETED'
+  }
+  if (key === 'gold_code_execution') {
+    if (gold === 'COMPLETED') return 'COMPLETED'
+  }
+  return 'PENDING'
 }
 
 function buildStepDetail(run, key, state, existingDetail) {
@@ -300,6 +329,12 @@ function buildStepDetail(run, key, state, existingDetail) {
       if (state === 'COMPLETED') return 'Gold analytics scripts were generated.'
       if (state === 'RUNNING') return 'Generating Gold KPI scripts.'
       return 'Gold generation starts after Silver processing completes.'
+    case 'bronze_code_execution':
+      return 'UI-only marker: Bronze scripts are exported for external execution, not run inside Athena.'
+    case 'silver_code_execution':
+      return 'UI-only marker: Silver scripts are exported for external execution, not run inside Athena.'
+    case 'gold_code_execution':
+      return 'UI-only marker: Gold scripts are exported for external execution, not run inside Athena.'
     default:
       return existingDetail || ''
   }

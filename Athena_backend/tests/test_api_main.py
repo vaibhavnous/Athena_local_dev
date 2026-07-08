@@ -20,8 +20,8 @@ def test_health_endpoint():
     assert body["status"] == "ok"
     assert body["service"] == "athena-fastapi"
     embeddings = body["embeddings"]
-    assert embeddings["enabled"] is False
-    assert embeddings["mode"] == "disabled"
+    assert isinstance(embeddings["enabled"], bool)
+    assert embeddings["mode"] in {"blocked", "disabled", "enabled"}
 
 
 def test_sql_tcp_probe_failure_is_cached(monkeypatch):
@@ -62,7 +62,10 @@ def test_sql_tcp_probe_failure_is_cached(monkeypatch):
 
 def test_schema_embedding_is_skipped_when_embeddings_are_disabled(monkeypatch):
     from nodes import ingestion
+    from utilis.embeddings import reset_embedding_model_cache
 
+    monkeypatch.setenv("ATHENA_BLOCK_EMBEDDINGS", "true")
+    reset_embedding_model_cache()
     monkeypatch.setattr(
         ingestion,
         "execute_source_sql",
@@ -77,6 +80,7 @@ def test_schema_embedding_is_skipped_when_embeddings_are_disabled(monkeypatch):
 
     assert result["schema_embedded"] is False
     assert result["schema_columns_count"] == 0
+    reset_embedding_model_cache()
 
 
 def test_pipeline_run_requires_brd_text_for_database_source():
@@ -115,6 +119,14 @@ def test_pipeline_run_starts_demo_progress_before_kpi_review(monkeypatch):
     assert recorded == {"run_id": "demo-run-1", "segment": "start"}
 
 
+def test_demo_mode_defaults_to_false(monkeypatch):
+    from api import demo
+
+    monkeypatch.delenv("ATHENA_DEMO_MODE", raising=False)
+
+    assert demo.demo_enabled() is False
+
+
 def test_pipeline_run_accepts_file_source_with_brd_text(monkeypatch):
     saved = {}
 
@@ -137,6 +149,73 @@ def test_pipeline_run_accepts_file_source_with_brd_text(monkeypatch):
     assert saved["state"]["sftp_entity"] == "transactions"
     assert saved["submitted_run_id"] == body["run_id"]
     assert saved["submitted_source"] == "sftp"
+
+
+def test_resume_from_failure_uses_real_resume_path(monkeypatch):
+    from api.routers import pipeline_router
+
+    monkeypatch.setattr(pipeline_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        pipeline_router,
+        "_resume_failed_run",
+        lambda run_id, action_name: {"run_id": run_id, "status": "SUBMITTED", "action": action_name},
+    )
+
+    response = client.post("/pipeline/run-123/resume-from-failure")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": "run-123",
+        "status": "SUBMITTED",
+        "action": "resume_from_failure",
+    }
+
+
+def test_restart_creates_new_real_run(monkeypatch):
+    from api.routers import pipeline_router
+
+    monkeypatch.setattr(pipeline_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "brd_text": "real brd",
+            "brd_filename": "real.txt",
+            "source": "database",
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.pipeline_service.seed_payload_from_checkpoint",
+        lambda checkpoint: pipeline_router.PipelineRunRequest(
+            brd_text=checkpoint["brd_text"],
+            brd_filename=checkpoint["brd_filename"],
+            source=checkpoint["source"],
+        ),
+    )
+
+    recorded = {}
+    monkeypatch.setattr(
+        pipeline_router,
+        "_seed_run_checkpoint",
+        lambda run_id, payload: recorded.update({"run_id": run_id, "payload": payload}),
+    )
+    monkeypatch.setattr(
+        "api.services.pipeline_service.submit_pipeline_start",
+        lambda run_id, payload: recorded.update({"submitted_run_id": run_id, "submitted_payload": payload}),
+    )
+    monkeypatch.setattr(pipeline_router.uuid, "uuid4", lambda: "new-real-run")
+
+    response = client.post("/pipeline/run-old/restart")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": "new-real-run",
+        "status": "RUNNING",
+        "action": "restart",
+        "source_run_id": "run-old",
+    }
+    assert recorded["run_id"] == "new-real-run"
+    assert recorded["submitted_run_id"] == "new-real-run"
 
 
 def test_pipeline_run_returns_503_when_checkpoint_init_fails(monkeypatch):

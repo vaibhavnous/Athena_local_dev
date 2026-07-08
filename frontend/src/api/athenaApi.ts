@@ -46,6 +46,7 @@ export const startRun = (payload: {
   brd_filename?: string
   database_type?: string
   database_name?: string
+  target_warehouse?: string
   deployment?: string
   budget?: number
   maxKpis?: number
@@ -76,18 +77,18 @@ export const getTableReviews = (runId: string) => api.get(`/table-reviews/${runI
 export const submitTableReviews = (runId: string, approvedTables: string[]) =>
   api.post(`/table-reviews/${runId}`, { approved_tables: approvedTables }, { timeout: WRITE_TIMEOUT })
 export const getEnrichmentReviews = (runId: string) => api.get(`/enrichment-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
-export const submitEnrichmentReview = (runId: string, approve: boolean) =>
-  api.post(`/enrichment-reviews/${runId}`, { approve }, { timeout: WRITE_TIMEOUT })
+export const submitEnrichmentReview = (runId: string, approve: boolean, enrichedMetadata?: Record<string, any>) =>
+  api.post(`/enrichment-reviews/${runId}`, { approve, enriched_metadata: enrichedMetadata }, { timeout: WRITE_TIMEOUT })
 
 export const getBronzeReview = (runId: string) => api.get(`/bronze-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 
-export const submitBronzeReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE') =>
-  api.post(`/bronze-reviews/${runId}`, { action }, { timeout: WRITE_TIMEOUT })
+export const submitBronzeReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE', reviewArtifact?: Record<string, any>) =>
+  api.post(`/bronze-reviews/${runId}`, { action, review_artifact: reviewArtifact }, { timeout: WRITE_TIMEOUT })
 
 export const getSilverReview = (runId: string) => api.get(`/silver-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 
-export const submitSilverReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE') =>
-  api.post(`/silver-reviews/${runId}`, { action }, { timeout: WRITE_TIMEOUT })
+export const submitSilverReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE', reviewArtifact?: Record<string, any>) =>
+  api.post(`/silver-reviews/${runId}`, { action, review_artifact: reviewArtifact }, { timeout: WRITE_TIMEOUT })
 
 export const abortRun = (runId: string) => api.post(`/pipeline/${runId}/abort`, undefined, { timeout: WRITE_TIMEOUT })
 export const continueStage = (runId: string, autoAdvance = false) =>

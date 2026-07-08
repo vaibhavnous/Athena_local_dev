@@ -33,11 +33,13 @@ def status_from_context(context: Dict[str, Any]) -> str:
 
 
 def display_run_name(checkpoint: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> str:
+    if checkpoint.get("brd_filename"):
+        return checkpoint["brd_filename"]
     if api_utils.is_file_source(checkpoint.get("source")):
         from services.sftp_runtime import build_sftp_display_name
 
         return (context or {}).get("display_name") or build_sftp_display_name(checkpoint)
-    return checkpoint.get("brd_filename") or "athena_brd.txt"
+    return checkpoint.get("run_id") or "Untitled run"
 
 
 def failed_stage_key(checkpoint: Dict[str, Any], pipeline_steps: List[Dict[str, Any]]) -> Optional[str]:

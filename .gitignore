@@ -34,3 +34,4 @@ Thumbs.db
 *.bak
 paramiko_debug.log
 .tmp-smoke/ponytail/
+generated_code/

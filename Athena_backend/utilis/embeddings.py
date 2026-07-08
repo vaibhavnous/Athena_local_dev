@@ -186,7 +186,7 @@ def get_embedding_model(*, log_context: Optional[dict] = None) -> Optional[Any]:
     config = get_embedding_provider_config()
     if config["blocked"]:
         _EMBEDDING_PROVIDER = None
-        _log_probe("Embedding feature is blocked for demo runtime", log_context)
+        _log_probe("Embedding feature is blocked by environment", log_context)
         return None
 
     if not config["enabled"]:

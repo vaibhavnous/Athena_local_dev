@@ -333,6 +333,16 @@ def hitl_decisions(
     return decisions
 
 
+def current_pipeline_step(context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    step = context.get("current_pipeline_step")
+    if isinstance(step, dict) and step:
+        return step
+    for candidate in context.get("pipeline_steps") or []:
+        if str(candidate.get("state") or candidate.get("status") or "").upper() in {"RUNNING", "HITL_WAIT", "PAUSED_FOR_HITL"}:
+            return candidate
+    return None
+
+
 def build_ui_payload(
     *,
     run_id: str,
@@ -365,6 +375,7 @@ def build_ui_payload(
         "total_tokens": sum(int(row.get("token_count") or 0) for row in summary),
         "total_cost": sum(float(row.get("cost_usd") or 0) for row in summary),
         "stages": ui_stages(context, run_id),
+        "pipeline_steps": pipeline_steps,
         "requirements": requirements,
         "kpis": kpis,
         "hitl_decisions": hitl_decisions(run_id, context, hitl_rows=hitl_rows),
@@ -382,6 +393,7 @@ def build_ui_payload(
         "next_gate": context.get("next_gate"),
         "resume_message": context.get("resume_message"),
         "stage_confirmation": context.get("stage_confirmation"),
+        "current_pipeline_step": current_pipeline_step(context),
         "failed_stage_key": run_failed_stage_key,
         "failed_stage_label": failed_stage_label,
         "error": checkpoint.get("error"),
@@ -439,9 +451,11 @@ def ui_run_summary(run_id: str) -> Dict[str, Any]:
             summary=summary,
             pipeline_steps=context.get("pipeline_steps") or [],
         ),
+        "pipeline_steps": context.get("pipeline_steps") or [],
         "next_gate": context.get("next_gate"),
         "resume_message": context.get("resume_message"),
         "stage_confirmation": context.get("stage_confirmation"),
+        "current_pipeline_step": current_pipeline_step(context),
         "failed_stage_key": run_failed_stage_key,
         "failed_stage_label": failed_stage_label,
         "error": checkpoint.get("error"),

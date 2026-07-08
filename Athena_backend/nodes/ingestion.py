@@ -11,12 +11,14 @@ from typing import Optional
 
 import docx
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pinecone import Pinecone
 from pydantic import ValidationError
 
 from schema import BRDSchema
 from state import Stage01State
 from utilis.db import config, get_pipeline_connection
 from utilis.env import load_backend_env
+from utilis.embeddings import get_embedding_model
 from utilis.logger import logger
 from utilis.db import execute_source_sql
 
@@ -31,13 +33,16 @@ pc = None
 pinecone_index = None
 
 def _get_pinecone_index(*, log_context: dict) -> Optional[object]:
-    logger.info("Pinecone disabled for demo runtime; embeddings skipped", extra=log_context)
-    return None
+    api_key = pinecone_conf.get("api_key") or os.getenv("PINECONE_API_KEY")
+    index_name = pinecone_conf.get("index_name") or os.getenv("PINECONE_INDEX_NAME") or pinecone_index_name
+    if not api_key or not index_name:
+        logger.info("Pinecone configuration unavailable; embeddings skipped", extra=log_context)
+        return None
+    return Pinecone(api_key=api_key).Index(index_name)
 
 
 def _get_embedding_model(*, log_context: dict) -> Optional[object]:
-    logger.info("Embedding model disabled for demo runtime", extra=log_context)
-    return None
+    return get_embedding_model(log_context=log_context)
 
 
 db_conf = config["azure_sql"]
@@ -434,8 +439,6 @@ def _chunk_and_embed(state: Stage01State) -> Stage01State:
     }
 
     logger.info("START: _chunk_and_embed", extra=log_context)
-    logger.info("BRD semantic index disabled for demo runtime", extra=log_context)
-    return _mark_embedding_skipped(new_state, brd_embedded=False)
 
     try:
         if new_state.get("status") == "FAILED":
@@ -534,8 +537,6 @@ def _embed_schema_metadata(state: Stage01State) -> Stage01State:
     }
 
     logger.info("START: _embed_schema_metadata", extra=log_context)
-    logger.info("Schema semantic index disabled for demo runtime", extra=log_context)
-    return _mark_embedding_skipped(new_state, schema_embedded=False, schema_columns_count=0)
 
     try:
         if new_state.get("status") == "FAILED":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+import pytest
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("ATHENA_DEMO_MODE", "false")
@@ -69,6 +70,34 @@ def test_ui_run_builds_cross_layer_payload(monkeypatch):
     assert payload["kpis"][0]["name"] == "Revenue"
     assert payload["script_counts"]["bronze"] == 1
     assert payload["next_gate"] == 2
+
+
+def test_display_run_name_prefers_submitted_brd_filename():
+    from api.services.ui.shared import display_run_name
+
+    assert display_run_name({"run_id": "run-name", "source": "database", "brd_filename": "Claims BRD"}) == "Claims BRD"
+    assert display_run_name({"run_id": "run-name", "source": "database"}) == "run-name"
+
+
+def test_exact_memory_match_does_not_preload_requirements_or_kpis():
+    from nodes.memory_lookup import _apply_match_result
+
+    state = {"run_id": "run-memory", "fingerprint": "fp1"}
+    result = _apply_match_result(
+        state,
+        True,
+        {"business_objective": "cached objective"},
+        {"kpis": [{"kpi_name": "Cached KPI"}]},
+        {"node": "test"},
+    )
+
+    assert result["memory_layer1"] is True
+    assert result["memory_bypass"] is False
+    assert result["memory_exact_requirements_found"] is True
+    assert result["memory_exact_kpi_count"] == 1
+    assert "req_business_objective" not in result
+    assert "kpis" not in result
+    assert "prior_kpis" not in result
 
 
 def test_ui_status_prefers_background_stage_over_stale_stage_confirmation():
@@ -181,3 +210,43 @@ def test_mocked_pipeline_progression_stays_in_sync(monkeypatch):
     assert after.status_code == 200
     assert after.json()["status"] == "SUCCESS"
     assert after.json()["state"]["life_cycle_state"] == "TERMINATED"
+
+
+def test_hitl_batch_submit_returns_503_when_decision_persistence_fails(monkeypatch):
+    def fail_update_hitl_item(*args, **kwargs):
+        raise RuntimeError("pipeline database unavailable")
+
+    monkeypatch.setattr("utilis.db.update_hitl_item", fail_update_hitl_item)
+
+    response = client.post(
+        "/hitl/run-db/decisions",
+        json={"decisions": [{"kpi_id": "run-db:1:kpi-1", "decision": "APPROVED"}]},
+    )
+
+    assert response.status_code == 503
+    assert "Failed to persist KPI decision" in response.json()["detail"]
+
+
+def test_update_hitl_item_rejects_missing_item(monkeypatch):
+    from utilis.db import update_hitl_item
+
+    class Cursor:
+        rowcount = 0
+
+        def execute(self, *args, **kwargs):
+            return None
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            raise AssertionError("missing HITL item should not be committed")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("utilis.db.get_pipeline_connection", lambda: Connection())
+
+    with pytest.raises(LookupError, match="HITL item not found"):
+        update_hitl_item("missing-item", "APPROVED")

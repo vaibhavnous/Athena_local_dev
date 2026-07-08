@@ -1,5 +1,6 @@
 // @ts-nocheck
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowLeft,
@@ -27,8 +28,9 @@ const DEFAULT_FORM = {
   deployment: '',
   databaseType: 'azure_sql',
   databaseName: 'insurance',
+  targetWarehouse: 'databricks',
   useDomainKb: false,
-  stageConfirmationEnabled: true,
+  stageConfirmationEnabled: false,
 }
 
 function buildInitialForm(settings, seedRun) {
@@ -48,6 +50,7 @@ function buildInitialForm(settings, seedRun) {
           deployment: seedRun.deployment || settings.azure_deployment || DEFAULT_FORM.deployment,
           databaseType: seedRun.database_type || DEFAULT_FORM.databaseType,
           databaseName: seedRun.database_name || DEFAULT_FORM.databaseName,
+          targetWarehouse: seedRun.target_warehouse || DEFAULT_FORM.targetWarehouse,
           useDomainKb: !!seedRun.use_domain_kb,
         }
       : {}),
@@ -61,6 +64,11 @@ const SOURCE_OPTIONS = [
 
 const DATA_LAKE_OPTIONS = [
   { id: 'adls_gen2', label: 'ADLS' },
+]
+
+const TARGET_WAREHOUSE_OPTIONS = [
+  { id: 'databricks', label: 'Databricks' },
+  { id: 'snowflake', label: 'Snowflake' },
 ]
 
 const DATABASE_OPTIONS = {
@@ -109,9 +117,11 @@ function connectionTypeFromSource(source) {
 }
 
 function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
+  const navigate = useNavigate()
   const fileInputRef = useRef(null)
   const sourceSectionRef = useRef(null)
   const addRun = useAthenaStore((s) => s.addRun)
+  const setActiveRun = useAthenaStore((s) => s.setActiveRun)
   const addNotification = useAthenaStore((s) => s.addNotification)
   const settings = useAthenaStore((s) => s.settings)
 
@@ -292,6 +302,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         deployment: form.deployment || undefined,
         database_type: form.databaseType,
         database_name: form.databaseName,
+        target_warehouse: form.targetWarehouse,
         budget: settings.budget,
         maxKpis: settings.maxKpis,
         devMode: settings.devMode,
@@ -299,7 +310,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         stage_confirmation_enabled: form.stageConfirmationEnabled,
       })
 
-      addRun({
+      const newRun = {
         id: run.run_id,
         run_id: run.run_id,
         brd_filename: displayName,
@@ -308,11 +319,15 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         sftp_entity: normalizedSftpEntity,
         provider: form.provider,
         deployment: form.deployment || null,
+        target_warehouse: form.targetWarehouse,
         use_domain_kb: !!form.useDomainKb,
         started_at: new Date().toISOString(),
         stages: [],
         kpis: [],
-      })
+      }
+
+      addRun(newRun)
+      setActiveRun(run.run_id)
 
       addNotification({
         type: 'success',
@@ -324,6 +339,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
       })
 
       handleClose()
+      navigate('/app/data-discovery')
     } catch (submitError) {
       console.error('[NewRunModal] Failed to start run', submitError)
       const message =
@@ -477,6 +493,20 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                         </div>
 
                         <div className="space-y-4">
+                          <Field label="Target Warehouse" required compact>
+                            <ModalSelect
+                              id="targetWarehouse"
+                              value={form.targetWarehouse}
+                              options={TARGET_WAREHOUSE_OPTIONS}
+                              openSelect={openSourceSelect}
+                              setOpenSelect={setOpenSourceSelect}
+                              onChange={(targetWarehouse) =>
+                                setForm((current) => ({ ...current, targetWarehouse }))
+                              }
+                              activeBorder
+                            />
+                          </Field>
+
                           <div className="text-[16px] font-semibold text-white">Source Connection</div>
 
                             <Field label="Connection Type" required compact>

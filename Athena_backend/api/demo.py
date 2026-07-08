@@ -18,7 +18,7 @@ GENERATED_CODE_DIR = ROOT_DIR / "generated_code"
 
 
 def demo_enabled() -> bool:
-    return str(os.getenv("ATHENA_DEMO_MODE", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    return str(os.getenv("ATHENA_DEMO_MODE", "false")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _now() -> datetime:

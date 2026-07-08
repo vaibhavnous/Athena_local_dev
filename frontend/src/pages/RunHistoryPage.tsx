@@ -412,8 +412,9 @@ function getHistoryDisplaySteps(phase) {
 
   if (phase.id === 'phase-4') {
     const silverState = byKey.get('silver')?.state || phaseState
+    const gate4State = reviewAwareState(byKey.get('gate4'), phase)
     const gate5State = reviewAwareState(byKey.get('gate5'), phase)
-    const silverFlow = buildHistorySilverPhaseStates(silverState, gate5State, phase.status)
+    const silverFlow = buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phase.status)
     return [
       actual('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverFlow.mergeResolution),
       actual('silver_merge_key_review', 'Silver Merge Key Review', silverFlow.mergeReview),
@@ -459,8 +460,9 @@ function inferExecutionState(generationState, reviewState, phaseStatus) {
   return phaseStatusToStepState(phaseStatus) === 'FAILED' ? 'FAILED' : 'PENDING'
 }
 
-function buildHistorySilverPhaseStates(silverState, gate5State, phaseStatus) {
+function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phaseStatus) {
   const normalizedSilver = String(silverState || '').toUpperCase()
+  const normalizedGate4 = String(gate4State || '').toUpperCase()
   const normalizedGate = String(gate5State || '').toUpperCase()
   const normalizedPhase = String(phaseStatus || '').toLowerCase()
 
@@ -484,11 +486,21 @@ function buildHistorySilverPhaseStates(silverState, gate5State, phaseStatus) {
     }
   }
 
+  if (normalizedGate4 === 'HITL_WAIT' || normalizedGate4 === 'PAUSED_FOR_HITL') {
+    return {
+      mergeResolution: 'COMPLETED',
+      mergeReview: 'HITL_WAIT',
+      codeGeneration: 'PENDING',
+      reviewGate: 'PENDING',
+      codeExecution: 'PENDING',
+    }
+  }
+
   if (normalizedSilver === 'RUNNING') {
     return {
-      mergeResolution: 'RUNNING',
-      mergeReview: 'PENDING',
-      codeGeneration: 'PENDING',
+      mergeResolution: 'COMPLETED',
+      mergeReview: 'COMPLETED',
+      codeGeneration: 'RUNNING',
       reviewGate: 'PENDING',
       codeExecution: 'PENDING',
     }

@@ -161,7 +161,8 @@ def build_req_extraction_node(
         run_id = state["run_id"]
         fingerprint = state["fingerprint"]
 
-        if state.get("memory_bypass"):
+        # ponytail: keep memory checks observable, but never reuse cached req output.
+        if False:
             logger.info("Requirement Extraction - reusing exact-match requirements", extra=log_context)
             payload = {
                 "business_objective": state.get("req_business_objective", ""),
@@ -174,7 +175,7 @@ def build_req_extraction_node(
                 "fingerprint": fingerprint,
                 "run_id": run_id,
                 "cost_usd": 0.0,
-                "source": "MEMORY_LAYER1",
+                "source": "DISABLED_MEMORY_REUSE",
             }
             ai_store_db_writer(
                 run_id=run_id,

@@ -170,6 +170,14 @@ def _datatype_cast(data_type: str) -> str | None:
     return None
 
 
+def _key_columns(enriched_columns: List[Dict[str, Any]]) -> List[str]:
+    return [
+        _normalized_column_name(column)
+        for column in enriched_columns
+        if column.get("is_join_key") or str(column.get("semantic_type") or "") in {"ID", "SURROGATE_KEY"}
+    ]
+
+
 COLUMN_NAME_CORRECTIONS = {
     "rererence_id": "reference_id",
 }
@@ -204,11 +212,7 @@ def generate_silver_script(
         for column in enriched_columns
         if column.get("is_pii_candidate") or column.get("is_pii") or column.get("semantic_type") == "PII"
     ]
-    key_columns = [
-        _normalized_column_name(column)
-        for column in enriched_columns
-        if column.get("is_join_key") or str(column.get("semantic_type") or "") in {"ID", "SURROGATE_KEY"}
-    ]
+    key_columns = _key_columns(enriched_columns)
     cast_rules = {
         _normalized_column_name(column): _datatype_cast(str(column.get("data_type") or ""))
         for column in enriched_columns
@@ -236,7 +240,8 @@ DO NOT EDIT MANUALLY
 
 from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, lit, sha2, trim, when
+from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, lit, row_number, sha2, trim, when
+from pyspark.sql.window import Window
 
 spark = SparkSession.builder.getOrCreate()
 spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
@@ -349,8 +354,27 @@ df = df.withColumn(
     ),
 )
 
-if dedup_keys:
-    df = df.dropDuplicates(["silver_upsert_key"])
+dedup_order_columns = [
+    name for name in df.columns
+    if any(token in name.lower() for token in ["updated", "modified", "effective", "inserted", "created", "timestamp", "date"])
+]
+dedup_order_columns.extend([
+    name for name in ["ingestion_timestamp", "run_id"]
+    if name in df.columns
+])
+dedup_order_columns = list(dict.fromkeys(dedup_order_columns))
+if dedup_keys and dedup_order_columns:
+    window_spec = Window.partitionBy(*dedup_keys).orderBy(
+        *[col(name).desc_nulls_last() for name in dedup_order_columns]
+    )
+    df = (
+        df
+        .withColumn("_silver_row_number", row_number().over(window_spec))
+        .filter(col("_silver_row_number") == 1)
+        .drop("_silver_row_number")
+    )
+elif dedup_keys:
+    df = df.dropDuplicates(dedup_keys)
 else:
     df = df.dropDuplicates(["silver_upsert_key"])
 
@@ -399,6 +423,7 @@ def _generate_one_table(
 ) -> Dict[str, object]:
     table_name = table_ref["table_name"]
     enriched_columns = _columns_for_table(enriched_metadata, table_name)
+    merge_keys = _key_columns(enriched_columns)
 
     code = generate_silver_script(
         table_ref=table_ref,
@@ -423,6 +448,10 @@ def _generate_one_table(
         "source_table": table_ref["bronze_table"],
         "target_table": table_ref["silver_table"],
         "column_count": len(enriched_columns),
+        "merge_keys": merge_keys,
+        "primary_keys": merge_keys,
+        "merge_key_source": "semantic_enrichment",
+        "merge_strategy": "Delta MERGE on silver_upsert_key built from reviewed merge keys",
         "status": "APPROVED",
         "script_path": script_path,
     }

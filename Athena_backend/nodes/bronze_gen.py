@@ -29,6 +29,10 @@ BRONZE_LLM_SYSTEM_MSG = (
     "You are a senior Spark data engineer. Return only production-ready Python code. "
     "Do not include markdown fences or explanations."
 )
+SNOWFLAKE_BRONZE_LLM_SYSTEM_MSG = (
+    "You are a senior Snowflake data engineer. Return only production-ready Snowflake SQL. "
+    "Do not include markdown fences or explanations."
+)
 
 DANGEROUS_SQL_KEYWORDS = {
     "DELETE",
@@ -36,6 +40,14 @@ DANGEROUS_SQL_KEYWORDS = {
     "TRUNCATE",
     "UPDATE",
     "ALTER",
+}
+DESTRUCTIVE_SNOWFLAKE_SQL_KEYWORDS = {
+    "ALTER",
+    "DELETE",
+    "DROP",
+    "MERGE",
+    "TRUNCATE",
+    "UPDATE",
 }
 
 
@@ -108,16 +120,23 @@ def _bronze_output_dir() -> str:
     return os.path.join(os.getcwd(), "generated_code", "bronze")
 
 
+def _bronze_output_dir_for(target_warehouse: str = "databricks") -> str:
+    warehouse = str(target_warehouse or "databricks").lower()
+    if warehouse == "snowflake":
+        return os.path.join(os.getcwd(), "generated_code", "snowflake", "bronze")
+    return _bronze_output_dir()
+
+
 def _run_slug(run_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", str(run_id or "run")).strip("_")[:48] or "run"
 
 
-def _bronze_readme_path() -> str:
-    return os.path.join(_bronze_output_dir(), "README.md")
+def _bronze_readme_path(target_warehouse: str = "databricks") -> str:
+    return os.path.join(_bronze_output_dir_for(target_warehouse), "README.md")
 
 
-def _bronze_ui_path() -> str:
-    return os.path.join(_bronze_output_dir(), "index.html")
+def _bronze_ui_path(target_warehouse: str = "databricks") -> str:
+    return os.path.join(_bronze_output_dir_for(target_warehouse), "index.html")
 
 
 def _resolve_tables_for_bronze(state: Stage01State) -> List[BronzeTableRef]:
@@ -164,6 +183,17 @@ def _detect_dangerous_sql(code: str) -> None:
             raise ValueError(f"Dangerous SQL keyword detected: {kw}")
 
 
+def _validate_snowflake_sql(sql: str) -> None:
+    upper = str(sql or "").upper()
+    required = ("CREATE SCHEMA", "CREATE TABLE", "INSERT INTO")
+    missing = [token for token in required if token not in upper]
+    if missing:
+        raise ValueError(f"Snowflake bronze SQL is missing required statements: {', '.join(missing)}")
+    for keyword in DESTRUCTIVE_SNOWFLAKE_SQL_KEYWORDS:
+        if re.search(rf"\b{keyword}\b", upper):
+            raise ValueError(f"Disallowed Snowflake SQL keyword detected: {keyword}")
+
+
 def _strip_code_fences(raw: str) -> str:
     raw = raw.strip()
     if raw.startswith("```"):
@@ -173,6 +203,10 @@ def _strip_code_fences(raw: str) -> str:
 
 def _llm_enabled_for_bronze() -> bool:
     return os.getenv("ATHENA_ENABLE_LLM_BRONZE_ENHANCEMENT", "false").lower() in {"1", "true", "yes", "on"}
+
+
+def _llm_enabled_for_snowflake_bronze() -> bool:
+    return os.getenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "false").lower() in {"1", "true", "yes", "on"}
 
 
 def _enhance_with_llm(code: str, metadata: Dict[str, Any]) -> str:
@@ -240,12 +274,77 @@ def _maybe_enhance_with_llm(code: str, metadata: Dict[str, Any]) -> tuple[str, b
         return code, False, str(exc)[:500]
 
 
+def _enhance_snowflake_with_llm(sql: str, metadata: Dict[str, Any]) -> str:
+    provider = os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")
+    model = os.getenv("ATHENA_SNOWFLAKE_BRONZE_LLM_MODEL") or os.getenv("ATHENA_BRONZE_LLM_MODEL")
+    llm = get_llm(
+        provider=provider,
+        model=model,
+        temperature=0.0,
+        request_timeout=BRONZE_LLM_TIMEOUT_SECONDS,
+    )
+
+    prompt = f"""
+Enhance this deterministic Snowflake Bronze ingestion SQL.
+
+Metadata:
+{json.dumps(metadata, indent=2, default=str)}
+
+Requirements:
+- Return only complete Snowflake SQL.
+- Preserve the same source and target objects.
+- Preserve the INSERT INTO load pattern.
+- Preserve audit columns run_id, ingestion_timestamp, source_system, and source_table.
+- Keep statements idempotent where possible.
+- Use Snowflake-native safe casts and timestamp handling.
+- Do not generate DROP, DELETE, UPDATE, MERGE, TRUNCATE, or ALTER statements.
+- Do not add explanations or markdown fences.
+
+Current SQL:
+{sql}
+""".strip()
+
+    if len(prompt) > BRONZE_LLM_MAX_PROMPT_CHARS:
+        raise ValueError(
+            f"Snowflake Bronze LLM enhancement prompt too large: {len(prompt)} chars > {BRONZE_LLM_MAX_PROMPT_CHARS}"
+        )
+
+    response = llm.invoke(
+        [
+            SystemMessage(content=SNOWFLAKE_BRONZE_LLM_SYSTEM_MSG),
+            HumanMessage(content=prompt),
+        ]
+    )
+    enhanced = _strip_code_fences(str(response.content))
+    if not enhanced:
+        raise ValueError("Snowflake Bronze LLM enhancement returned empty SQL")
+    return enhanced
+
+
+def _maybe_enhance_snowflake_with_llm(sql: str, metadata: Dict[str, Any]) -> tuple[str, bool, str | None]:
+    if not _llm_enabled_for_snowflake_bronze():
+        return sql, False, None
+
+    try:
+        enhanced = _enhance_snowflake_with_llm(sql, metadata)
+        _validate_snowflake_sql(enhanced)
+        return enhanced, True, None
+    except Exception as exc:
+        logger.warning(
+            "Snowflake Bronze LLM enhancement failed; using deterministic template: %s",
+            exc,
+            extra={"node": "bronze_gen", "pass": "snowflake_llm_enhancement"},
+        )
+        return sql, False, str(exc)[:500]
+
+
 def _write_bronze_readme(
     *,
     results: List[Dict[str, object]],
     generated_at: str,
     bronze_catalog: str,
     bronze_schema: str,
+    target_warehouse: str = "databricks",
 ) -> str:
     lines = [
         "# Bronze Scripts",
@@ -281,7 +380,8 @@ def _write_bronze_readme(
         ]
     )
 
-    readme_path = _bronze_readme_path()
+    readme_path = _bronze_readme_path(target_warehouse)
+    os.makedirs(os.path.dirname(readme_path), exist_ok=True)
     with open(readme_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -294,6 +394,7 @@ def _write_bronze_ui(
     generated_at: str,
     bronze_catalog: str,
     bronze_schema: str,
+    target_warehouse: str = "databricks",
 ) -> str:
     rows: List[Dict[str, str]] = []
     for item in sorted(results, key=lambda row: (str(row.get("database_name", "")), str(row.get("schema_name", "")), str(row.get("table", "")))):
@@ -528,7 +629,8 @@ def _write_bronze_ui(
 </html>
 """
 
-    ui_path = _bronze_ui_path()
+    ui_path = _bronze_ui_path(target_warehouse)
+    os.makedirs(os.path.dirname(ui_path), exist_ok=True)
     with open(ui_path, "w", encoding="utf-8") as f:
         f.write(html)
 
@@ -538,6 +640,194 @@ def _write_bronze_ui(
 # ------------------------------------------------------------------------------
 # BRONZE SCRIPT TEMPLATE (POC‑LOCKED)
 # ------------------------------------------------------------------------------
+
+def _snowflake_quote_identifier(value: str) -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        raise ValueError("Snowflake identifier cannot be empty.")
+    return '"' + cleaned.replace('"', '""') + '"'
+
+
+def _snowflake_qualified_name(*parts: str) -> str:
+    return ".".join(_snowflake_quote_identifier(part) for part in parts if str(part or "").strip())
+
+
+def _snowflake_string_literal(value: str) -> str:
+    return "'" + str(value or "").replace("'", "''") + "'"
+
+
+def _snowflake_type_from_metadata(column: Dict[str, Any]) -> str:
+    data_type = str(column.get("data_type") or "").strip().lower()
+    precision = column.get("numeric_precision")
+    scale = column.get("numeric_scale")
+    max_length = column.get("character_maximum_length") or column.get("max_length")
+
+    if data_type in {"int", "integer", "smallint", "tinyint", "bigint"}:
+        return "NUMBER(38,0)"
+    if data_type in {"bit", "boolean"}:
+        return "BOOLEAN"
+    if data_type in {"float", "real", "double"}:
+        return "FLOAT"
+    if data_type in {"decimal", "numeric", "number", "money", "smallmoney"}:
+        if precision and scale is not None:
+            return f"NUMBER({min(int(precision), 38)},{int(scale)})"
+        return "NUMBER(38,10)"
+    if data_type == "date":
+        return "DATE"
+    if data_type in {"datetime", "datetime2", "smalldatetime", "datetimeoffset", "time", "timestamp"}:
+        return "TIMESTAMP_NTZ"
+    if data_type in {"binary", "varbinary"}:
+        return "BINARY"
+    if data_type in {"varchar", "nvarchar", "char", "nchar", "text", "ntext", "string"}:
+        try:
+            length = int(max_length)
+            if 0 < length <= 16777216:
+                return f"VARCHAR({length})"
+        except Exception:
+            pass
+    return "VARCHAR"
+
+
+def _snowflake_type_from_spark_cast(cast_type: str) -> str:
+    normalized = str(cast_type or "").strip().lower()
+    decimal_match = re.fullmatch(r"decimal\((\d+),\s*(\d+)\)", normalized)
+    if decimal_match:
+        return f"NUMBER({min(int(decimal_match.group(1)), 38)},{int(decimal_match.group(2))})"
+    if normalized in {"int", "integer", "bigint", "smallint", "tinyint"}:
+        return "NUMBER(38,0)"
+    if normalized in {"double", "float", "real"}:
+        return "FLOAT"
+    if normalized == "boolean":
+        return "BOOLEAN"
+    if normalized == "date":
+        return "DATE"
+    if normalized == "timestamp":
+        return "TIMESTAMP_NTZ"
+    return "VARCHAR"
+
+
+def _snowflake_columns(
+    *,
+    table_metadata: Dict[str, Any] | None,
+    cast_rules: Dict[str, str] | None,
+) -> List[Dict[str, str]]:
+    columns: List[Dict[str, str]] = []
+    seen: Dict[str, int] = {}
+    metadata_columns = (table_metadata or {}).get("columns") or []
+
+    for column in metadata_columns:
+        original_name = str(column.get("column_name") or "").strip()
+        if not original_name:
+            continue
+        normalized_name = _normalize_bronze_column_name(original_name)
+        if normalized_name in seen:
+            seen[normalized_name] += 1
+            normalized_name = f"{normalized_name}_{seen[normalized_name]}"
+        else:
+            seen[normalized_name] = 0
+        columns.append(
+            {
+                "source": original_name,
+                "target": normalized_name,
+                "type": _snowflake_type_from_metadata(column),
+            }
+        )
+
+    if columns:
+        return columns
+
+    for column_name, cast_type in sorted((cast_rules or {}).items()):
+        normalized_name = _normalize_bronze_column_name(column_name)
+        if not normalized_name:
+            continue
+        columns.append(
+            {
+                "source": column_name,
+                "target": normalized_name,
+                "type": _snowflake_type_from_spark_cast(cast_type),
+            }
+        )
+    return columns
+
+
+def generate_snowflake_bronze_script(
+    *,
+    table: str,
+    schema: str = "dbo",
+    database: str = "insurance",
+    run_id: str = "BRONZE_RUN",
+    bronze_catalog: str = "main",
+    bronze_schema: str = "bronze",
+    cast_rules: Dict[str, str] | None = None,
+    table_metadata: Dict[str, Any] | None = None,
+) -> str:
+    source_table = _snowflake_qualified_name(database, schema, table)
+    target_table = _snowflake_qualified_name(bronze_catalog, bronze_schema, f"bronze_{table}")
+    target_schema = _snowflake_qualified_name(bronze_catalog, bronze_schema)
+    columns = _snowflake_columns(table_metadata=table_metadata, cast_rules=cast_rules)
+
+    if columns:
+        table_columns = ",\n    ".join(
+            f"{_snowflake_quote_identifier(column['target'])} {column['type']}" for column in columns
+        )
+        insert_columns = ",\n    ".join(_snowflake_quote_identifier(column["target"]) for column in columns)
+        select_columns = ",\n    ".join(
+            f"TRY_CAST(src.{_snowflake_quote_identifier(column['source'])} AS {column['type']}) AS {_snowflake_quote_identifier(column['target'])}"
+            for column in columns
+        )
+        create_table = f"""CREATE TABLE IF NOT EXISTS {target_table} (
+    {table_columns},
+    "run_id" VARCHAR,
+    "ingestion_timestamp" TIMESTAMP_NTZ,
+    "source_system" VARCHAR,
+    "source_table" VARCHAR
+);"""
+        insert_sql = f"""INSERT INTO {target_table} (
+    {insert_columns},
+    "run_id",
+    "ingestion_timestamp",
+    "source_system",
+    "source_table"
+)
+SELECT
+    {select_columns},
+    {_snowflake_string_literal(run_id)} AS "run_id",
+    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
+    {_snowflake_string_literal(database)} AS "source_system",
+    {_snowflake_string_literal(table)} AS "source_table"
+FROM {source_table} AS src;"""
+    else:
+        create_table = f"""CREATE TABLE IF NOT EXISTS {target_table} AS
+SELECT
+    src.*,
+    {_snowflake_string_literal(run_id)} AS "run_id",
+    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
+    {_snowflake_string_literal(database)} AS "source_system",
+    {_snowflake_string_literal(table)} AS "source_table"
+FROM {source_table} AS src
+WHERE 1 = 0;"""
+        insert_sql = f"""INSERT INTO {target_table}
+SELECT
+    src.*,
+    {_snowflake_string_literal(run_id)} AS "run_id",
+    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
+    {_snowflake_string_literal(database)} AS "source_system",
+    {_snowflake_string_literal(table)} AS "source_table"
+FROM {source_table} AS src;"""
+
+    return f"""-- AUTO-GENERATED BRONZE INGESTION SCRIPT
+-- Source: {database}.{schema}.{table}
+-- Expected runtime: Snowflake SQL
+-- Target table: {bronze_catalog}.{bronze_schema}.bronze_{table}
+-- DO NOT EDIT MANUALLY
+
+CREATE SCHEMA IF NOT EXISTS {target_schema};
+
+{create_table}
+
+{insert_sql}
+"""
+
 
 def generate_bronze_script(
     *,
@@ -566,6 +856,8 @@ Target table: {bronze_catalog}.{bronze_schema}.bronze_{table}
 DO NOT EDIT MANUALLY
 """
 
+import os
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, current_timestamp, lit
 
@@ -581,7 +873,11 @@ except Exception:
     print("Could not create schema '{bronze_schema}' in the current catalog")
 
 RUN_ID = {run_id!r}
-SOURCE_JDBC_URL = "{source_jdbc_url}"
+DEFAULT_SOURCE_JDBC_URL = {source_jdbc_url!r}
+SOURCE_JDBC_URL_ENV = "ATHENA_SOURCE_JDBC_URL"
+SOURCE_JDBC_URL = os.getenv(SOURCE_JDBC_URL_ENV) or os.getenv("SOURCE_JDBC_URL") or DEFAULT_SOURCE_JDBC_URL
+if not SOURCE_JDBC_URL:
+    raise RuntimeError(f"Missing source JDBC URL. Set {{SOURCE_JDBC_URL_ENV}} or SOURCE_JDBC_URL at runtime.")
 
 TARGET_TABLE = "{bronze_schema}.bronze_{table}"
 TEMP_VIEW = "bronze_src_{table}"
@@ -690,38 +986,64 @@ def _generate_one_table(
     bronze_schema: str = "bronze",
     cast_rules: Dict[str, str] | None = None,
     table_metadata: Dict[str, Any] | None = None,
+    target_warehouse: str = "databricks",
 ) -> Dict[str, object]:
     database_name = table_ref["database_name"]
     schema_name = table_ref["schema_name"]
     table_name = table_ref["table_name"]
-    resolved_source_jdbc_url = source_jdbc_url or build_source_jdbc_url(database_name)
+    target_warehouse = str(target_warehouse or "databricks").lower()
 
-    code = generate_bronze_script(
-        table=table_name,
-        schema=schema_name,
-        database=database_name,
-        run_id=run_id,
-        bronze_catalog=bronze_catalog,
-        bronze_schema=bronze_schema,
-        source_jdbc_url=resolved_source_jdbc_url,
-        cast_rules=cast_rules or {},
-    )
+    if target_warehouse == "snowflake":
+        code = generate_snowflake_bronze_script(
+            table=table_name,
+            schema=schema_name,
+            database=database_name,
+            run_id=run_id,
+            bronze_catalog=bronze_catalog,
+            bronze_schema=bronze_schema,
+            cast_rules=cast_rules or {},
+            table_metadata=table_metadata or {},
+        )
+        enhancement_metadata = {
+            "source_table": table_ref,
+            "target_table": f"{bronze_catalog}.{bronze_schema}.bronze_{table_name}",
+            "cast_rules": cast_rules or {},
+            "table_metadata": table_metadata or {},
+            "target_warehouse": "snowflake",
+        }
+        code, llm_enhanced, llm_error = _maybe_enhance_snowflake_with_llm(code, enhancement_metadata)
+        _validate_snowflake_sql(code)
+        extension = "sql"
+    else:
+        resolved_source_jdbc_url = source_jdbc_url or build_source_jdbc_url(database_name)
 
-    enhancement_metadata = {
-        "source_table": table_ref,
-        "target_table": f"{bronze_catalog}.{bronze_schema}.bronze_{table_name}",
-        "cast_rules": cast_rules or {},
-        "table_metadata": table_metadata or {},
-    }
-    code, llm_enhanced, llm_error = _maybe_enhance_with_llm(code, enhancement_metadata)
+        code = generate_bronze_script(
+            table=table_name,
+            schema=schema_name,
+            database=database_name,
+            run_id=run_id,
+            bronze_catalog=bronze_catalog,
+            bronze_schema=bronze_schema,
+            source_jdbc_url=resolved_source_jdbc_url,
+            cast_rules=cast_rules or {},
+        )
 
-    _validate_python(code)
-    _detect_dangerous_sql(code)
+        enhancement_metadata = {
+            "source_table": table_ref,
+            "target_table": f"{bronze_catalog}.{bronze_schema}.bronze_{table_name}",
+            "cast_rules": cast_rules or {},
+            "table_metadata": table_metadata or {},
+        }
+        code, llm_enhanced, llm_error = _maybe_enhance_with_llm(code, enhancement_metadata)
 
-    output_dir = _bronze_output_dir()
+        _validate_python(code)
+        _detect_dangerous_sql(code)
+        extension = "py"
+
+    output_dir = _bronze_output_dir_for(target_warehouse)
     os.makedirs(output_dir, exist_ok=True)
 
-    script_path = os.path.join(output_dir, f"bronze_ingest_{_run_slug(run_id)}_{table_name}.py")
+    script_path = os.path.join(output_dir, f"bronze_ingest_{_run_slug(run_id)}_{table_name}.{extension}")
 
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
@@ -735,6 +1057,8 @@ def _generate_one_table(
         "cast_rule_count": len(cast_rules or {}),
         "llm_enhanced": llm_enhanced,
         "llm_enhancement_error": llm_error,
+        "target_warehouse": target_warehouse,
+        "script_language": "sql" if target_warehouse == "snowflake" else "python",
         "script_path": script_path,
     }
 # ------------------------------------------------------------------------------
@@ -752,6 +1076,7 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
     run_id = str(state.get("run_id") or "BRONZE_RUN")
     bronze_catalog = state.get("bronze_catalog") or "main"
     bronze_schema = state.get("bronze_schema") or "bronze"
+    target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
 
     table_refs = _resolve_tables_for_bronze(state)
 
@@ -772,6 +1097,7 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
                 bronze_schema=bronze_schema,
                 cast_rules=_cast_rules_for_table(state, table_ref["table_name"]),
                 table_metadata=_metadata_for_table(state, table_ref["table_name"]),
+                target_warehouse=target_warehouse,
             )
             for table_ref in table_refs
         ]
@@ -784,12 +1110,15 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
         "run_id": run_id,
         "generated_at": datetime.utcnow().isoformat(),
         "source_database": table_refs[0]["database_name"],
+        "target_warehouse": target_warehouse,
         "script_count": len(results),
         "scripts": results,
     }
 
-    bundle_path = os.path.join(_bronze_output_dir(), f"{_run_slug(run_id)}_bronze_scripts.json")
-    latest_bundle_path = os.path.join(_bronze_output_dir(), "bronze_scripts.json")
+    output_dir = _bronze_output_dir_for(target_warehouse)
+    os.makedirs(output_dir, exist_ok=True)
+    bundle_path = os.path.join(output_dir, f"{_run_slug(run_id)}_bronze_scripts.json")
+    latest_bundle_path = os.path.join(output_dir, "bronze_scripts.json")
     with open(bundle_path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
     with open(latest_bundle_path, "w", encoding="utf-8") as f:
@@ -800,12 +1129,14 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
         generated_at=bundle["generated_at"],
         bronze_catalog=bronze_catalog,
         bronze_schema=bronze_schema,
+        target_warehouse=target_warehouse,
     )
     ui_path = _write_bronze_ui(
         results=results,
         generated_at=bundle["generated_at"],
         bronze_catalog=bronze_catalog,
         bronze_schema=bronze_schema,
+        target_warehouse=target_warehouse,
     )
 
     new_state["bronze_generation_status"] = "COMPLETED"

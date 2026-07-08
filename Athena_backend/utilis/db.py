@@ -697,6 +697,8 @@ def update_hitl_item(
             rejection_reason,
             item_id,
         )
+        if cursor.rowcount == 0:
+            raise LookupError(f"HITL item not found: {item_id}")
         conn.commit()
     except Exception as e:
         logger.error("HITL item update failed for %s: %s", item_id, e)
@@ -732,6 +734,8 @@ def update_hitl_items_batch(items: Iterable[Dict[str, Optional[str]]]) -> None:
                 item.get("rejection_reason"),
                 item["item_id"],
             )
+            if cursor.rowcount == 0:
+                raise LookupError(f"HITL item not found: {item['item_id']}")
         conn.commit()
     except Exception as e:
         conn.rollback()

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from utilis.db import config, execute_source_sql
+from utilis.embeddings import get_embedding_model
 from utilis.env import load_backend_env
 from utilis.logger import logger
 
@@ -41,7 +42,7 @@ def _env_enabled(name: str, default: str = "false") -> bool:
 def get_domain_kb_config() -> DomainKBConfig:
     kb_id = os.getenv("ATHENA_KB_ID", DEFAULT_KB_ID).strip() or DEFAULT_KB_ID
     return DomainKBConfig(
-        enabled=False,
+        enabled=_env_enabled("ATHENA_USE_DOMAIN_KB"),
         index_name=(
             os.getenv("PINECONE_KNOWLEDGE_BASE_INDEX_NAME")
             or os.getenv("PINECONE_KB_INDEX_NAME")
@@ -58,11 +59,24 @@ def get_domain_kb_config() -> DomainKBConfig:
 
 
 def _pinecone_index(index_name: str):
-    raise RuntimeError("Domain KB vector search is disabled for demo runtime")
+    from pinecone import Pinecone
+
+    api_key = os.getenv("PINECONE_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("Missing required environment variable: PINECONE_API_KEY")
+    return Pinecone(api_key=api_key).Index(index_name)
 
 
 def _pinecone_index_description(index_name: str) -> Dict[str, Any]:
-    return {}
+    from pinecone import Pinecone
+
+    api_key = os.getenv("PINECONE_API_KEY", "").strip()
+    if not api_key:
+        return {}
+    details = Pinecone(api_key=api_key).describe_index(index_name)
+    if hasattr(details, "to_dict"):
+        return details.to_dict()
+    return details if isinstance(details, dict) else {}
 
 
 def _index_uses_integrated_embedding(index_name: str) -> bool:
@@ -314,15 +328,6 @@ def upsert_kb_rows_to_pinecone(
     cfg = get_domain_kb_config()
     target_index_name = index_name or cfg.index_name
     target_namespace = namespace or cfg.namespace
-    return {
-        "rows_upserted": 0,
-        "rows_skipped": len([row for row in kb_rows if row.get("is_active", True)]),
-        "kb_hash": compute_kb_fingerprint(kb_rows, cfg.knowledge_base_id),
-        "index_name": target_index_name,
-        "namespace": target_namespace,
-        "knowledge_base_id": cfg.knowledge_base_id,
-        "disabled": True,
-    }
 
     active_rows = [row for row in kb_rows if row.get("is_active", True)]
     if not active_rows:

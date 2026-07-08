@@ -9,9 +9,11 @@ from pydantic import BaseModel, Field
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
+from pinecone import Pinecone
 
 from state import Stage01State
 from schema import KPISchema, KPISchemaItem, DerivationType
+from utilis.embeddings import get_embedding_model
 from utilis.logger import logger
 from utilis.db import ai_store_db_writer, config as db_config, insert_hitl_queue_items, get_pipeline_connection
 from nodes.req_extraction import get_llm, compute_cost_usd, TokenAccumulator, _strip_fences, handoff_validator
@@ -80,8 +82,56 @@ def _resolve_source_databases(state: Stage01State) -> List[str]:
 
 
 def _fetch_relevant_schema(brd_text: str, source_databases: List[str], top_k: int = 10) -> List[Dict[str, Any]]:
-    logger.info("Embedding schema grounding disabled for demo runtime", extra={"node": "kpi_extraction"})
-    return []
+    log_context = {"node": "kpi_extraction", "pass": "schema_grounding"}
+    model = get_embedding_model(log_context=log_context)
+    api_key = os.getenv("PINECONE_API_KEY", "").strip()
+    index_name = (os.getenv("PINECONE_SCHEMA_INDEX_NAME") or "metadata").strip()
+    if model is None or not api_key or not index_name:
+        logger.info("Embedding schema grounding unavailable", extra=log_context)
+        return []
+
+    try:
+        vector = model.embed_query(brd_text or "schema grounding")
+        matches = Pinecone(api_key=api_key).Index(index_name).query(
+            vector=vector,
+            top_k=top_k * 4,
+            include_metadata=True,
+            namespace="schema",
+        ).matches
+    except Exception as exc:
+        logger.warning("Embedding schema grounding failed: %s", exc, extra=log_context)
+        return []
+
+    source_set = {str(db).lower() for db in source_databases}
+    table_map: Dict[str, Dict[str, Any]] = {}
+    for match in matches or []:
+        metadata = getattr(match, "metadata", {}) or {}
+        db = str(metadata.get("database_name") or "").lower()
+        if source_set and db not in source_set:
+            continue
+        table_name = str(metadata.get("table_name") or "")
+        column_name = str(metadata.get("column_name") or "")
+        if not table_name:
+            continue
+        key = f"{db}.{metadata.get('schema_name')}.{table_name}"
+        entry = table_map.setdefault(
+            key,
+            {
+                "database_name": db,
+                "schema_name": metadata.get("schema_name"),
+                "table_name": table_name,
+                "columns": [],
+                "semantic_score": 0.0,
+            },
+        )
+        entry["semantic_score"] = max(entry["semantic_score"], float(getattr(match, "score", 0.0) or 0.0))
+        if column_name:
+            entry["columns"].append(column_name)
+
+    rows = list(table_map.values())
+    for row in rows:
+        row["columns"] = sorted(set(row["columns"]))
+    return sorted(rows, key=lambda row: row["semantic_score"], reverse=True)[:top_k]
 
 
 def _format_schema_context(schema_rows: List[Dict[str, Any]]) -> str:
@@ -260,109 +310,104 @@ def build_kpi_extraction_node(
         schema_context = _format_schema_context(relevant_schema)
         file_source_context = _format_file_source_context(state, context_text)
 
-        if state.get("memory_layer1", False) and state.get("prior_kpis"):
-            kpis = state["prior_kpis"][:25]
-            source = "MEMORY_LAYER1"
-            logger.info("PATH A: Using MEMORY_LAYER1 prior_kpis (n=%d)", len(kpis), extra=log_context)
-        else:
-            llm = get_llm(provider=llm_provider)
-            token_acc = TokenAccumulator()
-            last_error = None
-            kpis = []
-            rejected_kpis = state.get("rejected_kpis", [])
+        llm = get_llm(provider=llm_provider)
+        token_acc = TokenAccumulator()
+        last_error = None
+        kpis = []
+        rejected_kpis = state.get("rejected_kpis", [])
 
-            for attempt in range(max_retries + 1):
-                user_prompt = f"""Requirements: {json.dumps(requirements, indent=2)}
+        for attempt in range(max_retries + 1):
+            user_prompt = f"""Requirements: {json.dumps(requirements, indent=2)}
 {schema_context}
 {file_source_context}
 Rejected KPI names: {json.dumps(rejected_kpis)}
 Extract KPIs ONLY based on the available schema or file-source columns above.
 For file sources, every KPI must reference at least one available column when possible."""
 
-                if attempt > 0:
-                    user_prompt += f"\n\nPREV ERROR: {last_error}. Fix & ensure valid JSON array."
+            if attempt > 0:
+                user_prompt += f"\n\nPREV ERROR: {last_error}. Fix & ensure valid JSON array."
 
-                if attempt == max_retries:
-                    user_prompt += "\nFINAL: Force at least 3 valid KPIs."
+            if attempt == max_retries:
+                user_prompt += "\nFINAL: Force at least 3 valid KPIs."
 
-                logger.info("KPI LLM attempt %d/%d (path=%s)", attempt + 1, max_retries + 1, source, extra=log_context)
+            logger.info("KPI LLM attempt %d/%d (path=%s)", attempt + 1, max_retries + 1, source, extra=log_context)
 
-                try:
-                    response = llm.invoke(
-                        [SystemMessage(content=SYSTEM_PROMPT_KPI), HumanMessage(content=user_prompt)],
-                        config={"callbacks": [token_acc]},
-                    )
-
-                    raw_json = _strip_fences(response.content)
-                    parsed_list = _coerce_kpi_payload(json.loads(raw_json))
-                    kpis_parsed = [
-                        KPISchemaItem.model_validate(kpi).model_dump(mode="json")
-                        for kpi in parsed_list
-                    ]
-
-                    kpis_final = _remove_duplicates_and_rejected(kpis_parsed, rejected_kpis)
-                    kpis_final = kpis_final[:10]
-                    kpis_final = _grounding_check(kpis_final, requirements, context_text)
-
-                    if len(kpis_final) == 0 and attempt == max_retries:
-                        obj_name = requirements["business_objective"] or "Default Primary Objective"
-                        kpis_final = [{
-                            "kpi_name": obj_name[:50],
-                            "kpi_description": "Primary objective metric",
-                            "ai_confidence_score": 0.5,
-                            "derivation_type": "implicit",
-                            "source_requirement_ref": "business_objective",
-                            "grounding": "WEAK",
-                        }]
-
-                    kpis = kpis_final
-                    tokens_used = token_acc.total
-                    cost_usd = compute_cost_usd(token_acc.total_input, token_acc.total_output)
-                    attempts = attempt + 1
-                    break
-
-                except (json.JSONDecodeError, pydantic.ValidationError, Exception) as exc:
-                    last_error = str(exc)[:300]
-                    logger.warning("Attempt %d failed: %s", attempt + 1, last_error, extra=log_context)
-
-            if not kpis:
-                fallback_kpis = _fallback_kpis_from_columns(state)
-                if fallback_kpis:
-                    logger.warning(
-                        "Using deterministic file-source KPI fallback after LLM extraction failure: n_kpis=%d",
-                        len(fallback_kpis),
-                        extra=log_context,
-                    )
-                    kpis = fallback_kpis
-                    source = "FILE_SOURCE_FALLBACK"
-                    attempts = max_retries + 1
-                    tokens_used = token_acc.total if token_acc else 0
-                    cost_usd = compute_cost_usd(token_acc.total_input, token_acc.total_output) if token_acc else 0.0
-
-            if not kpis:
-                logger.error("KPI extraction FAILED after %d attempts", max_retries + 1, extra=log_context)
-                payload = {
-                    "fingerprint": fingerprint,
-                    "run_id": run_id,
-                    "kpi_count": 0,
-                    "source": source,
-                    "error": last_error,
-                }
-                ai_store_db_writer(
-                    run_id=run_id,
-                    stage="KPI Extraction",
-                    artifact_type="KPIS",
-                    payload=payload,
-                    schema_version="KPISchema_v1",
-                    prompt_version="PROMPT_KPI_v1",
-                    faithfulness_status="FAILED",
-                    retry_count=max_retries,
-                    token_count=tokens_used,
-                    input_tokens=0,
-                    output_tokens=0,
-                    fingerprint=fingerprint,
+            try:
+                response = llm.invoke(
+                    [SystemMessage(content=SYSTEM_PROMPT_KPI), HumanMessage(content=user_prompt)],
+                    config={"callbacks": [token_acc]},
                 )
-                return {**state, "status": "FAILED", "error": "KPI extraction failed"}
+
+                raw_json = _strip_fences(response.content)
+                parsed_list = _coerce_kpi_payload(json.loads(raw_json))
+                kpis_parsed = [
+                    KPISchemaItem.model_validate(kpi).model_dump(mode="json")
+                    for kpi in parsed_list
+                ]
+
+                kpis_final = _remove_duplicates_and_rejected(kpis_parsed, rejected_kpis)
+                kpis_final = kpis_final[:10]
+                kpis_final = _grounding_check(kpis_final, requirements, context_text)
+
+                if len(kpis_final) == 0 and attempt == max_retries:
+                    obj_name = requirements["business_objective"] or "Default Primary Objective"
+                    kpis_final = [{
+                        "kpi_name": obj_name[:50],
+                        "kpi_description": "Primary objective metric",
+                        "ai_confidence_score": 0.5,
+                        "derivation_type": "implicit",
+                        "source_requirement_ref": "business_objective",
+                        "grounding": "WEAK",
+                    }]
+
+                kpis = kpis_final
+                tokens_used = token_acc.total
+                cost_usd = compute_cost_usd(token_acc.total_input, token_acc.total_output)
+                attempts = attempt + 1
+                break
+
+            except (json.JSONDecodeError, pydantic.ValidationError, Exception) as exc:
+                last_error = str(exc)[:300]
+                logger.warning("Attempt %d failed: %s", attempt + 1, last_error, extra=log_context)
+
+        if not kpis:
+            fallback_kpis = _fallback_kpis_from_columns(state)
+            if fallback_kpis:
+                logger.warning(
+                    "Using deterministic file-source KPI fallback after LLM extraction failure: n_kpis=%d",
+                    len(fallback_kpis),
+                    extra=log_context,
+                )
+                kpis = fallback_kpis
+                source = "FILE_SOURCE_FALLBACK"
+                attempts = max_retries + 1
+                tokens_used = token_acc.total if token_acc else 0
+                cost_usd = compute_cost_usd(token_acc.total_input, token_acc.total_output) if token_acc else 0.0
+
+        if not kpis:
+            logger.error("KPI extraction FAILED after %d attempts", max_retries + 1, extra=log_context)
+            payload = {
+                "fingerprint": fingerprint,
+                "run_id": run_id,
+                "kpi_count": 0,
+                "source": source,
+                "error": last_error,
+            }
+            ai_store_db_writer(
+                run_id=run_id,
+                stage="KPI Extraction",
+                artifact_type="KPIS",
+                payload=payload,
+                schema_version="KPISchema_v1",
+                prompt_version="PROMPT_KPI_v1",
+                faithfulness_status="FAILED",
+                retry_count=max_retries,
+                token_count=tokens_used,
+                input_tokens=0,
+                output_tokens=0,
+                fingerprint=fingerprint,
+            )
+            return {**state, "status": "FAILED", "error": "KPI extraction failed"}
 
         ai_payload = {
             "fingerprint": fingerprint,

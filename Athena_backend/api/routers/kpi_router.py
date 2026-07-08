@@ -213,13 +213,25 @@ def submit_hitl_decisions(run_id: str, payload: HitlDecisionPayload) -> Dict[str
             else:
                 update_hitl_item(decision.kpi_id, "APPROVED")
 
-        except Exception:
-            logger.warning("Failed to process HITL decision", extra={"kpi_id": decision.kpi_id})
-            continue
+        except Exception as exc:
+            logger.warning(
+                "Failed to process HITL decision",
+                extra={"run_id": run_id, "kpi_id": decision.kpi_id, "error": str(exc)},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to persist KPI decision {decision.kpi_id}: {exc}",
+            ) from exc
 
     logger.info("HITL decisions submitted", extra={"run_id": run_id})
 
-    maybe_resume_gate1(run_id)
+    try:
+        maybe_resume_gate1(run_id)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"KPI decisions were saved, but pipeline resume check failed: {exc}",
+        ) from exc
 
     return {"run_id": run_id, "status": "SUBMITTED"}
 

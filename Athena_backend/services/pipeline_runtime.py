@@ -10,7 +10,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from utilis.db import config, get_completed_items, get_connection, get_pending_items, timed_stage, update_hitl_items_batch
+from utilis.db import ai_store_db_writer, config, get_completed_items, get_connection, get_pending_items, timed_stage, update_hitl_items_batch
 from utilis.logger import logger
 
 
@@ -188,18 +188,53 @@ def _database_stage_runner(stage_key: str):
 
         return build_hitl_enrichment_review_node()
     if stage_key == "bronze":
-        from nodes.bronze_gen import bronze_code_generation_node
-
-        return bronze_code_generation_node
+        return _run_database_bronze_stage
     if stage_key == "silver":
-        from nodes.silver_gen import silver_code_generation_node
-
-        return silver_code_generation_node
+        return _run_database_silver_stage
     if stage_key == "gold":
-        from nodes.gold_gen import gold_code_generation_node
-
-        return gold_code_generation_node
+        return _run_database_gold_stage
     raise ValueError(f"Unsupported database stage: {stage_key}")
+
+
+def _run_database_bronze_stage(state: Dict[str, Any]) -> Dict[str, Any]:
+    from nodes.bronze_gen import bronze_code_generation_node
+
+    result = bronze_code_generation_node(state)
+    if str(result.get("target_warehouse") or "").lower() == "snowflake":
+        from services.snowflake_bronze_runtime import run_snowflake_bronze_scripts
+
+        result = run_snowflake_bronze_scripts(result)
+    if str(result.get("bronze_generation_status") or "").upper() == "COMPLETED":
+        return {
+            **result,
+            "status": "HITL_WAIT",
+            "next_gate": 4,
+            "resume_message": "Bronze Review is pending. Review generated Bronze scripts before Silver generation.",
+        }
+    return result
+
+
+def _run_database_silver_stage(state: Dict[str, Any]) -> Dict[str, Any]:
+    from nodes.silver_gen import silver_code_generation_node
+
+    result = silver_code_generation_node(state)
+    if str(result.get("silver_generation_status") or "").upper() == "COMPLETED":
+        return {
+            **result,
+            "status": "HITL_WAIT",
+            "next_gate": 5,
+            "resume_message": "Silver Review is pending. Review generated Silver scripts before Gold generation.",
+        }
+    return result
+
+
+def _run_database_gold_stage(state: Dict[str, Any]) -> Dict[str, Any]:
+    from nodes.gold_gen import gold_code_generation_node
+
+    result = gold_code_generation_node(state)
+    if str(result.get("gold_generation_status") or "").upper().startswith("COMPLETED"):
+        return {**result, "status": "PIPELINE_COMPLETED", "next_gate": None}
+    return result
 
 
 def continue_database_pipeline(
@@ -457,6 +492,25 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
             pass
         cursor.execute(
             f"""
+            SELECT TOP ({limit}) run_id, full_state_json, checkpoint_at AS last_activity
+            FROM [{_pipeline_schema()}].[kpi_checkpoints]
+            ORDER BY checkpoint_at DESC
+            """
+        )
+        rows = cursor.fetchall()
+        if rows:
+            return [
+                {
+                    "run_id": row[0],
+                    "checkpoint": json.loads(row[1]) if row[1] else {},
+                    "last_activity": row[2],
+                }
+                for row in rows
+                if row and row[0]
+            ]
+
+        cursor.execute(
+            f"""
             WITH ai_runs AS (
                 SELECT run_id, MAX(stored_at) AS last_activity
                 FROM [{_pipeline_schema()}].[ai_store]
@@ -538,10 +592,29 @@ def _run_slug(run_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", str(run_id or "run")).strip("_")[:48] or "run"
 
 
-def _script_bundle_path(layer: str, run_id: str) -> Path:
-    output_dir = Path(os.getcwd()) / "generated_code" / layer
-    run_scoped = output_dir / f"{_run_slug(run_id)}_{layer}_scripts.json"
-    return run_scoped if run_scoped.exists() else output_dir / f"{layer}_scripts.json"
+def _script_output_dirs(layer: str, target_warehouse: Optional[str] = None) -> List[Path]:
+    default_dir = Path(os.getcwd()) / "generated_code" / layer
+    if layer != "bronze":
+        return [default_dir]
+
+    snowflake_dir = Path(os.getcwd()) / "generated_code" / "snowflake" / "bronze"
+    if str(target_warehouse or "").lower() == "snowflake":
+        return [snowflake_dir, default_dir]
+    if target_warehouse is None:
+        return [default_dir, snowflake_dir]
+    return [default_dir]
+
+
+def _script_bundle_path(layer: str, run_id: str, target_warehouse: Optional[str] = None) -> Path:
+    output_dirs = _script_output_dirs(layer, target_warehouse)
+    for output_dir in output_dirs:
+        run_scoped = output_dir / f"{_run_slug(run_id)}_{layer}_scripts.json"
+        if run_scoped.exists():
+            return run_scoped
+        latest = output_dir / f"{layer}_scripts.json"
+        if latest.exists():
+            return latest
+    return output_dirs[0] / f"{layer}_scripts.json"
 
 
 def _script_matches_run(
@@ -612,13 +685,14 @@ def _scripts_from_checkpoint(
 
 
 def load_bronze_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    bundle_path = _script_bundle_path("bronze", run_id)
+    checkpoint = checkpoint or {}
+    bundle_path = _script_bundle_path("bronze", run_id, checkpoint.get("target_warehouse"))
     if not bundle_path.exists():
-        return _scripts_from_checkpoint(checkpoint or {}, "bronze_generation_results", "bronze_generated_at")
+        return _scripts_from_checkpoint(checkpoint, "bronze_generation_results", "bronze_generated_at")
 
     bundle = _load_script_bundle(bundle_path)
     if not bundle:
-        return _scripts_from_checkpoint(checkpoint or {}, "bronze_generation_results", "bronze_generated_at")
+        return _scripts_from_checkpoint(checkpoint, "bronze_generation_results", "bronze_generated_at")
     bundle_run_id = bundle.get("run_id")
     scripts: List[Dict[str, Any]] = []
     for item in bundle.get("scripts", []):
@@ -1241,12 +1315,6 @@ def build_pipeline_steps(
                 "detail": "Semantic enrichment review",
             },
             {
-                "key": "pre_bronze",
-                "label": "Pre-Bronze Readiness",
-                "complete": bool(checkpoint.get("bronze_review_artifact")),
-                "detail": "Bronze readiness inputs assembled",
-            },
-            {
                 "key": "bronze",
                 "label": "Bronze Code Generation",
                 "complete": bronze_generation_completed,
@@ -1256,24 +1324,30 @@ def build_pipeline_steps(
                 "key": "gate4",
                 "label": _gate_label(4, source=source),
                 "complete": gate4_decision == "APPROVED",
-                "detail": "Bronze review",
+                "detail": "Bronze review and merge-key resolution",
             },
             {
-                "key": "pull",
-                "label": "Source Handoff" if source == "adls_gen2" else "SFTP Pull",
+                "key": "bronze_code_execution",
+                "label": "Bronze Code Execution",
                 "complete": bool(
                     checkpoint.get("sftp_pull_status") == "COMPLETED"
-                    or checkpoint.get("bronze_ingestion_status") == "HANDOFF_ONLY"
+                    or checkpoint.get("bronze_ingestion_status") in {"COMPLETED", "HANDOFF_ONLY"}
+                    or checkpoint.get("bronze_validation_status") == "COMPLETED"
+                    or gate4_decision == "APPROVED"
                 ),
-                "detail": "Approved ADLS source handed to generated Bronze script"
-                if source == "adls_gen2"
-                else "Approved SFTP files synchronized",
+                "detail": "UI-only execution marker; generated Bronze code runs outside Athena",
             },
             {
-                "key": "bronze_validation",
-                "label": "Bronze Validation",
-                "complete": bool(checkpoint.get("bronze_validation_status") == "COMPLETED"),
-                "detail": "Bronze readiness validated",
+                "key": "silver_merge_key_resolution",
+                "label": "Silver Merge Key Resolution",
+                "complete": bool(checkpoint.get("bronze_review_artifact")),
+                "detail": "Merge keys resolved from Gate 4 Bronze review",
+            },
+            {
+                "key": "silver_merge_key_review",
+                "label": "Silver Merge Key Review",
+                "complete": gate4_decision == "APPROVED",
+                "detail": "Reviewed merge keys approved before Silver generation",
             },
             {
                 "key": "silver",
@@ -1288,16 +1362,22 @@ def build_pipeline_steps(
                 "detail": "Silver review",
             },
             {
-                "key": "dq_validation",
-                "label": "DQ Validation",
-                "complete": bool(checkpoint.get("dq_validation_status") == "COMPLETED" or checkpoint.get("dq_validation_status") == "SKIPPED"),
-                "detail": "Data quality validation placeholder",
+                "key": "silver_code_execution",
+                "label": "Silver Code Execution",
+                "complete": bool(checkpoint.get("dq_validation_status") in {"COMPLETED", "SKIPPED"} or gate5_decision == "APPROVED"),
+                "detail": "UI-only execution marker; generated Silver code runs outside Athena",
             },
             {
                 "key": "gold",
                 "label": "Gold Code Generation",
                 "complete": gold_generation_completed,
                 "detail": "Gold KPI generation completed",
+            },
+            {
+                "key": "gold_code_execution",
+                "label": "Gold Code Execution",
+                "complete": gold_generation_completed,
+                "detail": "UI-only execution marker; generated Gold code runs outside Athena",
             },
         ]
     else:
@@ -1381,21 +1461,63 @@ def build_pipeline_steps(
         },
         {
             "key": "bronze",
-            "label": "Bronze Scripts",
+            "label": "Bronze Code Generation",
             "complete": bool(bronze_generation_completed),
             "detail": "Bronze scripts generated",
         },
         {
+            "key": "gate4",
+            "label": _gate_label(4, source=source),
+            "complete": bool((checkpoint.get("gate4") or {}).get("decision") == "APPROVED" or checkpoint.get("bronze_review_decision") == "APPROVED"),
+            "detail": "Bronze review and merge-key resolution",
+        },
+        {
+            "key": "bronze_code_execution",
+            "label": "Bronze Code Execution",
+            "complete": bool((checkpoint.get("gate4") or {}).get("decision") == "APPROVED" or checkpoint.get("bronze_review_decision") == "APPROVED"),
+            "detail": "UI-only execution marker; generated Bronze code runs outside Athena",
+        },
+        {
+            "key": "silver_merge_key_resolution",
+            "label": "Silver Merge Key Resolution",
+            "complete": bool(checkpoint.get("bronze_review_artifact") or checkpoint.get("gate4_reviewed_merge_keys")),
+            "detail": "Merge keys resolved from Gate 4 Bronze review",
+        },
+        {
+            "key": "silver_merge_key_review",
+            "label": "Silver Merge Key Review",
+            "complete": bool((checkpoint.get("gate4") or {}).get("decision") == "APPROVED" or checkpoint.get("bronze_review_decision") == "APPROVED"),
+            "detail": "Reviewed merge keys approved before Silver generation",
+        },
+        {
             "key": "silver",
-            "label": "Silver Scripts",
+            "label": "Silver Code Generation",
             "complete": bool(silver_generation_completed),
             "detail": "Silver transformation scripts generated",
         },
         {
+            "key": "gate5",
+            "label": _gate_label(5, source=source),
+            "complete": bool((checkpoint.get("gate5") or {}).get("decision") == "APPROVED" or checkpoint.get("silver_review_decision") == "APPROVED"),
+            "detail": "Silver review",
+        },
+        {
+            "key": "silver_code_execution",
+            "label": "Silver Code Execution",
+            "complete": bool((checkpoint.get("gate5") or {}).get("decision") == "APPROVED" or checkpoint.get("silver_review_decision") == "APPROVED"),
+            "detail": "UI-only execution marker; generated Silver code runs outside Athena",
+        },
+        {
             "key": "gold",
-            "label": "Gold Scripts",
+            "label": "Gold Code Generation",
             "complete": bool(gold_generation_completed),
             "detail": "Gold KPI scripts generated",
+        },
+        {
+            "key": "gold_code_execution",
+            "label": "Gold Code Execution",
+            "complete": bool(gold_generation_completed),
+            "detail": "UI-only execution marker; generated Gold code runs outside Athena",
         },
         ]
 
@@ -1632,6 +1754,24 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     elif not summary and not checkpoint:
         resume_message = "No stored state was found for this run ID."
 
+    # Recover stale checkpoints that say HITL_WAIT but do not carry next_gate.
+    # The durable ai_store artifacts are the source of truth for UI review routing.
+    if source_value not in {"sftp", "adls_gen2"} and not next_gate:
+        gate4_decision = str((checkpoint.get("gate4") or {}).get("decision") or checkpoint.get("bronze_review_decision") or "").upper()
+        gate5_decision = str((checkpoint.get("gate5") or {}).get("decision") or checkpoint.get("silver_review_decision") or "").upper()
+        if completed_gate1 and not pending_gate1 and nominated_tables and not certified_tables:
+            next_gate = 2
+            resume_message = "Table Review is pending. Review and certify nominated tables below."
+        elif certified_tables and enriched_payload and not gate3_payload:
+            next_gate = 3
+            resume_message = "Semantic Review is pending. Review enriched column metadata below."
+        elif gate3_payload and bronze_generation_completed and gate4_decision not in {"APPROVED", "REJECTED"}:
+            next_gate = 4
+            resume_message = "Bronze Review is pending. Review generated Bronze scripts before Silver generation."
+        elif silver_generation_completed and gate5_decision not in {"APPROVED", "REJECTED"}:
+            next_gate = 5
+            resume_message = "Silver Review is pending. Review generated Silver scripts before Gold generation."
+
     stage_confirmation = None
     active_background_stage = bool(checkpoint.get("background_stage"))
     paused_for_stage_confirmation = (
@@ -1720,7 +1860,14 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         silver_generation_completed=silver_generation_completed,
         gold_generation_completed=gold_generation_completed,
     )
-    waiting_gate_key = "gate1" if next_gate == 1 else "gate2" if next_gate == 2 else "gate3" if next_gate == 3 else None
+    waiting_gate_key = (
+        "gate1" if next_gate == 1
+        else "gate2" if next_gate == 2
+        else "gate3" if next_gate == 3
+        else "gate4" if next_gate == 4
+        else "gate5" if next_gate == 5
+        else None
+    )
     pipeline_steps = apply_waiting_stage_state(pipeline_steps, waiting_gate_key)
     if checkpoint.get("status") == "PAUSED_FOR_STAGE_CONFIRMATION" and checkpoint.get("next_stage_key"):
         for step in pipeline_steps:
@@ -1773,12 +1920,14 @@ def start_pipeline(
     *,
     brd_text: Optional[str] = None,
     input_path: Optional[str] = None,
+    brd_filename: Optional[str] = None,
     source: Optional[str] = None,
     source_databases: Optional[List[str]] = None,
     sftp_entity: Optional[str] = None,
     run_id: Optional[str] = None,
     use_domain_kb: bool = False,
-    stage_confirmation_enabled: bool = True,
+    stage_confirmation_enabled: bool = False,
+    target_warehouse: str = "databricks",
 ) -> Dict[str, Any]:
     run_id = run_id or str(uuid.uuid4())
     default_source_db = config["azure_sql"].get("source_database") or "insurance"
@@ -1786,6 +1935,7 @@ def start_pipeline(
     file_sources = {"sftp", "adls_gen2"}
     initial_state: Dict[str, Any] = {
         "brd_text": brd_text or input_path or "",
+        "brd_filename": brd_filename,
         "run_id": run_id,
         "metadata": {},
         "status": "PENDING",
@@ -1794,6 +1944,7 @@ def start_pipeline(
         "source_databases": source_databases or [default_source_db],
         "use_domain_kb": bool(use_domain_kb),
         "stage_confirmation_enabled": bool(stage_confirmation_enabled),
+        "target_warehouse": str(target_warehouse or "databricks").lower(),
     }
 
     if source_value in file_sources:
@@ -1912,11 +2063,11 @@ def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]
     return continue_database_pipeline(run_id, start_stage_key="discovery", state=resumed)
 
 
-def submit_gate3_review(run_id: str, approve: bool) -> Dict[str, Any]:
+def submit_gate3_review(run_id: str, approve: bool, enriched_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from nodes.hitl import build_hitl_enrichment_review_node
 
     checkpoint_state = load_checkpoint_state(run_id) or {}
-    metadata = fetch_json_artifact(run_id, "ENRICHED_METADATA") or _checkpoint_enriched_payload(checkpoint_state)
+    metadata = enriched_metadata or fetch_json_artifact(run_id, "ENRICHED_METADATA") or _checkpoint_enriched_payload(checkpoint_state)
     if not metadata:
         raise ValueError("No enriched metadata found for this run.")
 
@@ -1960,6 +2111,81 @@ def submit_gate3_review(run_id: str, approve: bool) -> Dict[str, Any]:
     return continue_database_pipeline(run_id, start_stage_key="bronze", state=bronze_state)
 
 
+def _apply_gate4_merge_keys_to_metadata(metadata: Dict[str, Any], review_artifact: Dict[str, Any]) -> Dict[str, Any]:
+    feeds = review_artifact.get("feeds") or []
+    if not feeds or not isinstance(metadata, dict):
+        return metadata
+
+    keys_by_table = {
+        str(feed.get("entity") or feed.get("table_name") or feed.get("target_table") or "").split(".")[-1].strip().lower(): {
+            str(key).strip().lower()
+            for key in (feed.get("primary_keys") or feed.get("merge_keys") or [])
+            if str(key).strip()
+        }
+        for feed in feeds
+    }
+    columns = []
+    for column in metadata.get("columns") or []:
+        if not isinstance(column, dict):
+            columns.append(column)
+            continue
+        table_name = str(column.get("table_name") or "").strip().lower()
+        column_name = str(column.get("column_name") or "").strip().lower()
+        reviewed_keys = keys_by_table.get(table_name) or set()
+        if column_name in reviewed_keys:
+            columns.append({**column, "is_join_key": True, "semantic_type": column.get("semantic_type") or "ID"})
+        else:
+            columns.append(column)
+    return {**metadata, "columns": columns, "gate4_reviewed_merge_keys": review_artifact}
+
+
+def submit_gate4_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
+    decision = str(action or "APPROVED").upper()
+    final_state = {
+        **checkpoint_state,
+        "run_id": run_id,
+        "bronze_review_decision": decision,
+        "bronze_review_artifact": review_artifact or checkpoint_state.get("bronze_review_artifact") or {},
+        "gate4": {"gate": "gate4", "status": "COMPLETED", "decision": decision},
+    }
+
+    if decision == "REJECTED":
+        final_state["status"] = "FAILED"
+        final_state["error"] = "Gate 4 rejected Bronze review artifact"
+    elif decision == "REGENERATE":
+        final_state["status"] = "REGENERATE_REQUIRED"
+    elif decision == "APPROVED":
+        enriched = final_state.get("enrichment_review_artifact") or final_state.get("enriched_metadata") or {}
+        if isinstance(enriched, dict) and "enrichment_artifact" in enriched:
+            enriched = enriched.get("enrichment_artifact") or {}
+        reviewed_metadata = _apply_gate4_merge_keys_to_metadata(enriched, final_state["bronze_review_artifact"])
+        final_state["enriched_metadata"] = reviewed_metadata
+        final_state["enrichment_review_artifact"] = reviewed_metadata
+        ai_store_db_writer(
+            run_id=run_id,
+            stage="Bronze Review",
+            artifact_type="GATE4_BRONZE_REVIEW",
+            payload={
+                "run_id": run_id,
+                "decision": decision,
+                "review_artifact": final_state["bronze_review_artifact"],
+            },
+            schema_version="GATE4_v1",
+            prompt_version="UI_REVIEWER_v1",
+            faithfulness_status="PASSED",
+            token_count=0,
+            input_tokens=0,
+            output_tokens=0,
+            fingerprint=str(final_state.get("fingerprint") or run_id),
+        )
+        save_checkpoint_state(run_id, final_state)
+        return continue_database_pipeline(run_id, start_stage_key="silver", state=final_state)
+
+    save_checkpoint_state(run_id, final_state)
+    return final_state
+
+
 def submit_bronze_generation(run_id: str) -> Dict[str, Any]:
     from nodes.bronze_gen import bronze_code_generation_node
 
@@ -1983,13 +2209,20 @@ def submit_bronze_generation(run_id: str) -> Dict[str, Any]:
     }
     result = bronze_code_generation_node(state)
     final_state = {**checkpoint_state, **result, "run_id": run_id}
+    if str(result.get("bronze_generation_status") or "").upper() == "COMPLETED":
+        final_state.update(
+            {
+                "status": "HITL_WAIT",
+                "next_gate": 4,
+                "resume_message": "Bronze Review is pending. Review generated Bronze scripts before Silver generation.",
+            }
+        )
     save_checkpoint_state(run_id, final_state)
-    return result
+    return final_state
 
 
 def submit_silver_generation(run_id: str) -> Dict[str, Any]:
     from nodes.silver_gen import silver_code_generation_node
-    from nodes.gold_gen import gold_code_generation_node
 
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
     metadata = fetch_json_artifact(run_id, "ENRICHED_METADATA")
@@ -2005,11 +2238,58 @@ def submit_silver_generation(run_id: str) -> Dict[str, Any]:
         "silver_schema": os.getenv("SILVER_SCHEMA", "silver"),
     }
     result = silver_code_generation_node(state)
-    gold_result = gold_code_generation_node({**checkpoint_state, **result, "run_id": run_id, "gold_schema": os.getenv("GOLD_SCHEMA", "gold")})
-    final_state = {**checkpoint_state, **result, **gold_result, "run_id": run_id}
-    if result.get("silver_generation_status") == "COMPLETED" or str(gold_result.get("gold_generation_status") or "").startswith("COMPLETED"):
-        final_state["status"] = "PIPELINE_COMPLETED"
+    final_state = {**checkpoint_state, **result, "run_id": run_id}
+    if str(result.get("silver_generation_status") or "").upper() == "COMPLETED":
+        final_state.update(
+            {
+                "status": "HITL_WAIT",
+                "next_gate": 5,
+                "resume_message": "Silver Review is pending. Review generated Silver scripts before Gold generation.",
+            }
+        )
     save_checkpoint_state(run_id, final_state)
+    return final_state
+
+
+def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
+    decision = str(action or "APPROVED").upper()
+    final_state = {
+        **checkpoint_state,
+        "run_id": run_id,
+        "silver_review_decision": decision,
+        "silver_review_artifact": review_artifact or checkpoint_state.get("silver_review_artifact") or {},
+        "gate5": {"gate": "gate5", "status": "COMPLETED", "decision": decision},
+    }
+
+    if decision == "REJECTED":
+        final_state["status"] = "FAILED"
+        final_state["error"] = "Gate 5 rejected Silver review artifact"
+    elif decision == "REGENERATE":
+        final_state["status"] = "REGENERATE_REQUIRED"
+    elif decision == "APPROVED":
+        final_state["status"] = "RUNNING"
+
+    ai_store_db_writer(
+        run_id=run_id,
+        stage="Silver Review",
+        artifact_type="GATE5_SILVER_REVIEW",
+        payload={
+            "run_id": run_id,
+            "decision": decision,
+            "review_artifact": final_state["silver_review_artifact"],
+        },
+        schema_version="GATE5_v1",
+        prompt_version="UI_REVIEWER_v1",
+        faithfulness_status="PASSED" if decision == "APPROVED" else "WARN",
+        token_count=0,
+        input_tokens=0,
+        output_tokens=0,
+        fingerprint=str(final_state.get("fingerprint") or run_id),
+    )
+    save_checkpoint_state(run_id, final_state)
+    if decision == "APPROVED":
+        return continue_database_pipeline(run_id, start_stage_key="gold", state=final_state)
     return final_state
 
 

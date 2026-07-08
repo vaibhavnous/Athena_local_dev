@@ -326,6 +326,7 @@ def start_sftp_pipeline(
     *,
     run_id: str,
     brd_text: Optional[str] = None,
+    brd_filename: Optional[str] = None,
     sftp_entity: Optional[str] = None,
     source: str = "sftp",
 ) -> Dict[str, Any]:
@@ -339,6 +340,7 @@ def start_sftp_pipeline(
 
     initial_state: Dict[str, Any] = {
         "brd_text": brd_text or "",
+        "brd_filename": brd_filename,
         "run_id": run_id,
         "metadata": {},
         "status": "PENDING",

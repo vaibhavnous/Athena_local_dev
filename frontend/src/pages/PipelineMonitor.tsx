@@ -1,11 +1,11 @@
 // @ts-nocheck
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Play, RefreshCcw, RotateCcw, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
-import { formatPipelineStepLabel, getPhaseGroups, getPipelineSteps, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
+import { formatPipelineStepLabel, getGateDisplayName, getPhaseGroups, getPipelineSteps, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { abortRun, continueStage, getRun, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
@@ -40,6 +40,7 @@ function PipelineMonitor() {
   )
   const runsRequestInFlightRef = useRef(false)
   const activeRunRequestInFlightRef = useRef(false)
+  const lastLogTriggeredRefreshRef = useRef(0)
   const runningStepSinceRef = useRef<Record<string, number>>({})
   const stepHoldTimersRef = useRef<Record<string, number>>({})
   const [stepStateOverrides, setStepStateOverrides] = useState<Record<string, string>>({})
@@ -196,6 +197,35 @@ function PipelineMonitor() {
     })
   }, [activeRun, actualSteps])
 
+  const refreshActiveRunNow = useCallback(async () => {
+    if (!activeRunStableId || activeRunIsDemoFallback || activeRunRequestInFlightRef.current) return false
+
+    activeRunRequestInFlightRef.current = true
+    try {
+      const data = await getRun(activeRunStableId)
+      updateRun(activeRunStableId, data)
+      setServerOnline(true)
+      return true
+    } catch (error) {
+      if (!isTransientReadError(error)) {
+        setServerOnline(false)
+        console.warn('[PipelineMonitor] Failed to refresh active run', error)
+      } else {
+        console.debug('[PipelineMonitor] Active run refresh timed out; keeping existing data')
+      }
+      return false
+    } finally {
+      activeRunRequestInFlightRef.current = false
+    }
+  }, [activeRunStableId, activeRunIsDemoFallback, updateRun, setServerOnline])
+
+  const handleLogsUpdated = useCallback(() => {
+    const now = Date.now()
+    if (now - lastLogTriggeredRefreshRef.current < 2000) return
+    lastLogTriggeredRefreshRef.current = now
+    void refreshActiveRunNow()
+  }, [refreshActiveRunNow])
+
   useEffect(() => {
     let cancelled = false
     let timer: number | null = null
@@ -259,29 +289,9 @@ function PipelineMonitor() {
     }
 
     const refreshActiveRun = async () => {
-      if (activeRunRequestInFlightRef.current) {
-        scheduleNext()
-        return
-      }
-
-      activeRunRequestInFlightRef.current = true
       try {
-        const data = await getRun(activeRunStableId)
-        if (!cancelled) {
-          updateRun(activeRunStableId, data)
-          setServerOnline(true)
-        }
-      } catch (error) {
-        if (!cancelled) {
-          if (!isTransientReadError(error)) {
-            setServerOnline(false)
-            console.warn('[PipelineMonitor] Failed to refresh active run', error)
-          } else {
-            console.debug('[PipelineMonitor] Active run refresh timed out; keeping existing data')
-          }
-        }
+        await refreshActiveRunNow()
       } finally {
-        activeRunRequestInFlightRef.current = false
         scheduleNext()
       }
     }
@@ -291,7 +301,7 @@ function PipelineMonitor() {
       cancelled = true
       if (timer !== null) window.clearTimeout(timer)
     }
-  }, [activeRunStableId, activeRunIsDemoFallback, updateRun, setServerOnline])
+  }, [activeRunStableId, activeRunIsDemoFallback, refreshActiveRunNow])
 
   const actualPhaseIndex = useMemo(() => {
     const sourcePhases = actualPhases?.length ? actualPhases : phases
@@ -485,6 +495,8 @@ function PipelineMonitor() {
   const failureSummary = useMemo(() => buildFailureSummary(monitorRun), [monitorRun])
   const stageConfirmation = monitorRun?.stage_confirmation || null
   const stageScriptReview = useMemo(() => buildStageScriptReview(monitorRunWithScripts), [monitorRunWithScripts])
+  const currentStepSummary = useMemo(() => buildCurrentStepSummary(monitorRun), [monitorRun])
+  const activeStatusLabel = formatRunStatusLabel(monitorRun, currentStepSummary)
 
   if (!activeRun) {
     return (
@@ -693,7 +705,7 @@ function PipelineMonitor() {
                 : 'border-[#253044] bg-[#0b1120] text-slate-300'
             }`}>
               <span className="h-2 w-2 rounded-full bg-current" />
-              {String(monitorRun.status || 'Waiting').replace(/_/g, ' ')}
+              {activeStatusLabel}
             </div>
           </div>
         </div>
@@ -786,6 +798,7 @@ function PipelineMonitor() {
               )}
           </div>
         </div>
+
       </div>
 
       <div className="grid min-h-0 flex-1 gap-5 xl:grid-cols-[520px_minmax(0,1fr)]">
@@ -816,7 +829,7 @@ function PipelineMonitor() {
                       </div>
                     </div>
                     <div className="ml-4 flex items-center gap-3">
-                      <StatusPill status={phase.status} tone={tone} compact={!expanded} />
+                      <StatusPill status={phase.status} tone={tone} compact={!expanded} step={phase.steps.find((step) => ['RUNNING', 'HITL_WAIT'].includes(step.state))} />
                       {expanded ? <ChevronUp size={14} className="text-[#64748b]" /> : <ChevronDown size={14} className="text-[#64748b]" />}
                     </div>
                   </button>
@@ -856,12 +869,12 @@ function PipelineMonitor() {
                 : 'border-[#253044] bg-[#0b1120] text-slate-300'
             }`}>
               <span className="h-2 w-2 rounded-full bg-current" />
-              {String(monitorRun.status || 'Waiting').replace(/_/g, ' ')}
+              {activeStatusLabel}
             </div>
           </div>
 
           <div className="min-h-0 flex-1">
-            <PipelineLogsPanel runId={activeRun.run_id || activeRun.id} isActive />
+            <PipelineLogsPanel runId={activeRun.run_id || activeRun.id} isActive onLogsUpdated={handleLogsUpdated} />
           </div>
         </section>
       </div>
@@ -1015,6 +1028,87 @@ function buildFailureSummary(run) {
   }
 }
 
+function buildCurrentStepSummary(run) {
+  if (!run) return null
+  const fromBackend = run.current_pipeline_step
+  const steps = Array.isArray(run.pipeline_steps) && run.pipeline_steps.length
+    ? run.pipeline_steps
+    : Array.isArray(run.stages)
+    ? run.stages
+    : []
+  const step =
+    fromBackend ||
+    steps.find((item) => ['RUNNING', 'HITL_WAIT', 'PAUSED_FOR_HITL'].includes(String(item?.state || item?.status || '').toUpperCase())) ||
+    steps.find((item) => ['FAILED'].includes(String(item?.state || item?.status || '').toUpperCase())) ||
+    null
+
+  const runStatus = String(run.status || '').toUpperCase()
+  const state = String(step?.state || step?.status || runStatus || '').toUpperCase()
+  const label = formatPipelineStepLabel(step?.label || step?.name, step?.key) || step?.label || step?.key || ''
+  const detail = step?.detail || run.resume_message || ''
+  const nextGate = Number(run.next_gate || 0)
+  const gateLabel = nextGate ? getGateDisplayName(nextGate, run.source) : label
+
+  if (['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(runStatus) || state === 'HITL_WAIT') {
+    return {
+      state: 'HITL_WAIT',
+      tone: 'amber',
+      badge: 'Waiting for Review',
+      headline: `${gateLabel || label || 'Review'} is waiting for approval`,
+      detail,
+    }
+  }
+
+  if (['RUNNING', 'PROCESSING', 'SUBMITTED', 'IN_PROGRESS'].includes(runStatus) || state === 'RUNNING') {
+    return {
+      state: 'RUNNING',
+      tone: 'blue',
+      badge: 'Running',
+      headline: `${label || 'Pipeline stage'} is running`,
+      detail,
+    }
+  }
+
+  if (runStatus === 'FAILED' || state === 'FAILED') {
+    return {
+      state: 'FAILED',
+      tone: 'red',
+      badge: 'Failed',
+      headline: `${label || 'Pipeline stage'} failed`,
+      detail: run.error || detail,
+    }
+  }
+
+  if (['SUCCESS', 'COMPLETED', 'PIPELINE_COMPLETED'].includes(runStatus)) {
+    return {
+      state: 'COMPLETED',
+      tone: 'emerald',
+      badge: 'Complete',
+      headline: 'Pipeline completed',
+      detail: 'Generation stages are complete. Execution markers are UI-only for locally exported scripts.',
+    }
+  }
+
+  return label
+    ? {
+        state,
+        tone: statusTone(run.status),
+        badge: String(run.status || 'Pending').replace(/_/g, ' '),
+        headline: `${label} is ${String(run.status || 'pending').replace(/_/g, ' ').toLowerCase()}`,
+        detail,
+      }
+    : null
+}
+
+function formatRunStatusLabel(run, currentStepSummary) {
+  if (currentStepSummary?.badge && currentStepSummary?.headline) {
+    if (currentStepSummary.state === 'HITL_WAIT') return currentStepSummary.badge
+    if (currentStepSummary.state === 'RUNNING') return 'Running'
+    return currentStepSummary.badge
+  }
+  return String(run?.status || 'Waiting').replace(/_/g, ' ')
+}
+
 function PhaseNumber({ index, tone, status }) {
   const running = status === 'Running'
   const toneClass =
@@ -1043,8 +1137,19 @@ function PhaseNumber({ index, tone, status }) {
   )
 }
 
-function StatusPill({ status, tone, compact }) {
-  const label = compact ? status : status === 'Waiting' ? 'Review' : status
+function StatusPill({ status, tone, compact, step }) {
+  const stepLabel = step?.label || ''
+  const label = stepLabel && ['Review', 'Running'].includes(status)
+    ? compact
+      ? stepLabel
+      : status === 'Review'
+      ? `${stepLabel} waiting`
+      : `${stepLabel} running`
+    : compact
+    ? status
+    : status === 'Waiting'
+    ? 'Review'
+    : status
   const color =
     tone === 'emerald'
       ? 'text-emerald-400'
@@ -1120,6 +1225,11 @@ function StepRow({ step, index = 0, onOpenReview }) {
         <div className={`truncate text-[14px] font-semibold ${complete || waiting || running ? 'text-white' : 'text-[#7d8daa]'}`}>
           {step.label}
         </div>
+        {step.detail && (
+          <div className="mt-1 max-w-[400px] text-[12px] leading-5 text-[#7f8ea8]">
+            {step.detail}
+          </div>
+        )}
       </div>
     </motion.div>
   )
@@ -1211,11 +1321,11 @@ function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       complete: isCompletedStepState(state),
     }
   }
-  const makeSynthetic = (key, label, state) => ({
+  const makeSynthetic = (key, label, state, detail = '') => ({
     key,
     label,
     state: state || phaseState,
-    detail: '',
+    detail,
     complete: isCompletedStepState(state || phaseState),
   })
 
@@ -1244,24 +1354,25 @@ function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
     displaySteps = [
       makeStep('bronze', 'Bronze Code Generation'),
       makeStep('gate4', 'Bronze Review', gate4State),
-      makeSynthetic('bronze_code_execution', 'Bronze Code Execution', inferExecutionDisplayState(bronzeState, byKey.get('gate4')?.state, phase.status)),
+      makeSynthetic('bronze_code_execution', 'Bronze Code Execution', inferExecutionDisplayState(bronzeState, byKey.get('gate4')?.state, phase.status), 'UI-only marker: Bronze scripts are exported for external execution, not run inside Athena.'),
     ]
   } else if (phase.id === 'phase-4') {
     const silverState = byKey.get('silver')?.state || phaseState
+    const gate4State = reviewAwareStepState(byKey.get('gate4'), phase, run, 4)
     const gate5State = reviewAwareStepState(byKey.get('gate5'), phase, run, 5)
-    const silverFlow = buildSilverPhaseStates(silverState, gate5State, phase.status)
+    const silverFlow = buildSilverPhaseStates(silverState, gate4State, gate5State, phase.status)
     displaySteps = [
       makeSynthetic('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverFlow.mergeResolution),
       makeSynthetic('silver_merge_key_review', 'Silver Merge Key Review', silverFlow.mergeReview),
       makeStep('silver', 'Silver Code Generation', silverFlow.codeGeneration, true),
       makeStep('gate5', 'Silver Review', silverFlow.reviewGate),
-      makeSynthetic('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution),
+      makeSynthetic('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution, 'UI-only marker: Silver scripts are exported for external execution, not run inside Athena.'),
     ]
   } else if (phase.id === 'phase-5') {
     const goldState = byKey.get('gold')?.state || phaseState
     displaySteps = [
       makeStep('gold', 'Gold Code Generation'),
-      makeSynthetic('gold_code_execution', 'Gold Code Execution', inferExecutionDisplayState(goldState, undefined, phase.status)),
+      makeSynthetic('gold_code_execution', 'Gold Code Execution', inferExecutionDisplayState(goldState, undefined, phase.status), 'UI-only marker: Gold scripts are exported for external execution, not run inside Athena.'),
     ]
   }
 
@@ -1311,8 +1422,9 @@ function inferExecutionDisplayState(generationState, reviewState, phaseStatus) {
   return phaseStatusToStepState(phaseStatus) === 'FAILED' ? 'FAILED' : 'PENDING'
 }
 
-function buildSilverPhaseStates(silverState, gate5State, phaseStatus) {
+function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus) {
   const normalizedSilver = String(silverState || '').toUpperCase()
+  const normalizedGate4 = String(gate4State || '').toUpperCase()
   const normalizedGate = String(gate5State || '').toUpperCase()
   const normalizedPhase = String(phaseStatus || '').toLowerCase()
 
@@ -1336,11 +1448,21 @@ function buildSilverPhaseStates(silverState, gate5State, phaseStatus) {
     }
   }
 
+  if (normalizedGate4 === 'HITL_WAIT' || normalizedGate4 === 'PAUSED_FOR_HITL') {
+    return {
+      mergeResolution: 'COMPLETED',
+      mergeReview: 'HITL_WAIT',
+      codeGeneration: 'PENDING',
+      reviewGate: 'PENDING',
+      codeExecution: 'PENDING',
+    }
+  }
+
   if (normalizedSilver === 'RUNNING') {
     return {
-      mergeResolution: 'RUNNING',
-      mergeReview: 'PENDING',
-      codeGeneration: 'PENDING',
+      mergeResolution: 'COMPLETED',
+      mergeReview: 'COMPLETED',
+      codeGeneration: 'RUNNING',
       reviewGate: 'PENDING',
       codeExecution: 'PENDING',
     }

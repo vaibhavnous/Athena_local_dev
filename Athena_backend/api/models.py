@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -15,9 +15,10 @@ class PipelineRunRequest(BaseModel):
     use_domain_kb: Optional[bool] = False
     database_name: Optional[str] = None
     database_type: Optional[str] = None
+    target_warehouse: Optional[str] = "databricks"
     source_databases: Optional[List[str]] = None
     sftp_entity: Optional[str] = "transactions"
-    stage_confirmation_enabled: Optional[bool] = True
+    stage_confirmation_enabled: Optional[bool] = False
 
 
 class StageContinueRequest(BaseModel):
@@ -42,7 +43,9 @@ class Gate2DecisionPayload(BaseModel):
 
 class Gate3DecisionPayload(BaseModel):
     approve: bool = True
+    enriched_metadata: Optional[Dict[str, Any]] = None
 
 
 class GenericGateDecisionPayload(BaseModel):
     action: str = "APPROVED"
+    review_artifact: Optional[Dict[str, Any]] = None

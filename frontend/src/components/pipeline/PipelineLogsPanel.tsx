@@ -59,13 +59,14 @@ function formatDuration(value: unknown) {
 interface Props {
   runId?: string | null
   isActive?: boolean
+  onLogsUpdated?: (logs: PipelineLog[]) => void
 }
 
-export default function PipelineLogsPanel({ runId, isActive = true }: Props) {
+export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdated }: Props) {
   const getRunById = useAthenaStore((s) => s.getRunById)
   const run = getRunById(runId || '')
   const { discoveredRunId, isDiscovering, discoveryError, logs, isLoadingLogs, logsError } =
-    usePipelineLogs(runId, isActive)
+    usePipelineLogs(runId, isActive, onLogsUpdated)
 
   const [filterLevel, setFilterLevel] = useState('ALL')
   const [filterStage, setFilterStage] = useState('ALL')

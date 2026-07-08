@@ -8,6 +8,7 @@ from nodes.ingestion import _chunk_and_embed, finalize_ingestion_after_memory
 from state import Stage01State
 from utilis.db import artifact_storage_fingerprint, config, get_pipeline_connection
 from utilis.env import load_backend_env
+from utilis.embeddings import get_embedding_model
 from utilis.logger import logger
 
 load_backend_env()
@@ -77,7 +78,36 @@ def _fetch_exact_match(fingerprint: str, state: Stage01State) -> Tuple[bool, Dic
 
 
 def _fetch_context_kpis(embeddings: List[float], top_k: int = 3) -> List[Dict[str, Any]]:
-    return []
+    api_key = pinecone_conf.get("api_key") or os.getenv("PINECONE_API_KEY")
+    index_name = pinecone_conf.get("index_name") or os.getenv("PINECONE_INDEX_NAME") or "ai-store-index"
+    if not api_key or not index_name:
+        return []
+
+    try:
+        from pinecone import Pinecone
+
+        result = Pinecone(api_key=api_key).Index(index_name).query(
+            vector=embeddings,
+            top_k=max(1, int(top_k)),
+            include_metadata=True,
+            namespace="global",
+        )
+    except Exception as exc:
+        logger.warning("Semantic memory lookup query failed: %s", exc, extra={"node": "memory_lookup"})
+        return []
+
+    matches = getattr(result, "matches", None)
+    if matches is None and isinstance(result, dict):
+        matches = result.get("matches", [])
+
+    rows: List[Dict[str, Any]] = []
+    for match in matches or []:
+        metadata = getattr(match, "metadata", None)
+        if metadata is None and isinstance(match, dict):
+            metadata = match.get("metadata")
+        if isinstance(metadata, dict):
+            rows.append(metadata)
+    return rows
 
 
 def _fetch_rejected_kpis(fingerprint: str, limit: int = 10) -> List[str]:
@@ -116,25 +146,18 @@ def _apply_match_result(
     if is_match:
         stored_kpis = kpis_payload.get("kpis", [])
         logger.info(
-            "Layer 1 hit: exact match reused (has_requirements=%s has_kpis=%s)",
+        "Layer 1 hit: exact match found; LLM extraction still required (has_requirements=%s has_kpis=%s)",
             bool(requirements_payload),
             bool(stored_kpis),
             extra=log_context,
         )
         new_state.update({
             "memory_layer1": True,
-            "memory_bypass": True,
-            "prior_kpis": stored_kpis,
-            "kpis": stored_kpis,
-            "kpi_source": "MEMORY_LAYER1" if stored_kpis else new_state.get("kpi_source"),
-            "req_business_objective": requirements_payload.get("business_objective", new_state.get("req_business_objective")),
-            "req_data_domains": requirements_payload.get("data_domains", new_state.get("req_data_domains", [])),
-            "req_reporting_frequency": requirements_payload.get("reporting_frequency", new_state.get("req_reporting_frequency")),
-            "req_target_audience": requirements_payload.get("target_audience", new_state.get("req_target_audience")),
-            "req_constraints": requirements_payload.get("constraints", new_state.get("req_constraints", [])),
-            "req_schema_valid": requirements_payload.get("schema_valid", new_state.get("req_schema_valid")),
-            "req_prompt_version": requirements_payload.get("prompt_version", new_state.get("req_prompt_version")),
-            "status": "EXACT_MATCH_FOUND",
+            "memory_bypass": False,
+            "memory_exact_requirements_found": bool(requirements_payload),
+            "memory_exact_kpis_found": bool(stored_kpis),
+            "memory_exact_kpi_count": len(stored_kpis),
+            "status": "EXACT_MATCH_FOUND_LLM_REQUIRED",
         })
     else:
         logger.info("Layer 1 miss", extra=log_context)
@@ -148,8 +171,24 @@ def _apply_match_result(
 
 def _run_semantic_lookup(state: Stage01State, log_context: dict) -> Stage01State:
     new_state = _copy_state(state)
-    logger.info("Semantic memory lookup disabled for demo runtime", extra=log_context)
-    new_state["memory_layer2"] = False
+    model = get_embedding_model(log_context=log_context)
+    if model is None:
+        logger.info("Semantic memory lookup deferred; embedding provider unavailable", extra=log_context)
+        new_state["memory_layer2"] = False
+        return new_state
+
+    query_text = str(new_state.get("brd_text") or new_state.get("context_text") or "").strip()
+    if not query_text:
+        new_state["memory_layer2"] = False
+        return new_state
+
+    embeddings = model.embed_query(query_text)
+    context_kpis = _fetch_context_kpis(embeddings, top_k=3)
+    rejected_kpis = _fetch_rejected_kpis(str(new_state.get("fingerprint") or ""), limit=10)
+
+    new_state["context_kpis"] = context_kpis
+    new_state["rejected_kpis"] = rejected_kpis
+    new_state["memory_layer2"] = bool(context_kpis)
     return new_state
 
 
@@ -175,10 +214,10 @@ def memory_lookup_node(state: Stage01State) -> Stage01State:
         new_state = finalize_ingestion_after_memory(new_state)
 
     logger.info(
-        "END memory_lookup: layer1=%s layer2=%s prior_n=%d context_n=%d rejected_n=%d",
+        "END memory_lookup: layer1=%s layer2=%s exact_kpi_n=%d context_n=%d rejected_n=%d",
         new_state.get("memory_layer1"),
         new_state.get("memory_layer2"),
-        len(new_state.get("prior_kpis", [])),
+        int(new_state.get("memory_exact_kpi_count") or 0),
         len(new_state.get("context_kpis", [])),
         len(new_state.get("rejected_kpis", [])),
         extra=log_context,

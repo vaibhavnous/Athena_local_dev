@@ -15,6 +15,7 @@ class Stage01State(TypedDict, total=False):
     metadata: Dict[str, Any]
     status: str
     error: Optional[str]
+    target_warehouse: Optional[str]
 
     # Source ingestion MVP
     source: Optional[str]

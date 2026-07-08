@@ -23,14 +23,16 @@ import { formatPipelineStepLabel, getGateDisplayName } from '../utils/pipelinePh
 const TABS = ['Overview', 'Requirements', 'KPIs', 'Scripts', 'HITL Decisions', 'Cost Log']
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
+const PIPELINE_ADVANCE_ATTEMPTS = 60
+const PIPELINE_ADVANCE_DELAY_MS = 2000
 
-async function waitForRunGate(runId, targetGate, attempts = 20) {
+async function waitForRunGate(runId, targetGate, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
   let latest = null
   for (let index = 0; index < attempts; index += 1) {
     latest = await getRun(runId)
     if (Number(latest?.next_gate || 0) === targetGate) return latest
     if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
-    await sleep(1500)
+    await sleep(PIPELINE_ADVANCE_DELAY_MS)
   }
   return latest
 }
@@ -43,13 +45,13 @@ function hasGoldScripts(run) {
   )
 }
 
-async function waitForGoldScripts(runId, attempts = 24) {
+async function waitForGoldScripts(runId, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
   let latest = null
   for (let index = 0; index < attempts; index += 1) {
     latest = await getRun(runId)
     if (hasGoldScripts(latest)) return latest
     if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
-    await sleep(1500)
+    await sleep(PIPELINE_ADVANCE_DELAY_MS)
   }
   return latest
 }

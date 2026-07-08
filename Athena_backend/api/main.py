@@ -21,8 +21,15 @@ from utilis.logger import logger
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    embedding_status = get_embedding_runtime_status(probe_models=False)
     logger.info("Athena API service started")
-    logger.info("Embeddings disabled; using non-vector fallbacks")
+    logger.info(
+        "Embeddings status | blocked=%s enabled=%s ready=%s provider=%s",
+        embedding_status.get("blocked"),
+        embedding_status.get("env_enabled"),
+        embedding_status.get("ready"),
+        embedding_status.get("provider"),
+    )
     try:
         yield
     finally:
@@ -58,13 +65,14 @@ app.add_middleware(
 
 @app.get("/health", tags=["Health"])
 async def health_check():
+    embedding_status = get_embedding_runtime_status(probe_models=False)
     return {
         "status": "ok",
         "service": "athena-fastapi",
         "embeddings": {
-            **get_embedding_runtime_status(probe_models=False),
-            "enabled": False,
-            "mode": "disabled",
+            **embedding_status,
+            "enabled": embedding_status["env_enabled"],
+            "mode": "blocked" if embedding_status["blocked"] else ("enabled" if embedding_status["env_enabled"] else "disabled"),
         },
     }
 

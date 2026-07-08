@@ -49,6 +49,92 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
     }
 
 
+def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest) -> None:
+    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+
+    source = str(payload.source or "database").lower()
+    sftp_entity = api_utils.normalize_file_entity(source, payload.sftp_entity)
+    existing = load_checkpoint_state(run_id) or {"run_id": run_id}
+
+    save_checkpoint_state(
+        run_id,
+        {
+            **existing,
+            "run_id": run_id,
+            "status": existing.get("status") or "RUNNING",
+            "brd_text": existing.get("brd_text") or payload.brd_text,
+            "brd_filename": existing.get("brd_filename") or payload.brd_filename,
+            "source": existing.get("source") or source,
+            "provider": existing.get("provider") or payload.provider,
+            "deployment": existing.get("deployment") or payload.deployment,
+            "target_warehouse": existing.get("target_warehouse") or payload.target_warehouse or "databricks",
+            "source_databases": existing.get("source_databases")
+            or payload.source_databases
+            or ([payload.database_name] if payload.database_name else None),
+            "sftp_entity": existing.get("sftp_entity") or sftp_entity,
+            "use_domain_kb": (
+                existing.get("use_domain_kb")
+                if existing.get("use_domain_kb") is not None
+                else False
+            ),
+            "stage_confirmation_enabled": (
+                existing.get("stage_confirmation_enabled")
+                if existing.get("stage_confirmation_enabled") is not None
+                else bool(payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else False)
+            ),
+        },
+    )
+
+
+def _resume_failed_run(run_id: str, action_name: str) -> Dict[str, Any]:
+    from api.services.pipeline_service import (
+        clean_checkpoint_for_resume,
+        continue_database_pipeline_job,
+        continue_file_pipeline_job,
+        database_failed_stage_key,
+    )
+    from services.pipeline_runtime import (
+        load_checkpoint_state,
+        save_checkpoint_state,
+        submit_background,
+    )
+
+    checkpoint = load_checkpoint_state(run_id) or {}
+
+    if str(checkpoint.get("status") or "").upper() != "FAILED":
+        raise HTTPException(status_code=400, detail="Only failed runs can be resumed.")
+
+    source = str(checkpoint.get("source") or "database").lower()
+    resumed_state = clean_checkpoint_for_resume(checkpoint)
+    save_checkpoint_state(run_id, resumed_state)
+
+    if api_utils.is_file_source(source):
+        submit_background(run_id, "file_resume", continue_file_pipeline_job, run_id, resumed_state)
+        return {"run_id": run_id, "status": "SUBMITTED", "action": action_name}
+
+    failed_stage_key = database_failed_stage_key(run_id, checkpoint)
+    if not failed_stage_key:
+        raise HTTPException(status_code=400, detail="No failed stage identified.")
+
+    submit_background(
+        run_id,
+        failed_stage_key,
+        continue_database_pipeline_job,
+        run_id,
+        failed_stage_key,
+        resumed_state,
+    )
+
+    logger.info("Resuming failed run", extra={"run_id": run_id, "stage": failed_stage_key, "action": action_name})
+
+    return {
+        "run_id": run_id,
+        "status": "SUBMITTED",
+        "action": action_name,
+        "start_stage_key": failed_stage_key,
+    }
+
+
 # -------------------------
 # ✅ Health
 # -------------------------
@@ -69,10 +155,8 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
         return {"run_id": run_id, "status": "PROCESSING"}
 
     from api.services.pipeline_service import submit_pipeline_start
-    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
 
     source = str(payload.source or "database").lower()
-    sftp_entity = api_utils.normalize_file_entity(source, payload.sftp_entity)
 
     if not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
@@ -82,36 +166,7 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
     logger.info("Pipeline run requested", extra={"run_id": run_id, "source": source})
 
     try:
-        existing = load_checkpoint_state(run_id) or {"run_id": run_id}
-
-        save_checkpoint_state(
-            run_id,
-            {
-                **existing,
-                "run_id": run_id,
-                "status": existing.get("status") or "RUNNING",
-                "brd_text": existing.get("brd_text") or payload.brd_text,
-                "brd_filename": existing.get("brd_filename") or payload.brd_filename,
-                "source": existing.get("source") or source,
-                "provider": existing.get("provider") or payload.provider,
-                "deployment": existing.get("deployment") or payload.deployment,
-                "source_databases": existing.get("source_databases")
-                or payload.source_databases
-                or ([payload.database_name] if payload.database_name else None),
-                "sftp_entity": existing.get("sftp_entity") or sftp_entity,
-                "use_domain_kb": (
-                    existing.get("use_domain_kb")
-                    if existing.get("use_domain_kb") is not None
-                    else False
-                ),
-                "stage_confirmation_enabled": (
-                    existing.get("stage_confirmation_enabled")
-                    if existing.get("stage_confirmation_enabled") is not None
-                    else bool(payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else True)
-                ),
-            },
-        )
-
+        _seed_run_checkpoint(run_id, payload)
     except Exception:
         logger.error("Failed to initialize checkpoint", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to initialize run checkpoint")
@@ -347,9 +402,35 @@ def retry_failed_stage(run_id: str) -> Dict[str, Any]:
 
 @router.post("/pipeline/{run_id}/resume-from-failure")
 def resume_from_failure(run_id: str) -> Dict[str, Any]:
-    return demo_action(run_id, action="resume_from_failure")
+    if demo_enabled():
+        return demo_action(run_id, action="resume_from_failure")
+
+    return _resume_failed_run(run_id, "resume_from_failure")
 
 
 @router.post("/pipeline/{run_id}/restart")
 def restart_run(run_id: str) -> Dict[str, Any]:
-    return demo_action(run_id, action="restart")
+    if demo_enabled():
+        return demo_action(run_id, action="restart")
+
+    from api.services.pipeline_service import seed_payload_from_checkpoint, submit_pipeline_start
+    from services.pipeline_runtime import load_checkpoint_state
+
+    checkpoint = load_checkpoint_state(run_id) or {}
+
+    if not str(checkpoint.get("brd_text") or "").strip():
+        raise HTTPException(status_code=400, detail="Cannot restart a run without saved BRD text.")
+
+    payload = seed_payload_from_checkpoint(checkpoint)
+    new_run_id = str(uuid.uuid4())
+
+    try:
+        _seed_run_checkpoint(new_run_id, payload)
+    except Exception:
+        logger.error("Failed to initialize restarted run checkpoint", exc_info=True, extra={"run_id": new_run_id})
+        raise HTTPException(status_code=503, detail="Failed to initialize restarted run checkpoint")
+
+    submit_pipeline_start(new_run_id, payload)
+    logger.info("Restarted run from checkpoint", extra={"source_run_id": run_id, "run_id": new_run_id})
+
+    return {"run_id": new_run_id, "status": "RUNNING", "action": "restart", "source_run_id": run_id}

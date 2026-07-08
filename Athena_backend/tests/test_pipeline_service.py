@@ -67,6 +67,7 @@ def test_run_pipeline_background_database_flow_saves_completed(monkeypatch):
     pipeline_service.run_pipeline_background(
         run_id="run-1",
         brd_text="brd",
+        brd_filename="Customer BRD",
         source="database",
         source_databases=["db1"],
         sftp_entity="transactions",
@@ -77,6 +78,7 @@ def test_run_pipeline_background_database_flow_saves_completed(monkeypatch):
     assert saved["run_id"] == "run-1"
     assert saved["state"]["status"] == "COMPLETED"
     assert saved["state"]["payload"] == "ok"
+    assert saved["state"]["brd_filename"] == "Customer BRD"
 
 
 def test_run_pipeline_background_file_source_keeps_completed(monkeypatch):
@@ -99,6 +101,7 @@ def test_run_pipeline_background_file_source_keeps_completed(monkeypatch):
     pipeline_service.run_pipeline_background(
         run_id="run-2",
         brd_text="",
+        brd_filename="File BRD",
         source="sftp",
         source_databases=None,
         sftp_entity="transactions",
@@ -108,6 +111,7 @@ def test_run_pipeline_background_file_source_keeps_completed(monkeypatch):
 
     assert saved["state"]["status"] == "COMPLETED"
     assert saved["state"]["source"] == "sftp"
+    assert saved["state"]["brd_filename"] == "File BRD"
 
 
 def test_run_pipeline_background_marks_failure(monkeypatch):
@@ -130,6 +134,7 @@ def test_run_pipeline_background_marks_failure(monkeypatch):
         pipeline_service.run_pipeline_background(
             run_id="run-3",
             brd_text="brd",
+            brd_filename="Broken BRD",
             source="database",
             source_databases=None,
             sftp_entity="transactions",
@@ -176,12 +181,14 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
     monkeypatch.setattr(pipeline_service.api_utils, "normalize_file_entity", lambda source, entity: "transactions")
     monkeypatch.setattr(pipeline_service.api_utils, "is_file_source", lambda source: False)
 
-    payload = PipelineRunRequest(brd_text="brd", source="database", database_name="db1")
+    payload = PipelineRunRequest(brd_text="brd", brd_filename="Claims BRD", source="database", database_name="db1")
     pipeline_service.submit_pipeline_start("run-submit", payload)
 
     assert recorded["fn"] == pipeline_service.run_pipeline_background
     assert recorded["kwargs"]["run_id"] == "run-submit"
+    assert recorded["kwargs"]["brd_filename"] == "Claims BRD"
     assert recorded["kwargs"]["source_databases"] == ["db1"]
+    assert recorded["kwargs"]["stage_confirmation_enabled"] is False
     assert callable(recorded["callback"])
     pipeline_service.BACKGROUND_JOBS.pop("run-submit:pipeline", None)
 
@@ -425,7 +432,7 @@ def test_run_context_converts_existing_pause_before_review_gate_to_hitl_wait(mon
     assert context["status"] == "HITL_WAIT"
     assert context["next_gate"] == 3
     assert context["stage_confirmation"] is None
-    assert "Column Review is pending" in context["resume_message"]
+    assert "Semantic Review is pending" in context["resume_message"]
 
 
 def test_run_context_suppresses_stage_confirmation_when_background_stage_active(monkeypatch):

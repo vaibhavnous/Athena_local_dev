@@ -15,10 +15,12 @@ from typing import Any, Callable, Dict, List, Set
 
 from langgraph.graph import StateGraph
 from langchain_core.messages import HumanMessage, SystemMessage
+from pinecone import Pinecone
 
 from nodes.req_extraction import get_llm
 from schema import NominationItem, NominationSchema
 from state import Stage01State
+from utilis.embeddings import get_embedding_model
 from utilis.db import (
     ai_store_db_writer,
     artifact_storage_fingerprint,
@@ -501,8 +503,55 @@ def _lexical_search(
 
 def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> List[Dict[str, Any]]:
     log_context = {"node": "table_nomination", "pass": "semantic"}
-    logger.info("Semantic vector ranking disabled; using catalog and lexical matching", extra=log_context)
-    return []
+    model = get_embedding_model(log_context=log_context)
+    api_key = os.getenv("PINECONE_API_KEY", "").strip()
+    index_name = (os.getenv("PINECONE_SCHEMA_INDEX_NAME") or "metadata").strip()
+    if model is None or not api_key or not index_name:
+        logger.info("Semantic vector ranking unavailable; using catalog and lexical matching", extra=log_context)
+        return []
+
+    try:
+        vector = model.embed_query(combined_kpi_string or "table nomination")
+        source_set = {str(db).lower() for db in source_databases}
+        matches = Pinecone(api_key=api_key).Index(index_name).query(
+            vector=vector,
+            top_k=25,
+            include_metadata=True,
+            namespace="schema",
+        ).matches
+    except Exception as exc:
+        logger.warning("Semantic vector ranking failed: %s", exc, extra=log_context)
+        return []
+
+    table_map: Dict[str, Dict[str, Any]] = {}
+    for match in matches or []:
+        metadata = getattr(match, "metadata", {}) or {}
+        db = str(metadata.get("database_name") or "").lower()
+        if source_set and db not in source_set:
+            continue
+        schema_name = str(metadata.get("schema_name") or "")
+        table_name = str(metadata.get("table_name") or "")
+        column_name = str(metadata.get("column_name") or "")
+        if not db or not table_name:
+            continue
+        key = f"{db}.{schema_name}.{table_name}"
+        entry = table_map.setdefault(
+            key,
+            {
+                "database_name": db,
+                "schema_name": schema_name,
+                "table_name": table_name,
+                "semantic_score": 0.0,
+                "matched_columns": [],
+            },
+        )
+        entry["semantic_score"] = max(entry["semantic_score"], float(getattr(match, "score", 0.0) or 0.0))
+        if column_name:
+            entry["matched_columns"].append(column_name)
+
+    for entry in table_map.values():
+        entry["matched_columns"] = sorted(set(entry["matched_columns"]))
+    return list(table_map.values())
 
 
 def _fuse_results(
