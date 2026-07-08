@@ -180,8 +180,25 @@ def _read_sql_file(path_value: Any) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def execute_snowflake_sql_file(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
+def validate_snowflake_bronze_script(script: Dict[str, Any]) -> str:
+    from nodes.bronze_gen import _snowflake_qualified_name, validate_snowflake_bronze_sql
+
     sql = _read_sql_file(script.get("script_path"))
+    table_name = str(script.get("table") or script.get("table_name") or "").strip()
+    database_name = str(script.get("database_name") or "insurance")
+    schema_name = str(script.get("schema_name") or "dbo")
+    bronze_catalog = str(script.get("bronze_catalog") or os.getenv("BRONZE_CATALOG", "main"))
+    bronze_schema = str(script.get("bronze_schema") or os.getenv("BRONZE_SCHEMA", "bronze"))
+    validate_snowflake_bronze_sql(
+        sql,
+        source_table=_snowflake_qualified_name(database_name, schema_name, table_name) if table_name else None,
+        target_table=_snowflake_qualified_name(bronze_catalog, bronze_schema, f"bronze_{table_name}") if table_name else None,
+    )
+    return sql
+
+
+def execute_snowflake_sql_file(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
+    sql = validate_snowflake_bronze_script(script)
     cursors = snowflake_conn.execute_string(sql, return_cursors=True)
     statement_count = len(list(cursors or []))
     return {
@@ -202,6 +219,9 @@ def run_snowflake_bronze_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
     scripts = [item for item in state.get("bronze_generation_results") or [] if isinstance(item, dict)]
     if not scripts:
         raise ValueError("Snowflake bronze execution enabled but no generated bronze scripts were found.")
+
+    for script in scripts:
+        validate_snowflake_bronze_script(script)
 
     load_source = snowflake_bronze_source_load_enabled()
     loaded_sources: List[Dict[str, Any]] = []

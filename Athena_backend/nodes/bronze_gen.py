@@ -45,6 +45,7 @@ DESTRUCTIVE_SNOWFLAKE_SQL_KEYWORDS = {
     "DELETE",
     "DROP",
     "MERGE",
+    "REPLACE",
     "TRUNCATE",
     "UPDATE",
 }
@@ -181,15 +182,45 @@ def _detect_dangerous_sql(code: str) -> None:
             raise ValueError(f"Dangerous SQL keyword detected: {kw}")
 
 
-def _validate_snowflake_sql(sql: str) -> None:
+def validate_snowflake_bronze_sql(
+    sql: str,
+    *,
+    source_table: str | None = None,
+    target_table: str | None = None,
+) -> None:
     upper = str(sql or "").upper()
-    required = ("CREATE SCHEMA", "CREATE TABLE", "INSERT INTO")
+    required = (
+        "CREATE SCHEMA IF NOT EXISTS",
+        "CREATE TABLE IF NOT EXISTS",
+        "INSERT INTO",
+        "CURRENT_TIMESTAMP",
+        '"RUN_ID"',
+        '"INGESTION_TIMESTAMP"',
+        '"SOURCE_SYSTEM"',
+        '"SOURCE_TABLE"',
+    )
     missing = [token for token in required if token not in upper]
     if missing:
         raise ValueError(f"Snowflake bronze SQL is missing required statements: {', '.join(missing)}")
     for keyword in DESTRUCTIVE_SNOWFLAKE_SQL_KEYWORDS:
         if re.search(rf"\b{keyword}\b", upper):
             raise ValueError(f"Disallowed Snowflake SQL keyword detected: {keyword}")
+    for token in ("SPARK.", "PYSPARK", ".FORMAT(", ".OPTION(", "JDBC"):
+        if token in upper:
+            raise ValueError(f"Snowflake bronze SQL contains Databricks/Python token: {token}")
+    if source_table and source_table not in sql:
+        raise ValueError(f"Snowflake bronze SQL does not read from expected source table: {source_table}")
+    if target_table and target_table not in sql:
+        raise ValueError(f"Snowflake bronze SQL does not write to expected target table: {target_table}")
+
+
+def _validate_snowflake_sql(
+    sql: str,
+    *,
+    source_table: str | None = None,
+    target_table: str | None = None,
+) -> None:
+    validate_snowflake_bronze_sql(sql, source_table=source_table, target_table=target_table)
 
 
 def _strip_code_fences(raw: str) -> str:
@@ -319,13 +350,19 @@ Current SQL:
     return enhanced
 
 
-def _maybe_enhance_snowflake_with_llm(sql: str, metadata: Dict[str, Any]) -> tuple[str, bool, str | None]:
+def _maybe_enhance_snowflake_with_llm(
+    sql: str,
+    metadata: Dict[str, Any],
+    *,
+    source_table: str | None = None,
+    target_table: str | None = None,
+) -> tuple[str, bool, str | None]:
     if not _llm_enabled_for_snowflake_bronze():
         return sql, False, None
 
     try:
         enhanced = _enhance_snowflake_with_llm(sql, metadata)
-        _validate_snowflake_sql(enhanced)
+        _validate_snowflake_sql(enhanced, source_table=source_table, target_table=target_table)
         return enhanced, True, None
     except Exception as exc:
         logger.warning(
@@ -1009,8 +1046,15 @@ def _generate_one_table(
             "table_metadata": table_metadata or {},
             "target_warehouse": "snowflake",
         }
-        code, llm_enhanced, llm_error = _maybe_enhance_snowflake_with_llm(code, enhancement_metadata)
-        _validate_snowflake_sql(code)
+        source_table = _snowflake_qualified_name(database_name, schema_name, table_name)
+        target_table = _snowflake_qualified_name(bronze_catalog, bronze_schema, f"bronze_{table_name}")
+        code, llm_enhanced, llm_error = _maybe_enhance_snowflake_with_llm(
+            code,
+            enhancement_metadata,
+            source_table=source_table,
+            target_table=target_table,
+        )
+        _validate_snowflake_sql(code, source_table=source_table, target_table=target_table)
         extension = "sql"
     else:
         resolved_source_jdbc_url = source_jdbc_url or build_source_jdbc_url(database_name)

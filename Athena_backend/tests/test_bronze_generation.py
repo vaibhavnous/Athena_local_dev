@@ -115,6 +115,46 @@ def test_snowflake_bronze_generation_can_use_llm_enhancement(monkeypatch):
     assert result["llm_enhancement_error"] is None
 
 
+def test_snowflake_llm_enhancement_falls_back_when_target_drifted(monkeypatch):
+    monkeypatch.setenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "true")
+
+    def wrong_target(sql, metadata):
+        return sql.replace('"ATHENA_DB"."BRONZE"."bronze_claims"', '"OTHER_DB"."BRONZE"."bronze_claims"')
+
+    monkeypatch.setattr(bronze_gen, "_enhance_snowflake_with_llm", wrong_target)
+
+    result = bronze_gen._generate_one_table(
+        {
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table_name": "claims",
+        },
+        run_id="run-target-check",
+        bronze_catalog="ATHENA_DB",
+        bronze_schema="BRONZE",
+        table_metadata={"columns": [{"column_name": "CLAIM_ID", "data_type": "int"}]},
+        target_warehouse="snowflake",
+    )
+
+    sql = Path(result["script_path"]).read_text(encoding="utf-8")
+    assert result["llm_enhanced"] is False
+    assert '"ATHENA_DB"."BRONZE"."bronze_claims"' in sql
+    assert "expected target table" in str(result["llm_enhancement_error"]).lower()
+
+
+def test_snowflake_validator_rejects_databricks_format():
+    try:
+        bronze_gen.validate_snowflake_bronze_sql(
+            'CREATE SCHEMA IF NOT EXISTS "A"."B";\n'
+            'CREATE TABLE IF NOT EXISTS "A"."B"."bronze_claims" ("run_id" VARCHAR, "ingestion_timestamp" TIMESTAMP_NTZ, "source_system" VARCHAR, "source_table" VARCHAR);\n'
+            'INSERT INTO "A"."B"."bronze_claims" SELECT spark.read.format("jdbc"), CURRENT_TIMESTAMP(), \'x\', \'y\';'
+        )
+    except ValueError as exc:
+        assert "databricks/python token" in str(exc).lower()
+    else:
+        raise AssertionError("Databricks-style Snowflake SQL should be rejected")
+
+
 def test_snowflake_bronze_generation_skips_llm_by_default(monkeypatch):
     monkeypatch.delenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", raising=False)
 

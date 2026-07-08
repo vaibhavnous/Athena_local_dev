@@ -29,7 +29,22 @@ def test_snowflake_bronze_runtime_executes_generated_sql(monkeypatch):
     workdir = Path.cwd() / ".tmp-tests" / f"snowflake_runtime_{uuid.uuid4().hex}"
     workdir.mkdir(parents=True, exist_ok=True)
     sql_path = workdir / "bronze_claims.sql"
-    sql_path.write_text("CREATE SCHEMA IF NOT EXISTS \"ATHENA_DB\".\"BRONZE\";\nSELECT 1;", encoding="utf-8")
+    sql_path.write_text(
+        'CREATE SCHEMA IF NOT EXISTS "main"."bronze";\n'
+        'CREATE TABLE IF NOT EXISTS "main"."bronze"."bronze_claims" (\n'
+        '    "claim_id" NUMBER(38,0),\n'
+        '    "run_id" VARCHAR,\n'
+        '    "ingestion_timestamp" TIMESTAMP_NTZ,\n'
+        '    "source_system" VARCHAR,\n'
+        '    "source_table" VARCHAR\n'
+        ');\n'
+        'INSERT INTO "main"."bronze"."bronze_claims" (\n'
+        '    "claim_id", "run_id", "ingestion_timestamp", "source_system", "source_table"\n'
+        ')\n'
+        'SELECT TRY_CAST(src."claim_id" AS NUMBER(38,0)), \'run-1\', CURRENT_TIMESTAMP()::TIMESTAMP_NTZ, \'insurance\', \'claims\'\n'
+        'FROM "insurance"."dbo"."claims" AS src;',
+        encoding="utf-8",
+    )
 
     class FakeSnowflakeConnection:
         def __init__(self):
@@ -51,7 +66,14 @@ def test_snowflake_bronze_runtime_executes_generated_sql(monkeypatch):
     result = snowflake_bronze_runtime.run_snowflake_bronze_scripts(
         {
             "target_warehouse": "snowflake",
-            "bronze_generation_results": [{"table": "claims", "script_path": str(sql_path)}],
+            "bronze_generation_results": [
+                {
+                    "table": "claims",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "script_path": str(sql_path),
+                }
+            ],
         }
     )
 
@@ -59,6 +81,42 @@ def test_snowflake_bronze_runtime_executes_generated_sql(monkeypatch):
     assert result["snowflake_bronze_execution_results"][0]["statement_count"] == 2
     assert fake_conn.sql[0][0].startswith("CREATE SCHEMA")
     assert fake_conn.closed is True
+
+
+def test_snowflake_bronze_runtime_rejects_wrong_script_format(monkeypatch):
+    workdir = Path.cwd() / ".tmp-tests" / f"snowflake_runtime_bad_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    sql_path = workdir / "bronze_claims.sql"
+    sql_path.write_text("CREATE SCHEMA IF NOT EXISTS \"main\".\"bronze\";\nSELECT 1;", encoding="utf-8")
+
+    class FakeSnowflakeConnection:
+        def execute_string(self, sql, return_cursors=True):
+            raise AssertionError("Bad Snowflake bronze SQL should not execute")
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_BRONZE", "true")
+    monkeypatch.setattr(snowflake_bronze_runtime, "_snowflake_connect", lambda: FakeSnowflakeConnection())
+
+    try:
+        snowflake_bronze_runtime.run_snowflake_bronze_scripts(
+            {
+                "target_warehouse": "snowflake",
+                "bronze_generation_results": [
+                    {
+                        "table": "claims",
+                        "database_name": "insurance",
+                        "schema_name": "dbo",
+                        "script_path": str(sql_path),
+                    }
+                ],
+            }
+        )
+    except ValueError as exc:
+        assert "missing required statements" in str(exc).lower()
+    else:
+        raise AssertionError("Wrong Snowflake bronze script format should be rejected")
 
 
 def test_load_bronze_scripts_reads_snowflake_bundle(monkeypatch):
