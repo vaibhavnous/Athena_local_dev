@@ -85,6 +85,11 @@ export const getBronzeReview = (runId: string) => api.get(`/bronze-reviews/${run
 export const submitBronzeReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE', reviewArtifact?: Record<string, any>) =>
   api.post(`/bronze-reviews/${runId}`, { action, review_artifact: reviewArtifact }, { timeout: WRITE_TIMEOUT })
 
+export const getSilverMergeKeyReview = (runId: string) => api.get(`/silver-merge-key-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
+
+export const submitSilverMergeKeyReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE', reviewArtifact?: Record<string, any>) =>
+  api.post(`/silver-merge-key-reviews/${runId}`, { action, review_artifact: reviewArtifact }, { timeout: WRITE_TIMEOUT })
+
 export const getSilverReview = (runId: string) => api.get(`/silver-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 
 export const submitSilverReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE', reviewArtifact?: Record<string, any>) =>

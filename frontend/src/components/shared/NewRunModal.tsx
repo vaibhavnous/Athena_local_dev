@@ -12,7 +12,7 @@ import {
   Upload,
 } from 'lucide-react'
 import * as mammoth from 'mammoth'
-import { startRun, uploadBrd } from '../../api/athenaApi'
+import { getRun, startRun, uploadBrd } from '../../api/athenaApi'
 import useAthenaStore from '../../store/useAthenaStore'
 
 const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024
@@ -114,6 +114,32 @@ function buildFileRunLabel(source, entity) {
 
 function connectionTypeFromSource(source) {
   return source === 'adls_gen2' || source === 'sftp' ? 'data_lake' : 'database'
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+function hasStartedPipeline(run) {
+  const steps = Array.isArray(run?.pipeline_steps) ? run.pipeline_steps : []
+  const status = String(run?.status || '').toUpperCase()
+  return (
+    steps.some((step) => ['RUNNING', 'COMPLETED', 'HITL_WAIT'].includes(String(step?.state || '').toUpperCase())) ||
+    ['RUNNING', 'PROCESSING', 'SUBMITTED', 'IN_PROGRESS', 'HITL_WAIT'].includes(status)
+  )
+}
+
+async function waitForRunStart(runId, fallbackRun, attempts = 20) {
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      const run = await getRun(runId)
+      if (run?.id && hasStartedPipeline(run)) return run
+    } catch (error) {
+      if (index === attempts - 1) console.warn('[NewRunModal] Run start polling failed', error)
+    }
+    await sleep(1000)
+  }
+  return fallbackRun
 }
 
 function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
@@ -276,6 +302,23 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
     setLoading(true)
     setError(null)
 
+    const normalizedSftpEntity = normalizeFileEntity(form.source, form.sftpEntity)
+    const displayName =
+      form.projectName.trim() ||
+      form.fileName ||
+      (isFileSource(form.source)
+        ? buildFileRunLabel(form.source, normalizedSftpEntity)
+        : 'pasted_brd.txt')
+    const startedAt = new Date().toISOString()
+    addNotification({
+      type: 'info',
+      title: 'Starting Run',
+      message: isFileSource(form.source)
+        ? `Submitting the ${form.source === 'adls_gen2' ? 'ADLS Gen2' : 'SFTP'} pipeline run.`
+        : `Submitting ${displayName}.`,
+      duration: 3000,
+    })
+
     try {
       if (uploadedFile) {
         try {
@@ -284,14 +327,6 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
           console.warn('[NewRunModal] BRD upload failed; continuing with parsed text', uploadError)
         }
       }
-
-      const normalizedSftpEntity = normalizeFileEntity(form.source, form.sftpEntity)
-      const displayName =
-        form.projectName.trim() ||
-        form.fileName ||
-        (isFileSource(form.source)
-          ? buildFileRunLabel(form.source, normalizedSftpEntity)
-          : 'pasted_brd.txt')
 
       const run = await startRun({
         source: form.source,
@@ -321,13 +356,24 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         deployment: form.deployment || null,
         target_warehouse: form.targetWarehouse,
         use_domain_kb: !!form.useDomainKb,
-        started_at: new Date().toISOString(),
+        started_at: startedAt,
         stages: [],
         kpis: [],
       }
 
-      addRun(newRun)
+      const startedRun = await waitForRunStart(run.run_id, newRun)
+      addRun({
+        ...newRun,
+        ...startedRun,
+        id: startedRun.id || run.run_id,
+        run_id: startedRun.run_id || run.run_id,
+        brd_filename: startedRun.brd_filename || displayName,
+        started_at: startedRun.started_at || startedAt,
+      })
       setActiveRun(run.run_id)
+      resetState()
+      onClose()
+      navigate('/app/data-discovery', { replace: true, state: null })
 
       addNotification({
         type: 'success',
@@ -337,9 +383,6 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
           : `Pipeline submitted for ${displayName}.`,
         duration: 4000,
       })
-
-      handleClose()
-      navigate('/app/data-discovery')
     } catch (submitError) {
       console.error('[NewRunModal] Failed to start run', submitError)
       const message =
@@ -347,6 +390,12 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
           ? 'Backend did not start the run within 90 seconds. Check the API service and database connection.'
           : submitError?.data?.message || submitError?.message || 'Failed to start the pipeline run.'
       setError(message)
+      addNotification({
+        type: 'error',
+        title: 'Run Start Failed',
+        message,
+        duration: 5000,
+      })
     } finally {
       setLoading(false)
     }
@@ -704,39 +753,48 @@ function ModalSelect({
       <button
         type="button"
         onClick={() => setOpenSelect(open ? null : id)}
-        className={`flex h-[60px] w-full items-center justify-between rounded-[10px] border bg-[#070d1a] px-5 text-left text-[18px] text-white transition-colors ${
-          open ? 'border-[#4585f5] ring-1 ring-[#4585f5]' : activeBorder ? 'border-[#26344b]' : 'border-[#26344b] hover:border-[#4585f5]/70'
+        className={`flex h-[60px] w-full items-center justify-between rounded-[12px] border bg-[#070d1a] px-5 text-left text-[18px] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-[border-color,box-shadow,background-color] duration-150 ${
+          open ? 'border-[#4585f5] shadow-[0_0_0_1px_rgba(69,133,245,0.55),0_10px_26px_rgba(9,17,31,0.22)]' : activeBorder ? 'border-[#26344b] hover:border-[#4585f5]/70' : 'border-[#26344b] hover:border-[#4585f5]/70'
         }`}
       >
         <span className={selected ? 'text-white' : 'text-[#b8c5db]'}>
           {selected?.label || placeholder}
         </span>
-        <ChevronDown size={21} className={`text-white transition-transform ${open ? 'rotate-180' : ''}`} />
+        <ChevronDown size={21} className={`text-white transition-transform duration-150 ${open ? 'rotate-180' : ''}`} />
       </button>
 
-      {open && (
-        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[80] overflow-hidden rounded-[10px] border border-[#4585f5] bg-[#070d1a] shadow-[0_16px_36px_rgba(0,0,0,0.45)]">
-          <button
-            type="button"
-            disabled
-            className="block h-10 w-full cursor-default px-5 text-left text-[14px] font-medium text-[#6f84a4]"
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: -4, scale: 0.985 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -4, scale: 0.985 }}
+            transition={{ duration: 0.14, ease: [0.2, 0.8, 0.2, 1] }}
+            className="absolute left-0 right-0 top-[calc(100%+5px)] z-[80] origin-top overflow-hidden rounded-[12px] border border-[#335fba] bg-[#081020] p-1 shadow-[0_18px_44px_rgba(0,0,0,0.48)]"
           >
-            {placeholder}
-          </button>
-          {options.map((option) => (
-            <button
-            key={option.id}
-            type="button"
-            onClick={() => onChange(option.id)}
-              className={`block h-11 w-full px-5 text-left text-[16px] font-semibold transition-colors ${
-                option.id === value ? 'bg-[#1b2a45] text-white' : 'bg-[#070d1a] text-white hover:bg-[#172131]'
-              }`}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-      )}
+            <div className="px-4 py-2 text-left text-[13px] font-semibold text-[#7185a6]">
+              {placeholder}
+            </div>
+            <div className="space-y-1">
+              {options.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => {
+                    onChange(option.id)
+                    setOpenSelect(null)
+                  }}
+                  className={`flex h-10 w-full items-center rounded-[8px] px-4 text-left text-[15px] font-semibold transition-[background-color,color] duration-120 ${
+                    option.id === value ? 'bg-[#1b2a45] text-white' : 'text-[#dbe5f5] hover:bg-[#121d31] hover:text-white'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

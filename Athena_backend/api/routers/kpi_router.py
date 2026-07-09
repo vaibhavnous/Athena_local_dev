@@ -11,7 +11,7 @@ router = APIRouter()
 
 
 # -------------------------
-# ✅ KPI Reviews
+# KPI Reviews
 # -------------------------
 @router.get("/kpi-reviews/{run_id}")
 def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
@@ -19,13 +19,12 @@ def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
         return demo_kpi_reviews(run_id)
 
     from api.services.kpi_service import artifact_kpis, fetch_hitl_rows, map_kpi
-    from services.pipeline_runtime import load_checkpoint_state
+    from services.pipeline_runtime import load_checkpoint_fields
 
-    checkpoint = load_checkpoint_state(run_id) or {}
-    source = str(checkpoint.get("source") or "database").lower()
+    source = str(load_checkpoint_fields(run_id, "source").get("source") or "database").lower()
 
     try:
-        rows = fetch_hitl_rows(run_id, status=status, checkpoint=checkpoint)  # ✅ reuse checkpoint
+        rows = fetch_hitl_rows(run_id, status=status)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -47,7 +46,7 @@ def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
 
 
 # -------------------------
-# ✅ Approve KPI
+# Approve KPI
 # -------------------------
 @router.post("/kpi-reviews/{queue_id}/approve")
 def approve_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -76,7 +75,7 @@ def approve_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # -------------------------
-# ✅ Reject KPI
+# Reject KPI
 # -------------------------
 @router.post("/kpi-reviews/{queue_id}/reject")
 def reject_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -104,7 +103,7 @@ def reject_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # -------------------------
-# ✅ Modify KPI
+# Modify KPI
 # -------------------------
 @router.post("/kpi-reviews/{queue_id}/modify")
 def modify_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -137,7 +136,7 @@ def modify_kpi(queue_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # -------------------------
-# ✅ Bulk Action
+# Bulk Action
 # -------------------------
 @router.post("/kpi-reviews/{run_id}/bulk")
 def bulk_kpi_action(run_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -175,7 +174,7 @@ def bulk_kpi_action(run_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # -------------------------
-# ✅ HITL Queue (alias)
+# HITL Queue (alias)
 # -------------------------
 @router.get("/hitl/{run_id}")
 def hitl_queue(run_id: str) -> Dict[str, Any]:
@@ -183,7 +182,7 @@ def hitl_queue(run_id: str) -> Dict[str, Any]:
 
 
 # -------------------------
-# ✅ Submit HITL Decisions
+# Submit HITL Decisions
 # -------------------------
 @router.post("/hitl/{run_id}/decisions")
 def submit_hitl_decisions(run_id: str, payload: HitlDecisionPayload) -> Dict[str, Any]:
@@ -237,7 +236,7 @@ def submit_hitl_decisions(run_id: str, payload: HitlDecisionPayload) -> Dict[str
 
 
 # -------------------------
-# ✅ All KPIs
+# All KPIs
 # -------------------------
 @router.get("/kpis")
 def kpis() -> List[Dict[str, Any]]:

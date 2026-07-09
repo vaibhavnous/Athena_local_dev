@@ -66,7 +66,7 @@ function BooleanCell({ value, editable, onChange }) {
 
 function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, onReject, onDraftChange }) {
   const [reason, setReason] = useState(rejectionReason || '')
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(false)
   const columns = item?.item_detail?.columns || EMPTY_COLUMNS
   const decision = localDecision || item?.decision
   const id = itemId(item)

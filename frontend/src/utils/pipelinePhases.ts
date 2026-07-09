@@ -55,17 +55,17 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-3',
       label: 'Bronze Layer (Ingestion)',
-      keys: ['bronze', 'gate4'],
+      keys: ['bronze', 'gate4', 'bronze_code_execution'],
     },
     {
       id: 'phase-4',
       label: 'Silver Layer (Transformation)',
-      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5'],
+      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution'],
     },
     {
       id: 'phase-5',
       label: 'Gold Layer (Analytics)',
-      keys: ['gold'],
+      keys: ['gold', 'gold_code_execution'],
     },
   ],
   file: [
@@ -82,17 +82,17 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-3',
       label: 'Bronze Layer (Ingestion)',
-      keys: ['bronze', 'gate4'],
+      keys: ['bronze', 'gate4', 'bronze_code_execution'],
     },
     {
       id: 'phase-4',
       label: 'Silver Layer (Transformation)',
-      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5'],
+      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution'],
     },
     {
       id: 'phase-5',
       label: 'Gold Layer (Analytics)',
-      keys: ['gold'],
+      keys: ['gold', 'gold_code_execution'],
     },
   ],
 }
@@ -103,32 +103,72 @@ export function isFileSource(run) {
 
 export function getPipelineSteps(run) {
   if (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length) {
-    return withPendingReviewGate(run, run.pipeline_steps.map((step) => ({
+    return withPendingReviewGate(run, clearStaleWaitingSteps(run, run.pipeline_steps.map((step) => ({
       ...step,
       label: formatPipelineStepLabel(step.label, step.key),
       detail: step.detail || buildStepDetail(run, step.key, normalizeState(step.state), step.detail),
       state: normalizeState(step.state),
-    })) as PipelineStep[])
+    })) as PipelineStep[]))
   }
   if (Array.isArray(run?.stages) && run.stages.length) {
-    return withPendingReviewGate(run, run.stages.map((stage) => ({
+    return withPendingReviewGate(run, clearStaleWaitingSteps(run, run.stages.map((stage) => ({
       key: stage.key,
       label: formatPipelineStepLabel(stage.name, stage.key),
       detail: stage.error || buildStepDetail(run, stage.key, normalizeState(stage.status), ''),
       state: normalizeState(stage.status),
       complete: normalizeState(stage.status) === 'COMPLETED',
-    })) as PipelineStep[])
+    })) as PipelineStep[]))
   }
   return withPendingReviewGate(run, [] as PipelineStep[])
 }
 
+function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
+  const sourceType = isFileSource(run) ? 'file' : 'database'
+  const orderedKeys = PIPELINE_PHASE_TEMPLATES[sourceType].flatMap((phase) => phase.keys)
+  const indexByKey = new Map(orderedKeys.map((key, index) => [key, index]))
+  const progressedStates = new Set(['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'])
+  const progressedIndexes = steps
+    .map((step) => indexByKey.get(step.key) ?? -1)
+    .filter((index, itemIndex) => index >= 0 && progressedStates.has(normalizeState(steps[itemIndex]?.state)))
+
+  if (!progressedIndexes.length) return steps
+  const furthestProgressIndex = Math.max(...progressedIndexes)
+
+  return steps.map((step) => {
+    const stepIndex = indexByKey.get(step.key) ?? -1
+    const state = normalizeState(step.state)
+    if (stepIndex >= 0 && stepIndex < furthestProgressIndex && state === 'HITL_WAIT') {
+      return {
+        ...step,
+        state: 'COMPLETED',
+        complete: true,
+      }
+    }
+    return step
+  })
+}
+
 function withPendingReviewGate(run, steps: PipelineStep[]) {
   const gate = Number(run?.next_gate || 0)
-  if (gate < 1 || gate > 5) return steps
-
   const status = normalizeState(run?.status)
   const reviewReady = ['HITL_WAIT', 'PENDING_REVIEW', 'PAUSED_FOR_HITL'].includes(status)
   if (!reviewReady) return steps
+
+  if (run?.next_review_key === 'silver_merge_key_review') {
+    if (steps.some((step) => step.key === 'silver_merge_key_review')) return steps
+    return [
+      ...steps,
+      {
+        key: 'silver_merge_key_review',
+        label: 'Silver Merge Key Review',
+        detail: buildStepDetail(run, 'silver_merge_key_review', 'HITL_WAIT', ''),
+        state: 'HITL_WAIT',
+        complete: false,
+      },
+    ]
+  }
+
+  if (gate < 1 || gate > 5) return steps
 
   const gateKey = `gate${gate}`
   if (steps.some((step) => step.key === gateKey)) return steps
@@ -250,8 +290,9 @@ function syntheticStepState(key, byKey: Map<string, PipelineStep>) {
     if (gate4 === 'COMPLETED' || gate4 === 'HITL_WAIT' || silver === 'RUNNING' || silver === 'COMPLETED') return 'COMPLETED'
   }
   if (key === 'silver_merge_key_review') {
-    if (gate4 === 'COMPLETED' || silver === 'RUNNING' || silver === 'COMPLETED') return 'COMPLETED'
-    if (gate4 === 'HITL_WAIT') return 'HITL_WAIT'
+    const review = state('silver_merge_key_review')
+    if (review === 'HITL_WAIT') return 'HITL_WAIT'
+    if (review === 'COMPLETED' || silver === 'RUNNING' || silver === 'COMPLETED') return 'COMPLETED'
   }
   if (key === 'silver_code_execution') {
     if (gate5 === 'COMPLETED' || gold === 'RUNNING' || gold === 'COMPLETED') return 'COMPLETED'
@@ -298,6 +339,10 @@ function buildStepDetail(run, key, state, existingDetail) {
       return readyGateMessage('Semantic review', 'Semantic review is ready. Validate enriched column metadata before Bronze generation starts.')
     case 'gate4':
       return readyGateMessage('Bronze review', 'Bronze review is ready. Validate generated Bronze artifacts before Silver generation starts.')
+    case 'silver_merge_key_review':
+      if (state === 'HITL_WAIT') return 'Silver Merge Key Review is ready. Approve merge keys before Silver generation starts.'
+      if (state === 'COMPLETED') return 'Silver merge keys were approved.'
+      return 'Silver Merge Key Review opens after Bronze execution completes.'
     case 'gate5':
       return readyGateMessage('Silver review', 'Silver review is ready. Validate generated Silver artifacts before downstream validation continues.')
     case 'discovery':
@@ -324,16 +369,31 @@ function buildStepDetail(run, key, state, existingDetail) {
     case 'silver':
       if (state === 'COMPLETED') return 'Silver scripts were generated.'
       if (state === 'RUNNING') return 'Generating Silver transformation artifacts.'
-      return 'Silver generation starts after Gate 4 approval.'
+      return 'Silver generation starts after Silver Merge Key Review approval.'
     case 'gold':
       if (state === 'COMPLETED') return 'Gold analytics scripts were generated.'
       if (state === 'RUNNING') return 'Generating Gold KPI scripts.'
       return 'Gold generation starts after Silver processing completes.'
     case 'bronze_code_execution':
+      if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
+        if (state === 'COMPLETED') return 'Approved Bronze scripts were executed in Snowflake.'
+        if (state === 'RUNNING') return 'Executing approved Bronze scripts in Snowflake.'
+        return 'Bronze execution starts immediately after Gate 4 approval for Snowflake runs.'
+      }
       return 'UI-only marker: Bronze scripts are exported for external execution, not run inside Athena.'
     case 'silver_code_execution':
+      if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
+        if (state === 'COMPLETED') return 'Approved Silver scripts were executed in Snowflake.'
+        if (state === 'RUNNING') return 'Executing approved Silver scripts in Snowflake.'
+        return 'Silver execution starts immediately after Gate 5 approval for Snowflake runs.'
+      }
       return 'UI-only marker: Silver scripts are exported for external execution, not run inside Athena.'
     case 'gold_code_execution':
+      if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
+        if (state === 'COMPLETED') return 'Generated Gold scripts were executed in Snowflake.'
+        if (state === 'RUNNING') return 'Executing generated Gold scripts in Snowflake.'
+        return 'Gold execution starts after Gold generation for Snowflake runs.'
+      }
       return 'UI-only marker: Gold scripts are exported for external execution, not run inside Athena.'
     default:
       return existingDetail || ''

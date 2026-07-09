@@ -57,7 +57,7 @@ def _status_from_checkpoint(checkpoint: Dict[str, Any]) -> str:
     status = str(checkpoint.get("status") or "UNKNOWN").upper()
     if checkpoint.get("background_stage") or status in {"RUNNING", "PROCESSING", "PENDING", "SUBMITTED", "IN_PROGRESS"}:
         return "RUNNING"
-    if checkpoint.get("next_gate") or status in {"HITL_WAIT", "PAUSED_FOR_HITL"}:
+    if checkpoint.get("next_gate") or checkpoint.get("next_review_key") or status in {"HITL_WAIT", "PAUSED_FOR_HITL"}:
         return "HITL_WAIT"
     if status == "PAUSED_FOR_STAGE_CONFIRMATION":
         return "PAUSED_FOR_STAGE_CONFIRMATION"
@@ -89,6 +89,7 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "started_at": checkpoint.get("started_at") or row.get("started_at") or row.get("last_activity"),
         "completed_at": checkpoint.get("completed_at"),
         "next_gate": checkpoint.get("next_gate"),
+        "next_review_key": checkpoint.get("next_review_key"),
         "resume_message": checkpoint.get("resume_message"),
         "stage_confirmation": checkpoint.get("stage_confirmation"),
         "failed_stage_key": checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key"),
@@ -103,13 +104,71 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
     checkpoint = checkpoint or {}
+    from services.pipeline_runtime import build_pipeline_steps
+
+    bronze_completed = bool(
+        checkpoint.get("bronze_generation_status") == "COMPLETED"
+        or checkpoint.get("bronze_generation_results")
+        or checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
+    )
+    silver_completed = bool(
+        checkpoint.get("silver_generation_status") == "COMPLETED"
+        or checkpoint.get("silver_generation_results")
+        or checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
+    )
+    gold_completed = bool(
+        str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
+        or checkpoint.get("gold_generation_results")
+        or checkpoint.get("background_stage") == "gold_code_execution"
+        or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
+    )
+    next_gate = None if gold_completed else checkpoint.get("next_gate")
+    next_review_key = None if gold_completed else checkpoint.get("next_review_key")
+    pipeline_steps = build_pipeline_steps(
+        source=str(checkpoint.get("source") or "database"),
+        checkpoint=checkpoint,
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=checkpoint.get("nominated_tables") or [],
+        certified_tables=checkpoint.get("certified_tables") or [],
+        enriched_payload=checkpoint.get("enriched_metadata") or {},
+        gate3_payload=checkpoint.get("enrichment_review_artifact") or {},
+        bronze_generation_completed=bronze_completed,
+        silver_generation_completed=silver_completed,
+        gold_generation_completed=gold_completed,
+    )
+    waiting_gate_key = f"gate{next_gate}" if next_gate in {1, 2, 3, 4, 5} else None
+    waiting_stage_key = str(next_review_key or waiting_gate_key or "") or None
+    if waiting_stage_key:
+        from services.pipeline_runtime import apply_waiting_stage_state
+
+        pipeline_steps = apply_waiting_stage_state(pipeline_steps, waiting_stage_key)
+    fallback_status = checkpoint.get("status")
+    if checkpoint.get("background_stage"):
+        fallback_status = "RUNNING"
+    elif gold_completed and str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED":
+        fallback_status = "SUCCESS"
+    elif gold_completed and str(fallback_status or "").upper() == "HITL_WAIT":
+        fallback_status = "RUNNING"
+    current_step = next(
+        (
+            step for step in pipeline_steps
+            if str(step.get("state") or "").upper() in {"RUNNING", "HITL_WAIT", "FAILED"}
+        ),
+        None,
+    )
+    external_execution = checkpoint.get("external_execution") if isinstance(checkpoint.get("external_execution"), dict) else None
+    if current_step and external_execution and external_execution.get("message"):
+        current_step = {**current_step, "detail": external_execution.get("message")}
+
     return {
         **_fallback_run_summary(
             {
                 "run_id": run_id,
                 "brd_filename": checkpoint.get("brd_filename"),
                 "source": checkpoint.get("source"),
-                "status": checkpoint.get("status"),
+                "status": fallback_status,
                 "provider": checkpoint.get("provider"),
                 "deployment": checkpoint.get("deployment"),
                 "error": checkpoint.get("error"),
@@ -121,8 +180,15 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         ),
         "checkpoint": checkpoint,
         "stage_confirmation": checkpoint.get("stage_confirmation"),
-        "next_gate": checkpoint.get("next_gate"),
+        "next_gate": next_gate,
+        "next_review_key": next_review_key,
         "resume_message": checkpoint.get("resume_message"),
+        "pipeline_steps": pipeline_steps,
+        "current_pipeline_step": current_step,
+        "external_execution": external_execution,
+        "bronze_generation_completed": bronze_completed,
+        "silver_generation_completed": silver_completed,
+        "gold_generation_completed": gold_completed,
         "candidate_feed": checkpoint.get("candidate_feed"),
         "candidate_feeds": checkpoint.get("candidate_feeds") or [],
         "bronze": {"generated_at": None, "scripts": []},

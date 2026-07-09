@@ -62,6 +62,8 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest) -> None:
             **existing,
             "run_id": run_id,
             "status": existing.get("status") or "RUNNING",
+            "background_stage": existing.get("background_stage") or "ingestion",
+            "resume_message": existing.get("resume_message") or "BRD Ingest is running.",
             "brd_text": existing.get("brd_text") or payload.brd_text,
             "brd_filename": existing.get("brd_filename") or payload.brd_filename,
             "source": existing.get("source") or source,

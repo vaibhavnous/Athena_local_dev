@@ -7,6 +7,7 @@ from services.pipeline_runtime import (
     build_pipeline_steps,
     fetch_json_artifact,
     fetch_run_summary,
+    load_checkpoint_fields,
     load_checkpoint_state,
 )
 from utilis.logger import logger
@@ -261,11 +262,12 @@ def _file_source_summary_context(run_id: str, checkpoint: Dict[str, Any], summar
 
 
 def _summary_run_data(run_id: str) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = load_checkpoint_fields(run_id, "source")
     summary = fetch_run_summary(run_id)
     if api_utils.is_file_source(checkpoint.get("source")):
-        context = _file_source_summary_context(run_id, checkpoint, summary)
-        return checkpoint, context, summary, checkpoint
+        full_checkpoint = load_checkpoint_state(run_id) or {}
+        context = _file_source_summary_context(run_id, full_checkpoint, summary)
+        return full_checkpoint, context, summary, full_checkpoint
     return get_run_data(run_id)
 
 
@@ -391,9 +393,11 @@ def build_ui_payload(
         "feed_semantic_summary": context.get("feed_semantic_summary") or [],
         "gate3_approved": context.get("gate3_approved") or False,
         "next_gate": context.get("next_gate"),
+        "next_review_key": context.get("next_review_key"),
         "resume_message": context.get("resume_message"),
         "stage_confirmation": context.get("stage_confirmation"),
         "current_pipeline_step": current_pipeline_step(context),
+        "external_execution": context.get("external_execution"),
         "failed_stage_key": run_failed_stage_key,
         "failed_stage_label": failed_stage_label,
         "error": checkpoint.get("error"),
@@ -453,9 +457,11 @@ def ui_run_summary(run_id: str) -> Dict[str, Any]:
         ),
         "pipeline_steps": context.get("pipeline_steps") or [],
         "next_gate": context.get("next_gate"),
+        "next_review_key": context.get("next_review_key"),
         "resume_message": context.get("resume_message"),
         "stage_confirmation": context.get("stage_confirmation"),
         "current_pipeline_step": current_pipeline_step(context),
+        "external_execution": context.get("external_execution"),
         "failed_stage_key": run_failed_stage_key,
         "failed_stage_label": failed_stage_label,
         "error": checkpoint.get("error"),

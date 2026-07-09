@@ -60,7 +60,7 @@ def test_snowflake_bronze_runtime_executes_generated_sql(monkeypatch):
 
     fake_conn = FakeSnowflakeConnection()
     monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_BRONZE", "true")
-    monkeypatch.delenv("ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE", raising=False)
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE", "false")
     monkeypatch.setattr(snowflake_bronze_runtime, "_snowflake_connect", lambda: fake_conn)
 
     result = snowflake_bronze_runtime.run_snowflake_bronze_scripts(
@@ -81,6 +81,152 @@ def test_snowflake_bronze_runtime_executes_generated_sql(monkeypatch):
     assert result["snowflake_bronze_execution_results"][0]["statement_count"] == 2
     assert fake_conn.sql[0][0].startswith("CREATE SCHEMA")
     assert fake_conn.closed is True
+
+
+def test_snowflake_bronze_runtime_adls_executes_only_approved_scripts(monkeypatch):
+    workdir = Path.cwd() / ".tmp-tests" / f"snowflake_adls_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    def write_script(table):
+        path = workdir / f"bronze_{table}.sql"
+        path.write_text(
+            f'CREATE SCHEMA IF NOT EXISTS "main"."bronze";\n'
+            f'CREATE TABLE IF NOT EXISTS "main"."bronze"."bronze_{table}" (\n'
+            f'    "claim_id" NUMBER(38,0),\n'
+            f'    "run_id" VARCHAR,\n'
+            f'    "ingestion_timestamp" TIMESTAMP_NTZ,\n'
+            f'    "source_system" VARCHAR,\n'
+            f'    "source_table" VARCHAR\n'
+            f');\n'
+            f'INSERT INTO "main"."bronze"."bronze_{table}" (\n'
+            f'    "claim_id", "run_id", "ingestion_timestamp", "source_system", "source_table"\n'
+            f')\n'
+            f'SELECT TRY_CAST(src."claim_id" AS NUMBER(38,0)), \'run-1\', CURRENT_TIMESTAMP()::TIMESTAMP_NTZ, \'insurance\', \'{table}\'\n'
+            f'FROM "insurance"."dbo"."{table}" AS src;',
+            encoding="utf-8",
+        )
+        return str(path)
+
+    class FakeCursor:
+        description = [("status",)]
+
+        def __init__(self, conn):
+            self.conn = conn
+
+        def execute(self, sql):
+            self.conn.sql.append(sql)
+
+        def fetchall(self):
+            return [("loaded",)]
+
+        def close(self):
+            pass
+
+    class FakeSnowflakeConnection:
+        def __init__(self):
+            self.sql = []
+            self.closed = False
+
+        def cursor(self):
+            return FakeCursor(self)
+
+        def execute_string(self, sql, return_cursors=True):
+            self.sql.append(sql)
+            return [object(), object()]
+
+        def close(self):
+            self.closed = True
+
+    fake_conn = FakeSnowflakeConnection()
+    monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_BRONZE", "true")
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE", "true")
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_SOURCE_MODE", "adls")
+    monkeypatch.setenv("SNOWFLAKE_ADLS_STAGE_URL", "azure://atheastorage.blob.core.windows.net/athena/Insurance/")
+    monkeypatch.setattr(snowflake_bronze_runtime, "_snowflake_connect", lambda: fake_conn)
+
+    result = snowflake_bronze_runtime.run_snowflake_bronze_scripts(
+        {
+            "target_warehouse": "snowflake",
+            "bronze_generation_results": [
+                {
+                    "table": "claim_information",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "script_path": write_script("claim_information"),
+                    "source_columns": [{"source": "claim_id"}],
+                },
+                {
+                    "table": "policy_transactions",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "script_path": write_script("policy_transactions"),
+                    "source_columns": [{"source": "claim_id"}],
+                },
+            ],
+        },
+        review_artifact={
+            "feeds": [
+                {
+                    "table": "claim_information",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "review_status": "APPROVED",
+                },
+                {
+                    "table": "policy_transactions",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "review_status": "REJECTED",
+                },
+            ]
+        },
+        approved_only=True,
+    )
+
+    assert result["snowflake_bronze_execution_status"] == "COMPLETED"
+    assert result["snowflake_bronze_source_mode"] == "adls"
+    assert [item["table"] for item in result["snowflake_bronze_execution_results"]] == ["claim_information"]
+    assert any("CREATE STAGE IF NOT EXISTS" in sql for sql in fake_conn.sql)
+    assert any("COPY INTO \"insurance\".\"dbo\".\"claim_information\"" in sql for sql in fake_conn.sql)
+    assert not any("COPY INTO \"insurance\".\"dbo\".\"policy_transactions\"" in sql for sql in fake_conn.sql)
+    assert fake_conn.closed is True
+
+
+def test_approved_review_scripts_match_case_sensitive_variants():
+    lower_script = {
+        "table": "policy_cover_level_transactions_dup_del",
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "script_path": "lower.sql",
+    }
+    mixed_script = {
+        "table": "policy_cover_level_transactions_Dup_Del",
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "script_path": "mixed.sql",
+    }
+
+    approved = snowflake_bronze_runtime._approved_review_scripts(
+        {
+            "bronze_generation_results": [
+                lower_script,
+                mixed_script,
+            ]
+        },
+        {
+            "feeds": [
+                {
+                    "table": "policy_cover_level_transactions_dup_del",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "review_status": "APPROVED",
+                }
+            ]
+        },
+    )
+
+    assert len(approved) == 1
+    assert approved[0]["script_path"] == "lower.sql"
 
 
 def test_snowflake_bronze_runtime_rejects_wrong_script_format(monkeypatch):
@@ -117,6 +263,88 @@ def test_snowflake_bronze_runtime_rejects_wrong_script_format(monkeypatch):
         assert "missing required statements" in str(exc).lower()
     else:
         raise AssertionError("Wrong Snowflake bronze script format should be rejected")
+
+
+def test_load_azure_sql_table_to_snowflake_replaces_landing_table_and_logs_progress(monkeypatch):
+    progress_messages = []
+
+    class FakeSourceCursor:
+        description = [("claim_id",), ("status",)]
+
+        def __init__(self):
+            self._batches = [
+                [(1, "open"), (2, "closed")],
+                [(3, "open"), (4, "closed")],
+                [],
+            ]
+
+        def execute(self, sql):
+            self.sql = sql
+
+        def fetchmany(self, size):
+            return self._batches.pop(0)
+
+    class FakeSourceConnection:
+        def __init__(self):
+            self.closed = False
+            self.cursor_instance = FakeSourceCursor()
+
+        def cursor(self):
+            return self.cursor_instance
+
+        def close(self):
+            self.closed = True
+
+    class FakeSnowflakeCursor:
+        def __init__(self):
+            self.sql = []
+            self.executemany_calls = []
+            self.closed = False
+
+        def execute(self, sql):
+            self.sql.append(sql)
+
+        def executemany(self, sql, values):
+            self.executemany_calls.append((sql, values))
+
+        def close(self):
+            self.closed = True
+
+    class FakeSnowflakeConnection:
+        def __init__(self):
+            self.cursor_instance = FakeSnowflakeCursor()
+
+        def cursor(self):
+            return self.cursor_instance
+
+    fake_source_conn = FakeSourceConnection()
+    fake_snowflake_conn = FakeSnowflakeConnection()
+
+    monkeypatch.setattr(snowflake_bronze_runtime, "get_client_connection", lambda database_name: fake_source_conn)
+    monkeypatch.setattr(snowflake_bronze_runtime, "_batch_size", lambda: 2)
+    monkeypatch.setattr(snowflake_bronze_runtime, "_progress_log_interval", lambda: 3)
+
+    def capture_info(message, *args, **kwargs):
+        progress_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(snowflake_bronze_runtime.logger, "info", capture_info)
+
+    result = snowflake_bronze_runtime.load_azure_sql_table_to_snowflake(
+        {
+            "table": "claim_payment_indemnity",
+            "database_name": "insurance",
+            "schema_name": "dbo",
+        },
+        fake_snowflake_conn,
+        run_id="run-123",
+    )
+
+    assert result["rows_loaded"] == 4
+    assert any(sql.startswith('CREATE OR REPLACE TABLE "insurance"."dbo"."claim_payment_indemnity"') for sql in fake_snowflake_conn.cursor_instance.sql)
+    assert len(fake_snowflake_conn.cursor_instance.executemany_calls) == 2
+    assert any("rows_loaded=4" in message for message in progress_messages)
+    assert fake_source_conn.closed is True
+    assert fake_snowflake_conn.cursor_instance.closed is True
 
 
 def test_load_bronze_scripts_reads_snowflake_bundle(monkeypatch):

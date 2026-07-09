@@ -381,53 +381,70 @@ function getHistoryDisplaySteps(phase) {
   }
 
   if (phase.id === 'phase-1') {
-    return [
+    return clampLinearHistorySteps([
       actual('ingestion', 'BRD Ingest'),
       actual('memory', 'Memory Check'),
       actual('requirements', 'Requirement Extraction'),
       actual('kpis', 'KPI Extraction'),
       actual('gate1', 'KPI Review', reviewAwareState(byKey.get('gate1'), phase)),
-    ]
+    ])
   }
 
   if (phase.id === 'phase-2') {
-    return [
+    return clampLinearHistorySteps([
       actual('nomination', 'Table Extraction'),
       actual('gate2', 'Table Review', reviewAwareState(byKey.get('gate2'), phase)),
       actual('discovery', 'Column Extraction', byKey.get('discovery')?.state || byKey.get('schema')?.state || phaseState),
       actual('profiling', 'Column Profiling', byKey.get('profiling')?.state || phaseState),
       actual('enrichment', 'Semantic Enrichment', byKey.get('enrichment')?.state || phaseState),
       actual('gate3', 'Semantic Review', reviewAwareState(byKey.get('gate3'), phase)),
-    ]
+    ])
   }
 
   if (phase.id === 'phase-3') {
-    return [
+    return clampLinearHistorySteps([
       actual('bronze', 'Bronze Code Generation'),
       actual('gate4', 'Bronze Review', reviewAwareState(byKey.get('gate4'), phase)),
-    ]
+    ])
   }
 
   if (phase.id === 'phase-4') {
     const silverState = byKey.get('silver')?.state || phaseState
     const gate4State = reviewAwareState(byKey.get('gate4'), phase)
     const gate5State = reviewAwareState(byKey.get('gate5'), phase)
+    const mergeReviewState = byKey.get('silver_merge_key_review')?.state
     const silverFlow = buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phase.status)
-    return [
+    return clampLinearHistorySteps([
       actual('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverFlow.mergeResolution),
-      actual('silver_merge_key_review', 'Silver Merge Key Review', silverFlow.mergeReview),
+      actual('silver_merge_key_review', 'Silver Merge Key Review', mergeReviewState || silverFlow.mergeReview),
       actual('silver', 'Silver Code Generation', silverFlow.codeGeneration),
       actual('gate5', 'Silver Review', silverFlow.reviewGate),
-    ]
+      actual('silver_code_execution', 'Silver Code Execution'),
+    ])
   }
 
   if (phase.id === 'phase-5') {
-    return [
+    return clampLinearHistorySteps([
       actual('gold', 'Gold Code Generation'),
-    ]
+      actual('gold_code_execution', 'Gold Code Execution'),
+    ])
   }
 
-  return steps.map((step) => ({ ...step, label: step.label || step.key }))
+  return clampLinearHistorySteps(steps.map((step) => ({ ...step, label: step.label || step.key })))
+}
+
+function clampLinearHistorySteps(steps = []) {
+  let blocked = false
+  return steps.map((step) => {
+    const state = String(step.state || '').toUpperCase()
+    const complete = isCompletedStep(state)
+    if (!blocked && complete) return step
+    if (!blocked) {
+      blocked = true
+      return step
+    }
+    return { ...step, state: 'PENDING' }
+  })
 }
 
 function phaseStatusToStepState(status) {

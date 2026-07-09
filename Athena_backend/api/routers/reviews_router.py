@@ -202,6 +202,38 @@ def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
 # -------------------------
 # ✅ SILVER REVIEWS (GET)
 # -------------------------
+@router.get("/silver-merge-key-reviews/{run_id}")
+def silver_merge_key_reviews(run_id: str) -> Dict[str, Any]:
+    from api.services.ui_service import ui_run
+    from services.pipeline_runtime import load_checkpoint_state
+
+    try:
+        run = ui_run(run_id)
+    except Exception:
+        logger.error("Failed to fetch Silver merge-key review", exc_info=True, extra={"run_id": run_id})
+        raise HTTPException(status_code=503, detail="Failed to load Silver merge-key review")
+
+    checkpoint = load_checkpoint_state(run_id) or {}
+
+    return {
+        "run_id": run_id,
+        "next_gate": run.get("next_gate"),
+        "next_review_key": run.get("next_review_key"),
+        "resume_message": run.get("resume_message"),
+        "silver_merge_key_review_artifact": checkpoint.get("silver_merge_key_review_artifact") or {},
+    }
+
+
+@router.post("/silver-merge-key-reviews/{run_id}")
+def submit_silver_merge_key_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
+    from services.pipeline_runtime import submit_background, submit_silver_merge_key_review
+
+    logger.info("Submitting Silver merge-key review", extra={"run_id": run_id, "action": payload.action})
+    submit_background(run_id, "silver_merge_key_review", submit_silver_merge_key_review, run_id, payload.action, payload.review_artifact)
+
+    return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
+
+
 @router.get("/silver-reviews/{run_id}")
 def silver_reviews(run_id: str) -> Dict[str, Any]:
     if demo_enabled():

@@ -15,6 +15,7 @@ import {
   getPipelineKpis,
   getRun,
   getRuns,
+  getSilverMergeKeyReview,
   getSilverReview,
   getTableReviews
 } from '../../api/athenaApi'
@@ -183,7 +184,10 @@ function AppShell() {
 
   const pausedRunId = pausedRun?.id || null
   const pausedRunGate = Number(pausedRun?.next_gate || 0)
-  const pausedBannerKey = pausedRunId && pausedRunGate ? `${pausedRunId}:${pausedRunGate}` : null
+  const pausedRunReviewKey = pausedRun?.next_review_key || ''
+  const pausedBannerKey = pausedRunId && (pausedRunGate || pausedRunReviewKey)
+    ? `${pausedRunId}:${pausedRunReviewKey || pausedRunGate}`
+    : null
 
   useEffect(() => {
     if (!pausedRunId || !pausedBannerKey) {
@@ -208,14 +212,17 @@ function AppShell() {
         if (cancelled) return
 
         const detailGate = Number(detail?.next_gate || 0)
+        const detailReviewKey = detail?.next_review_key || ''
         const expectedGate = pausedRunGate
-        const expectedGateKey =
+        const expectedReviewKey = pausedRunReviewKey
+        const expectedGateKey = expectedReviewKey || (
           detailGate === 1 ? 'gate1' :
           detailGate === 2 ? 'gate2' :
           detailGate === 3 ? 'gate3' :
           detailGate === 4 ? 'gate4' :
           detailGate === 5 ? 'gate5' :
           null
+        )
 
         const detailSteps = [
           ...(detail?.pipeline_steps || []),
@@ -230,10 +237,10 @@ function AppShell() {
             )
           : false
         const reviewDataReady = isReviewPausedRun(detail) && gateStepReady
-          ? await isReviewDataReadyForGate(detail.id || pausedRunId, detailGate, detail?.source)
+          ? await isReviewDataReadyForGate(detail.id || pausedRunId, detailReviewKey || detailGate, detail?.source)
           : false
 
-        if (detailGate === expectedGate && gateStepReady && reviewDataReady) {
+        if ((detailReviewKey || detailGate) === (expectedReviewKey || expectedGate) && gateStepReady && reviewDataReady) {
           setPausedRunDetail(detail)
         }
       } catch (error) {
@@ -247,7 +254,7 @@ function AppShell() {
     return () => {
       cancelled = true
     }
-  }, [pausedBannerKey, pausedRun, pausedRunGate, pausedRunId])
+  }, [pausedBannerKey, pausedRun, pausedRunGate, pausedRunId, pausedRunReviewKey])
 
   useEffect(() => {
     if (!pausedRunDetail || !pausedBannerKey) {
@@ -268,12 +275,14 @@ function AppShell() {
     const bannerRun = pausedRunDetail || pausedRun
     if (!bannerRun) return null
     const gate = Number(bannerRun.next_gate || 0)
+    const reviewKey = bannerRun.next_review_key || ''
     const phases = getPhaseGroups(bannerRun)
     const total = phases.reduce((sum, phase) => sum + (phase.total || 0), 0)
     const completed = phases.reduce((sum, phase) => sum + (phase.completed || 0), 0)
     return {
       gate,
-      gateLabel: getGateDisplayName(gate, bannerRun.source),
+      reviewKey,
+      gateLabel: reviewKey === 'silver_merge_key_review' ? 'Silver Merge Key Review' : getGateDisplayName(gate, bannerRun.source),
       progressLabel: total > 0 ? `${completed}/${total} stages done` : 'Pipeline paused',
       timeAgo: formatTimeAgo(bannerRun.updated_at || bannerRun.started_at || bannerRun.created_at),
       resumeMessage: bannerRun.resume_message || 'Pipeline progress is saved. Resume review when you are ready.',
@@ -285,14 +294,14 @@ function AppShell() {
     if (!key) return false
     return latestRunsRef.current.some((run) => {
       if (!isReviewPausedRun(run)) return false
-      return `${run.id}:${Number(run.next_gate || 0)}` === key
+      return `${run.id}:${run.next_review_key || Number(run.next_gate || 0)}` === key
     })
   }, [])
 
   useEffect(() => {
     const pausedKeys = (runs || [])
       .filter(isReviewPausedRun)
-      .map((run) => `${run.id}:${Number(run.next_gate || 0)}`)
+      .map((run) => `${run.id}:${run.next_review_key || Number(run.next_gate || 0)}`)
     if (!pausedKeys.length) return
     setDismissedPausedBanners((current) => {
       const activeKeys = new Set(pausedKeys)
@@ -319,7 +328,7 @@ function AppShell() {
 
     const timer = window.setTimeout(() => {
       if (!isPausedBannerStillCurrent(pausedBannerKey)) return
-      const targetPath = `/app/hitl?runId=${encodeURIComponent(pausedRun.id)}&gate=${Number(pausedRun.next_gate || 0)}`
+      const targetPath = reviewPathForPausedRun(pausedRun)
       setActiveRun(pausedRun.id)
       if (`${location.pathname}${location.search}` !== targetPath) {
         navigate(targetPath)
@@ -407,7 +416,7 @@ function AppShell() {
   const handleResumePausedRun = () => {
     if (!pausedRun) return
     setActiveRun(pausedRun.id)
-    navigate(`/app/hitl?runId=${encodeURIComponent(pausedRun.id)}&gate=${Number(pausedRun.next_gate || 0)}`)
+    navigate(reviewPathForPausedRun(pausedRun))
   }
 
   const handleRestartPausedRun = () => {
@@ -520,6 +529,7 @@ function formatTimeAgo(value) {
 }
 
 function hasReviewGate(run) {
+  if (run?.next_review_key) return true
   const gate = Number(run?.next_gate || 0)
   return gate >= 1 && gate <= 5
 }
@@ -530,6 +540,7 @@ function hasRenderableRunDetail(run) {
     (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length > 0) ||
     run?.stage_confirmation ||
     Number(run?.next_gate || 0) > 0 ||
+    run?.next_review_key ||
     run?.bronze ||
     run?.silver ||
     run?.gold
@@ -566,6 +577,11 @@ async function isReviewDataReadyForGate(runId, gate, source) {
   if (!runId || !gate) return false
 
   try {
+    if (gate === 'silver_merge_key_review') {
+      const review = await getSilverMergeKeyReview(runId)
+      return Boolean((review?.silver_merge_key_review_artifact?.feeds || []).length || review?.next_review_key === 'silver_merge_key_review')
+    }
+
     if (gate === 1) {
       const review = await fetchKpiReviews(runId)
       if (Array.isArray(review) && review.length > 0) return true
@@ -615,6 +631,14 @@ async function isReviewDataReadyForGate(runId, gate, source) {
   }
 
   return false
+}
+
+function reviewPathForPausedRun(run) {
+  const runId = encodeURIComponent(run.id || run.run_id)
+  if (run?.next_review_key) {
+    return `/app/hitl?runId=${runId}&review=${encodeURIComponent(run.next_review_key)}`
+  }
+  return `/app/hitl?runId=${runId}&gate=${Number(run.next_gate || 0)}`
 }
 
 /** Individual toast card */

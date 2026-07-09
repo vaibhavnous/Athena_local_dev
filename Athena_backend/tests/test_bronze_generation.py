@@ -35,6 +35,7 @@ def test_snowflake_bronze_script_uses_sql_patterns():
 
 def test_snowflake_bronze_generation_writes_sql_without_databricks_path(monkeypatch):
     monkeypatch.setenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "false")
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", "*")
     workdir = Path.cwd() / ".tmp-tests" / f"bronze_{uuid.uuid4().hex}"
     workdir.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(workdir)
@@ -77,6 +78,127 @@ def test_snowflake_bronze_generation_writes_sql_without_databricks_path(monkeypa
     assert script_path.parts[-3:] == ("snowflake", "bronze", script_path.name)
     assert "Expected runtime: Snowflake SQL" in script_path.read_text(encoding="utf-8")
     assert bundle["target_warehouse"] == "snowflake"
+
+
+def test_bronze_generation_avoids_case_only_duplicate_source_tables(monkeypatch):
+    monkeypatch.setenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "false")
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", "*")
+    workdir = Path.cwd() / ".tmp-tests" / f"bronze_case_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    state = {
+        "run_id": "run-case",
+        "target_warehouse": "snowflake",
+        "bronze_catalog": "ATHENA_DB",
+        "bronze_schema": "BRONZE",
+        "certified_tables": [
+            {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy_cover_level_transactions_dup_del"},
+            {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy_cover_level_transactions_Dup_Del"},
+        ],
+        "discovered_metadata": {
+            "tables": [
+                {
+                    "table_name": "policy_cover_level_transactions_dup_del",
+                    "columns": [{"column_name": "PolicyID", "data_type": "int"}],
+                }
+            ]
+        },
+    }
+
+    result = bronze_gen.bronze_code_generation_node(state)
+    scripts = result["bronze_generation_results"]
+
+    assert result["bronze_generation_status"] == "COMPLETED"
+    assert [item["table"] for item in scripts] == ["policy_cover_level_transactions_dup_del"]
+    assert Path(scripts[0]["script_path"]).exists()
+
+
+def test_snowflake_bronze_generation_uses_selected_tables_without_default_allowlist(monkeypatch):
+    monkeypatch.setenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "false")
+    monkeypatch.delenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", raising=False)
+    monkeypatch.delenv("SNOWFLAKE_BRONZE_CATALOG", raising=False)
+    monkeypatch.delenv("SNOWFLAKE_BRONZE_SCHEMA", raising=False)
+    workdir = Path.cwd() / ".tmp-tests" / f"bronze_allowlist_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    state = {
+        "run_id": "run-small-insurance",
+        "target_warehouse": "snowflake",
+        "bronze_catalog": "INSURANCE",
+        "bronze_schema": "BRONZE",
+        "certified_tables": [
+            {"database_name": "insurance", "schema_name": "dbo", "table_name": "claim_information"},
+            {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy_cover_level_transactions"},
+        ],
+        "discovered_metadata": {
+            "tables": [
+                {"table_name": "claim_information", "columns": [{"column_name": "ClaimID", "data_type": "int"}]},
+                {"table_name": "policy_cover_level_transactions", "columns": [{"column_name": "PolicyID", "data_type": "int"}]},
+            ]
+        },
+    }
+
+    result = bronze_gen.bronze_code_generation_node(state)
+    scripts = sorted(result["bronze_generation_results"], key=lambda item: item["table"])
+    script_sql = "\n".join(Path(item["script_path"]).read_text(encoding="utf-8") for item in scripts)
+
+    assert result["bronze_generation_status"] == "COMPLETED"
+    assert [item["table"] for item in scripts] == ["claim_information", "policy_cover_level_transactions"]
+    assert {item["bronze_catalog"] for item in scripts} == {"ATHENA_DB"}
+    assert {item["bronze_schema"] for item in scripts} == {"BRONZE"}
+    assert 'CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."BRONZE"' in script_sql
+    assert '"INSURANCE"."BRONZE"' not in script_sql
+    assert result["bronze_generation_skipped_tables"] == []
+
+
+def test_snowflake_bronze_generation_respects_optional_table_allowlist(monkeypatch):
+    monkeypatch.setenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "false")
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", "claim_information")
+    workdir = Path.cwd() / ".tmp-tests" / f"bronze_allowlist_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    state = {
+        "run_id": "run-explicit-allowlist",
+        "target_warehouse": "snowflake",
+        "certified_tables": [
+            {"database_name": "insurance", "schema_name": "dbo", "table_name": "claim_information"},
+            {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy_cover_level_transactions"},
+        ],
+        "discovered_metadata": {
+            "tables": [
+                {"table_name": "claim_information", "columns": [{"column_name": "ClaimID", "data_type": "int"}]},
+                {"table_name": "policy_cover_level_transactions", "columns": [{"column_name": "PolicyID", "data_type": "int"}]},
+            ]
+        },
+    }
+
+    result = bronze_gen.bronze_code_generation_node(state)
+
+    assert result["bronze_generation_status"] == "COMPLETED"
+    assert [item["table"] for item in result["bronze_generation_results"]] == ["claim_information"]
+    assert [item["table_name"] for item in result["bronze_generation_skipped_tables"]] == ["policy_cover_level_transactions"]
+
+
+def test_bronze_script_filename_is_safe_for_case_variant_tables():
+    lower = bronze_gen._bronze_script_filename(
+        run_id="run-case",
+        database_name="insurance",
+        schema_name="dbo",
+        table_name="policy_cover_level_transactions_dup_del",
+        extension="sql",
+    )
+    mixed = bronze_gen._bronze_script_filename(
+        run_id="run-case",
+        database_name="insurance",
+        schema_name="dbo",
+        table_name="policy_cover_level_transactions_Dup_Del",
+        extension="sql",
+    )
+
+    assert lower.casefold() != mixed.casefold()
 
 
 def test_snowflake_bronze_generation_can_use_llm_enhancement(monkeypatch):

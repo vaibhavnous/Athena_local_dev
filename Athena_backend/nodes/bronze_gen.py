@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, TypedDict
@@ -14,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from nodes.req_extraction import get_llm
 from state import Stage01State
 from utilis.db import build_source_jdbc_url
+from utilis.generated_code_paths import generated_code_dir
 from utilis.logger import logger
 
 
@@ -117,18 +119,32 @@ def _metadata_for_table(state: Stage01State, table_name: str) -> Dict[str, Any]:
 # ------------------------------------------------------------------------------
 
 def _bronze_output_dir() -> str:
-    return os.path.join(os.getcwd(), "generated_code", "bronze")
+    return str(generated_code_dir("bronze"))
 
 
 def _bronze_output_dir_for(target_warehouse: str = "databricks") -> str:
     warehouse = str(target_warehouse or "databricks").lower()
     if warehouse == "snowflake":
-        return os.path.join(os.getcwd(), "generated_code", "snowflake", "bronze")
+        return str(generated_code_dir("snowflake", "bronze"))
     return _bronze_output_dir()
 
 
 def _run_slug(run_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", str(run_id or "run")).strip("_")[:48] or "run"
+
+
+def _bronze_script_filename(
+    *,
+    run_id: str,
+    database_name: str,
+    schema_name: str,
+    table_name: str,
+    extension: str,
+) -> str:
+    table_slug = re.sub(r"[^a-zA-Z0-9_]+", "_", str(table_name or "table")).strip("_")[:80] or "table"
+    source_key = f"{database_name}.{schema_name}.{table_name}"
+    digest = hashlib.sha1(source_key.encode("utf-8")).hexdigest()[:10]
+    return f"bronze_ingest_{_run_slug(run_id)}_{table_slug}_{digest}.{extension}"
 
 
 def _bronze_readme_path(target_warehouse: str = "databricks") -> str:
@@ -142,6 +158,7 @@ def _bronze_ui_path(target_warehouse: str = "databricks") -> str:
 def _resolve_tables_for_bronze(state: Stage01State) -> List[BronzeTableRef]:
     raw_tables = state.get("certified_tables") or state.get("nominated_tables") or []
     resolved: List[BronzeTableRef] = []
+    seen_casefolded: set[str] = set()
 
     for item in raw_tables:
         if isinstance(item, dict):
@@ -156,15 +173,63 @@ def _resolve_tables_for_bronze(state: Stage01State) -> List[BronzeTableRef]:
         if not table_name:
             continue
 
+        database_name = database_name or "insurance"
+        schema_name = schema_name or "dbo"
+        casefolded_key = f"{database_name}.{schema_name}.{table_name}".casefold()
+        if casefolded_key in seen_casefolded:
+            logger.warning(
+                "Skipping case-only duplicate Bronze table reference: %s.%s.%s",
+                database_name,
+                schema_name,
+                table_name,
+            )
+            continue
+        seen_casefolded.add(casefolded_key)
+
         resolved.append(
             {
-                "database_name": database_name or "insurance",
-                "schema_name": schema_name or "dbo",
+                "database_name": database_name,
+                "schema_name": schema_name,
                 "table_name": table_name,
             }
         )
 
     return resolved
+
+
+def _snowflake_bronze_table_allowlist() -> set[str] | None:
+    raw = os.getenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST")
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped or stripped == "*":
+        return None
+    return {item.strip().casefold() for item in stripped.split(",") if item.strip()}
+
+
+def _filter_snowflake_bronze_tables(table_refs: List[BronzeTableRef]) -> tuple[List[BronzeTableRef], List[BronzeTableRef]]:
+    allowlist = _snowflake_bronze_table_allowlist()
+    if allowlist is None:
+        return table_refs, []
+
+    selected: List[BronzeTableRef] = []
+    skipped: List[BronzeTableRef] = []
+    for table_ref in table_refs:
+        table_key = table_ref["table_name"].casefold()
+        full_key = f"{table_ref['database_name']}.{table_ref['schema_name']}.{table_ref['table_name']}".casefold()
+        if table_key in allowlist or full_key in allowlist:
+            selected.append(table_ref)
+        else:
+            skipped.append(table_ref)
+    return selected, skipped
+
+
+def _snowflake_bronze_catalog() -> str:
+    return str(os.getenv("SNOWFLAKE_BRONZE_CATALOG") or "ATHENA_DB").strip() or "ATHENA_DB"
+
+
+def _snowflake_bronze_schema() -> str:
+    return str(os.getenv("SNOWFLAKE_BRONZE_SCHEMA") or "BRONZE").strip() or "BRONZE"
 
 
 # ------------------------------------------------------------------------------
@@ -1085,7 +1150,14 @@ def _generate_one_table(
     output_dir = _bronze_output_dir_for(target_warehouse)
     os.makedirs(output_dir, exist_ok=True)
 
-    script_path = os.path.join(output_dir, f"bronze_ingest_{_run_slug(run_id)}_{table_name}.{extension}")
+    script_name = _bronze_script_filename(
+        run_id=run_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        table_name=table_name,
+        extension=extension,
+    )
+    script_path = os.path.join(output_dir, script_name)
 
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
@@ -1095,8 +1167,18 @@ def _generate_one_table(
         "table": table_name,
         "database_name": database_name,
         "schema_name": schema_name,
+        "bronze_catalog": bronze_catalog,
+        "bronze_schema": bronze_schema,
         "status": "APPROVED",
         "cast_rule_count": len(cast_rules or {}),
+        "source_columns": [
+            {
+                "source": column["source"],
+                "target": column["target"],
+                "type": column["type"],
+            }
+            for column in _snowflake_columns(table_metadata=table_metadata, cast_rules=cast_rules)
+        ] if target_warehouse == "snowflake" else [],
         "llm_enhanced": llm_enhanced,
         "llm_enhancement_error": llm_error,
         "target_warehouse": target_warehouse,
@@ -1116,16 +1198,45 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
 
     results: List[Dict[str, object]] = []
     run_id = str(state.get("run_id") or "BRONZE_RUN")
+    log_context = {"run_id": run_id, "node": "bronze_generation", "stage": "bronze_generation"}
     bronze_catalog = state.get("bronze_catalog") or "main"
     bronze_schema = state.get("bronze_schema") or "bronze"
     target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
+    if target_warehouse == "snowflake":
+        bronze_catalog = _snowflake_bronze_catalog()
+        bronze_schema = _snowflake_bronze_schema()
 
     table_refs = _resolve_tables_for_bronze(state)
+    skipped_by_allowlist: List[BronzeTableRef] = []
+    if target_warehouse == "snowflake":
+        table_refs, skipped_by_allowlist = _filter_snowflake_bronze_tables(table_refs)
+        if skipped_by_allowlist:
+            logger.info(
+                "Snowflake Bronze allowlist skipped %d table(s): %s",
+                len(skipped_by_allowlist),
+                ", ".join(
+                    f"{item['database_name']}.{item['schema_name']}.{item['table_name']}"
+                    for item in skipped_by_allowlist
+                ),
+                extra={**log_context, "step_name": "snowflake_bronze_allowlist"},
+            )
 
     if not table_refs:
         new_state["bronze_generation_status"] = "SKIPPED"
-        new_state["bronze_generation_error"] = "No certified_tables or nominated_tables available for Bronze generation."
+        if skipped_by_allowlist:
+            new_state["bronze_generation_error"] = "No tables matched ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST."
+            new_state["bronze_generation_skipped_tables"] = skipped_by_allowlist
+        else:
+            new_state["bronze_generation_error"] = "No certified_tables or nominated_tables available for Bronze generation."
         return new_state
+
+    logger.info(
+        "Generating %s Bronze scripts for %d table(s): %s",
+        target_warehouse,
+        len(table_refs),
+        ", ".join(f"{item['database_name']}.{item['schema_name']}.{item['table_name']}" for item in table_refs),
+        extra={**log_context, "step_name": "bronze_generation_start"},
+    )
 
     source_jdbc_url = state.get("source_jdbc_url")
     with ThreadPoolExecutor(max_workers=BRONZE_MAX_WORKERS) as executor:
@@ -1145,7 +1256,24 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
         ]
 
         for f in as_completed(futures):
-            results.append(f.result())
+            result = f.result()
+            results.append(result)
+            logger.info(
+                "Generated Bronze script for %s.%s.%s target=%s.%s.%s script=%s",
+                result.get("database_name"),
+                result.get("schema_name"),
+                result.get("table"),
+                result.get("bronze_catalog") or bronze_catalog,
+                result.get("bronze_schema") or bronze_schema,
+                f"bronze_{result.get('table')}",
+                result.get("script_path"),
+                extra={
+                    **log_context,
+                    "step_name": "bronze_script_generated",
+                    "table": result.get("table"),
+                    "target_warehouse": target_warehouse,
+                },
+            )
 
     # Write bundle summary
     bundle = {
@@ -1185,9 +1313,17 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
     new_state["bronze_generation_error"] = None
     new_state["bronze_generated_at"] = bundle["generated_at"]
     new_state["bronze_generation_results"] = results
+    new_state["bronze_generation_skipped_tables"] = skipped_by_allowlist
     new_state["bronze_generation_bundle_path"] = bundle_path
     new_state["bronze_generation_readme_path"] = readme_path
     new_state["bronze_generation_ui_path"] = ui_path
     new_state["status"] = "PIPELINE_COMPLETED"
+    logger.info(
+        "Bronze generation completed: generated=%d skipped=%d target_warehouse=%s",
+        len(results),
+        len(skipped_by_allowlist),
+        target_warehouse,
+        extra={**log_context, "step_name": "bronze_generation_complete"},
+    )
 
     return new_state

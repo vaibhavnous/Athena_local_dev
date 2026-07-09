@@ -18,6 +18,7 @@ from typing import Any, Dict, List, TypedDict
 
 from state import Stage01State
 from utilis.db import ai_store_db_writer
+from utilis.generated_code_paths import generated_code_dir
 from utilis.logger import logger
 
 
@@ -31,10 +32,18 @@ class SilverTableRef(TypedDict):
     bronze_table: str
     silver_table: str
     existing_script_path: str | None
+    source_columns: List[Dict[str, Any]]
 
 
 def _silver_output_dir() -> str:
-    return os.path.join(os.getcwd(), "generated_code", "silver")
+    return str(generated_code_dir("silver"))
+
+
+def _silver_output_dir_for(target_warehouse: str = "databricks") -> str:
+    warehouse = str(target_warehouse or "databricks").lower()
+    if warehouse == "snowflake":
+        return str(generated_code_dir("snowflake", "silver"))
+    return _silver_output_dir()
 
 
 def _run_slug(run_id: str) -> str:
@@ -50,27 +59,31 @@ def _file_slug(value: str, max_length: int = 64) -> str:
 
 
 def _gold_output_dir() -> str:
-    return os.path.join(os.getcwd(), "generated_code", "gold")
+    return str(generated_code_dir("gold"))
 
 
-def _bronze_bundle_path() -> str:
-    return os.path.join(os.getcwd(), "generated_code", "bronze", "bronze_scripts.json")
+def _bronze_bundle_path(target_warehouse: str = "databricks") -> str:
+    if str(target_warehouse or "").lower() == "snowflake":
+        snowflake_path = str(generated_code_dir("snowflake", "bronze", "bronze_scripts.json"))
+        if os.path.exists(snowflake_path):
+            return snowflake_path
+    return str(generated_code_dir("bronze", "bronze_scripts.json"))
 
 
-def _silver_readme_path() -> str:
-    return os.path.join(_silver_output_dir(), "README.md")
+def _silver_readme_path(target_warehouse: str = "databricks") -> str:
+    return os.path.join(_silver_output_dir_for(target_warehouse), "README.md")
 
 
-def _silver_ui_path() -> str:
-    return os.path.join(_silver_output_dir(), "index.html")
+def _silver_ui_path(target_warehouse: str = "databricks") -> str:
+    return os.path.join(_silver_output_dir_for(target_warehouse), "index.html")
 
 
 def _validate_python(code: str) -> None:
     compile(code, "<silver_generated>", "exec")
 
 
-def _load_bronze_bundle() -> Dict[str, Any]:
-    path = _bronze_bundle_path()
+def _load_bronze_bundle(target_warehouse: str = "databricks") -> Dict[str, Any]:
+    path = _bronze_bundle_path(target_warehouse)
     if not os.path.exists(path):
         return {"scripts": []}
     with open(path, "r", encoding="utf-8") as f:
@@ -96,6 +109,7 @@ def _existing_silver_script_refs(silver_schema: str) -> List[SilverTableRef]:
                 "bronze_table": f"bronze.bronze_{table_name}",
                 "silver_table": f"{silver_schema}.silver_{table_name}",
                 "existing_script_path": os.path.join(output_dir, file_name),
+                "source_columns": [],
             }
         )
     return refs
@@ -105,16 +119,57 @@ def _table_name_from_ref(item: Dict[str, Any]) -> str:
     return str(item.get("table") or item.get("table_name") or "").strip()
 
 
-def _resolve_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
-    bronze_results = list(state.get("bronze_generation_results") or [])
-    bronze_results.extend(_load_bronze_bundle().get("scripts", []))
-    bronze_results.extend(state.get("certified_tables") or [])
-    discovered = state.get("discovered_metadata") or {}
-    if isinstance(discovered, dict):
-        bronze_results.extend(discovered.get("tables", []) or [])
+def _snowflake_quote_identifier(value: str) -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        raise ValueError("Snowflake identifier cannot be empty.")
+    return '"' + cleaned.replace('"', '""') + '"'
 
+
+def _snowflake_qualified_name(*parts: str) -> str:
+    return ".".join(_snowflake_quote_identifier(part) for part in parts if str(part or "").strip())
+
+
+def _snowflake_string_literal(value: str) -> str:
+    return "'" + str(value or "").replace("'", "''") + "'"
+
+
+def _snowflake_bronze_catalog() -> str:
+    return str(os.getenv("SNOWFLAKE_BRONZE_CATALOG") or "ATHENA_DB").strip() or "ATHENA_DB"
+
+
+def _snowflake_bronze_schema() -> str:
+    return str(os.getenv("SNOWFLAKE_BRONZE_SCHEMA") or "BRONZE").strip() or "BRONZE"
+
+
+def _snowflake_silver_catalog() -> str:
+    return str(os.getenv("SNOWFLAKE_SILVER_CATALOG") or _snowflake_bronze_catalog()).strip() or "ATHENA_DB"
+
+
+def _snowflake_silver_schema() -> str:
+    return str(os.getenv("SNOWFLAKE_SILVER_SCHEMA") or "SILVER").strip() or "SILVER"
+
+
+def _resolve_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
+    target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
+    bronze_results = list(state.get("bronze_generation_results") or [])
+    if not bronze_results:
+        bronze_results.extend(_load_bronze_bundle(target_warehouse).get("scripts", []))
+    if not bronze_results:
+        bronze_results.extend(state.get("certified_tables") or [])
+        discovered = state.get("discovered_metadata") or {}
+        if isinstance(discovered, dict):
+            bronze_results.extend(discovered.get("tables", []) or [])
+
+    bronze_catalog = str(state.get("bronze_catalog") or "main")
     bronze_schema = str(state.get("bronze_schema") or "bronze")
+    silver_catalog = str(state.get("silver_catalog") or bronze_catalog)
     silver_schema = str(state.get("silver_schema") or "silver")
+    if target_warehouse == "snowflake":
+        bronze_catalog = _snowflake_bronze_catalog()
+        bronze_schema = _snowflake_bronze_schema()
+        silver_catalog = _snowflake_silver_catalog()
+        silver_schema = _snowflake_silver_schema()
     resolved_by_table: Dict[str, SilverTableRef] = {}
 
     for item in bronze_results:
@@ -123,14 +178,43 @@ def _resolve_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
         table_name = _table_name_from_ref(item)
         if not table_name:
             continue
-        script_path = os.path.join(_silver_output_dir(), f"silver_transform_{table_name}.py")
+        extension = "sql" if target_warehouse == "snowflake" else "py"
+        script_path = os.path.join(
+            _silver_output_dir_for(target_warehouse),
+            f"silver_transform_{_run_slug(str(state.get('run_id') or 'run'))}_{_file_slug(table_name)}.{extension}",
+        )
+        bronze_table = (
+            str(item.get("target_table") or "").strip()
+            if target_warehouse == "snowflake" and item.get("target_table")
+            else ""
+        )
+        if not bronze_table:
+            bronze_table = (
+                f"{bronze_catalog}.{bronze_schema}.bronze_{table_name}"
+                if target_warehouse == "snowflake"
+                else f"{bronze_schema}.bronze_{table_name}"
+            )
+        silver_table = (
+            f"{silver_catalog}.{silver_schema}.silver_{table_name}"
+            if target_warehouse == "snowflake"
+            else f"{silver_schema}.silver_{table_name}"
+        )
         resolved_by_table[table_name.lower()] = {
             "database_name": str(item.get("database_name") or "insurance"),
             "schema_name": str(item.get("schema_name") or "dbo"),
             "table_name": table_name,
-            "bronze_table": f"{bronze_schema}.bronze_{table_name}",
-            "silver_table": f"{silver_schema}.silver_{table_name}",
+            "bronze_table": bronze_table,
+            "silver_table": silver_table,
             "existing_script_path": script_path if os.path.exists(script_path) else None,
+            "source_columns": [
+                {
+                    "column_name": str(column.get("target") or column.get("source") or ""),
+                    "source_column_name": str(column.get("target") or column.get("source") or ""),
+                    "type": str(column.get("type") or ""),
+                }
+                for column in item.get("source_columns") or []
+                if isinstance(column, dict)
+            ],
         }
 
     return list(resolved_by_table.values())
@@ -169,10 +253,17 @@ def _datatype_cast(data_type: str) -> str | None:
 
 
 def _key_columns(enriched_columns: List[Dict[str, Any]]) -> List[str]:
+    reviewed = [
+        _normalized_column_name(column)
+        for column in enriched_columns
+        if column.get("is_join_key") is True
+    ]
+    if reviewed:
+        return reviewed
     return [
         _normalized_column_name(column)
         for column in enriched_columns
-        if column.get("is_join_key") or str(column.get("semantic_type") or "") in {"ID", "SURROGATE_KEY"}
+        if str(column.get("semantic_type") or "") in {"ID", "SURROGATE_KEY"}
     ]
 
 
@@ -184,6 +275,13 @@ COLUMN_NAME_CORRECTIONS = {
 def _normalized_column_name(column: Dict[str, Any]) -> str:
     normalized = str(column.get("column_name") or "").strip().lower()
     return COLUMN_NAME_CORRECTIONS.get(normalized, normalized)
+
+
+def _source_column_name(column: Dict[str, Any]) -> str:
+    source_name = str(column.get("source_column_name") or column.get("source") or "").strip().lower()
+    if source_name:
+        return source_name
+    return str(column.get("column_name") or "").strip().lower()
 
 
 def generate_silver_script(
@@ -411,6 +509,209 @@ print(f"SUCCESS: Silver upsert completed for {{TARGET_TABLE}}")
 '''
 
 
+def _snowflake_type_from_metadata(column: Dict[str, Any]) -> str:
+    explicit_type = str(column.get("type") or "").strip()
+    if explicit_type:
+        return explicit_type
+    data_type = str(column.get("data_type") or "").strip().lower()
+    precision = column.get("numeric_precision")
+    scale = column.get("numeric_scale")
+    max_length = column.get("character_maximum_length") or column.get("max_length")
+
+    if data_type in {"int", "integer", "smallint", "tinyint", "bigint"}:
+        return "NUMBER(38,0)"
+    if data_type in {"bit", "boolean"}:
+        return "BOOLEAN"
+    if data_type in {"float", "real", "double"}:
+        return "FLOAT"
+    if data_type in {"decimal", "numeric", "number", "money", "smallmoney"}:
+        if precision and scale is not None:
+            return f"NUMBER({min(int(precision), 38)},{int(scale)})"
+        return "NUMBER(38,10)"
+    if data_type == "date":
+        return "DATE"
+    if data_type in {"datetime", "datetime2", "smalldatetime", "datetimeoffset", "time", "timestamp"}:
+        return "TIMESTAMP_NTZ"
+    if data_type in {"binary", "varbinary"}:
+        return "BINARY"
+    if data_type in {"varchar", "nvarchar", "char", "nchar", "text", "ntext", "string"}:
+        try:
+            length = int(max_length)
+            if 0 < length <= 16777216:
+                return f"VARCHAR({length})"
+        except Exception:
+            pass
+    return "VARCHAR"
+
+
+def _snowflake_column_expr(column: Dict[str, Any]) -> str:
+    target_name = _normalized_column_name(column)
+    source_name = _source_column_name(column)
+    source_ref = f"GET_IGNORE_CASE(OBJECT_CONSTRUCT_KEEP_NULL(src.*), {_snowflake_string_literal(source_name)})"
+    data_type = str(column.get("data_type") or "").strip().lower()
+    target_type = _snowflake_type_from_metadata(column)
+
+    if data_type in {"varchar", "nvarchar", "char", "nchar", "text", "ntext", "string"}:
+        expression = f"NULLIF(TRIM(TO_VARCHAR({source_ref})), '')"
+    elif target_type == "VARCHAR":
+        expression = source_ref
+    else:
+        expression = _snowflake_variant_cast_expr(source_ref, target_type)
+    return f"{expression} AS {_snowflake_quote_identifier(target_name)}"
+
+
+def _snowflake_variant_cast_expr(source_ref: str, target_type: str) -> str:
+    normalized = str(target_type or "").strip().upper()
+    number_match = re.fullmatch(r"NUMBER\((\d+),\s*(\d+)\)", normalized)
+    if number_match:
+        return f"TRY_TO_DECIMAL(TO_VARCHAR({source_ref}), {number_match.group(1)}, {number_match.group(2)})"
+    if normalized.startswith("NUMBER"):
+        return f"TRY_TO_NUMBER(TO_VARCHAR({source_ref}))"
+    if normalized == "FLOAT":
+        return f"TRY_TO_DOUBLE(TO_VARCHAR({source_ref}))"
+    if normalized == "BOOLEAN":
+        return f"TRY_TO_BOOLEAN(TO_VARCHAR({source_ref}))"
+    if normalized == "DATE":
+        text_value = f"TO_VARCHAR({source_ref})"
+        return f"COALESCE(TRY_TO_DATE({text_value}), TO_DATE(TRY_TO_TIMESTAMP_NTZ({text_value})))"
+    if normalized == "TIMESTAMP_NTZ":
+        return f"TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR({source_ref}))"
+    if normalized == "BINARY":
+        return f"CAST({source_ref} AS BINARY)"
+    return f"CAST({source_ref} AS {target_type})"
+
+
+def _snowflake_hash_expr(columns: List[str]) -> str:
+    if not columns:
+        return "SHA2('__NO_BUSINESS_COLUMNS__', 256)"
+    parts = ",\n            ".join(
+        f"COALESCE(TO_VARCHAR({_snowflake_quote_identifier(column)}), '__NULL__')" for column in columns
+    )
+    return f"SHA2(CONCAT_WS('||',\n            {parts}\n        ), 256)"
+
+
+def generate_snowflake_silver_script(
+    *,
+    table_ref: SilverTableRef,
+    enriched_columns: List[Dict[str, Any]],
+    run_id: str,
+    silver_catalog: str = "ATHENA_DB",
+    silver_schema: str = "SILVER",
+) -> str:
+    table_name = table_ref["table_name"]
+    source_table = _snowflake_qualified_name(*str(table_ref["bronze_table"]).split("."))
+    target_table = _snowflake_qualified_name(*str(table_ref["silver_table"]).split("."))
+    target_schema = _snowflake_qualified_name(silver_catalog, silver_schema)
+
+    business_columns = []
+    seen_columns: set[str] = set()
+    for column in enriched_columns:
+        column_name = _normalized_column_name(column)
+        if column_name and column_name not in seen_columns:
+            business_columns.append(column)
+            seen_columns.add(column_name)
+
+    if not business_columns:
+        business_columns = [{"column_name": table_name, "data_type": "varchar"}]
+
+    business_column_names = [_normalized_column_name(column) for column in business_columns]
+    key_columns = [column for column in _key_columns(business_columns) if column in business_column_names]
+    hash_columns = key_columns or business_column_names
+    column_defs = ",\n    ".join(
+        f"{_snowflake_quote_identifier(_normalized_column_name(column))} {_snowflake_type_from_metadata(column)}"
+        for column in business_columns
+    )
+    business_selects = ",\n        ".join(_snowflake_column_expr(column) for column in business_columns)
+    business_insert_columns = ",\n    ".join(_snowflake_quote_identifier(column) for column in business_column_names)
+    all_insert_columns = ",\n    ".join(
+        [
+            business_insert_columns,
+            '"run_id"',
+            '"ingestion_timestamp"',
+            '"source_system"',
+            '"source_table"',
+            '"silver_upsert_key"',
+            '"silver_run_id"',
+            '"silver_processed_timestamp"',
+        ]
+    )
+    update_assignments = ",\n        ".join(
+        f'target.{_snowflake_quote_identifier(column)} = source.{_snowflake_quote_identifier(column)}'
+        for column in business_column_names
+    )
+    update_assignments = ",\n        ".join(
+        [
+            update_assignments,
+            'target."run_id" = source."run_id"',
+            'target."ingestion_timestamp" = source."ingestion_timestamp"',
+            'target."source_system" = source."source_system"',
+            'target."source_table" = source."source_table"',
+            'target."silver_run_id" = source."silver_run_id"',
+            'target."silver_processed_timestamp" = source."silver_processed_timestamp"',
+        ]
+    )
+    insert_values = ",\n    ".join(f"source.{column}" for column in all_insert_columns.split(",\n    "))
+    hash_expr = _snowflake_hash_expr(hash_columns)
+    order_expr = 'COALESCE("ingestion_timestamp", "silver_processed_timestamp") DESC NULLS LAST'
+
+    return f"""-- AUTO-GENERATED SILVER TRANSFORMATION SCRIPT
+-- Source table: {table_ref["bronze_table"]}
+-- Target table: {table_ref["silver_table"]}
+-- Expected runtime: Snowflake SQL
+-- Merge keys: {", ".join(key_columns) if key_columns else "business column hash fallback"}
+-- DO NOT EDIT MANUALLY
+
+CREATE SCHEMA IF NOT EXISTS {target_schema};
+
+CREATE TABLE IF NOT EXISTS {target_table} (
+    {column_defs},
+    "run_id" VARCHAR,
+    "ingestion_timestamp" TIMESTAMP_NTZ,
+    "source_system" VARCHAR,
+    "source_table" VARCHAR,
+    "silver_upsert_key" VARCHAR,
+    "silver_run_id" VARCHAR,
+    "silver_processed_timestamp" TIMESTAMP_NTZ
+);
+
+MERGE INTO {target_table} AS target
+USING (
+    WITH normalized AS (
+        SELECT
+        {business_selects},
+        src."run_id" AS "run_id",
+        src."ingestion_timestamp" AS "ingestion_timestamp",
+        src."source_system" AS "source_system",
+        src."source_table" AS "source_table",
+        {_snowflake_string_literal(run_id)} AS "silver_run_id",
+        CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "silver_processed_timestamp"
+        FROM {source_table} AS src
+    ),
+    keyed AS (
+        SELECT
+            *,
+            {hash_expr} AS "silver_upsert_key"
+        FROM normalized
+    )
+    SELECT *
+    FROM keyed
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY "silver_upsert_key"
+        ORDER BY {order_expr}
+    ) = 1
+) AS source
+ON target."silver_upsert_key" = source."silver_upsert_key"
+WHEN MATCHED THEN UPDATE SET
+        {update_assignments}
+WHEN NOT MATCHED THEN INSERT (
+    {all_insert_columns}
+)
+VALUES (
+    {insert_values}
+);
+"""
+
+
 def _generate_one_table(
     table_ref: SilverTableRef,
     *,
@@ -418,23 +719,41 @@ def _generate_one_table(
     run_id: str,
     silver_catalog: str,
     silver_schema: str,
+    target_warehouse: str = "databricks",
 ) -> Dict[str, object]:
     table_name = table_ref["table_name"]
     enriched_columns = _columns_for_table(enriched_metadata, table_name)
+    if not enriched_columns and str(target_warehouse or "").lower() == "snowflake":
+        enriched_columns = table_ref.get("source_columns") or []
     merge_keys = _key_columns(enriched_columns)
 
-    code = generate_silver_script(
-        table_ref=table_ref,
-        enriched_columns=enriched_columns,
-        run_id=run_id,
-        silver_catalog=silver_catalog,
-        silver_schema=silver_schema,
-    )
-    _validate_python(code)
+    if str(target_warehouse or "").lower() == "snowflake":
+        code = generate_snowflake_silver_script(
+            table_ref=table_ref,
+            enriched_columns=enriched_columns,
+            run_id=run_id,
+            silver_catalog=silver_catalog,
+            silver_schema=silver_schema,
+        )
+        script_language = "sql"
+        extension = "sql"
+        merge_strategy = "Snowflake MERGE on silver_upsert_key built from reviewed merge keys"
+    else:
+        code = generate_silver_script(
+            table_ref=table_ref,
+            enriched_columns=enriched_columns,
+            run_id=run_id,
+            silver_catalog=silver_catalog,
+            silver_schema=silver_schema,
+        )
+        _validate_python(code)
+        script_language = "python"
+        extension = "py"
+        merge_strategy = "Delta MERGE on silver_upsert_key built from reviewed merge keys"
 
-    output_dir = _silver_output_dir()
+    output_dir = _silver_output_dir_for(target_warehouse)
     os.makedirs(output_dir, exist_ok=True)
-    script_path = os.path.join(output_dir, f"silver_transform_{_run_slug(run_id)}_{_file_slug(table_name)}.py")
+    script_path = os.path.join(output_dir, f"silver_transform_{_run_slug(run_id)}_{_file_slug(table_name)}.{extension}")
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
 
@@ -448,14 +767,21 @@ def _generate_one_table(
         "column_count": len(enriched_columns),
         "merge_keys": merge_keys,
         "primary_keys": merge_keys,
-        "merge_key_source": "semantic_enrichment",
-        "merge_strategy": "Delta MERGE on silver_upsert_key built from reviewed merge keys",
+        "merge_key_source": "reviewed_gate4" if enriched_metadata.get("gate4_reviewed_merge_keys") else "semantic_enrichment",
+        "merge_strategy": merge_strategy,
+        "script_language": script_language,
+        "target_warehouse": str(target_warehouse or "databricks").lower(),
         "status": "APPROVED",
         "script_path": script_path,
     }
 
 
-def _write_silver_readme(*, results: List[Dict[str, object]], generated_at: str) -> str:
+def _write_silver_readme(
+    *,
+    results: List[Dict[str, object]],
+    generated_at: str,
+    target_warehouse: str = "databricks",
+) -> str:
     lines = [
         "# Silver Scripts",
         "",
@@ -473,13 +799,18 @@ def _write_silver_readme(*, results: List[Dict[str, object]], generated_at: str)
             f"`{item.get('column_count', 0)}` | [{script_name}]({script_path}) | `{item.get('status')}` |"
         )
 
-    readme_path = _silver_readme_path()
+    readme_path = _silver_readme_path(target_warehouse)
     with open(readme_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return readme_path
 
 
-def _write_silver_ui(*, results: List[Dict[str, object]], generated_at: str) -> str:
+def _write_silver_ui(
+    *,
+    results: List[Dict[str, object]],
+    generated_at: str,
+    target_warehouse: str = "databricks",
+) -> str:
     rows: List[Dict[str, str]] = []
     for item in sorted(results, key=lambda row: str(row.get("table", ""))):
         script_path = str(item.get("script_path") or "")
@@ -548,7 +879,7 @@ def _write_silver_ui(*, results: List[Dict[str, object]], generated_at: str) -> 
 </html>
 """
 
-    ui_path = _silver_ui_path()
+    ui_path = _silver_ui_path(target_warehouse)
     with open(ui_path, "w", encoding="utf-8") as f:
         f.write(html)
     return ui_path
@@ -851,6 +1182,7 @@ def _persist_generation_artifacts(
 
 def silver_code_generation_node(state: Stage01State) -> Stage01State:
     new_state = state.copy()
+    target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
     table_refs = _resolve_tables_for_silver(state)
 
     if not table_refs:
@@ -869,6 +1201,9 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
     run_id = str(state.get("run_id") or "SILVER_POC_RUN_001")
     silver_catalog = str(state.get("silver_catalog") or state.get("bronze_catalog") or "main")
     silver_schema = str(state.get("silver_schema") or "silver")
+    if target_warehouse == "snowflake":
+        silver_catalog = _snowflake_silver_catalog()
+        silver_schema = _snowflake_silver_schema()
 
     results: List[Dict[str, object]] = []
     with ThreadPoolExecutor(max_workers=SILVER_MAX_WORKERS) as executor:
@@ -880,6 +1215,7 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
                 run_id=run_id,
                 silver_catalog=silver_catalog,
                 silver_schema=silver_schema,
+                target_warehouse=target_warehouse,
             )
             for table_ref in table_refs
         ]
@@ -891,19 +1227,29 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
         "run_id": run_id,
         "generated_at": generated_at,
         "script_count": len(results),
+        "target_warehouse": target_warehouse,
         "scripts": results,
     }
 
-    os.makedirs(_silver_output_dir(), exist_ok=True)
-    bundle_path = os.path.join(_silver_output_dir(), f"{_run_slug(run_id)}_silver_scripts.json")
-    latest_bundle_path = os.path.join(_silver_output_dir(), "silver_scripts.json")
+    output_dir = _silver_output_dir_for(target_warehouse)
+    os.makedirs(output_dir, exist_ok=True)
+    bundle_path = os.path.join(output_dir, f"{_run_slug(run_id)}_silver_scripts.json")
+    latest_bundle_path = os.path.join(output_dir, "silver_scripts.json")
     with open(bundle_path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
     with open(latest_bundle_path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
 
-    readme_path = _write_silver_readme(results=results, generated_at=generated_at)
-    ui_path = _write_silver_ui(results=results, generated_at=generated_at)
+    readme_path = _write_silver_readme(
+        results=results,
+        generated_at=generated_at,
+        target_warehouse=target_warehouse,
+    )
+    ui_path = _write_silver_ui(
+        results=results,
+        generated_at=generated_at,
+        target_warehouse=target_warehouse,
+    )
     gold_contract = _build_gold_generation_contract(
         state=state,
         results=results,
@@ -929,5 +1275,10 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
     new_state["gold_contract_bundle_path"] = gold_contract_path
     new_state["status"] = "PIPELINE_COMPLETED"
 
-    logger.info("Silver generation completed: %d scripts", len(results), extra={"run_id": run_id, "node": "silver_generation"})
+    logger.info(
+        "Silver generation completed: %d scripts target_warehouse=%s",
+        len(results),
+        target_warehouse,
+        extra={"run_id": run_id, "node": "silver_generation"},
+    )
     return new_state

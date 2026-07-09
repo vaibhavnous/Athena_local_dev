@@ -47,6 +47,37 @@ def test_minimum_stage_runtime_falls_back_for_bad_env(monkeypatch):
     assert pipeline_runtime._minimum_stage_runtime_seconds() == 4.0
 
 
+def test_load_checkpoint_fields_uses_json_value_projection(monkeypatch):
+    from services import pipeline_runtime
+
+    recorded = {}
+
+    class StubCursor:
+        def execute(self, query, params):
+            recorded["query"] = query
+            recorded["params"] = params
+
+        def fetchone(self):
+            return ("database", "RUNNING")
+
+    class StubConnection:
+        def cursor(self):
+            return StubCursor()
+
+        def close(self):
+            recorded["closed"] = True
+
+    monkeypatch.setattr(pipeline_runtime, "get_connection", lambda: StubConnection())
+
+    fields = pipeline_runtime.load_checkpoint_fields("run-fast", "source", "status")
+
+    assert fields == {"source": "database", "status": "RUNNING"}
+    assert "JSON_VALUE(full_state_json, '$.source')" in recorded["query"]
+    assert "JSON_VALUE(full_state_json, '$.status')" in recorded["query"]
+    assert recorded["params"] == ("run-fast",)
+    assert recorded["closed"] is True
+
+
 def test_run_pipeline_background_database_flow_saves_completed(monkeypatch):
     saved = {}
 
@@ -214,6 +245,62 @@ def test_database_failed_stage_key_uses_context_fallback(monkeypatch):
     result = pipeline_service.database_failed_stage_key("run-5", {})
 
     assert result == "silver"
+
+
+def test_build_pipeline_steps_keeps_active_ingestion_running():
+    from services import pipeline_runtime
+
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            "status": "PROCESSING",
+            "background_stage": "ingestion",
+            "brd_text": "partial brd text already saved",
+            "fingerprint": "partial-fingerprint",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=False,
+        silver_generation_completed=False,
+        gold_generation_completed=False,
+    )
+
+    by_key = {step["key"]: step for step in steps}
+    assert by_key["ingestion"]["state"] == "RUNNING"
+    assert by_key["memory"]["state"] == "PENDING"
+
+
+def test_build_pipeline_steps_does_not_complete_in_progress_profiling():
+    from services import pipeline_runtime
+
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            "status": "RUNNING",
+            "metadata_status": "COMPLETED",
+            "column_profiling_status": "IN_PROGRESS",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=False,
+        silver_generation_completed=False,
+        gold_generation_completed=False,
+    )
+
+    by_key = {step["key"]: step for step in steps}
+    assert by_key["discovery"]["state"] == "COMPLETED"
+    assert by_key["profiling"]["state"] == "RUNNING"
+    assert by_key["enrichment"]["state"] == "PENDING"
 
 
 def test_run_context_preserves_stage_confirmation_status_after_bronze(monkeypatch):
@@ -590,6 +677,8 @@ def test_database_continue_skips_stage_confirmation_before_review_gates(monkeypa
     assert result["status"] == "HITL_WAIT"
     assert result["last_completed_stage_key"] == expected_gate
     assert all(state.get("status") != "PAUSED_FOR_STAGE_CONFIRMATION" for state in saved_states)
+    assert any(state.get("background_stage") == start_stage for state in saved_states)
+    assert any(state.get("background_stage") == expected_gate for state in saved_states)
 
 
 def test_job_done_callback_marks_failure_and_cleans_registry(monkeypatch):
@@ -610,3 +699,32 @@ def test_job_done_callback_marks_failure_and_cleans_registry(monkeypatch):
 
     assert recorded == {"run_id": "run-6", "error": "job failed", "stage": "pipeline"}
     assert job_key not in pipeline_service.BACKGROUND_JOBS
+
+
+def test_gate4_review_filters_rejected_bronze_results_before_silver():
+    from services import pipeline_runtime
+
+    filtered = pipeline_runtime._filter_bronze_results_by_gate4_review(
+        [
+            {"database_name": "insurance", "schema_name": "dbo", "table": "claim_information"},
+            {"database_name": "insurance", "schema_name": "dbo", "table": "policy_transactions"},
+        ],
+        {
+            "feeds": [
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table": "claim_information",
+                    "review_status": "APPROVED",
+                },
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table": "policy_transactions",
+                    "review_status": "REJECTED",
+                },
+            ]
+        },
+    )
+
+    assert [item["table"] for item in filtered] == ["claim_information"]

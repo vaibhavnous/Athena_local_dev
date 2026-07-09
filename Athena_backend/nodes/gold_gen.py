@@ -16,14 +16,22 @@ from typing import Any, Dict, List, Tuple
 from state import Stage01State
 from utilis.db import ai_store_db_writer
 from utilis.domain_kb import get_domain_kb_config, load_domain_kb
+from utilis.generated_code_paths import generated_code_dir
 from utilis.logger import logger
 
 
 USE_LLM_ENV_KEYS = ("ATHENA_GOLD_USE_LLM", "USE_LLM")
+DEFAULT_MAX_GOLD_SOURCE_TABLES = 3
+
+
+def _gold_output_dir_for(target_warehouse: str = "databricks") -> str:
+    if str(target_warehouse or "").lower() == "snowflake":
+        return str(generated_code_dir("snowflake", "gold"))
+    return str(generated_code_dir("gold"))
 
 
 def _gold_output_dir() -> str:
-    return os.path.join(os.getcwd(), "generated_code", "gold")
+    return _gold_output_dir_for("databricks")
 
 
 def _run_slug(run_id: str) -> str:
@@ -35,20 +43,20 @@ def _contract_path() -> str:
     return os.path.join(_gold_output_dir(), "gold_generation_contract.json")
 
 
-def _bundle_path() -> str:
-    return os.path.join(_gold_output_dir(), "gold_scripts.json")
+def _bundle_path(target_warehouse: str = "databricks") -> str:
+    return os.path.join(_gold_output_dir_for(target_warehouse), "gold_scripts.json")
 
 
-def _run_bundle_path(run_id: Any) -> str:
-    return os.path.join(_gold_output_dir(), f"{_run_slug(str(run_id or 'run'))}_gold_scripts.json")
+def _run_bundle_path(run_id: Any, target_warehouse: str = "databricks") -> str:
+    return os.path.join(_gold_output_dir_for(target_warehouse), f"{_run_slug(str(run_id or 'run'))}_gold_scripts.json")
 
 
-def _readme_path() -> str:
-    return os.path.join(_gold_output_dir(), "README.md")
+def _readme_path(target_warehouse: str = "databricks") -> str:
+    return os.path.join(_gold_output_dir_for(target_warehouse), "README.md")
 
 
-def _ui_path() -> str:
-    return os.path.join(_gold_output_dir(), "index.html")
+def _ui_path(target_warehouse: str = "databricks") -> str:
+    return os.path.join(_gold_output_dir_for(target_warehouse), "index.html")
 
 
 def _validate_python(code: str) -> None:
@@ -63,6 +71,35 @@ def _safe_identifier(value: str, fallback: str = "kpi") -> str:
     if cleaned[0].isdigit():
         cleaned = f"{fallback}_{cleaned}"
     return cleaned
+
+
+def _snowflake_quote_identifier(value: str) -> str:
+    text = str(value or "").strip().strip('"')
+    return '"' + text.replace('"', '""') + '"'
+
+
+def _snowflake_silver_source_identifier(value: str) -> str:
+    return _snowflake_quote_identifier(str(value or "").strip().strip('"').lower())
+
+
+def _snowflake_qualified_name(*parts: str) -> str:
+    return ".".join(_snowflake_quote_identifier(part) for part in parts if str(part or "").strip())
+
+
+def _snowflake_string_literal(value: Any) -> str:
+    return "'" + str(value or "").replace("'", "''") + "'"
+
+
+def _snowflake_gold_catalog() -> str:
+    return str(os.getenv("SNOWFLAKE_GOLD_CATALOG") or os.getenv("SNOWFLAKE_SILVER_CATALOG") or "ATHENA_DB").strip() or "ATHENA_DB"
+
+
+def _snowflake_gold_schema() -> str:
+    return str(os.getenv("SNOWFLAKE_GOLD_SCHEMA") or "GOLD").strip() or "GOLD"
+
+
+def _target_warehouse(state: Stage01State) -> str:
+    return str(state.get("target_warehouse") or "databricks").lower()
 
 
 def _load_contract(state: Stage01State) -> Dict[str, Any]:
@@ -189,6 +226,10 @@ def _target_fact_table(gold_schema: str, kpi_id: str) -> str:
     return f"{gold_schema}.fact_{kpi_id}"
 
 
+def _snowflake_target_fact_table(gold_catalog: str, gold_schema: str, kpi_id: str) -> str:
+    return f"{gold_catalog}.{gold_schema}.fact_{kpi_id}"
+
+
 def _llm_prompt(
     mapping: Dict[str, Any],
     run_id: str,
@@ -268,6 +309,108 @@ def _usable_mapping(mapping: Dict[str, Any]) -> bool:
     if aggregation != "COUNT" and not measure.get("column"):
         return False
     return True
+
+
+def _max_gold_source_tables() -> int:
+    raw_value = str(os.getenv("ATHENA_GOLD_MAX_SOURCE_TABLES") or DEFAULT_MAX_GOLD_SOURCE_TABLES)
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        return DEFAULT_MAX_GOLD_SOURCE_TABLES
+
+
+def _logical_table_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return _logical_table_from_silver(text)
+
+
+def _bump_score(scores: Dict[str, float], table: Any, points: float) -> None:
+    name = _logical_table_name(table)
+    if name:
+        scores[name] = scores.get(name, 0.0) + points
+
+
+def _mapping_source_table_scores(mapping: Dict[str, Any]) -> Dict[str, float]:
+    measure = mapping.get("measure") or {}
+    time_info = mapping.get("time") or {}
+    time_column = time_info.get("column") if isinstance(time_info, dict) else {}
+    scores: Dict[str, float] = {}
+
+    _bump_score(scores, mapping.get("source_silver_table"), 10_000)
+    _bump_score(scores, measure.get("table"), 5_000)
+    if isinstance(time_column, dict):
+        _bump_score(scores, time_column.get("table"), 300)
+
+    for dimension in mapping.get("grouping_dimensions") or []:
+        if not isinstance(dimension, dict):
+            continue
+        _bump_score(scores, dimension.get("table"), 120)
+        if str(dimension.get("semantic_type") or "").upper() == "DATE":
+            _bump_score(scores, dimension.get("table"), 60)
+
+    for path in mapping.get("join_paths") or []:
+        if not isinstance(path, dict):
+            continue
+        if not all(str(path.get(key) or "").strip() for key in ("left_table", "right_table", "left_column", "right_column")):
+            continue
+        try:
+            confidence = float(path.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        join_score = 25 + min(max(confidence, 0.0), 1.0) * 50
+        if path.get("certified"):
+            join_score += 75
+        _bump_score(scores, path.get("left_table"), join_score)
+        _bump_score(scores, path.get("right_table"), join_score)
+
+    return scores
+
+
+def _sanitize_gold_mapping(mapping: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    max_tables = _max_gold_source_tables()
+    scores = _mapping_source_table_scores(mapping)
+    ranked_tables = sorted(scores, key=lambda table: (-scores[table], table))
+    kept_tables = set(ranked_tables[:max_tables])
+    dropped_tables = [table for table in ranked_tables if table not in kept_tables]
+
+    original_join_paths = [path for path in mapping.get("join_paths") or [] if isinstance(path, dict)]
+    valid_join_paths: List[Dict[str, Any]] = []
+    malformed_count = 0
+
+    for path in original_join_paths:
+        left_table = _logical_table_name(path.get("left_table"))
+        right_table = _logical_table_name(path.get("right_table"))
+        left_column = str(path.get("left_column") or "").strip()
+        right_column = str(path.get("right_column") or "").strip()
+        if not left_table or not right_table or not left_column or not right_column:
+            malformed_count += 1
+            continue
+        if left_table in kept_tables and right_table in kept_tables:
+            valid_join_paths.append({**path, "left_table": left_table, "right_table": right_table})
+
+    warnings: List[str] = []
+    if malformed_count:
+        warnings.append(f"Dropped {malformed_count} malformed Gold join path(s).")
+    if dropped_tables:
+        warnings.append(
+            f"Gold source table cap applied: kept {', '.join(ranked_tables[:max_tables])}; "
+            f"dropped {', '.join(dropped_tables)}."
+        )
+    if original_join_paths and not valid_join_paths and len(kept_tables) <= 1:
+        warnings.append("Gold join paths were not usable after validation; generating from the primary Silver table only.")
+
+    guard = {
+        "max_source_tables": max_tables,
+        "ranked_source_tables": ranked_tables,
+        "kept_source_tables": [table for table in ranked_tables if table in kept_tables],
+        "dropped_source_tables": dropped_tables,
+        "dropped_malformed_join_paths": malformed_count,
+        "dropped_join_paths": max(0, len(original_join_paths) - len(valid_join_paths) - malformed_count),
+        "warnings": warnings,
+    }
+    return {**mapping, "join_paths": valid_join_paths, "_gold_source_table_guard": guard}, guard
 
 
 def generate_dimension_script(mapping: Dict[str, Any], gold_schema: str) -> str:
@@ -612,16 +755,160 @@ print(f"SUCCESS: Gold KPI generation completed for {{TARGET_TABLE}}")
 '''
 
 
+def _snowflake_measure_expression(measure: Dict[str, Any], value_alias: str) -> str:
+    column = str(measure.get("column") or "").strip()
+    quoted_alias = _snowflake_quote_identifier(value_alias)
+    aggregation = str(measure.get("aggregation") or "SUM").upper()
+    if aggregation == "COUNT":
+        return f"COUNT(*) AS {quoted_alias}"
+    quoted_column = _snowflake_silver_source_identifier(column)
+    numeric_expr = f"TRY_TO_DECIMAL({quoted_column})"
+    if aggregation == "AVG":
+        return f"AVG({numeric_expr}) AS {quoted_alias}"
+    if aggregation == "MIN":
+        return f"MIN({numeric_expr}) AS {quoted_alias}"
+    if aggregation == "MAX":
+        return f"MAX({numeric_expr}) AS {quoted_alias}"
+    return f"SUM({numeric_expr}) AS {quoted_alias}"
+
+
+def _snowflake_grain_expr(grain: str, source_column: str) -> str:
+    grain = str(grain or "month").lower()
+    if grain not in {"day", "week", "month", "quarter", "year"}:
+        grain = "month"
+    return f"DATE_TRUNC('{grain}', TRY_TO_TIMESTAMP_NTZ({_snowflake_silver_source_identifier(source_column)}))"
+
+
+def generate_snowflake_gold_script(
+    *,
+    mapping: Dict[str, Any],
+    run_id: str,
+    gold_catalog: str,
+    gold_schema: str,
+) -> str:
+    kpi_name = str(mapping.get("kpi_name") or "KPI")
+    kpi_id = _safe_identifier(kpi_name, "kpi")
+    source_table = str(mapping["source_silver_table"])
+    target_table = _snowflake_target_fact_table(gold_catalog, gold_schema, kpi_id)
+    value_alias = _result_column_name(kpi_name)
+    measure = mapping.get("measure") or {}
+    dimensions = [
+        str(item.get("column") or "").strip()
+        for item in mapping.get("grouping_dimensions", []) or []
+        if isinstance(item, dict) and str(item.get("column") or "").strip()
+    ]
+    dimension_columns = list(dict.fromkeys(dimensions))[:12]
+    time_info = mapping.get("time") or {}
+    time_column = (time_info.get("column") or {}).get("column") if isinstance(time_info.get("column"), dict) else None
+    time_grain = str(time_info.get("grain") or "month")
+
+    select_clauses: List[str] = []
+    group_exprs: List[str] = []
+    table_columns: List[Tuple[str, str]] = []
+    for column in dimension_columns:
+        source_quoted = _snowflake_silver_source_identifier(column)
+        alias_quoted = _snowflake_quote_identifier(column)
+        select_clauses.append(f"{source_quoted} AS {alias_quoted}")
+        group_exprs.append(source_quoted)
+        table_columns.append((column, "VARCHAR"))
+
+    if time_column:
+        period_expr = _snowflake_grain_expr(time_grain, str(time_column))
+        select_clauses.append(f"{period_expr} AS \"period_start\"")
+        group_exprs.append(period_expr)
+        table_columns.append(("period_start", "TIMESTAMP_NTZ"))
+
+    select_clauses.append(_snowflake_measure_expression(measure, value_alias))
+    table_columns.append((value_alias, "FLOAT"))
+
+    create_business_columns = ",\n    ".join(
+        f"{_snowflake_quote_identifier(name)} {data_type}" for name, data_type in table_columns
+    )
+    if create_business_columns:
+        create_business_columns += ",\n    "
+
+    aggregate_select = ",\n        ".join(select_clauses)
+    group_by_clause = f"\n    GROUP BY {', '.join(group_exprs)}" if group_exprs else ""
+    final_columns = [name for name, _ in table_columns]
+    upsert_parts = [
+        _snowflake_string_literal(kpi_name),
+        *[f"COALESCE(TO_VARCHAR({_snowflake_quote_identifier(name)}), '__NULL__')" for name in final_columns],
+    ]
+    upsert_expr = f"MD5(CONCAT_WS('||', {', '.join(upsert_parts)}))"
+
+    insert_columns = [
+        *[_snowflake_quote_identifier(name) for name in final_columns],
+        '"kpi_name"',
+        '"gold_run_id"',
+        '"gold_processed_timestamp"',
+        '"gold_upsert_key"',
+    ]
+    update_assignments = ",\n        ".join(
+        f"target.{column} = source.{column}" for column in insert_columns if column != '"gold_upsert_key"'
+    )
+    insert_values = [f"source.{column}" for column in insert_columns]
+
+    return f"""-- AUTO-GENERATED GOLD KPI SCRIPT
+-- KPI: {kpi_name}
+-- Source table: {source_table}
+-- Target table: {target_table}
+-- Expected runtime: Snowflake SQL
+-- DO NOT EDIT MANUALLY
+
+CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(gold_catalog, gold_schema)};
+
+CREATE TABLE IF NOT EXISTS {_snowflake_qualified_name(*target_table.split("."))} (
+    {create_business_columns}"kpi_name" VARCHAR,
+    "gold_run_id" VARCHAR,
+    "gold_processed_timestamp" TIMESTAMP_NTZ,
+    "gold_upsert_key" VARCHAR
+);
+
+MERGE INTO {_snowflake_qualified_name(*target_table.split("."))} AS target
+USING (
+    WITH aggregate_data AS (
+        SELECT
+        {aggregate_select}
+        FROM {_snowflake_qualified_name(*source_table.split("."))}{group_by_clause}
+    )
+    SELECT
+        {", ".join(_snowflake_quote_identifier(name) for name in final_columns)},
+        {_snowflake_string_literal(kpi_name)} AS "kpi_name",
+        {_snowflake_string_literal(run_id)} AS "gold_run_id",
+        CURRENT_TIMESTAMP() AS "gold_processed_timestamp",
+        {upsert_expr} AS "gold_upsert_key"
+    FROM aggregate_data
+) AS source
+ON target."gold_upsert_key" = source."gold_upsert_key"
+WHEN MATCHED THEN UPDATE SET
+        {update_assignments}
+WHEN NOT MATCHED THEN INSERT (
+        {", ".join(insert_columns)}
+    )
+    VALUES (
+        {", ".join(insert_values)}
+    );
+"""
+
+
 def _generate_one_mapping(
     mapping: Dict[str, Any],
     *,
     run_id: str,
     gold_schema: str,
+    target_warehouse: str,
+    gold_catalog: str = "",
     use_domain_kb: bool,
 ) -> Dict[str, Any]:
+    mapping, source_table_guard = _sanitize_gold_mapping(mapping)
     kpi_name = str(mapping.get("kpi_name") or "KPI")
     kpi_id = _safe_identifier(kpi_name, "kpi")
-    target_table = _target_fact_table(gold_schema, kpi_id)
+    is_snowflake = str(target_warehouse or "").lower() == "snowflake"
+    target_table = (
+        _snowflake_target_fact_table(gold_catalog, gold_schema, kpi_id)
+        if is_snowflake
+        else _target_fact_table(gold_schema, kpi_id)
+    )
     kb_cfg = get_domain_kb_config()
     use_domain_kb = bool(use_domain_kb) and kb_cfg.enabled
     if use_domain_kb:
@@ -651,6 +938,9 @@ def _generate_one_mapping(
             "target_table": target_table,
             "script_path": None,
             "dimension_script_path": None,
+            "script_language": "sql" if is_snowflake else "python",
+            "target_warehouse": str(target_warehouse or "databricks").lower(),
+            "source_table_guard": source_table_guard,
             "domain_knowledge_base": {
                 "enabled": use_domain_kb,
                 "knowledge_base_id": kb_result.get("knowledge_base_id"),
@@ -659,10 +949,17 @@ def _generate_one_mapping(
             },
         }
 
-    llm_requested = _llm_enabled_for_gold()
-    generation_mode = "LLM" if llm_requested else "DETERMINISTIC"
+    llm_requested = _llm_enabled_for_gold() and not is_snowflake
+    generation_mode = "SNOWFLAKE_SQL" if is_snowflake else "LLM" if llm_requested else "DETERMINISTIC"
     fallback_reason = None
-    if llm_requested:
+    if is_snowflake:
+        code = generate_snowflake_gold_script(
+            mapping=mapping,
+            run_id=run_id,
+            gold_catalog=gold_catalog,
+            gold_schema=gold_schema,
+        )
+    elif llm_requested:
         code = llm_generate_gold_code(
             mapping=mapping,
             run_id=run_id,
@@ -682,18 +979,24 @@ def _generate_one_mapping(
             generation_mode = "DETERMINISTIC_FALLBACK"
     else:
         code = generate_gold_script(mapping=mapping, run_id=run_id, gold_schema=gold_schema)
-    _validate_python(code)
+    if not is_snowflake:
+        _validate_python(code)
 
-    dimension_code = generate_dimension_script(mapping=mapping, gold_schema=gold_schema)
-    _validate_python(dimension_code)
+    dimension_code = "" if is_snowflake else generate_dimension_script(mapping=mapping, gold_schema=gold_schema)
+    if dimension_code:
+        _validate_python(dimension_code)
 
-    os.makedirs(_gold_output_dir(), exist_ok=True)
-    script_path = os.path.join(_gold_output_dir(), f"gold_kpi_{_run_slug(run_id)}_{kpi_id}.py")
+    output_dir = _gold_output_dir_for(target_warehouse)
+    os.makedirs(output_dir, exist_ok=True)
+    extension = "sql" if is_snowflake else "py"
+    script_path = os.path.join(output_dir, f"gold_kpi_{_run_slug(run_id)}_{kpi_id}.{extension}")
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
-    dimension_script_path = os.path.join(_gold_output_dir(), f"gold_dim_{_run_slug(run_id)}_{kpi_id}.py")
-    with open(dimension_script_path, "w", encoding="utf-8") as f:
-        f.write(dimension_code)
+    dimension_script_path = None
+    if dimension_code:
+        dimension_script_path = os.path.join(output_dir, f"gold_dim_{_run_slug(run_id)}_{kpi_id}.py")
+        with open(dimension_script_path, "w", encoding="utf-8") as f:
+            f.write(dimension_code)
 
     return {
         "run_id": run_id,
@@ -703,12 +1006,15 @@ def _generate_one_mapping(
         "target_table": target_table,
         "script_path": script_path,
         "dimension_script_path": dimension_script_path,
+        "script_language": "sql" if is_snowflake else "python",
+        "target_warehouse": str(target_warehouse or "databricks").lower(),
         "generation_mode": generation_mode,
         "fallback_reason": fallback_reason,
         "time_grain": (mapping.get("time") or {}).get("grain"),
         "dimension_count": len(mapping.get("grouping_dimensions") or []),
         "kimball_dimension_count": len(_dimension_specs(mapping)),
         "join_count": len(mapping.get("join_paths") or []),
+        "source_table_guard": source_table_guard,
         "domain_knowledge_base": {
             "enabled": use_domain_kb,
             "knowledge_base_id": kb_result.get("knowledge_base_id"),
@@ -718,7 +1024,13 @@ def _generate_one_mapping(
     }
 
 
-def _write_bundle(*, generated_at: str, results: List[Dict[str, Any]], contract: Dict[str, Any]) -> str:
+def _write_bundle(
+    *,
+    generated_at: str,
+    results: List[Dict[str, Any]],
+    contract: Dict[str, Any],
+    target_warehouse: str = "databricks",
+) -> str:
     bundle = {
         "run_id": contract.get("run_id"),
         "generated_at": generated_at,
@@ -726,20 +1038,26 @@ def _write_bundle(*, generated_at: str, results: List[Dict[str, Any]], contract:
         "dimension_script_count": sum(1 for item in results if item.get("dimension_script_path")),
         "blocked_count": sum(1 for item in results if item.get("status") == "BLOCKED"),
         "contract_status": contract.get("status"),
+        "target_warehouse": str(target_warehouse or "databricks").lower(),
         "llm_enabled": _llm_enabled_for_gold(),
         "scripts": results,
     }
-    os.makedirs(_gold_output_dir(), exist_ok=True)
-    path = _bundle_path()
+    os.makedirs(_gold_output_dir_for(target_warehouse), exist_ok=True)
+    path = _bundle_path(target_warehouse)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
-    run_path = _run_bundle_path(contract.get("run_id"))
+    run_path = _run_bundle_path(contract.get("run_id"), target_warehouse)
     with open(run_path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
     return path
 
 
-def _write_readme(*, generated_at: str, results: List[Dict[str, Any]]) -> str:
+def _write_readme(
+    *,
+    generated_at: str,
+    results: List[Dict[str, Any]],
+    target_warehouse: str = "databricks",
+) -> str:
     lines = [
         "# Gold Scripts",
         "",
@@ -763,13 +1081,18 @@ def _write_readme(*, generated_at: str, results: List[Dict[str, Any]]) -> str:
             f"{dimension_link} | `{item.get('generation_mode') or '-'}` |"
         )
 
-    path = _readme_path()
+    path = _readme_path(target_warehouse)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return path
 
 
-def _write_ui(*, generated_at: str, results: List[Dict[str, Any]]) -> str:
+def _write_ui(
+    *,
+    generated_at: str,
+    results: List[Dict[str, Any]],
+    target_warehouse: str = "databricks",
+) -> str:
     rows: List[Dict[str, str]] = []
     for item in sorted(results, key=lambda row: str(row.get("kpi_name", ""))):
         script_path = str(item.get("script_path") or "")
@@ -849,7 +1172,7 @@ def _write_ui(*, generated_at: str, results: List[Dict[str, Any]]) -> str:
 </body>
 </html>
 """
-    path = _ui_path()
+    path = _ui_path(target_warehouse)
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
     return path
@@ -889,7 +1212,13 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         return new_state
 
     run_id = str(state.get("run_id") or contract.get("run_id") or "GOLD_RUN")
-    gold_schema = str(state.get("gold_schema") or os.getenv("GOLD_SCHEMA", "gold"))
+    target_warehouse = _target_warehouse(state)
+    if target_warehouse == "snowflake":
+        gold_catalog = str(state.get("gold_catalog") or _snowflake_gold_catalog())
+        gold_schema = str(state.get("gold_schema") or _snowflake_gold_schema())
+    else:
+        gold_catalog = str(state.get("gold_catalog") or "")
+        gold_schema = str(state.get("gold_schema") or os.getenv("GOLD_SCHEMA", "gold"))
     generated_at = datetime.utcnow().isoformat()
 
     results = [
@@ -897,6 +1226,8 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
             mapping,
             run_id=run_id,
             gold_schema=gold_schema,
+            gold_catalog=gold_catalog,
+            target_warehouse=target_warehouse,
             use_domain_kb=bool(state.get("use_domain_kb")),
         )
         for mapping in mappings
@@ -909,12 +1240,18 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         "dimension_script_count": sum(1 for item in results if item.get("dimension_script_path")),
         "blocked_count": sum(1 for item in results if item.get("status") == "BLOCKED"),
         "contract_status": contract.get("status"),
+        "target_warehouse": target_warehouse,
         "llm_enabled": _llm_enabled_for_gold(),
         "scripts": results,
     }
-    bundle_path = _write_bundle(generated_at=generated_at, results=results, contract=contract)
-    readme_path = _write_readme(generated_at=generated_at, results=results)
-    ui_path = _write_ui(generated_at=generated_at, results=results)
+    bundle_path = _write_bundle(
+        generated_at=generated_at,
+        results=results,
+        contract=contract,
+        target_warehouse=target_warehouse,
+    )
+    readme_path = _write_readme(generated_at=generated_at, results=results, target_warehouse=target_warehouse)
+    ui_path = _write_ui(generated_at=generated_at, results=results, target_warehouse=target_warehouse)
 
     try:
         _persist_gold_generation(state=state, bundle=bundle)
@@ -940,7 +1277,14 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
     new_state["gold_generation_bundle_path"] = bundle_path
     new_state["gold_generation_readme_path"] = readme_path
     new_state["gold_generation_ui_path"] = ui_path
+    new_state["gold_catalog"] = gold_catalog
     new_state["status"] = "PIPELINE_COMPLETED" if status != "FAILED" else "FAILED"
 
-    logger.info("Gold generation completed: %d scripts, %d blocked", generated_count, blocked_count, extra={"run_id": run_id, "node": "gold_generation"})
+    logger.info(
+        "Gold generation completed: %d scripts, %d blocked target_warehouse=%s",
+        generated_count,
+        blocked_count,
+        target_warehouse,
+        extra={"run_id": run_id, "node": "gold_generation"},
+    )
     return new_state
