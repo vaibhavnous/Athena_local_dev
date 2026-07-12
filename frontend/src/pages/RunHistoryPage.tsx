@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   CalendarDays,
   CheckCircle2,
@@ -11,23 +11,23 @@ import {
 } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import { getRun, getRuns } from '../api/athenaApi'
-import { getPhaseGroups, statusTone } from '../utils/pipelinePhases'
+import { getPhaseGroups, normalizeState, statusTone } from '../utils/pipelinePhases'
 
 const FILTERS = ['All', 'Running', 'Completed', 'Failed', 'Cancelled', 'Hitl wait']
 
 function matchesStatusFilter(statusValue, filterValue) {
-  const status = String(statusValue || '').toUpperCase()
+  const status = normalizeState(statusValue)
   if (filterValue === 'All') return true
-  if (filterValue === 'Running') return ['RUNNING', 'PROCESSING', 'SUBMITTED', 'IN_PROGRESS'].includes(status)
-  if (filterValue === 'Completed') return ['SUCCESS', 'COMPLETED', 'PIPELINE_COMPLETED'].includes(status)
+  if (filterValue === 'Running') return status === 'RUNNING'
+  if (filterValue === 'Completed') return status === 'COMPLETED'
   if (filterValue === 'Failed') return status === 'FAILED'
-  if (filterValue === 'Cancelled') return ['ABORTED', 'CANCELLED', 'CANCELED'].includes(status)
+  if (filterValue === 'Cancelled') return ['ABORTED', 'CANCELLED', 'CANCELED'].includes(String(statusValue || '').toUpperCase())
   if (filterValue === 'Hitl wait') return ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(status) || status.includes('HITL')
   return status === String(filterValue || '').toUpperCase()
 }
 
 function isRunningStatus(statusValue) {
-  return ['RUNNING', 'PROCESSING', 'SUBMITTED', 'IN_PROGRESS'].includes(String(statusValue || '').toUpperCase())
+  return normalizeState(statusValue) === 'RUNNING'
 }
 
 function RunHistoryPage() {
@@ -36,6 +36,8 @@ function RunHistoryPage() {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('All')
   const [detailRun, setDetailRun] = useState(null)
+  const runsRequestInFlightRef = useRef(false)
+  const detailRequestInFlightRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!selectedRunId && runs[0]?.id) setSelectedRunId(runs[0].id)
@@ -45,6 +47,8 @@ function RunHistoryPage() {
     let cancelled = false
 
     const loadRuns = async () => {
+      if (runsRequestInFlightRef.current) return
+      runsRequestInFlightRef.current = true
       try {
         const data = await getRuns()
         if (!cancelled && Array.isArray(data)) {
@@ -54,6 +58,8 @@ function RunHistoryPage() {
       } catch (error) {
         if (!cancelled) setServerOnline(false)
         if (!cancelled) console.warn('[RunHistoryPage] Failed to refresh runs', error)
+      } finally {
+        runsRequestInFlightRef.current = false
       }
     }
 
@@ -70,6 +76,8 @@ function RunHistoryPage() {
     let cancelled = false
 
     const loadRun = async () => {
+      if (detailRequestInFlightRef.current === selectedRunId) return
+      detailRequestInFlightRef.current = selectedRunId
       try {
         const data = await getRun(selectedRunId)
         if (!cancelled) {
@@ -80,6 +88,10 @@ function RunHistoryPage() {
       } catch (error) {
         if (!cancelled) setServerOnline(false)
         if (!cancelled) console.warn('[RunHistoryPage] Failed to load run detail', error)
+      } finally {
+        if (detailRequestInFlightRef.current === selectedRunId) {
+          detailRequestInFlightRef.current = null
+        }
       }
     }
 
@@ -337,10 +349,10 @@ function PhaseRow({ phase, index }) {
 }
 
 function StageTreeRow({ step }) {
-  const state = String(step.state || '').toUpperCase()
+  const state = normalizeState(step.state)
   const done = isCompletedStep(state)
-  const running = ['RUNNING', 'PROCESSING', 'IN_PROGRESS', 'SUBMITTED'].includes(state)
-  const review = ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(state) || step.key.includes('review') || step.key.startsWith('gate')
+  const running = state === 'RUNNING'
+  const review = state === 'HITL_WAIT' || step.key.includes('review') || step.key.startsWith('gate')
   const failed = state === 'FAILED'
   const toneClass = failed
     ? 'border-red-400 text-red-400'
@@ -375,7 +387,7 @@ function getHistoryDisplaySteps(phase) {
     return {
       key,
       label,
-      state: step?.state || fallbackState,
+      state: normalizeState(step?.state || fallbackState),
       detail: step?.detail || '',
     }
   }
@@ -405,28 +417,35 @@ function getHistoryDisplaySteps(phase) {
     return clampLinearHistorySteps([
       actual('bronze', 'Bronze Code Generation'),
       actual('gate4', 'Bronze Review', reviewAwareState(byKey.get('gate4'), phase)),
+      actual('bronze_code_execution', 'Bronze Code Execution'),
     ])
   }
 
   if (phase.id === 'phase-4') {
-    const silverState = byKey.get('silver')?.state || phaseState
+    const silverState = normalizeState(byKey.get('silver')?.state || phaseState)
+    const silverExecutionState = byKey.get('silver_code_execution')?.state ? normalizeState(byKey.get('silver_code_execution')?.state) : ''
     const gate4State = reviewAwareState(byKey.get('gate4'), phase)
     const gate5State = reviewAwareState(byKey.get('gate5'), phase)
-    const mergeReviewState = byKey.get('silver_merge_key_review')?.state
-    const silverFlow = buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phase.status)
+    const mergeReviewState = byKey.get('silver_merge_key_review')?.state ? normalizeState(byKey.get('silver_merge_key_review')?.state) : ''
+    const silverFlow = buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phase.status, mergeReviewState, silverExecutionState)
     return clampLinearHistorySteps([
       actual('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverFlow.mergeResolution),
       actual('silver_merge_key_review', 'Silver Merge Key Review', mergeReviewState || silverFlow.mergeReview),
       actual('silver', 'Silver Code Generation', silverFlow.codeGeneration),
       actual('gate5', 'Silver Review', silverFlow.reviewGate),
-      actual('silver_code_execution', 'Silver Code Execution'),
+      actual('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution),
     ])
   }
 
   if (phase.id === 'phase-5') {
+    const goldFlow = buildHistoryGoldPhaseStates(
+      byKey.get('gold')?.state || phaseState,
+      byKey.get('gold_code_execution')?.state,
+      phase.status
+    )
     return clampLinearHistorySteps([
-      actual('gold', 'Gold Code Generation'),
-      actual('gold_code_execution', 'Gold Code Execution'),
+      actual('gold', 'Gold Code Generation', goldFlow.codeGeneration),
+      actual('gold_code_execution', 'Gold Code Execution', goldFlow.codeExecution),
     ])
   }
 
@@ -436,7 +455,7 @@ function getHistoryDisplaySteps(phase) {
 function clampLinearHistorySteps(steps = []) {
   let blocked = false
   return steps.map((step) => {
-    const state = String(step.state || '').toUpperCase()
+    const state = normalizeState(step.state)
     const complete = isCompletedStep(state)
     if (!blocked && complete) return step
     if (!blocked) {
@@ -457,23 +476,26 @@ function phaseStatusToStepState(status) {
 }
 
 function reviewAwareState(step, phase) {
-  if (step?.state) return step.state
+  if (step?.state) return normalizeState(step.state)
   if (phase.status === 'Review') return 'HITL_WAIT'
   return phaseStatusToStepState(phase.status)
 }
 
-function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phaseStatus) {
-  const normalizedSilver = String(silverState || '').toUpperCase()
-  const normalizedGate4 = String(gate4State || '').toUpperCase()
-  const normalizedGate = String(gate5State || '').toUpperCase()
+function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phaseStatus, mergeReviewState = '', silverExecutionState = '') {
+  const normalizedSilver = normalizeState(silverState)
+  const normalizedGate4 = normalizeState(gate4State)
+  const normalizedGate = normalizeState(gate5State)
+  const normalizedMergeReview = mergeReviewState ? normalizeState(mergeReviewState) : ''
+  const normalizedSilverExecution = silverExecutionState ? normalizeState(silverExecutionState) : ''
   const normalizedPhase = String(phaseStatus || '').toLowerCase()
 
-  if (normalizedPhase === 'done') {
+  if (['RUNNING', 'FAILED', 'COMPLETED'].includes(normalizedSilverExecution)) {
     return {
       mergeResolution: 'COMPLETED',
       mergeReview: 'COMPLETED',
       codeGeneration: 'COMPLETED',
       reviewGate: 'COMPLETED',
+      codeExecution: normalizedSilverExecution,
     }
   }
 
@@ -483,15 +505,27 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
       mergeReview: 'COMPLETED',
       codeGeneration: 'COMPLETED',
       reviewGate: 'HITL_WAIT',
+      codeExecution: 'PENDING',
     }
   }
 
-  if (normalizedGate4 === 'HITL_WAIT' || normalizedGate4 === 'PAUSED_FOR_HITL') {
+  if (normalizedMergeReview === 'HITL_WAIT') {
     return {
       mergeResolution: 'COMPLETED',
       mergeReview: 'HITL_WAIT',
       codeGeneration: 'PENDING',
       reviewGate: 'PENDING',
+      codeExecution: 'PENDING',
+    }
+  }
+
+  if (normalizedGate4 === 'HITL_WAIT' || normalizedGate4 === 'PAUSED_FOR_HITL') {
+    return {
+      mergeResolution: 'PENDING',
+      mergeReview: 'PENDING',
+      codeGeneration: 'PENDING',
+      reviewGate: 'PENDING',
+      codeExecution: 'PENDING',
     }
   }
 
@@ -501,6 +535,7 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
       mergeReview: 'COMPLETED',
       codeGeneration: 'RUNNING',
       reviewGate: 'PENDING',
+      codeExecution: 'PENDING',
     }
   }
 
@@ -508,9 +543,10 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
     if (!normalizedGate || normalizedGate === 'PENDING') {
       return {
         mergeResolution: 'COMPLETED',
-        mergeReview: 'HITL_WAIT',
-        codeGeneration: 'PENDING',
-        reviewGate: 'PENDING',
+        mergeReview: 'COMPLETED',
+        codeGeneration: 'COMPLETED',
+        reviewGate: 'HITL_WAIT',
+        codeExecution: 'PENDING',
       }
     }
 
@@ -519,6 +555,7 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
       mergeReview: 'COMPLETED',
       codeGeneration: 'COMPLETED',
       reviewGate: normalizedGate || 'PENDING',
+      codeExecution: normalizedGate === 'COMPLETED' ? 'RUNNING' : 'PENDING',
     }
   }
 
@@ -528,6 +565,7 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
       mergeReview: 'PENDING',
       codeGeneration: 'PENDING',
       reviewGate: 'PENDING',
+      codeExecution: 'PENDING',
     }
   }
 
@@ -536,11 +574,51 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
     mergeReview: 'PENDING',
     codeGeneration: 'PENDING',
     reviewGate: normalizedGate || 'PENDING',
+    codeExecution: 'PENDING',
+  }
+}
+
+function buildHistoryGoldPhaseStates(goldState, goldExecutionState, phaseStatus) {
+  const normalizedGold = normalizeState(goldState)
+  const normalizedGoldExecution = goldExecutionState ? normalizeState(goldExecutionState) : ''
+  const normalizedPhase = String(phaseStatus || '').toLowerCase()
+
+  if (['RUNNING', 'FAILED', 'COMPLETED'].includes(normalizedGoldExecution)) {
+    return {
+      codeGeneration: 'COMPLETED',
+      codeExecution: normalizedGoldExecution,
+    }
+  }
+
+  if (normalizedGold === 'RUNNING') {
+    return {
+      codeGeneration: 'RUNNING',
+      codeExecution: 'PENDING',
+    }
+  }
+
+  if (normalizedGold === 'FAILED') {
+    return {
+      codeGeneration: 'FAILED',
+      codeExecution: 'PENDING',
+    }
+  }
+
+  if (normalizedGold === 'COMPLETED') {
+    return {
+      codeGeneration: 'COMPLETED',
+      codeExecution: normalizedPhase === 'done' ? 'COMPLETED' : 'PENDING',
+    }
+  }
+
+  return {
+    codeGeneration: 'PENDING',
+    codeExecution: 'PENDING',
   }
 }
 
 function isCompletedStep(state) {
-  return ['COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'].includes(String(state || '').toUpperCase())
+  return normalizeState(state) === 'COMPLETED'
 }
 
 function StatusPill({ status, tone, large = false }) {

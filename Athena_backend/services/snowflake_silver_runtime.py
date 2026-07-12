@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from services.external_execution_progress import save_external_execution_progress
+from services.snowflake_contract_validation import (
+    extract_quoted_source_column_references,
+    extract_source_column_references,
+    validate_catalog_columns,
+)
 from services.snowflake_bronze_runtime import _snowflake_connect
 from utilis.logger import logger
 
@@ -59,7 +64,7 @@ def _table_name(script: Dict[str, Any]) -> str:
     return str(script.get("table") or script.get("table_name") or script.get("entity") or "").strip()
 
 
-def validate_snowflake_silver_script(script: Dict[str, Any]) -> str:
+def validate_snowflake_silver_script(script: Dict[str, Any], catalog_connection: Any = None) -> str:
     sql = _read_sql(script)
     normalized = sql.upper()
     missing = [
@@ -79,11 +84,20 @@ def validate_snowflake_silver_script(script: Dict[str, Any]) -> str:
         raise ValueError(f"Snowflake silver SQL does not read from expected source table: {source_table}")
     if target_table and _qualified_name(target_table) not in sql:
         raise ValueError(f"Snowflake silver SQL does not write to expected target table: {target_table}")
+    if catalog_connection is not None and source_table:
+        validate_catalog_columns(
+            catalog_connection,
+            table_ref=source_table,
+            required_columns=extract_source_column_references(sql),
+            layer="Silver",
+            context=_table_name(script) or target_table or source_table,
+            exact_columns=extract_quoted_source_column_references(sql),
+        )
     return sql
 
 
 def execute_snowflake_silver_sql(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
-    sql = validate_snowflake_silver_script(script)
+    sql = validate_snowflake_silver_script(script, catalog_connection=snowflake_conn)
     cursors = snowflake_conn.execute_string(sql, return_cursors=True)
     statement_count = len(list(cursors or []))
     return {
@@ -118,10 +132,11 @@ def _approved_review_scripts(state: Dict[str, Any], review_artifact: Dict[str, A
         key = _casefold_key(script)
         scripts_by_casefolded_key[key] = None if key in scripts_by_casefolded_key else script
 
-    approved: List[Dict[str, Any]] = []
-    for item in items:
-        if str(item.get("review_status") or "").upper() != "APPROVED":
-            continue
+    statuses = {str(item.get("review_status") or "").upper() for item in items}
+    if not statuses.intersection({"APPROVED", "REJECTED"}):
+        return scripts
+
+    def matching_script(item: Dict[str, Any]) -> Dict[str, Any] | None:
         key = _script_key(item)
         script = scripts_by_key.get(key)
         if script is None:
@@ -131,10 +146,24 @@ def _approved_review_scripts(state: Dict[str, Any], review_artifact: Dict[str, A
             if table_name:
                 matching = [candidate for candidate in scripts if _table_name(candidate).casefold() == table_name.casefold()]
                 script = matching[0] if len(matching) == 1 else None
-        if script is None:
-            raise ValueError(f"Approved Silver review item has no generated script: {key}")
-        approved.append({**script, **item})
-    return approved
+        return script
+
+    approved: List[Dict[str, Any]] = []
+    approved_items = [item for item in items if str(item.get("review_status") or "").upper() == "APPROVED"]
+    if approved_items:
+        for item in approved_items:
+            script = matching_script(item)
+            if script is None:
+                raise ValueError(f"Approved Silver review item has no generated script: {_script_key(item)}")
+            approved.append({**script, **item})
+        return approved
+
+    rejected_keys = {
+        _casefold_key(item)
+        for item in items
+        if str(item.get("review_status") or "").upper() == "REJECTED"
+    }
+    return [script for script in scripts if _casefold_key(script) not in rejected_keys]
 
 
 def run_snowflake_silver_scripts(
@@ -160,29 +189,35 @@ def run_snowflake_silver_scripts(
     if not scripts:
         raise ValueError("Snowflake silver execution enabled but no approved generated silver scripts were found.")
 
-    for script in scripts:
-        validate_snowflake_silver_script(script)
-
-    executed_scripts: List[Dict[str, Any]] = []
-    stage_key = "silver_code_execution"
-    logger.info(
-        "Starting Snowflake Silver execution in external Snowflake warehouse: total_tables=%d tables=%s",
-        len(scripts),
-        ", ".join(_table_name(script) for script in scripts),
-        extra=_log_context(run_id, step_name="silver_execution_start"),
-    )
-    state = save_external_execution_progress(
-        state,
-        run_id=run_id,
-        layer="silver",
-        stage_key=stage_key,
-        status="RUNNING",
-        total_count=len(scripts),
-        completed_count=0,
-        message=f"Executing Silver scripts in Snowflake: 0/{len(scripts)} completed.",
-    )
     snowflake_conn = _snowflake_connect()
     try:
+        for script in scripts:
+            validate_snowflake_silver_script(script, catalog_connection=snowflake_conn)
+
+        logger.info(
+            "Silver Snowflake contract preflight passed: tables=%d",
+            len(scripts),
+            extra=_log_context(run_id, step_name="silver_contract_preflight_complete"),
+        )
+
+        executed_scripts: List[Dict[str, Any]] = []
+        stage_key = "silver_code_execution"
+        logger.info(
+            "Starting Snowflake Silver execution in external Snowflake warehouse: total_tables=%d tables=%s",
+            len(scripts),
+            ", ".join(_table_name(script) for script in scripts),
+            extra=_log_context(run_id, step_name="silver_execution_start"),
+        )
+        state = save_external_execution_progress(
+            state,
+            run_id=run_id,
+            layer="silver",
+            stage_key=stage_key,
+            status="RUNNING",
+            total_count=len(scripts),
+            completed_count=0,
+            message=f"Executing Silver scripts in Snowflake: 0/{len(scripts)} completed.",
+        )
         for index, script in enumerate(scripts, start=1):
             table_name = _table_name(script)
             target_table = script.get("target_table") or script.get("silver_table")

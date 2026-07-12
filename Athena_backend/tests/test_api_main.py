@@ -24,6 +24,25 @@ def test_health_endpoint():
     assert embeddings["mode"] in {"blocked", "disabled", "enabled"}
 
 
+def test_silver_merge_key_review_get_returns_checkpoint_artifact(monkeypatch):
+    from api.routers import reviews_router
+
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "status": "HITL_WAIT",
+            "next_review_key": "silver_merge_key_review",
+            "silver_merge_key_review_artifact": {"feeds": [{"table": "claims", "merge_keys": ["claim_id"]}]},
+        },
+    )
+
+    response = reviews_router.silver_merge_key_reviews("run-merge-review")
+
+    assert response["next_review_key"] == "silver_merge_key_review"
+    assert response["silver_merge_key_review_artifact"]["feeds"][0]["merge_keys"] == ["claim_id"]
+
+
 def test_sql_tcp_probe_failure_is_cached(monkeypatch):
     from utilis import db
 
@@ -368,6 +387,39 @@ def test_run_lineage_endpoint_returns_payload(monkeypatch):
     assert response.status_code == 200
     assert response.json()["run_id"] == "run-123"
     assert response.json()["nodes"][0]["id"] == "n1"
+
+
+def test_bronze_review_submit_uses_checkpoint_artifact_when_payload_empty(monkeypatch):
+    recorded = {}
+    checkpoint_artifact = {"feeds": [{"entity": "claims", "review_status": "APPROVED"}]}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "source": "database", "bronze_review_artifact": checkpoint_artifact},
+    )
+    monkeypatch.setattr("api.services.ui_service.bronze_review_from_scripts", lambda run_id, checkpoint: {})
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update({"stage": stage, "args": args}),
+    )
+
+    response = client.post("/bronze-reviews/run-123", json={"action": "APPROVED", "review_artifact": {"feeds": []}})
+
+    assert response.status_code == 200
+    assert recorded["stage"] == "silver"
+    assert recorded["args"][2] == checkpoint_artifact
+
+
+def test_bronze_review_submit_rejects_when_artifact_not_ready(monkeypatch):
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "source": "database"},
+    )
+    monkeypatch.setattr("api.services.ui_service.bronze_review_from_scripts", lambda run_id, checkpoint: {})
+
+    response = client.post("/bronze-reviews/run-123", json={"action": "APPROVED", "review_artifact": {"feeds": []}})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Bronze review is not ready yet. Generated Bronze scripts are still loading."
 
 
 def test_retry_failed_stage_rejects_non_failed_run(monkeypatch):

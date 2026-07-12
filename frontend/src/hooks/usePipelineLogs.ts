@@ -42,6 +42,7 @@ export function usePipelineLogs(
   const logIdsRef = useRef(new Set<string>())
   const isFetchingRef = useRef(false)
   const onNewLogsRef = useRef<NewLogsHandler | undefined>(onNewLogs)
+  const lastLogTimestampRef = useRef<string | null>(null)
 
   const [discoveredRunId, setDiscoveredRunId] = useState<string | null>(null)
   const [isDiscovering, setIsDiscovering] = useState(false)
@@ -95,11 +96,16 @@ export function usePipelineLogs(
   )
 
   const mergeLogs = useCallback((incoming: PipelineLog[]) => {
+    const newestTimestamp = incoming[incoming.length - 1]?.logged_at || null
+    if (newestTimestamp) {
+      lastLogTimestampRef.current = newestTimestamp
+      setLastLogTimestamp(newestTimestamp)
+    }
+
     const unique = incoming.filter((log) => !logIdsRef.current.has(stableLogKey(log)))
     if (unique.length === 0) return
     unique.forEach((log) => logIdsRef.current.add(stableLogKey(log)))
     setLogs((prev) => [...prev, ...unique])
-    setLastLogTimestamp(unique[unique.length - 1].logged_at)
     onNewLogsRef.current?.(unique)
   }, [])
 
@@ -139,6 +145,7 @@ export function usePipelineLogs(
     setDiscoveryError(null)
     setLogs([])
     setLogsError(null)
+    lastLogTimestampRef.current = null
     setLastLogTimestamp(null)
   }, [runId])
 
@@ -162,7 +169,7 @@ export function usePipelineLogs(
         return
       }
 
-      await startLogsPolling(discoveredRunId, lastLogTimestamp, false)
+      await startLogsPolling(discoveredRunId, lastLogTimestampRef.current, false)
       if (!cancelled) {
         timer = window.setTimeout(poll, 2000)
       }
@@ -173,7 +180,7 @@ export function usePipelineLogs(
       cancelled = true
       if (timer !== null) window.clearTimeout(timer)
     }
-  }, [discoveredRunId, isActive, lastLogTimestamp, serverOnline, startLogsPolling])
+  }, [discoveredRunId, isActive, serverOnline, startLogsPolling])
 
   return {
     runId,

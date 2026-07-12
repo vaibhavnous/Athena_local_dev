@@ -12,6 +12,7 @@ from services.pipeline_runtime import (
     BACKGROUND_JOBS,
     BACKGROUND_JOB_LOCK,
     continue_database_pipeline,
+    ensure_background_capacity_locked,
     get_run_context,
     load_checkpoint_state,
     save_checkpoint_state,
@@ -154,6 +155,7 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             logger.warning("Duplicate pipeline submission rejected run_id=%s", run_id)
             raise HTTPException(status_code=409, detail=f"Pipeline job already running for run_id={run_id}")
 
+        ensure_background_capacity_locked()
         logger.info("Submitting pipeline background job run_id=%s source=%s", run_id, source)
         future = BACKGROUND_EXECUTOR.submit(
             run_pipeline_background,
@@ -242,14 +244,33 @@ def continue_file_pipeline_job(run_id: str, state: Dict[str, Any]) -> Dict[str, 
 
 
 def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Optional[str]:
+    def _pipeline_stage(value: Any) -> Optional[str]:
+        raw_stage = str(value or "").strip().lower()
+        if raw_stage == "gold_code_execution":
+            return "gold"
+        if raw_stage == "silver_code_execution":
+            if checkpoint.get("gold_generation_results") or checkpoint.get("gold_generation_completed"):
+                return "gold"
+            return "silver"
+        stage = api_utils.stage_key(value)
+        if stage == "gold_code_execution":
+            return "gold"
+        if stage == "silver_code_execution":
+            # Gold is already generated only after Silver execution succeeds;
+            # if an older checkpoint points here, retry the Gold stage safely.
+            if checkpoint.get("gold_generation_results") or checkpoint.get("gold_generation_completed"):
+                return "gold"
+            return "silver"
+        return stage
+
     if checkpoint.get("failed_background_stage"):
-        return str(checkpoint.get("failed_background_stage"))
+        return _pipeline_stage(checkpoint.get("failed_background_stage"))
     if checkpoint.get("background_stage"):
-        return api_utils.stage_key(checkpoint.get("background_stage"))
+        return _pipeline_stage(checkpoint.get("background_stage"))
 
     next_stage_key = checkpoint.get("next_stage_key")
     if next_stage_key:
-        return str(next_stage_key)
+        return _pipeline_stage(next_stage_key)
 
     context = get_run_context(run_id)
     failed_step = next(
@@ -261,5 +282,5 @@ def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Option
         None,
     )
     if failed_step:
-        return str(failed_step)
+        return _pipeline_stage(failed_step)
     return None

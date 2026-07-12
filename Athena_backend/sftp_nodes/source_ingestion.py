@@ -12,6 +12,7 @@ import paramiko
 
 from state import Stage01State
 from utilis.logger import logger
+from api import utils as api_utils
 
 
 SFTP_HOST = "localhost"
@@ -303,13 +304,7 @@ def _build_demo_adls_source_state(new_state: Dict[str, Any], reason: str) -> pd.
         frames.append(raw_frame)
         discovered_entities.append(entity)
 
-        local_dir = (
-            Path(__file__).resolve().parents[1]
-            / "uploads"
-            / "adls"
-            / ADLS_VENDOR_NAME
-            / entity
-        )
+        local_dir = api_utils.upload_root() / "adls" / ADLS_VENDOR_NAME / entity
         local_dir.mkdir(parents=True, exist_ok=True)
         local_file = local_dir / f"{entity}_demo.csv"
         dataframe_entity.to_csv(local_file, index=False)
@@ -385,14 +380,7 @@ def source_ingestion_node(state: Stage01State) -> Stage01State:
                 dataframe_entity["__entity"] = entity
                 frames.append(dataframe_entity)
 
-                local_dir = (
-                    Path(__file__).resolve().parents[1]
-                    / "uploads"
-                    / "sftp"
-                    / "cash-project"
-                    / "Vendor1"
-                    / entity
-                )
+                local_dir = api_utils.upload_root() / "sftp" / "cash-project" / "Vendor1" / entity
                 local_dir.mkdir(parents=True, exist_ok=True)
                 local_file = local_dir / Path(remote_path).name
                 local_file.write_bytes(raw_content)
@@ -450,13 +438,7 @@ def source_ingestion_node(state: Stage01State) -> Stage01State:
                         entity_abfss_path = _abfss_path(entity_path.rstrip("/") + "/")
 
                         for remote_path, raw_content in payloads:
-                            local_dir = (
-                                Path(__file__).resolve().parents[1]
-                                / "uploads"
-                                / "adls"
-                                / ADLS_VENDOR_NAME
-                                / entity_name
-                            )
+                            local_dir = api_utils.upload_root() / "adls" / ADLS_VENDOR_NAME / entity_name
                             local_dir.mkdir(parents=True, exist_ok=True)
                             local_file = local_dir / Path(remote_path).name
                             local_file.write_bytes(raw_content)
@@ -481,13 +463,7 @@ def source_ingestion_node(state: Stage01State) -> Stage01State:
                         frames.append(dataframe_entity)
                         discovered_entities.append(entity_name)
 
-                        local_dir = (
-                            Path(__file__).resolve().parents[1]
-                            / "uploads"
-                            / "adls"
-                            / ADLS_VENDOR_NAME
-                            / entity_name
-                        )
+                        local_dir = api_utils.upload_root() / "adls" / ADLS_VENDOR_NAME / entity_name
                         local_dir.mkdir(parents=True, exist_ok=True)
                         local_file = local_dir / Path(remote_path).name
                         local_file.write_bytes(raw_content)

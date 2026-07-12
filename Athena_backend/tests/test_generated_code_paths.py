@@ -4,6 +4,7 @@ from pathlib import Path
 import uuid
 
 from utilis.generated_code_paths import generated_code_dir, generated_code_root
+from utilis.runtime_paths import runtime_dir
 
 
 def test_generated_code_root_uses_workspace_level_dir_when_cwd_is_backend(monkeypatch):
@@ -22,3 +23,20 @@ def test_generated_code_root_honors_explicit_env_override(monkeypatch):
 
     assert generated_code_root() == custom_root.resolve()
     assert generated_code_dir("gold") == custom_root.resolve() / "gold"
+
+
+def test_runtime_dir_uses_app_service_data_root(monkeypatch):
+    monkeypatch.delenv("ATHENA_GENERATED_CODE_DIR", raising=False)
+    monkeypatch.setenv("ATHENA_APP_DATA_DIR", "/home/site/custom-data")
+
+    original_exists = Path.exists
+
+    def fake_exists(self):
+        if str(self).replace("\\", "/") == "/home/site":
+            return True
+        return original_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    resolved = runtime_dir("ATHENA_GENERATED_CODE_DIR", Path.cwd() / "generated_code", "generated_code")
+    assert str(resolved).replace("\\", "/").endswith("/home/site/custom-data/generated_code")

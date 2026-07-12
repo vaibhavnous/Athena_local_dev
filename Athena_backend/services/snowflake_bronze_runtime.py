@@ -615,18 +615,33 @@ def _approved_review_scripts(state: Dict[str, Any], review_artifact: Dict[str, A
         else:
             scripts_by_casefolded_key[key] = script
 
-    approved: List[Dict[str, Any]] = []
-    for feed in feeds:
-        if str(feed.get("review_status") or "").upper() != "APPROVED":
-            continue
+    statuses = {str(feed.get("review_status") or "").upper() for feed in feeds}
+    if not statuses.intersection({"APPROVED", "REJECTED"}):
+        return scripts
+
+    def matching_script(feed: Dict[str, Any]) -> Dict[str, Any] | None:
         key = _script_key(feed)
         script = scripts_by_key.get(key)
         if script is None:
             script = scripts_by_casefolded_key.get(_casefold_script_key(feed))
-        if script is None:
-            raise ValueError(f"Approved Bronze review item has no generated script: {key}")
-        approved.append({**script, **feed})
-    return approved
+        return script
+
+    approved: List[Dict[str, Any]] = []
+    approved_feeds = [feed for feed in feeds if str(feed.get("review_status") or "").upper() == "APPROVED"]
+    if approved_feeds:
+        for feed in approved_feeds:
+            script = matching_script(feed)
+            if script is None:
+                raise ValueError(f"Approved Bronze review item has no generated script: {_script_key(feed)}")
+            approved.append({**script, **feed})
+        return approved
+
+    rejected_keys = {
+        _casefold_script_key(feed)
+        for feed in feeds
+        if str(feed.get("review_status") or "").upper() == "REJECTED"
+    }
+    return [script for script in scripts if _casefold_script_key(script) not in rejected_keys]
 
 
 def run_snowflake_bronze_scripts(

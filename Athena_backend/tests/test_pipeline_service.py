@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from api.models import PipelineRunRequest
 from api.services import pipeline_service
+from services import pipeline_runtime
 
 
 def test_validate_pipeline_result_rejects_non_dict():
@@ -29,6 +30,38 @@ def test_next_status_derives_database_and_file_source_defaults():
     assert pipeline_service._next_status(None, pending_gate1=True, file_source=False) == "HITL_WAIT"
     assert pipeline_service._next_status(None, pending_gate1=False, file_source=True) == "COMPLETED"
     assert pipeline_service._next_status("done", pending_gate1=False, file_source=True) == "done"
+
+
+def test_gate2_scope_keeps_lookup_and_fk_dimension_tables():
+    tables = [
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "claim_information", "nomination_reason": "Dual Match (Keyword + Semantic)"},
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "dim_policy", "nomination_reason": "Lookup Table Sweep (dim/ref/lkp)"},
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy_type", "nomination_reason": "FK Resolution (related to nominated table)"},
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "audit_log", "nomination_reason": "Lookup Table Sweep (dim/ref/lkp)"},
+    ]
+
+    scoped = pipeline_runtime._gate2_execution_scope(tables, ["insurance.dbo.claim_information"])
+
+    assert [item["table_name"] for item in scoped] == [
+        "claim_information",
+        "dim_policy",
+        "policy_type",
+    ]
+
+
+def test_silver_merge_key_resolution_node_builds_review_input():
+    from nodes.silver_merge_key_resolution import silver_merge_key_resolution_node
+
+    result = silver_merge_key_resolution_node({
+        "run_id": "run-merge-keys",
+        "bronze_review_artifact": {
+            "feeds": [{"table": "claims", "primary_keys": ["claim_id"]}],
+        },
+    })
+
+    assert result["silver_merge_key_resolution_status"] == "COMPLETED"
+    assert result["silver_merge_key_resolution_artifact"]["feeds"][0]["merge_keys"] == ["claim_id"]
+    assert result["silver_merge_key_resolution_artifact"]["feeds"][0]["review_status"] == "PENDING"
 
 
 def test_minimum_stage_runtime_uses_env(monkeypatch):
@@ -192,6 +225,26 @@ def test_submit_pipeline_start_rejects_duplicate(monkeypatch):
         pipeline_service.BACKGROUND_JOBS.pop("run-dup:pipeline", None)
 
 
+def test_submit_pipeline_start_rejects_when_background_capacity_full(monkeypatch):
+    class PendingFuture:
+        def done(self):
+            return False
+
+    keys = ["run-a:pipeline", "run-b:pipeline"]
+    payload = PipelineRunRequest(brd_text="brd", source="database")
+    monkeypatch.setattr(pipeline_runtime, "BACKGROUND_WORKER_COUNT", 2)
+    for key in keys:
+        monkeypatch.setitem(pipeline_service.BACKGROUND_JOBS, key, PendingFuture())
+
+    try:
+        with pytest.raises(HTTPException) as exc:
+            pipeline_service.submit_pipeline_start("run-c", payload)
+        assert exc.value.status_code == 429
+    finally:
+        for key in keys:
+            pipeline_service.BACKGROUND_JOBS.pop(key, None)
+
+
 def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
     recorded = {}
 
@@ -247,6 +300,23 @@ def test_database_failed_stage_key_uses_context_fallback(monkeypatch):
     assert result == "silver"
 
 
+def test_database_failed_stage_key_maps_external_gold_execution_to_gold():
+    assert pipeline_service.database_failed_stage_key(
+        "run-gold-failed",
+        {"failed_background_stage": "gold_code_execution"},
+    ) == "gold"
+
+
+def test_database_failed_stage_key_maps_stale_silver_execution_to_gold_when_gold_exists():
+    assert pipeline_service.database_failed_stage_key(
+        "run-gold-failed",
+        {
+            "next_stage_key": "silver_code_execution",
+            "gold_generation_completed": True,
+        },
+    ) == "gold"
+
+
 def test_build_pipeline_steps_keeps_active_ingestion_running():
     from services import pipeline_runtime
 
@@ -273,6 +343,51 @@ def test_build_pipeline_steps_keeps_active_ingestion_running():
     by_key = {step["key"]: step for step in steps}
     assert by_key["ingestion"]["state"] == "RUNNING"
     assert by_key["memory"]["state"] == "PENDING"
+
+
+def test_active_bronze_execution_hides_stale_downstream_completion():
+    from services import pipeline_runtime
+
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            "status": "RUNNING",
+            "target_warehouse": "snowflake",
+            "background_stage": "bronze_code_execution",
+            "snowflake_bronze_execution_status": "RUNNING",
+            "silver_generation_status": "COMPLETED",
+            "snowflake_silver_execution_status": "COMPLETED",
+            "gold_generation_status": "COMPLETED",
+            "snowflake_gold_execution_status": "COMPLETED",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=True,
+        gold_generation_completed=True,
+    )
+
+    by_key = {step["key"]: step for step in steps}
+    assert by_key["bronze_code_execution"]["state"] == "RUNNING"
+    assert by_key["silver"]["state"] == "PENDING"
+    assert by_key["gold_code_execution"]["state"] == "PENDING"
+
+
+def test_review_artifacts_do_not_count_as_generated_or_executed_silver():
+    from services.pipeline_runtime import generation_completed
+
+    summary = [
+        {"stage": "Silver Merge Key Review", "artifact_type": "SILVER_MERGE_KEY_REVIEW"},
+        {"stage": "Silver Review", "artifact_type": "GATE5_SILVER_REVIEW"},
+    ]
+
+    assert generation_completed(summary, {}, "silver") is False
+    assert generation_completed(summary, {"silver_generation_results": [{"script_path": "silver.sql"}]}, "silver") is True
 
 
 def test_build_pipeline_steps_does_not_complete_in_progress_profiling():
@@ -681,6 +796,36 @@ def test_database_continue_skips_stage_confirmation_before_review_gates(monkeypa
     assert any(state.get("background_stage") == expected_gate for state in saved_states)
 
 
+def test_mark_run_processing_moves_off_stale_review_gate(monkeypatch):
+    from services import pipeline_runtime
+
+    saved = []
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "status": "HITL_WAIT",
+            "next_gate": 4,
+            "next_review_key": "silver_merge_key_review",
+            "stage_confirmation": {"awaiting_confirmation": True},
+        },
+    )
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved.append(dict(state)))
+
+    pipeline_runtime.mark_run_processing("run-transition", "silver")
+
+    assert saved == [{
+        "run_id": "run-transition",
+        "status": "PROCESSING",
+        "background_stage": "silver",
+        "next_gate": None,
+        "next_review_key": None,
+        "stage_confirmation": None,
+        "awaiting_stage_confirmation": False,
+    }]
+
+
 def test_job_done_callback_marks_failure_and_cleans_registry(monkeypatch):
     recorded = {}
     future = Future()
@@ -728,3 +873,126 @@ def test_gate4_review_filters_rejected_bronze_results_before_silver():
     )
 
     assert [item["table"] for item in filtered] == ["claim_information"]
+
+
+def test_gate4_review_uses_selected_bronze_subset_before_silver():
+    from services import pipeline_runtime
+
+    filtered = pipeline_runtime._filter_bronze_results_by_gate4_review(
+        [
+            {"database_name": "insurance", "schema_name": "dbo", "table": "claim_information"},
+            {"database_name": "insurance", "schema_name": "dbo", "table": "policy_transactions"},
+            {"database_name": "insurance", "schema_name": "dbo", "table": "claim_payment_indemnity"},
+        ],
+        {
+            "feeds": [
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table": "claim_information",
+                    "review_status": "APPROVED",
+                },
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table": "policy_transactions",
+                    "review_status": "PENDING",
+                },
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table": "claim_payment_indemnity",
+                    "review_status": "PENDING",
+                },
+            ]
+        },
+    )
+
+    assert [item["table"] for item in filtered] == ["claim_information"]
+
+
+def test_gate4_review_all_pending_preserves_legacy_all_bronze_selection():
+    from services import pipeline_runtime
+
+    filtered = pipeline_runtime._filter_bronze_results_by_gate4_review(
+        [
+            {"database_name": "insurance", "schema_name": "dbo", "table": "claim_information"},
+            {"database_name": "insurance", "schema_name": "dbo", "table": "policy_transactions"},
+        ],
+        {
+            "feeds": [
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table": "claim_information",
+                    "review_status": "PENDING",
+                },
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table": "policy_transactions",
+                    "review_status": "PENDING",
+                },
+            ]
+        },
+    )
+
+    assert [item["table"] for item in filtered] == ["claim_information", "policy_transactions"]
+
+
+def test_gate5_review_filters_gold_contract_to_selected_silver_sources():
+    from services import pipeline_runtime
+
+    filtered_silver = pipeline_runtime._filter_silver_results_by_gate5_review(
+        [
+            {"table": "claims", "target_table": "ATHENA_DB.SILVER.silver_claims"},
+            {"table": "policy", "target_table": "ATHENA_DB.SILVER.silver_policy"},
+        ],
+        {
+            "items": [
+                {"table": "claims", "target_table": "ATHENA_DB.SILVER.silver_claims", "review_status": "APPROVED"},
+                {"table": "policy", "target_table": "ATHENA_DB.SILVER.silver_policy", "review_status": "PENDING"},
+            ]
+        },
+    )
+    contract = pipeline_runtime._filter_gold_contract_by_silver_results(
+        {
+            "kpi_mappings": [
+                {"kpi_name": "Claim Count", "source_silver_table": "ATHENA_DB.SILVER.silver_claims"},
+                {"kpi_name": "Policy Count", "source_silver_table": "ATHENA_DB.SILVER.silver_policy"},
+            ],
+            "warnings": [],
+        },
+        filtered_silver,
+    )
+
+    assert [item["table"] for item in filtered_silver] == ["claims"]
+    assert [item["kpi_name"] for item in contract["kpi_mappings"]] == ["Claim Count"]
+    assert "filtered out 1 KPI" in contract["warnings"][0]
+
+
+def test_gate5_review_matches_table_only_approval_to_generated_silver_target():
+    from services import pipeline_runtime
+
+    filtered_silver = pipeline_runtime._filter_silver_results_by_gate5_review(
+        [
+            {
+                "table": "claim_payment_indemnity",
+                "source_table": "ATHENA_DB.BRONZE.bronze_claim_payment_indemnity",
+                "target_table": "ATHENA_DB.SILVER.silver_claim_payment_indemnity",
+            },
+            {
+                "table": "policy_transactions",
+                "source_table": "ATHENA_DB.BRONZE.bronze_policy_transactions",
+                "target_table": "ATHENA_DB.SILVER.silver_policy_transactions",
+            },
+        ],
+        {
+            "items": [
+                {"table": "claim_payment_indemnity", "review_status": "APPROVED"},
+                {"table": "policy_transactions", "review_status": "PENDING"},
+            ]
+        },
+    )
+
+    assert [item["table"] for item in filtered_silver] == ["claim_payment_indemnity"]

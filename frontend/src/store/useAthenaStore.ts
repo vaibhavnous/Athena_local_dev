@@ -36,12 +36,59 @@ function hasUsefulRunDetail(run: any): boolean {
   return Boolean(
     (Array.isArray(run?.stages) && run.stages.length > 0) ||
       (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length > 0) ||
+      run?.background_stage ||
+      run?.external_execution ||
       run?.stage_confirmation ||
       Number(run?.next_gate || 0) > 0 ||
       run?.bronze ||
       run?.silver ||
       run?.gold
   )
+}
+
+function normalizeRunStatus(value: any): string {
+  const status = String(value || '').toUpperCase()
+  if (status === 'PROCESSING' || status === 'SUBMITTED' || status === 'IN_PROGRESS') return 'RUNNING'
+  if (status === 'PENDING_REVIEW' || status === 'PAUSED_FOR_HITL') return 'HITL_WAIT'
+  if (status === 'SUCCESS' || status === 'PIPELINE_COMPLETED') return 'COMPLETED'
+  return status
+}
+
+const PIPELINE_PROGRESS_ORDER = [
+  'ingestion', 'memory', 'requirements', 'kpis', 'gate1',
+  'nomination', 'gate2', 'discovery', 'profiling', 'enrichment', 'gate3',
+  'bronze', 'gate4', 'bronze_code_execution',
+  'silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution',
+  'gold', 'gold_code_execution',
+]
+
+function runProgressIndex(run: any): number {
+  const order = new Map(PIPELINE_PROGRESS_ORDER.map((key, index) => [key, index]))
+  const steps = Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length
+    ? run.pipeline_steps
+    : Array.isArray(run?.stages) ? run.stages : []
+  let furthest = -1
+
+  for (const step of steps) {
+    const state = normalizeRunStatus(step?.state ?? step?.status)
+    if (state !== 'PENDING') furthest = Math.max(furthest, order.get(String(step?.key || '')) ?? -1)
+  }
+
+  const backgroundStage = String(run?.external_execution?.stage_key || run?.background_stage || '').trim()
+  return Math.max(furthest, order.get(backgroundStage) ?? -1)
+}
+
+function preserveProgressFields(existing: any, merged: any) {
+  for (const key of [
+    'status', 'stages', 'pipeline_steps', 'background_stage', 'external_execution',
+    'snowflake_bronze_execution_status', 'snowflake_bronze_execution_progress',
+    'snowflake_silver_execution_status', 'snowflake_silver_execution_progress',
+    'snowflake_gold_execution_status', 'snowflake_gold_execution_progress',
+    'stage_confirmation', 'next_gate', 'next_review_key', 'resume_message',
+  ]) {
+    if (existing[key] !== undefined) merged[key] = existing[key]
+  }
+  return merged
 }
 
 function mergeRunPreservingDetail(existing: any, incoming: any): any {
@@ -51,13 +98,46 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
   const incomingHasDetail = hasUsefulRunDetail(incoming)
   const existingHasDetail = hasUsefulRunDetail(existing)
   const merged = { ...existing, ...incoming }
+  const incomingStatus = normalizeRunStatus(incoming?.status)
+  const hasIncomingStatus = incoming?.status !== undefined && incoming?.status !== null
+  const incomingActive = incomingStatus === 'RUNNING'
+  const incomingTerminal =
+    incomingStatus === 'FAILED' ||
+    incomingStatus === 'COMPLETED' ||
+    incomingStatus === 'ABORTED' ||
+    incomingStatus === 'CANCELLED' ||
+    incomingStatus === 'CANCELED'
+  const incomingPausedOrTerminal =
+    incomingStatus === 'HITL_WAIT' ||
+    incomingTerminal
+
+  // Status hydration can return a sparse checkpoint snapshot after its detail query times out.
+  // Keep the furthest known stage; a slower response must not move the UI back to an earlier phase.
+  if (runProgressIndex(incoming) < runProgressIndex(existing)) {
+    return preserveProgressFields(existing, merged)
+  }
+
+  for (const key of ['stages', 'pipeline_steps']) {
+    if (Array.isArray(existing[key]) && existing[key].length > 0 && Array.isArray(incoming[key]) && incoming[key].length === 0) {
+      merged[key] = existing[key]
+    }
+  }
 
   if (existingHasDetail && !incomingHasDetail) {
     for (const key of [
       'stages',
       'pipeline_steps',
+      'background_stage',
+      'external_execution',
+      'snowflake_bronze_execution_status',
+      'snowflake_bronze_execution_progress',
+      'snowflake_silver_execution_status',
+      'snowflake_silver_execution_progress',
+      'snowflake_gold_execution_status',
+      'snowflake_gold_execution_progress',
       'stage_confirmation',
       'next_gate',
+      'next_review_key',
       'resume_message',
       'bronze',
       'silver',
@@ -70,8 +150,38 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
       'enriched_columns',
       'enriched_joins',
     ]) {
-      if (existing[key] !== undefined && incoming[key] === undefined) merged[key] = existing[key]
+      if (existing[key] !== undefined && (incoming[key] === undefined || incoming[key] === null)) merged[key] = existing[key]
     }
+  }
+
+  if (incomingActive) {
+    for (const key of [
+      'background_stage',
+      'external_execution',
+      'snowflake_bronze_execution_progress',
+      'snowflake_silver_execution_progress',
+      'snowflake_gold_execution_progress',
+    ]) {
+      if (existing[key] !== undefined && (incoming[key] === undefined || incoming[key] === null)) merged[key] = existing[key]
+    }
+  }
+
+  if (incomingActive) {
+    if (incoming.next_gate === undefined || incoming.next_gate === null) merged.next_gate = null
+    if (incoming.next_review_key === undefined || incoming.next_review_key === null) merged.next_review_key = null
+    if (incoming.background_stage && (incoming.stage_confirmation === undefined || incoming.stage_confirmation === null)) {
+      merged.stage_confirmation = null
+    }
+  }
+
+  if (hasIncomingStatus && incomingPausedOrTerminal) {
+    if (incoming.background_stage === undefined || incoming.background_stage === null) merged.background_stage = null
+    if (incoming.external_execution === undefined || incoming.external_execution === null) merged.external_execution = null
+  }
+
+  if (hasIncomingStatus && incomingTerminal) {
+    if (incoming.next_gate === undefined || incoming.next_gate === null) merged.next_gate = null
+    if (incoming.next_review_key === undefined || incoming.next_review_key === null) merged.next_review_key = null
   }
 
   return merged

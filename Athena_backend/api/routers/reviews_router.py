@@ -29,7 +29,10 @@ def table_reviews(run_id: str) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state
 
     try:
-        run = ui_run(run_id)
+        checkpoint = load_checkpoint_state(run_id) or {}
+        run = checkpoint
+        if not (checkpoint.get("nominated_tables") or checkpoint.get("candidate_feed") or checkpoint.get("candidate_feeds")):
+            run = ui_run(run_id)
     except Exception:
         logger.error("Failed to fetch table review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load table review")
@@ -93,10 +96,13 @@ def enrichment_reviews(run_id: str) -> Dict[str, Any]:
     if demo_enabled():
         return demo_enrichment_reviews(run_id)
 
+    from services.pipeline_runtime import load_checkpoint_state
     from api.services.ui_service import ui_run
 
     try:
-        run = ui_run(run_id)
+        run = load_checkpoint_state(run_id) or {}
+        if not run.get("enriched_metadata") and not run.get("enriched_columns"):
+            run = ui_run(run_id)
     except Exception:
         logger.error("Failed to fetch enrichment review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load enrichment review")
@@ -157,12 +163,13 @@ def bronze_reviews(run_id: str) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state
 
     try:
-        run = ui_run(run_id)
+        checkpoint = load_checkpoint_state(run_id) or {}
+        run = checkpoint
+        if not (checkpoint.get("bronze_review_artifact") or checkpoint.get("bronze_generation_results")):
+            run = ui_run(run_id)
     except Exception:
         logger.error("Failed to fetch bronze review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load bronze review")
-
-    checkpoint = load_checkpoint_state(run_id) or {}
 
     bronze_artifact = checkpoint.get("bronze_review_artifact") or run.get("bronze_review_artifact") or {}
 
@@ -185,16 +192,30 @@ def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
     if demo_enabled():
         return demo_action(run_id, segment="bronze" if payload.action == "APPROVED" else None, action=payload.action)
 
+    from api.services.ui_service import bronze_review_from_scripts
     from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate4_review
     from sftp_nodes.hitl import submit_sftp_gate4_review
 
     logger.info("Submitting bronze review", extra={"run_id": run_id, "action": payload.action})
 
     checkpoint = load_checkpoint_state(run_id) or {}
+    review_artifact = payload.review_artifact or {}
+    if not (review_artifact.get("feeds") or []):
+        review_artifact = checkpoint.get("bronze_review_artifact") or bronze_review_from_scripts(run_id, checkpoint) or {}
+    if str(payload.action or "APPROVED").upper() == "APPROVED" and not (review_artifact.get("feeds") or []):
+        raise HTTPException(status_code=409, detail="Bronze review is not ready yet. Generated Bronze scripts are still loading.")
+
     if api_utils.is_file_source(checkpoint.get("source")):
-        submit_background(run_id, "gate4", submit_sftp_gate4_review, run_id, payload.action, payload.review_artifact)
+        stage = "bronze_code_execution" if str(payload.action).upper() == "APPROVED" else "gate4"
+        submit_background(run_id, stage, submit_sftp_gate4_review, run_id, payload.action, review_artifact)
     else:
-        submit_background(run_id, "gate4", submit_gate4_review, run_id, payload.action, payload.review_artifact)
+        stage = (
+            "bronze_code_execution"
+            if str(payload.action).upper() == "APPROVED" and str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+            else "silver" if str(payload.action).upper() == "APPROVED"
+            else "gate4"
+        )
+        submit_background(run_id, stage, submit_gate4_review, run_id, payload.action, review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
 
@@ -204,23 +225,20 @@ def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
 # -------------------------
 @router.get("/silver-merge-key-reviews/{run_id}")
 def silver_merge_key_reviews(run_id: str) -> Dict[str, Any]:
-    from api.services.ui_service import ui_run
     from services.pipeline_runtime import load_checkpoint_state
 
     try:
-        run = ui_run(run_id)
+        run = load_checkpoint_state(run_id) or {}
     except Exception:
         logger.error("Failed to fetch Silver merge-key review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load Silver merge-key review")
-
-    checkpoint = load_checkpoint_state(run_id) or {}
 
     return {
         "run_id": run_id,
         "next_gate": run.get("next_gate"),
         "next_review_key": run.get("next_review_key"),
         "resume_message": run.get("resume_message"),
-        "silver_merge_key_review_artifact": checkpoint.get("silver_merge_key_review_artifact") or {},
+        "silver_merge_key_review_artifact": run.get("silver_merge_key_review_artifact") or {},
     }
 
 
@@ -229,7 +247,8 @@ def submit_silver_merge_key_reviews(run_id: str, payload: GenericGateDecisionPay
     from services.pipeline_runtime import submit_background, submit_silver_merge_key_review
 
     logger.info("Submitting Silver merge-key review", extra={"run_id": run_id, "action": payload.action})
-    submit_background(run_id, "silver_merge_key_review", submit_silver_merge_key_review, run_id, payload.action, payload.review_artifact)
+    stage = "silver" if str(payload.action).upper() == "APPROVED" else "silver_merge_key_review"
+    submit_background(run_id, stage, submit_silver_merge_key_review, run_id, payload.action, payload.review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
 
@@ -243,12 +262,13 @@ def silver_reviews(run_id: str) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state
 
     try:
-        run = ui_run(run_id)
+        checkpoint = load_checkpoint_state(run_id) or {}
+        run = checkpoint
+        if not (checkpoint.get("silver_review_artifact") or checkpoint.get("silver_generation_results")):
+            run = ui_run(run_id)
     except Exception:
         logger.error("Failed to fetch silver review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load silver review")
-
-    checkpoint = load_checkpoint_state(run_id) or {}
 
     silver_artifact = checkpoint.get("silver_review_artifact") or run.get("silver_review_artifact") or {}
 
@@ -277,9 +297,15 @@ def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
     logger.info("Submitting silver review", extra={"run_id": run_id, "action": payload.action})
 
     checkpoint = load_checkpoint_state(run_id) or {}
+    stage = (
+        "silver_code_execution"
+        if str(payload.action).upper() == "APPROVED" and str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+        else "gold" if str(payload.action).upper() == "APPROVED"
+        else "gate5"
+    )
     if api_utils.is_file_source(checkpoint.get("source")):
-        submit_background(run_id, "gate5", submit_sftp_gate5_review, run_id, payload.action, payload.review_artifact)
+        submit_background(run_id, stage, submit_sftp_gate5_review, run_id, payload.action, payload.review_artifact)
     else:
-        submit_background(run_id, "gate5", submit_gate5_review, run_id, payload.action, payload.review_artifact)
+        submit_background(run_id, stage, submit_gate5_review, run_id, payload.action, payload.review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}

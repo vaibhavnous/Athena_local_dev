@@ -28,48 +28,18 @@ import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/
 import { getGateDisplayName } from '../utils/pipelinePhases'
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
-const REVIEW_HYDRATION_ATTEMPTS = 12
-const REVIEW_HYDRATION_DELAY_MS = 2500
-const PIPELINE_ADVANCE_ATTEMPTS = 60
-const PIPELINE_ADVANCE_DELAY_MS = 2000
+const REVIEW_HYDRATION_ATTEMPTS = 20
+const REVIEW_HYDRATION_DELAY_MS = 1000
 const ENABLE_DEMO_REVIEW_FALLBACKS = ENABLE_DEMO_FALLBACKS
 
-async function waitForRunGate(runId, updateRun, targetGate, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
+async function waitForNextReviewGate(runId, updateRun, targetGate, attempts = REVIEW_HYDRATION_ATTEMPTS) {
   let latest = null
   for (let index = 0; index < attempts; index += 1) {
     latest = await getRun(runId)
     updateRun(runId, latest)
-    if (Number(latest?.next_gate || 0) === targetGate) return latest
-    if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
-    await sleep(PIPELINE_ADVANCE_DELAY_MS)
-  }
-  return latest
-}
-
-async function waitForRunReviewKey(runId, updateRun, targetReviewKey, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
-  let latest = null
-  for (let index = 0; index < attempts; index += 1) {
-    latest = await getRun(runId)
-    updateRun(runId, latest)
-    if (latest?.next_review_key === targetReviewKey) return latest
-    if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
-    await sleep(PIPELINE_ADVANCE_DELAY_MS)
-  }
-  return latest
-}
-
-async function waitForRunToLeaveGate(runId, updateRun, currentGate, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
-  let latest = null
-  for (let index = 0; index < attempts; index += 1) {
-    latest = await getRun(runId)
-    updateRun(runId, latest)
-    const nextGate = Number(latest?.next_gate || 0)
-    const status = String(latest?.status || '').toUpperCase()
-    if (status === 'FAILED') return latest
-    if (nextGate !== Number(currentGate || 0) || ['RUNNING', 'PROCESSING', 'SUBMITTED'].includes(status)) {
-      return latest
-    }
-    await sleep(PIPELINE_ADVANCE_DELAY_MS)
+    if (Number(latest?.next_gate || 0) === Number(targetGate)) return latest
+    if (['FAILED', 'SUCCESS', 'COMPLETED', 'PIPELINE_COMPLETED'].includes(String(latest?.status || '').toUpperCase())) return latest
+    if (index < attempts - 1) await sleep(REVIEW_HYDRATION_DELAY_MS)
   }
   return latest
 }
@@ -100,9 +70,9 @@ function hasRenderableReviewData(review, gate, isFileSource) {
       Number(review?.next_gate || 0) === 3
     )
   }
-  if (gate === 4) return Boolean((review?.bronze_review_artifact?.feeds || []).length) || Number(review?.next_gate || 0) === 4
-  if (gate === 'silver_merge_key_review') return Boolean((review?.silver_merge_key_review_artifact?.feeds || []).length) || review?.next_review_key === 'silver_merge_key_review'
-  if (gate === 5) return Boolean((review?.silver_review_artifact?.items || []).length) || Number(review?.next_gate || 0) === 5
+  if (gate === 4) return Boolean((review?.bronze_review_artifact?.feeds || []).length)
+  if (gate === 'silver_merge_key_review') return Boolean((review?.silver_merge_key_review_artifact?.feeds || []).length)
+  if (gate === 5) return Boolean((review?.silver_review_artifact?.items || []).length)
   return false
 }
 
@@ -118,26 +88,6 @@ async function waitForRenderableReview(fetcher, gate, isFileSource = false, atte
   const error = new Error('Review data was not ready after ' + attempts + ' backend attempt' + (attempts !== 1 ? 's' : '') + '.')
   Object.assign(error, { code: 'REVIEW_NOT_READY', latest })
   throw error
-}
-
-function hasGoldScripts(run) {
-  return Boolean(
-    (run?.gold?.scripts || []).length ||
-    run?.gold_generation_completed ||
-    String(run?.gold_generation_status || '').toUpperCase().startsWith('COMPLETED')
-  )
-}
-
-async function waitForGoldScripts(runId, updateRun, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
-  let latest = null
-  for (let index = 0; index < attempts; index += 1) {
-    latest = await getRun(runId)
-    updateRun(runId, latest)
-    if (hasGoldScripts(latest)) return latest
-    if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
-    await sleep(PIPELINE_ADVANCE_DELAY_MS)
-  }
-  return latest
 }
 
 function isSuccessfulRun(run) {
@@ -570,15 +520,23 @@ function HitlQueue() {
   const currentRun = useMemo(() => {
     const summaryRun = runs.find((run) => run.id === selectedRunId) || null
     if (selectedRunDetail?.id === selectedRunId) {
-      return {
-        ...summaryRun,
+      if (!summaryRun) return selectedRunDetail
+      const merged = {
         ...selectedRunDetail,
+        ...summaryRun,
       }
+      if (!summaryRun?.pipeline_steps?.length && selectedRunDetail?.pipeline_steps?.length) {
+        merged.pipeline_steps = selectedRunDetail.pipeline_steps
+      }
+      if (!summaryRun?.stages?.length && selectedRunDetail?.stages?.length) {
+        merged.stages = selectedRunDetail.stages
+      }
+      return merged
     }
     return summaryRun
   }, [runs, selectedRunDetail, selectedRunId])
-  const gateToReview = Number(currentRun?.next_gate || requestedGate || 0)
-  const reviewKeyToReview = currentRun?.next_review_key || requestedReviewKey || ''
+  const gateToReview = Number(requestedGate || (!requestedReviewKey ? currentRun?.next_gate : 0) || 0)
+  const reviewKeyToReview = requestedReviewKey || (!requestedGate ? currentRun?.next_review_key : '') || ''
   const isReviewableRun = isReviewGateAccessible(currentRun) || (Boolean(selectedRunId) && (gateToReview > 0 || Boolean(reviewKeyToReview)))
   const isSilverMergeKeyReview = reviewKeyToReview === 'silver_merge_key_review'
   const isGate1 = gateToReview === 1
@@ -693,6 +651,25 @@ function HitlQueue() {
       cancelled = true
     }
   }, [addRun, currentRun, navigate, runs, selectedRunId, setActiveRun, setSearchParams, updateRun])
+
+  useEffect(() => {
+    if (!selectedRunId || !currentRun) return
+    if (!requestedGate && !requestedReviewKey) return
+    if (matchesRequestedReview(currentRun, requestedGate, requestedReviewKey)) return
+    if (!isRunActivelyProcessing(currentRun)) return
+
+    addNotification({
+      type: 'info',
+      title: 'Review no longer active',
+      message: 'The pipeline moved to another stage. Returning to the monitor.',
+      duration: 3500,
+    })
+    setActiveRun(selectedRunId)
+    navigate('/app/data-discovery', {
+      replace: true,
+      state: { activeRunId: selectedRunId },
+    })
+  }, [addNotification, currentRun, navigate, requestedGate, requestedReviewKey, selectedRunId, setActiveRun])
 
   useEffect(() => {
     if (requestedRunId) return
@@ -948,7 +925,9 @@ function HitlQueue() {
         window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 1, source: expectedSource } }))
       } catch (error) {
         if (!isCurrentHydration()) return
-        const demoFallback = ENABLE_DEMO_REVIEW_FALLBACKS ? buildDemoGateFallback(currentRun, gateToReview || 1, isSftpRun, runs) : null
+        const demoFallback = ENABLE_DEMO_REVIEW_FALLBACKS && isDemoFallbackRun(currentRun)
+          ? buildDemoGateFallback(currentRun, gateToReview || 1, isSftpRun, runs)
+          : null
         if (demoFallback) {
           const fallbackPatch = {
             ...demoFallback,
@@ -1085,7 +1064,18 @@ function HitlQueue() {
 
   const returnToMonitor = (runId) => {
     if (runId) setActiveRun(runId)
-    navigate('/app/data-discovery')
+    setSelectedRunDetail(null)
+    navigate('/app/data-discovery', {
+      replace: true,
+      state: runId ? { activeRunId: runId } : null,
+    })
+  }
+
+  const openReviewGate = (runId, gate) => {
+    if (!runId) return
+    setSelectedRunId(runId)
+    setActiveRun(runId)
+    setSearchParams({ runId, gate: String(gate || '') })
   }
 
   const selectReviewRun = (runId) => {
@@ -1096,20 +1086,6 @@ function HitlQueue() {
     } else {
       setSearchParams({})
     }
-  }
-
-  const stayOnReviewGate = (runId, gate) => {
-    if (!runId) return
-    setSelectedRunId(runId)
-    setActiveRun(runId)
-    setSearchParams({ runId, gate: String(gate || '') })
-  }
-
-  const stayOnNamedReview = (runId, reviewKey) => {
-    if (!runId) return
-    setSelectedRunId(runId)
-    setActiveRun(runId)
-    setSearchParams({ runId, review: String(reviewKey || '') })
   }
 
   const shouldRedirectDemoKpiReview = isSuppressedInitialReviewRun(currentRun)
@@ -1355,14 +1331,14 @@ function HitlQueue() {
         else handleAutoApproveTables()
         await submitTableReviews(selectedRunId, approvedTables)
         updateRun(selectedRunId, {
-          id: selectedRunId,
-          status: 'PROCESSING',
-          next_gate: 0,
-          kpis: [],
+            id: selectedRunId,
+            status: 'PROCESSING',
+            next_gate: 0,
+            stage_confirmation: null,
+            kpis: [],
+          background_stage: isSftpRun ? 'schema' : 'discovery',
           resume_message: `${gate2Name} submitted. Metadata discovery is starting.`,
         })
-        const refreshed = await waitForRunToLeaveGate(selectedRunId, updateRun, 2)
-        updateRun(selectedRunId, { ...refreshed, status: refreshed?.status || 'PROCESSING' })
         setTableReview(null)
         setSelectedTables({})
         addNotification({
@@ -1373,8 +1349,9 @@ function HitlQueue() {
             : 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
           duration: 5000
         })
-        if (Number(refreshed?.next_gate || 0) === 3 && isReviewGateAccessible(refreshed)) {
-          stayOnReviewGate(selectedRunId, 3)
+        const refreshed = await waitForNextReviewGate(selectedRunId, updateRun, 3)
+        if (Number(refreshed?.next_gate || 0) === 3) {
+          openReviewGate(selectedRunId, 3)
         } else {
           returnToMonitor(selectedRunId)
         }
@@ -1405,8 +1382,14 @@ function HitlQueue() {
         })
         const editedEnrichmentMetadata = hasRejectedSemanticItem ? undefined : buildEditedEnrichmentMetadata()
         await submitEnrichmentReview(selectedRunId, !hasRejectedSemanticItem, editedEnrichmentMetadata)
-        const refreshed = await getRun(selectedRunId)
-        updateRun(selectedRunId, refreshed)
+        updateRun(selectedRunId, {
+            id: selectedRunId,
+            status: 'RUNNING',
+            next_gate: 0,
+            stage_confirmation: null,
+            background_stage: 'bronze',
+          resume_message: `${gate3Name} submitted. Bronze generation is starting.`,
+        })
         setEnrichmentReview(null)
         setSemanticDecisions({})
         setSemanticDrafts({})
@@ -1420,11 +1403,7 @@ function HitlQueue() {
             : 'Enrichment review was rejected and the run remains paused for rework.',
           duration: 5000
         })
-        if (Number(refreshed?.next_gate || 0) === 4 && isReviewGateAccessible(refreshed)) {
-          stayOnReviewGate(selectedRunId, 4)
-        } else {
-          returnToMonitor(selectedRunId)
-        }
+        returnToMonitor(selectedRunId)
       } catch (error) {
         await refreshRunAfterSubmitError(`${gate3Name} submit did not complete. Waiting on backend state.`)
         addNotification({
@@ -1443,28 +1422,32 @@ function HitlQueue() {
     if (isGate4) {
       setSubmitting(true)
       try {
+        if (!bronzeCodeReviewItems.length) {
+          throw new Error(`${gate4Name} is not ready yet. Bronze scripts are still being generated.`)
+        }
         const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
         await submitBronzeReview(selectedRunId, reviewAction, buildCodeReviewArtifact('bronze', codeReviewDraftItems, bronzeReview, codeReviewDecisions))
-        const refreshed = reviewAction === 'APPROVED'
-          ? await waitForRunReviewKey(selectedRunId, updateRun, 'silver_merge_key_review')
-          : await getRun(selectedRunId)
-        updateRun(selectedRunId, refreshed)
+        updateRun(selectedRunId, {
+          id: selectedRunId,
+            status: 'RUNNING',
+            next_gate: 0,
+            next_review_key: null,
+            stage_confirmation: null,
+            background_stage: reviewAction === 'APPROVED' ? 'bronze_code_execution' : undefined,
+          resume_message: reviewAction === 'APPROVED'
+            ? 'Bronze review submitted. Bronze execution is starting.'
+            : 'Bronze review was submitted.',
+        })
         setBronzeReview(null)
         setCodeReviewDraftItems([])
         addNotification({
           type: 'success',
           title: `${gate4Name} Submitted`,
-          message: refreshed?.next_review_key === 'silver_merge_key_review'
-            ? 'Bronze approved. Silver Merge Key Review is ready.'
-            : 'Bronze review was submitted. Pipeline is still processing.',
+          message: 'Bronze review was submitted. Pipeline is resuming.',
           duration: 5000
         })
-        if (refreshed?.next_review_key === 'silver_merge_key_review' && isReviewGateAccessible(refreshed)) {
-          setSilverMergeKeyReview(null)
-          stayOnNamedReview(selectedRunId, 'silver_merge_key_review')
-        } else {
-          returnToMonitor(selectedRunId)
-        }
+        setSilverMergeKeyReview(null)
+        returnToMonitor(selectedRunId)
       } catch (error) {
         await refreshRunAfterSubmitError(`${gate4Name} submit did not complete. Waiting on backend state.`)
         addNotification({
@@ -1483,28 +1466,32 @@ function HitlQueue() {
     if (isSilverMergeKeyReview) {
       setSubmitting(true)
       try {
+        if (!silverMergeKeyReviewItems.length) {
+          throw new Error('Silver Merge Key Review is not ready yet. Merge-key review data is still being prepared.')
+        }
         const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
         await submitSilverMergeKeyReview(selectedRunId, reviewAction, buildCodeReviewArtifact('silver_merge_key', codeReviewDraftItems, silverMergeKeyReview, codeReviewDecisions))
-        const refreshed = reviewAction === 'APPROVED'
-          ? await waitForRunGate(selectedRunId, updateRun, 5)
-          : await getRun(selectedRunId)
-        updateRun(selectedRunId, refreshed)
+        updateRun(selectedRunId, {
+          id: selectedRunId,
+            status: 'RUNNING',
+            next_gate: 0,
+            next_review_key: null,
+            stage_confirmation: null,
+            background_stage: reviewAction === 'APPROVED' ? 'silver' : undefined,
+          resume_message: reviewAction === 'APPROVED'
+            ? 'Silver Merge Key Review submitted. Silver generation is starting.'
+            : 'Silver Merge Key Review was submitted.',
+        })
         setSilverMergeKeyReview(null)
         setCodeReviewDraftItems([])
         addNotification({
           type: 'success',
           title: 'Silver Merge Key Review Submitted',
-          message: Number(refreshed?.next_gate || 0) === 5
-            ? `Merge keys approved. Silver scripts are generated and ready for ${gate5Name}.`
-            : 'Silver Merge Key Review was submitted. Pipeline is still processing.',
+          message: 'Silver Merge Key Review was submitted. Pipeline is resuming.',
           duration: 5000
         })
-        if (Number(refreshed?.next_gate || 0) === 5 && isReviewGateAccessible(refreshed)) {
-          setSilverReview(null)
-          stayOnReviewGate(selectedRunId, 5)
-        } else {
-          returnToMonitor(selectedRunId)
-        }
+        setSilverReview(null)
+        returnToMonitor(selectedRunId)
       } catch (error) {
         await refreshRunAfterSubmitError('Silver Merge Key Review submit did not complete. Waiting on backend state.')
         addNotification({
@@ -1523,22 +1510,28 @@ function HitlQueue() {
     if (isGate5) {
       setSubmitting(true)
       try {
+        if (!silverCodeReviewItems.length) {
+          throw new Error(`${gate5Name} is not ready yet. Silver scripts are still being generated.`)
+        }
         const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
         await submitSilverReview(selectedRunId, reviewAction, buildCodeReviewArtifact('silver', codeReviewDraftItems, silverReview, codeReviewDecisions))
-        const refreshed = reviewAction === 'APPROVED'
-          ? await waitForGoldScripts(selectedRunId, updateRun)
-          : await getRun(selectedRunId)
-        updateRun(selectedRunId, refreshed)
+        updateRun(selectedRunId, {
+            id: selectedRunId,
+            status: 'RUNNING',
+            next_gate: 0,
+            next_review_key: null,
+            stage_confirmation: null,
+            background_stage: reviewAction === 'APPROVED' ? 'silver_code_execution' : undefined,
+          resume_message: reviewAction === 'APPROVED'
+            ? `${gate5Name} submitted. Silver execution is starting.`
+            : `${gate5Name} was submitted.`,
+        })
         setSilverReview(null)
         setCodeReviewDraftItems([])
         addNotification({
           type: 'success',
           title: `${gate5Name} Submitted`,
-          message: reviewAction === 'APPROVED' && hasGoldScripts(refreshed)
-            ? 'Silver approved. Gold scripts are now ready.'
-            : reviewAction === 'APPROVED'
-            ? 'Silver approved. Gold generation is still processing.'
-            : 'Silver review was submitted. Pipeline is resuming.',
+          message: 'Silver review was submitted. Pipeline is resuming.',
           duration: 5000
         })
         returnToMonitor(selectedRunId)
@@ -1721,8 +1714,8 @@ function HitlQueue() {
           )}
         </div>
 
-        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto rounded-[28px] bg-[radial-gradient(circle_at_top,_rgba(44,87,150,0.2),_transparent_42%),linear-gradient(180deg,#09101c_0%,#060b14_100%)] px-5 py-6">
-          <div className="flex w-full max-w-5xl flex-col overflow-hidden rounded-[26px] border border-[#1d2940] bg-[#0d1729] shadow-[0_30px_90px_rgba(0,0,0,0.46)]">
+        <div className="flex min-h-0 flex-1 items-stretch justify-center overflow-y-auto rounded-[28px] bg-[radial-gradient(circle_at_top,_rgba(44,87,150,0.2),_transparent_42%),linear-gradient(180deg,#09101c_0%,#060b14_100%)] px-3 py-4 sm:px-5 sm:py-6">
+          <div className="flex min-h-0 w-full max-w-[940px] flex-1 flex-col overflow-hidden rounded-[18px] border border-[#1d2940] bg-[#0d1729] shadow-[0_30px_90px_rgba(0,0,0,0.46)]">
             <div className="flex flex-col gap-4 border-b border-[#1d2940] bg-[#10192c] px-6 py-5 md:flex-row md:items-center md:justify-between">
               <div className="flex min-w-0 items-center gap-3">
                 <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-[14px] border border-[#29496f] bg-[#11213a]">
@@ -1751,7 +1744,7 @@ function HitlQueue() {
               </div>
             </div>
 
-            <div className="flex-1 space-y-4 overflow-y-auto bg-[#0b1220] p-6">
+            <div className="flex-1 space-y-4 overflow-y-auto bg-[#0b1220] p-3 sm:p-4">
               {semanticReviewItems.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center gap-4 py-16 text-center">
                   <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#131d30]">
@@ -2064,8 +2057,9 @@ function HitlQueue() {
               description={`Review ${silverMergeKeyReviewFeeds.length} merge-key set${silverMergeKeyReviewFeeds.length !== 1 ? 's' : ''} before Silver generation continues.`}
               lineageLabel="View Source -> Bronze -> Silver Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
-              emptyMessage="Merge-key review data is not loaded yet. Submit is still available if the review is pending."
+              emptyMessage="Merge-key review data is not loaded yet. Keep the monitor open while the backend prepares this review."
               items={silverMergeKeyReviewItems}
+              loading={hydrating}
               reviewedCount={reviewedCodeReviewCount}
               totalCount={silverMergeKeyReviewItems.length}
               gateDecision={codeReviewGateDecision || gateDecision}
@@ -2078,7 +2072,7 @@ function HitlQueue() {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting}
+              disabled={submitting || !gateReviewReady}
               submitLabel="Submit & Generate Silver"
             />
             ) : isGate5 ? (
@@ -2087,8 +2081,9 @@ function HitlQueue() {
               description={`Review ${silverReviewItems.length} generated script${silverReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.`}
               lineageLabel="View Source -> Bronze -> Silver Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
-              emptyMessage={`Silver scripts are not loaded yet. Submit is still available if ${gate5Name} is pending.`}
+              emptyMessage={`Silver scripts are not loaded yet. Keep the monitor open while ${gate5Name} is prepared.`}
               items={silverCodeReviewItems}
+              loading={hydrating}
               reviewedCount={reviewedCodeReviewCount}
               totalCount={silverCodeReviewItems.length}
               gateDecision={codeReviewGateDecision || gateDecision}
@@ -2101,7 +2096,7 @@ function HitlQueue() {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting}
+              disabled={submitting || !gateReviewReady}
               submitLabel="Submit & View Generated Code"
             />
             ) : isGate4 ? (
@@ -2110,8 +2105,9 @@ function HitlQueue() {
               description={`Review ${bronzeReviewFeeds.length} generated script${bronzeReviewFeeds.length !== 1 ? 's' : ''} before the pipeline continues.`}
               lineageLabel="View Source -> Bronze Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
-              emptyMessage={`Bronze scripts are not loaded yet. Submit is still available if ${gate4Name} is pending.`}
+              emptyMessage={`Bronze scripts are not loaded yet. Keep the monitor open while ${gate4Name} is prepared.`}
               items={bronzeCodeReviewItems}
+              loading={hydrating}
               reviewedCount={reviewedCodeReviewCount}
               totalCount={bronzeCodeReviewItems.length}
               gateDecision={codeReviewGateDecision || gateDecision}
@@ -2124,11 +2120,11 @@ function HitlQueue() {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting}
+              disabled={submitting || !gateReviewReady}
               submitLabel="Submit & Generate Silver"
             />
             ) : isGate3 ? (
-            <div className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-bg-border bg-bg-card shadow-2xl">
+            <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }} className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-bg-border bg-bg-card shadow-2xl">
               <div className="flex shrink-0 flex-col gap-4 border-b border-bg-border bg-bg-base/50 p-6 md:flex-row md:items-center md:justify-between">
                 <div className="flex items-center gap-3">
                   <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-blue/15">
@@ -2152,7 +2148,12 @@ function HitlQueue() {
               </div>
 
               <div className="flex-1 space-y-4 overflow-y-auto bg-bg-base/20 p-6">
-                {semanticReviewItems.length === 0 ? (
+                {hydrating && semanticReviewItems.length === 0 ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-4 py-16 text-center">
+                    <Loader2 size={28} className="animate-spin text-accent-blue" />
+                    <p className="font-medium text-text-primary">Loading semantic review artifacts…</p>
+                  </div>
+                ) : semanticReviewItems.length === 0 ? (
                   <div className="flex h-full flex-col items-center justify-center gap-4 py-16 text-center">
                     <div className="flex h-14 w-14 items-center justify-center rounded-full bg-bg-hover">
                       <Inbox size={28} className="text-text-tertiary" />
@@ -2209,9 +2210,13 @@ function HitlQueue() {
                   </div>
                 </div>
               </div>
-            </div>
+            </motion.div>
             ) : isGate2 ? (
-            (isSftpRun
+            hydrating ? (
+              <div className="flex min-h-[180px] items-center justify-center rounded-2xl border border-[#22304b] bg-[#0b1424] p-6 text-sm text-[#9fb0ca]">
+                <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin text-[#4fa3ff]" /> Loading table review artifacts…</span>
+              </div>
+            ) : (isSftpRun
               ? (availableSftpFeeds.length === 0)
               : (tableReview?.nominated_tables || []).length === 0) ? (
               <div className="flex items-center justify-center h-40 text-gray-600 text-sm">
@@ -2795,10 +2800,21 @@ function isReviewGateAccessible(run) {
   if (status === 'PAUSED_FOR_STAGE_CONFIRMATION') return false
 
   return (
-    ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW', 'RUNNING', 'PROCESSING', 'SUBMITTED'].includes(status) ||
+    ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(status) ||
     Boolean(run?.next_review_key) ||
-    hasGatePayload(run)
+    (hasGatePayload(run) && !['RUNNING', 'PROCESSING', 'SUBMITTED', 'IN_PROGRESS'].includes(status))
   )
+}
+
+function isRunActivelyProcessing(run) {
+  const status = String(run?.status || '').toUpperCase()
+  return ['RUNNING', 'PROCESSING', 'SUBMITTED', 'IN_PROGRESS'].includes(status) || Boolean(run?.background_stage)
+}
+
+function matchesRequestedReview(run, requestedGate, requestedReviewKey) {
+  if (!run || (!requestedGate && !requestedReviewKey)) return true
+  if (requestedReviewKey) return run?.next_review_key === requestedReviewKey
+  return Number(run?.next_gate || 0) === Number(requestedGate || 0)
 }
 
 function CountRow({ label, value, color, pulse }) {
@@ -2973,6 +2989,7 @@ function CodeReviewPanel({
   onViewLineage,
   onDraftItemsChange,
   sessionKey,
+  loading,
 }) {
   const [expandedKey, setExpandedKey] = useState(null)
   const [draftItems, setDraftItems] = useState(items)
@@ -3033,7 +3050,7 @@ function CodeReviewPanel({
     'border-amber-500/35 bg-amber-500/10 text-amber-300'
 
   return (
-    <div className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#0f1829] shadow-2xl">
+    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }} className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#0f1829] shadow-2xl">
       <div className="flex shrink-0 flex-col gap-4 border-b border-[#1d2940] bg-[#101726] p-6 md:flex-row md:items-center md:justify-between">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#163b74] text-[#4fa3ff]">
@@ -3070,7 +3087,11 @@ function CodeReviewPanel({
       </div>
 
       <div className="flex-1 space-y-4 overflow-y-auto bg-[#0b1220] p-6">
-        {draftItems.length === 0 ? (
+        {loading && draftItems.length === 0 ? (
+          <div className="flex min-h-[180px] items-center justify-center rounded-2xl border border-[#22304b] bg-[#0b1424] p-6 text-sm text-[#9fb0ca]">
+            <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin text-[#4fa3ff]" /> Loading generated review artifacts…</span>
+          </div>
+        ) : draftItems.length === 0 ? (
           <div className="rounded-2xl border border-[#22304b] bg-[#0b1424] p-4 text-sm text-[#c6d2e8]">
             {emptyMessage}
           </div>
@@ -3158,7 +3179,7 @@ function CodeReviewPanel({
           </button>
         </div>
       </div>
-    </div>
+    </motion.div>
   )
 }
 

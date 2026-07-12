@@ -229,6 +229,65 @@ def test_approved_review_scripts_match_case_sensitive_variants():
     assert approved[0]["script_path"] == "lower.sql"
 
 
+def test_approved_review_scripts_use_selected_subset_and_keep_all_pending_legacy():
+    scripts = [
+        {
+            "table": "claim_information",
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "script_path": "claims.sql",
+        },
+        {
+            "table": "policy_transactions",
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "script_path": "policy.sql",
+        },
+    ]
+
+    selected = snowflake_bronze_runtime._approved_review_scripts(
+        {"bronze_generation_results": scripts},
+        {
+            "feeds": [
+                {
+                    "table": "claim_information",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "review_status": "APPROVED",
+                },
+                {
+                    "table": "policy_transactions",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "review_status": "PENDING",
+                },
+            ]
+        },
+    )
+    legacy_all = snowflake_bronze_runtime._approved_review_scripts(
+        {"bronze_generation_results": scripts},
+        {
+            "feeds": [
+                {
+                    "table": "claim_information",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "review_status": "PENDING",
+                },
+                {
+                    "table": "policy_transactions",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "review_status": "PENDING",
+                },
+            ]
+        },
+    )
+
+    assert [item["script_path"] for item in selected] == ["claims.sql"]
+    assert [item["script_path"] for item in legacy_all] == ["claims.sql", "policy.sql"]
+
+
 def test_snowflake_bronze_runtime_rejects_wrong_script_format(monkeypatch):
     workdir = Path.cwd() / ".tmp-tests" / f"snowflake_runtime_bad_{uuid.uuid4().hex}"
     workdir.mkdir(parents=True, exist_ok=True)

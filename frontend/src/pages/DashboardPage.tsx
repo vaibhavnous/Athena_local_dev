@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import StatusBadge from '../components/shared/StatusBadge'
 import useAthenaStore from '../store/useAthenaStore'
+import { normalizeState } from '../utils/pipelinePhases'
 
 function DashboardPage() {
   const runs = useAthenaStore((s) => s.runs)
@@ -30,12 +31,9 @@ function DashboardPage() {
   })
 
   const activeRuns = runs.filter((run) =>
-    ['RUNNING', 'PROCESSING', 'SUBMITTED'].includes(String(run.status || '').toUpperCase())
+    ['RUNNING', 'PROCESSING', 'SUBMITTED'].includes(normalizeState(run.status))
   )
-  const waitingRuns = runs.filter((run) => {
-    const status = String(run.status || '').toUpperCase()
-    return status === 'HITL_WAIT' || status === 'PENDING_REVIEW' || Number(run.next_gate || 0) > 0
-  })
+  const waitingRuns = runs.filter(isReviewWaitingRun)
   const completedRuns = runs.filter((run) => String(run.status || '').toUpperCase() === 'SUCCESS')
   const failedRuns = runs.filter((run) => String(run.status || '').toUpperCase() === 'FAILED')
   const totalRuns = runs.length
@@ -264,7 +262,7 @@ function DashboardPage() {
 
                       <div className="flex flex-col items-end gap-2">
                         <StatusBadge status={run.status} size="sm" />
-                        {[1, 2, 3, 4, 5].includes(Number(run.next_gate || 0)) ? (
+                        {isReviewWaitingRun(run) && [1, 2, 3, 4, 5].includes(Number(run.next_gate || 0)) ? (
                           <span className="text-[11px] text-slate-400">Gate {run.next_gate}</span>
                         ) : (
                           <span className="text-[11px] text-slate-400">
@@ -499,6 +497,11 @@ function formatTimeAgo(dateStr) {
   if (h > 0) return `${h}h ago`
   if (m > 0) return `${m}m ago`
   return 'just now'
+}
+
+function isReviewWaitingRun(run) {
+  const status = normalizeState(run?.status)
+  return ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(status)
 }
 
 export default DashboardPage

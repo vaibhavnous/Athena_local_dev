@@ -12,7 +12,7 @@ import {
   Upload,
 } from 'lucide-react'
 import * as mammoth from 'mammoth'
-import { getRun, startRun, uploadBrd } from '../../api/athenaApi'
+import { startRun, uploadBrd } from '../../api/athenaApi'
 import useAthenaStore from '../../store/useAthenaStore'
 
 const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024
@@ -114,32 +114,6 @@ function buildFileRunLabel(source, entity) {
 
 function connectionTypeFromSource(source) {
   return source === 'adls_gen2' || source === 'sftp' ? 'data_lake' : 'database'
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
-
-function hasStartedPipeline(run) {
-  const steps = Array.isArray(run?.pipeline_steps) ? run.pipeline_steps : []
-  const status = String(run?.status || '').toUpperCase()
-  return (
-    steps.some((step) => ['RUNNING', 'COMPLETED', 'HITL_WAIT'].includes(String(step?.state || '').toUpperCase())) ||
-    ['RUNNING', 'PROCESSING', 'SUBMITTED', 'IN_PROGRESS', 'HITL_WAIT'].includes(status)
-  )
-}
-
-async function waitForRunStart(runId, fallbackRun, attempts = 20) {
-  for (let index = 0; index < attempts; index += 1) {
-    try {
-      const run = await getRun(runId)
-      if (run?.id && hasStartedPipeline(run)) return run
-    } catch (error) {
-      if (index === attempts - 1) console.warn('[NewRunModal] Run start polling failed', error)
-    }
-    await sleep(1000)
-  }
-  return fallbackRun
 }
 
 function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
@@ -350,6 +324,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         run_id: run.run_id,
         brd_filename: displayName,
         status: run.status || 'RUNNING',
+        background_stage: 'ingestion',
+        resume_message: 'BRD Ingest is running.',
         source: form.source,
         sftp_entity: normalizedSftpEntity,
         provider: form.provider,
@@ -361,19 +337,20 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         kpis: [],
       }
 
-      const startedRun = await waitForRunStart(run.run_id, newRun)
-      addRun({
-        ...newRun,
-        ...startedRun,
-        id: startedRun.id || run.run_id,
-        run_id: startedRun.run_id || run.run_id,
-        brd_filename: startedRun.brd_filename || displayName,
-        started_at: startedRun.started_at || startedAt,
-      })
+      addRun(newRun)
       setActiveRun(run.run_id)
       resetState()
       onClose()
-      navigate('/app/data-discovery', { replace: true, state: null })
+      navigate('/app/data-discovery', {
+        replace: true,
+        state: {
+          pendingRun: {
+            id: run.run_id,
+            label: displayName,
+            startedAt,
+          },
+        },
+      })
 
       addNotification({
         type: 'success',

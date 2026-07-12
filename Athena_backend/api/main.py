@@ -31,6 +31,12 @@ async def lifespan(app: FastAPI):
         embedding_status.get("provider"),
     )
     try:
+        from services.pipeline_runtime import mark_interrupted_background_runs_on_startup
+
+        mark_interrupted_background_runs_on_startup()
+    except Exception:
+        logger.exception("Interrupted run recovery failed during startup")
+    try:
         yield
     finally:
         logger.info("Athena API service stopped")
@@ -66,9 +72,17 @@ app.add_middleware(
 @app.get("/health", tags=["Health"])
 async def health_check():
     embedding_status = get_embedding_runtime_status(probe_models=False)
+    try:
+        from services.pipeline_runtime import background_capacity_snapshot
+
+        background_capacity = background_capacity_snapshot()
+    except Exception:
+        logger.exception("Failed to collect background capacity")
+        background_capacity = {"workers": 0, "active": 0, "available": 0}
     return {
         "status": "ok",
         "service": "athena-fastapi",
+        "background_capacity": background_capacity,
         "embeddings": {
             **embedding_status,
             "enabled": embedding_status["env_enabled"],

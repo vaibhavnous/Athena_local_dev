@@ -242,3 +242,39 @@ def test_load_silver_scripts_prefers_snowflake_bundle_for_snowflake_run(monkeypa
     assert len(loaded["scripts"]) == 1
     assert loaded["scripts"][0]["script_language"] == "sql"
     assert 'MERGE INTO "ATHENA_DB"."SILVER"."silver_measures"' in loaded["scripts"][0]["script_body"]
+
+
+def test_snowflake_silver_generates_one_script_per_approved_bronze_result(monkeypatch):
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
+    monkeypatch.setenv("SNOWFLAKE_SILVER_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_SILVER_SCHEMA", "SILVER")
+    monkeypatch.setattr(silver_gen, "ai_store_db_writer", lambda **_: None)
+    workdir = Path.cwd() / ".tmp-tests" / f"silver_four_tables_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    state = {
+        "run_id": "run-four-silver",
+        "target_warehouse": "snowflake",
+        "bronze_generation_results": [
+            {
+                "run_id": "run-four-silver",
+                "table": table,
+                "target_table": f"ATHENA_DB.BRONZE.bronze_{table}",
+                "source_columns": [{"target": f"{table}_id", "type": "NUMBER(38,0)"}],
+            }
+            for table in ("claims", "policy", "payments", "coverage")
+        ],
+    }
+
+    result = silver_gen.silver_code_generation_node(state)
+
+    assert result["silver_generation_status"] == "COMPLETED"
+    assert sorted(item["table"] for item in result["silver_generation_results"]) == [
+        "claims",
+        "coverage",
+        "payments",
+        "policy",
+    ]
+    assert len(result["silver_generation_results"]) == 4

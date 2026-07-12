@@ -212,6 +212,64 @@ def test_mocked_pipeline_progression_stays_in_sync(monkeypatch):
     assert after.json()["state"]["life_cycle_state"] == "TERMINATED"
 
 
+def test_active_pipeline_status_uses_checkpoint_snapshot(monkeypatch):
+    checkpoint = {
+        "run_id": "run-active",
+        "status": "RUNNING",
+        "source": "database",
+        "background_stage": "silver_code_execution",
+        "silver_generation_status": "COMPLETED",
+    }
+
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(
+        "api.services.ui_service.ui_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("active status should not hydrate full UI state")),
+    )
+
+    response = client.get("/pipeline/run-active/status")
+
+    assert response.status_code == 200
+    assert response.json()["run"]["status"] == "RUNNING"
+    assert response.json()["run"]["pipeline_steps"]
+
+
+def test_snowflake_bronze_review_submission_reports_execution_stage(monkeypatch):
+    submitted = {}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "source": "database", "target_warehouse": "snowflake"},
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: submitted.update({"run_id": run_id, "stage": stage}),
+    )
+
+    response = client.post(
+        "/bronze-reviews/run-bronze-transition",
+        json={"action": "APPROVED", "review_artifact": {"feeds": [{"table": "claims"}]}},
+    )
+
+    assert response.status_code == 200
+    assert submitted == {"run_id": "run-bronze-transition", "stage": "bronze_code_execution"}
+
+
+def test_silver_merge_review_submission_reports_generation_stage(monkeypatch):
+    submitted = {}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: submitted.update({"run_id": run_id, "stage": stage}),
+    )
+
+    response = client.post(
+        "/silver-merge-key-reviews/run-silver-transition",
+        json={"action": "APPROVED", "review_artifact": {"feeds": [{"table": "claims"}]}},
+    )
+
+    assert response.status_code == 200
+    assert submitted == {"run_id": "run-silver-transition", "stage": "silver"}
+
+
 def test_hitl_batch_submit_returns_503_when_decision_persistence_fails(monkeypatch):
     def fail_update_hitl_item(*args, **kwargs):
         raise RuntimeError("pipeline database unavailable")

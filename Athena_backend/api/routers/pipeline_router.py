@@ -38,7 +38,16 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "provider": checkpoint.get("provider") or "azure_openai",
             "deployment": checkpoint.get("deployment"),
             "stages": [],
+            "background_stage": checkpoint.get("background_stage"),
+            "external_execution": checkpoint.get("external_execution"),
+            "snowflake_bronze_execution_status": checkpoint.get("snowflake_bronze_execution_status"),
+            "snowflake_bronze_execution_progress": checkpoint.get("snowflake_bronze_execution_progress"),
+            "snowflake_silver_execution_status": checkpoint.get("snowflake_silver_execution_status"),
+            "snowflake_silver_execution_progress": checkpoint.get("snowflake_silver_execution_progress"),
+            "snowflake_gold_execution_status": checkpoint.get("snowflake_gold_execution_status"),
+            "snowflake_gold_execution_progress": checkpoint.get("snowflake_gold_execution_progress"),
             "next_gate": checkpoint.get("next_gate"),
+            "next_review_key": checkpoint.get("next_review_key"),
             "resume_message": checkpoint.get("resume_message"),
             "stage_confirmation": checkpoint.get("stage_confirmation"),
             "failed_stage_key": checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key"),
@@ -46,6 +55,23 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "error": checkpoint.get("error"),
             "updated_at": checkpoint.get("updated_at") or checkpoint.get("checkpoint_at"),
         },
+    }
+
+
+def _status_response(run_id: str, run: Dict[str, Any]) -> Dict[str, Any]:
+    result_state = str(run.get("status") or "RUNNING")
+    return {
+        "run_id": run_id,
+        "status": result_state,
+        "state": {
+            "life_cycle_state": (
+                "TERMINATED"
+                if result_state in {"SUCCESS", "FAILED", "ABORTED", "PIPELINE_COMPLETED", "COMPLETED"}
+                else "RUNNING"
+            ),
+            "result_state": result_state,
+        },
+        "run": run,
     }
 
 
@@ -157,11 +183,22 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
         return {"run_id": run_id, "status": "PROCESSING"}
 
     from api.services.pipeline_service import submit_pipeline_start
+    from services.pipeline_runtime import background_capacity_snapshot, load_checkpoint_state, save_checkpoint_state
 
     source = str(payload.source or "database").lower()
 
     if not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
+
+    capacity = background_capacity_snapshot()
+    if capacity["available"] <= 0:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Backend background capacity is full: {capacity['active']}/{capacity['workers']} active jobs. "
+                "Wait for one run to pause/finish, then retry."
+            ),
+        )
 
     run_id = str(uuid.uuid4())
 
@@ -173,7 +210,22 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
         logger.error("Failed to initialize checkpoint", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to initialize run checkpoint")
 
-    submit_pipeline_start(run_id, payload)
+    try:
+        submit_pipeline_start(run_id, payload)
+    except HTTPException as exc:
+        checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+        checkpoint.update(
+            {
+                "status": "FAILED",
+                "background_stage": None,
+                "failed_background_stage": "pipeline",
+                "error": str(exc.detail),
+                "error_type": "RunStartRejected",
+                "error_message": str(exc.detail),
+            }
+        )
+        save_checkpoint_state(run_id, checkpoint)
+        raise
 
     return {"run_id": run_id, "status": "RUNNING"}
 
@@ -184,7 +236,7 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
 @router.post("/pipeline/upload-brd")
 async def upload_brd(file: UploadFile = File(...)) -> Dict[str, Any]:
 
-    upload_dir = api_utils.ROOT_DIR / "uploads"
+    upload_dir = api_utils.upload_root()
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     path = upload_dir / Path(file.filename or "uploaded_brd").name
@@ -213,6 +265,19 @@ def pipeline_status(run_id: str) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state
 
     try:
+        try:
+            checkpoint = load_checkpoint_state(run_id) or {}
+        except Exception:
+            # Preserve the existing UI hydration path when the checkpoint store is unavailable.
+            checkpoint = {}
+        # Active polling must use the checkpoint snapshot. Full UI hydration reads
+        # multiple artifact/log tables and can take longer than the 1.5s UI poll.
+        # Falling back to it here caused alternating stale and current stage payloads.
+        if checkpoint.get("background_stage"):
+            from api.routers.runs_router import _fallback_run_detail
+
+            return _status_response(run_id, _fallback_run_detail(run_id, checkpoint))
+
         timeout_seconds = max(1, int(os.getenv("ATHENA_STATUS_ENDPOINT_TIMEOUT_SECONDS", "5")))
         future = RUN_STATUS_EXECUTOR.submit(ui_run, run_id)
         run = future.result(timeout=timeout_seconds)
@@ -232,19 +297,7 @@ def pipeline_status(run_id: str) -> Dict[str, Any]:
     if result_state == "NOT_FOUND":
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    return {
-        "run_id": run_id,
-        "status": result_state,
-        "state": {
-            "life_cycle_state": (
-                "TERMINATED"
-                if result_state in {"SUCCESS", "FAILED", "ABORTED"}
-                else "RUNNING"
-            ),
-            "result_state": result_state,
-        },
-        "run": run,
-    }
+    return _status_response(run_id, run)
 
 
 # -------------------------

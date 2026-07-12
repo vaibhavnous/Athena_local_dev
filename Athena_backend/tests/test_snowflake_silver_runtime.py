@@ -166,6 +166,45 @@ def test_snowflake_silver_runtime_prefers_reviewed_script_body(monkeypatch):
     assert "-- reviewed edit" in fake_conn.sql[0]
 
 
+def test_snowflake_silver_review_uses_selected_subset_and_keep_all_pending_legacy():
+    scripts = [
+        {
+            "table": "claims",
+            "source_table": "ATHENA_DB.BRONZE.bronze_claims",
+            "target_table": "ATHENA_DB.SILVER.silver_claims",
+            "script_path": "claims.sql",
+        },
+        {
+            "table": "policy",
+            "source_table": "ATHENA_DB.BRONZE.bronze_policy",
+            "target_table": "ATHENA_DB.SILVER.silver_policy",
+            "script_path": "policy.sql",
+        },
+    ]
+
+    selected = snowflake_silver_runtime._approved_review_scripts(
+        {"silver_generation_results": scripts},
+        {
+            "items": [
+                {"table": "claims", "target_table": "ATHENA_DB.SILVER.silver_claims", "review_status": "APPROVED"},
+                {"table": "policy", "target_table": "ATHENA_DB.SILVER.silver_policy", "review_status": "PENDING"},
+            ]
+        },
+    )
+    legacy_all = snowflake_silver_runtime._approved_review_scripts(
+        {"silver_generation_results": scripts},
+        {
+            "items": [
+                {"table": "claims", "target_table": "ATHENA_DB.SILVER.silver_claims", "review_status": "PENDING"},
+                {"table": "policy", "target_table": "ATHENA_DB.SILVER.silver_policy", "review_status": "PENDING"},
+            ]
+        },
+    )
+
+    assert [item["script_path"] for item in selected] == ["claims.sql"]
+    assert [item["script_path"] for item in legacy_all] == ["claims.sql", "policy.sql"]
+
+
 def test_snowflake_silver_runtime_rejects_databricks_sql():
     try:
         snowflake_silver_runtime.validate_snowflake_silver_script(
@@ -188,6 +227,72 @@ def test_snowflake_silver_runtime_rejects_databricks_sql():
         assert "databricks/python token" in str(exc).lower()
     else:
         raise AssertionError("Databricks-style Snowflake Silver SQL should be rejected")
+
+
+def test_snowflake_silver_catalog_preflight_rejects_missing_source_column():
+    class CatalogCursor:
+        def execute(self, sql):
+            self.sql = sql
+
+        def fetchall(self):
+            return [("claim_id",), ("run_id",), ("ingestion_timestamp",), ("source_system",), ("source_table",)]
+
+    class CatalogConnection:
+        def cursor(self):
+            return CatalogCursor()
+
+    sql = _silver_sql("claims").replace('src."claim_id"', "GET_IGNORE_CASE(OBJECT_CONSTRUCT_KEEP_NULL(src.*), 'missing_id')")
+
+    try:
+        snowflake_silver_runtime.validate_snowflake_silver_script(
+            {
+                "table": "claims",
+                "source_table": "ATHENA_DB.BRONZE.bronze_claims",
+                "target_table": "ATHENA_DB.SILVER.silver_claims",
+                "script_body": sql,
+            },
+            catalog_connection=CatalogConnection(),
+        )
+    except ValueError as exc:
+        assert "missing column(s): missing_id" in str(exc)
+    else:
+        raise AssertionError("Silver catalog preflight should reject an unknown source column")
+
+
+def test_snowflake_silver_catalog_preflight_rejects_quoted_case_mismatch():
+    class CatalogCursor:
+        def execute(self, sql):
+            self.sql = sql
+
+        def fetchall(self):
+            return [("rererence_id",), ("run_id",), ("ingestion_timestamp",), ("source_system",), ("source_table",)]
+
+    class CatalogConnection:
+        def cursor(self):
+            return CatalogCursor()
+
+    sql = _silver_sql("claims").replace(
+        '"ATHENA_DB"."BRONZE"."bronze_claims"',
+        '"ATHENA_DB"."BRONZE"."bronze_policy_cover_level_transactions"',
+    ).replace(
+        '"ATHENA_DB"."SILVER"."silver_claims"',
+        '"ATHENA_DB"."SILVER"."silver_policy_cover_level_transactions"',
+    ).replace('src."claim_id"', 'src."RERERENCE_ID"')
+
+    try:
+        snowflake_silver_runtime.validate_snowflake_silver_script(
+            {
+                "table": "policy_cover_level_transactions",
+                "source_table": "ATHENA_DB.BRONZE.bronze_policy_cover_level_transactions",
+                "target_table": "ATHENA_DB.SILVER.silver_policy_cover_level_transactions",
+                "script_body": sql,
+            },
+            catalog_connection=CatalogConnection(),
+        )
+    except ValueError as exc:
+        assert "RERERENCE_ID" in str(exc)
+    else:
+        raise AssertionError("Quoted Snowflake source identifiers must match catalog case exactly")
 
 
 def test_submit_gate5_review_executes_snowflake_silver_before_gold(monkeypatch):

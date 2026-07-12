@@ -6,12 +6,13 @@ type PipelineStep = {
   complete?: boolean
 }
 
-function normalizeState(value: string | undefined) {
+export function normalizeState(value: string | undefined) {
   const state = String(value || '').toUpperCase()
-  if (state === 'COMPLETE') return 'COMPLETED'
-  if (state === 'IN_PROGRESS' || state === 'PROCESSING') return 'RUNNING'
-  if (state === 'PAUSED_FOR_HITL') return 'HITL_WAIT'
+  if (state === 'COMPLETE' || state === 'EXTERNAL_COMPLETED') return 'COMPLETED'
+  if (state === 'IN_PROGRESS' || state === 'PROCESSING' || state === 'SUBMITTED' || state === 'EXTERNAL_RUNNING' || state === 'EXTERNAL_WAITING') return 'RUNNING'
+  if (state === 'PAUSED_FOR_HITL' || state === 'PENDING_REVIEW') return 'HITL_WAIT'
   if (state === 'SUCCESS' || state === 'PIPELINE_COMPLETED') return 'COMPLETED'
+  if (state === 'EXTERNAL_FAILED') return 'FAILED'
   return state || 'PENDING'
 }
 
@@ -103,23 +104,75 @@ export function isFileSource(run) {
 
 export function getPipelineSteps(run) {
   if (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length) {
-    return withPendingReviewGate(run, clearStaleWaitingSteps(run, run.pipeline_steps.map((step) => ({
+    const steps = run.pipeline_steps.map((step) => ({
       ...step,
       label: formatPipelineStepLabel(step.label, step.key),
       detail: step.detail || buildStepDetail(run, step.key, normalizeState(step.state), step.detail),
       state: normalizeState(step.state),
-    })) as PipelineStep[]))
+    })) as PipelineStep[]
+    return withPendingReviewGate(run, clearStaleWaitingSteps(run, applyExternalExecutionState(run, steps)))
   }
   if (Array.isArray(run?.stages) && run.stages.length) {
-    return withPendingReviewGate(run, clearStaleWaitingSteps(run, run.stages.map((stage) => ({
+    const steps = run.stages.map((stage) => ({
       key: stage.key,
       label: formatPipelineStepLabel(stage.name, stage.key),
       detail: stage.error || buildStepDetail(run, stage.key, normalizeState(stage.status), ''),
       state: normalizeState(stage.status),
       complete: normalizeState(stage.status) === 'COMPLETED',
-    })) as PipelineStep[]))
+    })) as PipelineStep[]
+    return withPendingReviewGate(run, clearStaleWaitingSteps(run, applyExternalExecutionState(run, steps)))
   }
-  return withPendingReviewGate(run, [] as PipelineStep[])
+  return withPendingReviewGate(run, applyExternalExecutionState(run, [] as PipelineStep[]))
+}
+
+function applyExternalExecutionState(run, steps: PipelineStep[]) {
+  const runState = normalizeState(run?.status)
+  const progress = run?.external_execution && typeof run.external_execution === 'object' ? run.external_execution : {}
+  const rawProgressState = String(progress.status || '').trim()
+  const progressState = rawProgressState ? normalizeState(rawProgressState) : ''
+  const stageKey = String(progress.stage_key || run?.background_stage || '').trim()
+  if (!stageKey || runState !== 'RUNNING' || (progressState && progressState !== 'RUNNING')) return steps
+
+  const sourceType = isFileSource(run) ? 'file' : 'database'
+  const orderedKeys = PIPELINE_PHASE_TEMPLATES[sourceType].flatMap((phase) => phase.keys)
+  const targetIndex = orderedKeys.indexOf(stageKey)
+  if (targetIndex < 0) return steps
+
+  let found = false
+  const detail = String(progress.message || run?.resume_message || '').trim()
+  const next = steps.map((step) => {
+    const stepIndex = orderedKeys.indexOf(step.key)
+    const state = normalizeState(step.state)
+    if (step.key === stageKey) {
+      found = true
+      return {
+        ...step,
+        state: 'RUNNING',
+        detail: detail || buildStepDetail(run, step.key, 'RUNNING', step.detail),
+        complete: false,
+      }
+    }
+    if (stepIndex >= 0 && stepIndex < targetIndex && state !== 'FAILED') {
+      return {
+        ...step,
+        state: 'COMPLETED',
+        complete: true,
+      }
+    }
+    return step
+  })
+
+  if (found) return next
+  return [
+    ...next,
+    {
+      key: stageKey,
+      label: fallbackStepLabel(stageKey),
+      detail,
+      state: 'RUNNING',
+      complete: false,
+    },
+  ]
 }
 
 function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
@@ -137,7 +190,7 @@ function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
   return steps.map((step) => {
     const stepIndex = indexByKey.get(step.key) ?? -1
     const state = normalizeState(step.state)
-    if (stepIndex >= 0 && stepIndex < furthestProgressIndex && state === 'HITL_WAIT') {
+    if (stepIndex >= 0 && stepIndex < furthestProgressIndex && ['HITL_WAIT', 'RUNNING'].includes(state)) {
       return {
         ...step,
         state: 'COMPLETED',
@@ -151,11 +204,15 @@ function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
 function withPendingReviewGate(run, steps: PipelineStep[]) {
   const gate = Number(run?.next_gate || 0)
   const status = normalizeState(run?.status)
-  const reviewReady = ['HITL_WAIT', 'PENDING_REVIEW', 'PAUSED_FOR_HITL'].includes(status)
+  const reviewReady = status === 'HITL_WAIT'
   if (!reviewReady) return steps
 
   if (run?.next_review_key === 'silver_merge_key_review') {
-    if (steps.some((step) => step.key === 'silver_merge_key_review')) return steps
+    if (steps.some((step) => step.key === 'silver_merge_key_review')) {
+      return steps.map((step) => step.key === 'silver_merge_key_review'
+        ? { ...step, state: 'HITL_WAIT', complete: false }
+        : step)
+    }
     return [
       ...steps,
       {
@@ -171,7 +228,11 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
   if (gate < 1 || gate > 5) return steps
 
   const gateKey = `gate${gate}`
-  if (steps.some((step) => step.key === gateKey)) return steps
+  if (steps.some((step) => step.key === gateKey)) {
+    return steps.map((step) => step.key === gateKey
+      ? { ...step, state: 'HITL_WAIT', complete: false }
+      : step)
+  }
 
   return [
     ...steps,
@@ -205,10 +266,10 @@ export function getPhaseGroups(run, stepsOverride?) {
       )
     })
 
-    const completed = phaseSteps.filter((step) => step.state === 'COMPLETED').length
-    const waiting = phaseSteps.find((step) => step.state === 'HITL_WAIT')
-    const running = phaseSteps.find((step) => step.state === 'RUNNING')
-    const failed = phaseSteps.find((step) => step.state === 'FAILED')
+    const completed = phaseSteps.filter((step) => normalizeState(step.state) === 'COMPLETED').length
+    const waiting = phaseSteps.find((step) => normalizeState(step.state) === 'HITL_WAIT')
+    const running = phaseSteps.find((step) => normalizeState(step.state) === 'RUNNING')
+    const failed = phaseSteps.find((step) => normalizeState(step.state) === 'FAILED')
 
     let status = 'Pending'
     if (failed) status = 'Failed'
@@ -239,10 +300,11 @@ export function summarizeRunSource(run) {
 
 export function statusTone(status) {
   const value = String(status || '').toLowerCase()
-  if (value === 'done' || value === 'completed' || value === 'success' || value === 'pipeline_completed') return 'emerald'
-  if (value === 'running' || value === 'processing' || value === 'submitted' || value === 'in_progress') return 'blue'
-  if (value === 'review' || value === 'waiting' || value === 'hitl_wait' || value === 'paused_for_hitl' || value === 'paused_for_stage_confirmation') return 'amber'
-  if (value === 'failed') return 'red'
+  const state = normalizeState(status)
+  if (value === 'done' || state === 'COMPLETED') return 'emerald'
+  if (value === 'running' || state === 'RUNNING' || value === 'submitted') return 'blue'
+  if (value === 'review' || value === 'waiting' || state === 'HITL_WAIT' || value === 'paused_for_stage_confirmation') return 'amber'
+  if (state === 'FAILED') return 'red'
   return 'slate'
 }
 
@@ -277,28 +339,47 @@ function fallbackStepLabel(key) {
 function syntheticStepState(key, byKey: Map<string, PipelineStep>) {
   const state = (stepKey: string) => normalizeState(byKey.get(stepKey)?.state)
   const bronze = state('bronze')
-  const gate4 = state('gate4')
+  const bronzeExecution = state('bronze_code_execution')
+  const mergeReview = state('silver_merge_key_review')
   const silver = state('silver')
   const gate5 = state('gate5')
+  const silverExecution = state('silver_code_execution')
   const gold = state('gold')
+  const goldExecution = state('gold_code_execution')
+  const progressed = (...states: string[]) => states.some((item) => ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(item))
+  const silverProgressed = progressed(silver, gate5, silverExecution, gold, goldExecution)
 
+  if (key === 'bronze') {
+    if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+  }
+  if (key === 'gate4') {
+    if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+  }
   if (key === 'bronze_code_execution') {
-    if (gate4 === 'COMPLETED' || bronze === 'COMPLETED') return 'COMPLETED'
+    if (bronzeExecution === 'COMPLETED' || progressed(mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
     if (bronze === 'RUNNING') return 'PENDING'
   }
   if (key === 'silver_merge_key_resolution') {
-    if (gate4 === 'COMPLETED' || gate4 === 'HITL_WAIT' || silver === 'RUNNING' || silver === 'COMPLETED') return 'COMPLETED'
+    if (bronzeExecution === 'COMPLETED' || mergeReview === 'HITL_WAIT' || mergeReview === 'COMPLETED' || silverProgressed) return 'COMPLETED'
   }
   if (key === 'silver_merge_key_review') {
-    const review = state('silver_merge_key_review')
-    if (review === 'HITL_WAIT') return 'HITL_WAIT'
-    if (review === 'COMPLETED' || silver === 'RUNNING' || silver === 'COMPLETED') return 'COMPLETED'
+    if (mergeReview === 'HITL_WAIT') return 'HITL_WAIT'
+    if (mergeReview === 'COMPLETED' || silverProgressed) return 'COMPLETED'
+  }
+  if (key === 'silver') {
+    if (progressed(gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+  }
+  if (key === 'gate5') {
+    if (progressed(silverExecution, gold, goldExecution)) return 'COMPLETED'
   }
   if (key === 'silver_code_execution') {
-    if (gate5 === 'COMPLETED' || gold === 'RUNNING' || gold === 'COMPLETED') return 'COMPLETED'
+    if (progressed(gold, goldExecution)) return 'COMPLETED'
+  }
+  if (key === 'gold') {
+    if (progressed(goldExecution)) return 'COMPLETED'
   }
   if (key === 'gold_code_execution') {
-    if (gold === 'COMPLETED') return 'COMPLETED'
+    if (goldExecution === 'COMPLETED') return 'COMPLETED'
   }
   return 'PENDING'
 }

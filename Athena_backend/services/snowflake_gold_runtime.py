@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 from services.external_execution_progress import save_external_execution_progress
+from services.snowflake_contract_validation import validate_catalog_columns
 from services.snowflake_bronze_runtime import _snowflake_connect
 from utilis.logger import logger
 
@@ -62,8 +64,32 @@ def _table_name(script: Dict[str, Any]) -> str:
     return str(script.get("kpi_name") or script.get("table") or script.get("entity") or "").strip()
 
 
-def validate_snowflake_gold_script(script: Dict[str, Any]) -> str:
+def _silver_output_column_name(value: Any) -> str:
+    normalized = str(value or "").strip().strip('"').lower()
+    return {"rererence_id": "reference_id"}.get(normalized, normalized)
+
+
+def _validate_canonical_source_references(sql: str, required_columns: List[str], *, layer: str, context: str) -> None:
+    quoted = {
+        match.group(1).replace('""', '"')
+        for match in re.finditer(r'"((?:""|[^"])*)"', str(sql or ""))
+    }
+    quoted_folded = {value.casefold(): value for value in quoted}
+    wrong_case = [
+        column
+        for column in required_columns
+        if column not in quoted and column.casefold() in quoted_folded
+    ]
+    if wrong_case:
+        raise ValueError(
+            f'{layer} preflight rejected {context}: SQL must reference canonical Silver column(s) exactly: '
+            + ", ".join(sorted(set(wrong_case))[:10])
+        )
+
+
+def validate_snowflake_gold_script(script: Dict[str, Any], catalog_connection: Any = None) -> str:
     sql = _read_sql(script)
+    sql = _normalize_snowflake_gold_sql(sql)
     normalized = sql.upper()
     missing = [
         keyword
@@ -82,11 +108,143 @@ def validate_snowflake_gold_script(script: Dict[str, Any]) -> str:
         raise ValueError(f"Snowflake gold SQL does not read from expected source table: {source_table}")
     if target_table and _qualified_name(target_table) not in sql:
         raise ValueError(f"Snowflake gold SQL does not write to expected target table: {target_table}")
+    required_columns = [
+        _silver_output_column_name(column)
+        for column in script.get("validation_columns") or []
+        if str(column).strip()
+    ]
+    missing_columns = [column for column in required_columns if column not in sql.lower()]
+    if missing_columns:
+        raise ValueError(f"Snowflake gold SQL is missing contract columns: {', '.join(missing_columns[:10])}")
+    if catalog_connection is not None and source_table:
+        _validate_canonical_source_references(
+            sql,
+            required_columns,
+            layer="Gold",
+            context=str(script.get("kpi_name") or target_table or source_table),
+        )
+        validate_catalog_columns(
+            catalog_connection,
+            table_ref=source_table,
+            required_columns=required_columns,
+            layer="Gold",
+            context=str(script.get("kpi_name") or target_table or source_table),
+        )
     return sql
 
 
+def validate_snowflake_dimension_script(script: Dict[str, Any], catalog_connection: Any = None) -> str:
+    path = Path(str(script.get("dimension_script_path") or ""))
+    if not path.exists() or not path.is_file():
+        return ""
+    sql = _normalize_snowflake_gold_sql(path.read_text(encoding="utf-8"))
+    normalized = sql.upper()
+    missing = [
+        keyword
+        for keyword in ("CREATE SCHEMA", "CREATE TABLE", "MERGE INTO", "WHEN MATCHED", "WHEN NOT MATCHED")
+        if keyword not in normalized
+    ]
+    if missing:
+        raise ValueError(f"Snowflake gold dimension SQL is missing required statements: {', '.join(missing)}")
+    for token in ("PYSPARK", "SPARK.", "DELTA", "DATABRICKS"):
+        if token in normalized:
+            raise ValueError(f"Snowflake gold dimension SQL contains Databricks/Python token: {token.lower()}")
+    dimension_contract = script.get("dimension_contract") or []
+    required_columns = {
+        _silver_output_column_name(column)
+        for spec in dimension_contract
+        if isinstance(spec, dict)
+        for column in spec.get("columns") or []
+        if str(column).strip()
+    }
+    missing_columns = [column for column in sorted(required_columns) if column not in sql.lower()]
+    if missing_columns:
+        raise ValueError(f"Snowflake gold dimension SQL is missing contract columns: {', '.join(missing_columns[:10])}")
+    source_table = str(script.get("source_table") or "").strip()
+    if catalog_connection is not None and source_table:
+        _validate_canonical_source_references(
+            sql,
+            sorted(required_columns),
+            layer="Gold dimension",
+            context=str(script.get("kpi_name") or source_table),
+        )
+        required_by_source: Dict[str, set[str]] = {}
+        for spec in dimension_contract:
+            if not isinstance(spec, dict):
+                continue
+            logical_table = str(spec.get("logical_table") or "").strip()
+            spec_source = str(spec.get("source_table") or "").strip() or source_table
+            parts = [part for part in spec_source.split(".") if part.strip()]
+            if logical_table and len(parts) >= 3:
+                spec_source = ".".join([parts[0], parts[1], f"silver_{logical_table}"])
+            required_by_source.setdefault(spec_source, set()).update(
+                _silver_output_column_name(column)
+                for column in (spec.get("source_columns") or spec.get("columns") or [])
+                if str(column).strip()
+            )
+        if not required_by_source:
+            required_by_source[source_table] = set(required_columns)
+        for spec_source, spec_columns in required_by_source.items():
+            validate_catalog_columns(
+                catalog_connection,
+                table_ref=spec_source,
+                required_columns=spec_columns,
+                layer="Gold dimension",
+                context=str(script.get("kpi_name") or spec_source),
+            )
+    return sql
+
+
+def _normalize_snowflake_gold_sql(sql: str) -> str:
+    # Existing reviewed artifacts may contain TRY_TO_TIMESTAMP_NTZ("date_col").
+    # Snowflake rejects TRY_CAST from DATE to TIMESTAMP_NTZ, so parse via VARCHAR.
+    sql = re.sub(
+        r'TRY_TO_TIMESTAMP_NTZ\(\s*("(?:""|[^"])+")\s*\)',
+        r"TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR(\1))",
+        sql,
+    )
+    sql = re.sub(
+        r'TRY_TO_DECIMAL\(\s*("(?:""|[^"])+")\s*\)',
+        r"TRY_TO_DECIMAL(TO_VARCHAR(\1))",
+        sql,
+    )
+    return _inject_gold_schema_evolution(sql)
+
+
+def _inject_gold_schema_evolution(sql: str) -> str:
+    if "ADD COLUMN IF NOT EXISTS" in sql.upper():
+        return sql
+
+    create_match = re.search(
+        r'(CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(?P<table>(?:"[^"]+"\.)*"[^"]+")\s*\(\s*(?P<columns>.*?)\n\);)',
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not create_match:
+        return sql
+
+    column_defs: List[str] = []
+    for raw_line in create_match.group("columns").splitlines():
+        column_def = raw_line.strip().rstrip(",")
+        if re.match(r'^"(?:""|[^"])+"\s+', column_def):
+            column_defs.append(column_def)
+    if not column_defs:
+        return sql
+
+    table = create_match.group("table")
+    alter_sql = "\n".join(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column_def};" for column_def in column_defs)
+    insert_at = create_match.end()
+    return f"{sql[:insert_at]}\n\n{alter_sql}{sql[insert_at:]}"
+
+
 def execute_snowflake_gold_sql(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
-    sql = validate_snowflake_gold_script(script)
+    dimension_sql = validate_snowflake_dimension_script(script, catalog_connection=snowflake_conn)
+    dimension_statement_count = 0
+    if dimension_sql:
+        dimension_cursors = snowflake_conn.execute_string(dimension_sql, return_cursors=True)
+        dimension_statement_count = len(list(dimension_cursors or []))
+
+    sql = validate_snowflake_gold_script(script, catalog_connection=snowflake_conn)
     cursors = snowflake_conn.execute_string(sql, return_cursors=True)
     statement_count = len(list(cursors or []))
     return {
@@ -94,6 +252,8 @@ def execute_snowflake_gold_sql(script: Dict[str, Any], snowflake_conn: Any) -> D
         "source_table": script.get("source_table"),
         "target_table": script.get("target_table"),
         "script_path": script.get("script_path"),
+        "dimension_script_path": script.get("dimension_script_path"),
+        "dimension_statement_count": dimension_statement_count,
         "statement_count": statement_count,
         "status": "COMPLETED",
     }
@@ -115,29 +275,36 @@ def run_snowflake_gold_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
     if not scripts:
         raise ValueError("Snowflake gold execution enabled but no generated gold scripts were found.")
 
-    for script in scripts:
-        validate_snowflake_gold_script(script)
-
-    executed_scripts: List[Dict[str, Any]] = []
-    stage_key = "gold_code_execution"
-    logger.info(
-        "Starting Snowflake Gold execution in external Snowflake warehouse: total_kpis=%d kpis=%s",
-        len(scripts),
-        ", ".join(_table_name(script) for script in scripts),
-        extra=_log_context(run_id, step_name="gold_execution_start"),
-    )
-    state = save_external_execution_progress(
-        state,
-        run_id=run_id,
-        layer="gold",
-        stage_key=stage_key,
-        status="RUNNING",
-        total_count=len(scripts),
-        completed_count=0,
-        message=f"Executing Gold scripts in Snowflake: 0/{len(scripts)} completed.",
-    )
     snowflake_conn = _snowflake_connect()
     try:
+        for script in scripts:
+            validate_snowflake_gold_script(script, catalog_connection=snowflake_conn)
+            validate_snowflake_dimension_script(script, catalog_connection=snowflake_conn)
+
+        logger.info(
+            "Gold Snowflake contract preflight passed: kpis=%d",
+            len(scripts),
+            extra=_log_context(run_id, step_name="gold_contract_preflight_complete"),
+        )
+
+        executed_scripts: List[Dict[str, Any]] = []
+        stage_key = "gold_code_execution"
+        logger.info(
+            "Starting Snowflake Gold execution in external Snowflake warehouse: total_kpis=%d kpis=%s",
+            len(scripts),
+            ", ".join(_table_name(script) for script in scripts),
+            extra=_log_context(run_id, step_name="gold_execution_start"),
+        )
+        state = save_external_execution_progress(
+            state,
+            run_id=run_id,
+            layer="gold",
+            stage_key=stage_key,
+            status="RUNNING",
+            total_count=len(scripts),
+            completed_count=0,
+            message=f"Executing Gold scripts in Snowflake: 0/{len(scripts)} completed.",
+        )
         for index, script in enumerate(scripts, start=1):
             table_name = _table_name(script)
             target_table = script.get("target_table")

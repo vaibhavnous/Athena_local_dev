@@ -1,17 +1,17 @@
 // @ts-nocheck
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { motion } from 'framer-motion'
+import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Play, RefreshCcw, RotateCcw, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
-import { formatPipelineStepLabel, getGateDisplayName, getPhaseGroups, getPipelineSteps, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
+import { formatPipelineStepLabel, getGateDisplayName, getPhaseGroups, getPipelineSteps, normalizeState, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
-import { abortRun, continueStage, getRun, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
+import { abortRun, continueStage, getRun, getRunStatus, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
-const MIN_STAGE_VISIBLE_MS = 20000
 const PHASE_AUTO_SWITCH_DELAY_MS = 4000
-const STAGE_TERMINAL_STATES = new Set(['COMPLETED', 'FAILED', 'HITL_WAIT'])
+const ACTIVE_RUN_REFRESH_INTERVAL_MS = 5000
+const ACTIVE_RUN_FAST_REFRESH_INTERVAL_MS = 1500
 
 function isTimeoutError(error) {
   return error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '')
@@ -21,11 +21,36 @@ function isTransientReadError(error) {
   return isTimeoutError(error) || Number(error?.status) === 503
 }
 
+function shouldUseStatusRefresh(run) {
+  const status = normalizeState(run?.status)
+  const stageKey = String(run?.external_execution?.stage_key || run?.background_stage || '').trim()
+  const externalState = normalizeState(run?.external_execution?.status)
+  return (
+    ['RUNNING', 'PROCESSING', 'SUBMITTED'].includes(status) ||
+    (stageKey && ['RUNNING', 'PROCESSING', 'SUBMITTED'].includes(externalState))
+  )
+}
+
+function activeRunRefreshDelay(run) {
+  return shouldUseStatusRefresh(run) ? ACTIVE_RUN_FAST_REFRESH_INTERVAL_MS : ACTIVE_RUN_REFRESH_INTERVAL_MS
+}
+
+function furthestActivePhase(phases = []) {
+  for (let index = phases.length - 1; index >= 0; index -= 1) {
+    const phase = phases[index]
+    if (phase?.steps?.some((step) => ['RUNNING', 'HITL_WAIT'].includes(normalizeState(step.state)))) {
+      return { phase, index }
+    }
+  }
+  return null
+}
+
 function PipelineMonitor() {
   const navigate = useNavigate()
   const location = useLocation()
   const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline, addNotification, addRun } = useAthenaStore()
   const pendingRun = location.state?.pendingRun || null
+  const routedActiveRunId = location.state?.activeRunId || null
   const storeActiveRun = activeRunId ? runs.find((run) => run.id === activeRunId) || null : null
   const pendingStartedAt = pendingRun?.startedAt ? Date.parse(pendingRun.startedAt) : 0
   const activeStartedAt = storeActiveRun?.started_at ? Date.parse(storeActiveRun.started_at) : 0
@@ -52,21 +77,21 @@ function PipelineMonitor() {
   const runsRequestInFlightRef = useRef(false)
   const activeRunRequestInFlightRef = useRef(false)
   const lastLogTriggeredRefreshRef = useRef(0)
-  const runningStepSinceRef = useRef<Record<string, number>>({})
-  const stepHoldTimersRef = useRef<Record<string, number>>({})
-  const [stepStateOverrides, setStepStateOverrides] = useState<Record<string, string>>({})
+  const latestRunsRef = useRef(runs)
+  const latestActiveRunRef = useRef(activeRun)
   const actualSteps = useMemo(() => getPipelineSteps(activeRun), [activeRun])
-  const displaySteps = useMemo(
-    () =>
-      actualSteps.map((step) => ({
-        ...step,
-        state: stepStateOverrides[step.key] || step.state,
-      })),
-    [actualSteps, stepStateOverrides]
-  )
+  const displaySteps = actualSteps
   const actualPhases = useMemo(() => getPhaseGroups(activeRun, actualSteps), [activeRun, actualSteps])
   const phases = useMemo(() => getPhaseGroups(activeRun, displaySteps), [activeRun, displaySteps])
   const shouldDebouncePhaseSwitch = ['adls_gen2', 'sftp'].includes(String(activeRun?.source || '').toLowerCase())
+
+  useEffect(() => {
+    latestRunsRef.current = runs
+  }, [runs])
+
+  useEffect(() => {
+    latestActiveRunRef.current = activeRun
+  }, [activeRun])
 
   useEffect(() => {
     if (!pendingRun || !activeRun?.id || suppressStaleActiveRun) return
@@ -74,168 +99,20 @@ function PipelineMonitor() {
   }, [activeRun?.id, location.pathname, navigate, pendingRun, suppressStaleActiveRun])
 
   useEffect(() => {
-    return () => {
-      for (const timerId of Object.values(stepHoldTimersRef.current)) {
-        window.clearTimeout(timerId)
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    for (const timerId of Object.values(stepHoldTimersRef.current)) {
-      window.clearTimeout(timerId)
-    }
-    stepHoldTimersRef.current = {}
-    runningStepSinceRef.current = {}
-    setStepStateOverrides({})
-
-    if (!activeRun) return
-
-    const now = Date.now()
-    for (const step of actualSteps) {
-      if (step.state === 'RUNNING' && !runningStepSinceRef.current[step.key]) {
-        runningStepSinceRef.current[step.key] = now
-      }
-    }
-
-    return () => {
-      for (const timerId of Object.values(stepHoldTimersRef.current)) {
-        window.clearTimeout(timerId)
-      }
-      stepHoldTimersRef.current = {}
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeRun?.id])
-
-  useEffect(() => {
-    if (!activeRun) {
-      setStepStateOverrides({})
-      return
-    }
-
-    const now = Date.now()
-    const activeStepKeys = new Set(actualSteps.map((step) => step.key))
-    const stepIndexByKey = new Map(actualSteps.map((step, index) => [step.key, index]))
-
-    for (const key of Object.keys(stepHoldTimersRef.current)) {
-      if (!activeStepKeys.has(key)) {
-        window.clearTimeout(stepHoldTimersRef.current[key])
-        delete stepHoldTimersRef.current[key]
-      }
-    }
-
-    setStepStateOverrides((current) => {
-      const next = { ...current }
-      const hasLaterActualProgress = (stepIndex) =>
-        actualSteps.slice(stepIndex + 1).some((laterStep) =>
-          ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(String(laterStep.state || '').toUpperCase())
-        )
-      let changed = false
-      const heldStepIndex = actualSteps.findIndex((step, index) => {
-        const runningSince = runningStepSinceRef.current[step.key]
-        return Boolean(
-          runningSince &&
-          STAGE_TERMINAL_STATES.has(step.state) &&
-          now - runningSince < MIN_STAGE_VISIBLE_MS &&
-          !hasLaterActualProgress(index)
-        )
-      })
-
-      for (const [index, step] of actualSteps.entries()) {
-        const runningSince = runningStepSinceRef.current[step.key]
-
-        if (heldStepIndex >= 0 && index > heldStepIndex && step.state === 'RUNNING') {
-          if (next[step.key] !== 'PENDING') {
-            next[step.key] = 'PENDING'
-            changed = true
-          }
-          continue
-        }
-
-        if (step.state === 'RUNNING') {
-          if (!runningSince) {
-            runningStepSinceRef.current[step.key] = now
-          }
-          if (next[step.key]) {
-            delete next[step.key]
-            changed = true
-          }
-          if (stepHoldTimersRef.current[step.key]) {
-            window.clearTimeout(stepHoldTimersRef.current[step.key])
-            delete stepHoldTimersRef.current[step.key]
-          }
-          continue
-        }
-
-        if (runningSince && STAGE_TERMINAL_STATES.has(step.state)) {
-          const stepIndex = stepIndexByKey.get(step.key) ?? -1
-          if (hasLaterActualProgress(stepIndex)) {
-            delete runningStepSinceRef.current[step.key]
-            if (next[step.key]) {
-              delete next[step.key]
-              changed = true
-            }
-            if (stepHoldTimersRef.current[step.key]) {
-              window.clearTimeout(stepHoldTimersRef.current[step.key])
-              delete stepHoldTimersRef.current[step.key]
-            }
-            continue
-          }
-
-          const remaining = Math.max(0, MIN_STAGE_VISIBLE_MS - (now - runningSince))
-          if (remaining > 0) {
-            if (next[step.key] !== 'RUNNING') {
-              next[step.key] = 'RUNNING'
-              changed = true
-            }
-            if (!stepHoldTimersRef.current[step.key]) {
-              stepHoldTimersRef.current[step.key] = window.setTimeout(() => {
-                delete runningStepSinceRef.current[step.key]
-                delete stepHoldTimersRef.current[step.key]
-                setStepStateOverrides((latest) => {
-                  const updated = { ...latest }
-                  delete updated[step.key]
-                  for (const laterStep of actualSteps.slice(stepIndex + 1)) {
-                    if (updated[laterStep.key] === 'PENDING' && laterStep.state === 'RUNNING') {
-                      delete updated[laterStep.key]
-                    }
-                  }
-                  return updated
-                })
-              }, remaining)
-            }
-            continue
-          }
-        }
-
-        delete runningStepSinceRef.current[step.key]
-        if (next[step.key]) {
-          delete next[step.key]
-          changed = true
-        }
-        if (stepHoldTimersRef.current[step.key]) {
-          window.clearTimeout(stepHoldTimersRef.current[step.key])
-          delete stepHoldTimersRef.current[step.key]
-        }
-      }
-
-      for (const key of Object.keys(next)) {
-        if (!activeStepKeys.has(key)) {
-          delete next[key]
-          changed = true
-        }
-      }
-
-      return changed ? next : current
-    })
-  }, [activeRun, actualSteps])
+    if (!routedActiveRunId) return
+    if (routedActiveRunId !== activeRunId) setActiveRun(routedActiveRunId)
+    navigate(location.pathname, { replace: true, state: null })
+  }, [activeRunId, location.pathname, navigate, routedActiveRunId, setActiveRun])
 
   const refreshActiveRunNow = useCallback(async () => {
     if (!activeRunStableId || activeRunIsDemoFallback || activeRunRequestInFlightRef.current) return false
 
     activeRunRequestInFlightRef.current = true
     try {
-      const data = await getRun(activeRunStableId)
+      const currentRun = latestActiveRunRef.current
+      const data = shouldUseStatusRefresh(currentRun)
+        ? ((await getRunStatus(activeRunStableId))?.run || await getRun(activeRunStableId))
+        : await getRun(activeRunStableId)
       updateRun(activeRunStableId, data)
       setServerOnline(true)
       return true
@@ -270,7 +147,8 @@ function PipelineMonitor() {
     }
 
     const refreshRuns = async () => {
-      if (ENABLE_DEMO_FALLBACKS && runs.length > 0 && runs.every((run) => isDemoFallbackRun(run))) {
+      const currentRuns = latestRunsRef.current || []
+      if (ENABLE_DEMO_FALLBACKS && currentRuns.length > 0 && currentRuns.every((run) => isDemoFallbackRun(run))) {
         setRuns(getDemoRuns())
         scheduleNext(2000)
         return
@@ -308,14 +186,14 @@ function PipelineMonitor() {
       cancelled = true
       if (timer !== null) window.clearTimeout(timer)
     }
-  }, [runs, setRuns, setServerOnline])
+  }, [setRuns, setServerOnline])
 
   useEffect(() => {
     if (!activeRunStableId || activeRunIsDemoFallback) return
     let cancelled = false
     let timer: number | null = null
 
-    const scheduleNext = (delay = 5000) => {
+    const scheduleNext = (delay = activeRunRefreshDelay(latestActiveRunRef.current)) => {
       if (!cancelled) {
         timer = window.setTimeout(refreshActiveRun, delay)
       }
@@ -339,10 +217,8 @@ function PipelineMonitor() {
   const actualPhaseIndex = useMemo(() => {
     const sourcePhases = actualPhases?.length ? actualPhases : phases
     if (!sourcePhases?.length) return 0
-    const activeIndex = sourcePhases.findIndex((phase) =>
-      phase.steps.some((step) => ['RUNNING', 'HITL_WAIT'].includes(step.state))
-    )
-    if (activeIndex >= 0) return activeIndex
+    const active = furthestActivePhase(sourcePhases)
+    if (active) return active.index
     const firstIncompleteIndex = sourcePhases.findIndex((phase) => phase.completed < phase.total)
     if (firstIncompleteIndex >= 0) return firstIncompleteIndex
     return Math.max(0, sourcePhases.length - 1)
@@ -404,18 +280,15 @@ function PipelineMonitor() {
       }
     })
   }, [phases, shouldDebouncePhaseSwitch, visiblePhaseIndex])
-  const renderedPhases = useMemo(
-    () => displayPhases.map((phase) => buildPipelineDisplayPhase(phase, displaySteps, activeRun)),
-    [activeRun, displayPhases, displaySteps]
-  )
+  // pipelinePhases is the single renderer contract; re-inferring completion here
+  // previously promoted a review artifact into completed Silver execution.
+  const renderedPhases = displayPhases
 
   const defaultExpandedPhase = useMemo(() => {
     const sourcePhases = actualPhases?.length ? actualPhases : displayPhases
     if (!sourcePhases?.length) return 'phase-1'
-    const activePhase = sourcePhases.find((phase) =>
-      phase.steps.some((step) => ['RUNNING', 'HITL_WAIT'].includes(step.state))
-    )
-    if (activePhase) return activePhase.id
+    const active = furthestActivePhase(sourcePhases)
+    if (active?.phase) return active.phase.id
     const firstIncomplete = sourcePhases.find((phase) => phase.completed < phase.total)
     return firstIncomplete?.id || sourcePhases[sourcePhases.length - 1].id
   }, [actualPhases, displayPhases])
@@ -630,7 +503,17 @@ function PipelineMonitor() {
     if (!activeRun?.id) return
     setStageConfirmSubmitting(true)
     try {
-      await continueStage(activeRun.id, autoAdvanceStages)
+      const continuation = await continueStage(activeRun.id, autoAdvanceStages)
+      const nextStageKey = String(continuation?.next_stage_key || stageConfirmation?.next_stage_key || '').trim()
+      updateRun(activeRun.id, {
+        id: activeRun.id,
+        status: 'RUNNING',
+        background_stage: nextStageKey || undefined,
+        next_gate: 0,
+        next_review_key: null,
+        stage_confirmation: null,
+        resume_message: continuation?.resume_message || `${stageConfirmation?.next_stage_label || 'The next stage'} is starting.`,
+      })
       const refreshed = await getRun(activeRun.id)
       updateRun(activeRun.id, refreshed)
       addNotification({
@@ -670,11 +553,15 @@ function PipelineMonitor() {
   const handleOpenGateReview = (step = null) => {
     if (!activeRun?.id) return
     setActiveRun(activeRun.id)
-    if (step?.key === 'silver_merge_key_review' || activeRun.next_review_key) {
-      navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=${encodeURIComponent(activeRun.next_review_key || 'silver_merge_key_review')}`)
+    if (step?.key === 'silver_merge_key_review') {
+      navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=silver_merge_key_review`)
       return
     }
     const stepGate = /^gate([1-5])$/.exec(String(step?.key || ''))?.[1]
+    if (!stepGate && activeRun.next_review_key) {
+      navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=${encodeURIComponent(activeRun.next_review_key)}`)
+      return
+    }
     const gate = Number(stepGate || activeRun.next_gate || 0)
     navigate(gate ? `/app/hitl?runId=${encodeURIComponent(activeRun.id)}&gate=${gate}` : '/app/hitl')
   }
@@ -873,22 +760,33 @@ function PipelineMonitor() {
                       </div>
                     </div>
                     <div className="ml-4 flex items-center gap-3">
-                      <StatusPill status={phase.status} tone={tone} compact={!expanded} step={phase.steps.find((step) => ['RUNNING', 'HITL_WAIT'].includes(step.state))} />
+                      <StatusPill status={phase.status} tone={tone} compact={!expanded} step={phase.steps.find((step) => ['RUNNING', 'HITL_WAIT'].includes(normalizeState(step.state)))} />
                       {expanded ? <ChevronUp size={14} className="text-[#64748b]" /> : <ChevronDown size={14} className="text-[#64748b]" />}
                     </div>
                   </button>
 
-                  {expanded && (
-                    <div className="bg-[#080e1d] px-6 pb-6 pt-1">
-                      <div className="ml-[18px] border-l border-[#2b3648] pl-7">
-                        <div className="space-y-5">
-                          {phase.steps.map((step, stepIndex) => (
-                            <StepRow key={step.key} step={step} index={stepIndex} onOpenReview={() => handleOpenGateReview(step)} />
-                          ))}
+                  <AnimatePresence initial={false} mode="sync">
+                    {expanded && (
+                      <motion.div
+                        key={`${phase.id}-content`}
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.28, ease: 'easeOut' }}
+                        className="overflow-hidden bg-[#080e1d]"
+                      >
+                        <div className="px-6 pb-6 pt-1">
+                          <div className="ml-[18px] border-l border-[#2b3648] pl-7">
+                            <div className="space-y-5">
+                              {phase.steps.map((step, stepIndex) => (
+                                <StepRow key={step.key} step={step} index={stepIndex} onOpenReview={() => handleOpenGateReview(step)} />
+                              ))}
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    </div>
-                  )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               )
             })}
@@ -1052,10 +950,10 @@ function buildFailureSummary(run) {
     ? run.stages
     : []
 
-  const failedStep = steps.find((step) => String(step?.state || step?.status || '').toUpperCase() === 'FAILED')
+  const failedStep = steps.find((step) => normalizeState(step?.state || step?.status) === 'FAILED')
   const completedCount = steps.filter((step) => {
-    const state = String(step?.state || step?.status || '').toUpperCase()
-    return state === 'COMPLETED' || state === 'SUCCESS'
+    const state = normalizeState(step?.state || step?.status)
+    return state === 'COMPLETED'
   }).length
   const failedStageLabel =
     run?.failed_stage_label ||
@@ -1082,12 +980,12 @@ function buildCurrentStepSummary(run) {
     : []
   const step =
     fromBackend ||
-    steps.find((item) => ['RUNNING', 'HITL_WAIT', 'PAUSED_FOR_HITL'].includes(String(item?.state || item?.status || '').toUpperCase())) ||
-    steps.find((item) => ['FAILED'].includes(String(item?.state || item?.status || '').toUpperCase())) ||
+    steps.find((item) => ['RUNNING', 'HITL_WAIT'].includes(normalizeState(item?.state || item?.status))) ||
+    steps.find((item) => normalizeState(item?.state || item?.status) === 'FAILED') ||
     null
 
-  const runStatus = String(run.status || '').toUpperCase()
-  const state = String(step?.state || step?.status || runStatus || '').toUpperCase()
+  const runStatus = normalizeState(run.status)
+  const state = normalizeState(step?.state || step?.status || run.status)
   const label = formatPipelineStepLabel(step?.label || step?.name, step?.key) || step?.label || step?.key || ''
   const externalMessage = String(run.external_execution?.message || '').trim()
   const detail = externalMessage || step?.detail || run.resume_message || ''
@@ -1096,7 +994,7 @@ function buildCurrentStepSummary(run) {
     ? 'Silver Merge Key Review'
     : nextGate ? getGateDisplayName(nextGate, run.source) : label
 
-  if (['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(runStatus) || state === 'HITL_WAIT') {
+  if (runStatus === 'HITL_WAIT' || state === 'HITL_WAIT') {
     return {
       state: 'HITL_WAIT',
       tone: 'amber',
@@ -1106,7 +1004,7 @@ function buildCurrentStepSummary(run) {
     }
   }
 
-  if (['RUNNING', 'PROCESSING', 'SUBMITTED', 'IN_PROGRESS'].includes(runStatus) || state === 'RUNNING') {
+  if (runStatus === 'RUNNING' || state === 'RUNNING') {
     return {
       state: 'RUNNING',
       tone: 'blue',
@@ -1126,7 +1024,7 @@ function buildCurrentStepSummary(run) {
     }
   }
 
-  if (['SUCCESS', 'COMPLETED', 'PIPELINE_COMPLETED'].includes(runStatus)) {
+  if (runStatus === 'COMPLETED') {
     return {
       state: 'COMPLETED',
       tone: 'emerald',
@@ -1217,10 +1115,11 @@ function StatusPill({ status, tone, compact, step }) {
 }
 
 function StepRow({ step, index = 0, onOpenReview }) {
-  const complete = step.state === 'COMPLETED'
-  const waiting = step.state === 'HITL_WAIT'
-  const running = step.state === 'RUNNING'
-  const failed = step.state === 'FAILED'
+  const state = normalizeState(step.state)
+  const complete = state === 'COMPLETED'
+  const waiting = state === 'HITL_WAIT'
+  const running = state === 'RUNNING'
+  const failed = state === 'FAILED'
   const isGate = /^gate[1-5]$/.test(String(step.key || ''))
   const isNamedReview = step.key === 'silver_merge_key_review'
   const canOpenReview = waiting && (isGate || isNamedReview) && onOpenReview
@@ -1348,13 +1247,13 @@ function formatScriptBody(script) {
   return `${body}\n\n# ---------------- Gold dimension script ----------------\n\n${script.dimension_body}`
 }
 
-function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
+export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
   const steps = Array.isArray(phase?.steps) ? phase.steps : []
   const byKey = new Map([...allSteps, ...steps].map((step) => [step.key, step]))
   const phaseState = phaseStatusToStepState(phase.status)
   const makeStep = (key, label, fallbackState = phaseState, forceState = false) => {
     const step = byKey.get(key)
-    const state = forceState ? fallbackState : (step?.state || fallbackState)
+    const state = normalizeState(forceState ? fallbackState : (step?.state || fallbackState))
     return {
       ...(step || {}),
       key,
@@ -1367,7 +1266,7 @@ function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
   const makeSynthetic = (key, label, state, detail = '') => ({
     key,
     label,
-    state: state || phaseState,
+    state: normalizeState(state || phaseState),
     detail,
     complete: isCompletedStepState(state || phaseState),
   })
@@ -1399,39 +1298,47 @@ function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeStep('bronze_code_execution', 'Bronze Code Execution'),
     ]
   } else if (phase.id === 'phase-4') {
-    const silverState = byKey.get('silver')?.state || phaseState
+    const silverState = normalizeState(byKey.get('silver')?.state || phaseState)
+    const silverExecutionState = normalizeState(byKey.get('silver_code_execution')?.state)
     const gate4State = reviewAwareStepState(byKey.get('gate4'), phase, run, 4)
     const goldState = byKey.get('gold')?.state
     const goldExecutionState = byKey.get('gold_code_execution')?.state
-    const hasGoldProgress = ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'].includes(String(goldState || '').toUpperCase()) ||
-      ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'].includes(String(goldExecutionState || '').toUpperCase())
+    const hasGoldProgress = ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(normalizeState(goldState)) ||
+      ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(normalizeState(goldExecutionState))
     const gate5State = hasGoldProgress
       ? 'COMPLETED'
       : reviewAwareStepState(byKey.get('gate5'), phase, run, 5)
-    const mergeReviewState = run?.next_review_key === 'silver_merge_key_review'
+    const rawMergeReviewState = run?.next_review_key === 'silver_merge_key_review'
       ? 'HITL_WAIT'
       : byKey.get('silver_merge_key_review')?.state
-    const silverFlow = buildSilverPhaseStates(silverState, gate4State, gate5State, phase.status, hasGoldProgress)
+    const mergeReviewState = rawMergeReviewState ? normalizeState(rawMergeReviewState) : ''
+    const silverFlow = buildSilverPhaseStates(silverState, gate4State, gate5State, phase.status, hasGoldProgress, mergeReviewState, silverExecutionState)
     displaySteps = [
       makeSynthetic('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverFlow.mergeResolution),
       makeSynthetic('silver_merge_key_review', 'Silver Merge Key Review', mergeReviewState || silverFlow.mergeReview, 'Merge keys are reviewed before Silver generation.'),
       makeStep('silver', 'Silver Code Generation', silverFlow.codeGeneration, true),
-      makeStep('gate5', 'Silver Review', silverFlow.reviewGate, hasGoldProgress),
-      makeStep('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution, hasGoldProgress),
+      makeStep('gate5', 'Silver Review', silverFlow.reviewGate, true),
+      makeStep('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution, true),
     ]
   } else if (phase.id === 'phase-5') {
+    const goldFlow = buildGoldPhaseStates(
+      byKey.get('gold')?.state || phaseState,
+      byKey.get('gold_code_execution')?.state,
+      phase.status,
+      run?.status
+    )
     displaySteps = [
-      makeStep('gold', 'Gold Code Generation'),
-      makeStep('gold_code_execution', 'Gold Code Execution'),
+      makeStep('gold', 'Gold Code Generation', goldFlow.codeGeneration, true),
+      makeStep('gold_code_execution', 'Gold Code Execution', goldFlow.codeExecution, true),
     ]
   }
 
   displaySteps = clampLinearStepStates(displaySteps)
 
   const completed = displaySteps.filter((step) => isCompletedStepState(step.state)).length
-  const waiting = displaySteps.find((step) => step.state === 'HITL_WAIT')
-  const running = displaySteps.find((step) => step.state === 'RUNNING')
-  const failed = displaySteps.find((step) => step.state === 'FAILED')
+  const waiting = displaySteps.find((step) => normalizeState(step.state) === 'HITL_WAIT')
+  const running = displaySteps.find((step) => normalizeState(step.state) === 'RUNNING')
+  const failed = displaySteps.find((step) => normalizeState(step.state) === 'FAILED')
   let status = phase.status
   if (failed) status = 'Failed'
   else if (waiting) status = 'Review'
@@ -1450,7 +1357,7 @@ function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
 function clampLinearStepStates(steps = []) {
   let blocked = false
   return steps.map((step) => {
-    const state = String(step.state || '').toUpperCase()
+    const state = normalizeState(step.state)
     const complete = isCompletedStepState(state)
     if (!blocked && complete) return step
     if (!blocked) {
@@ -1471,25 +1378,48 @@ function phaseStatusToStepState(status) {
 }
 
 function reviewAwareStepState(step, phase, run = null, gate = 0) {
-  if (step?.state) return step.state
-  const status = String(run?.status || '').toUpperCase()
-  if (Number(run?.next_gate || 0) === gate && ['HITL_WAIT', 'PENDING_REVIEW', 'PAUSED_FOR_HITL'].includes(status)) return 'HITL_WAIT'
+  if (step?.state) return normalizeState(step.state)
+  const status = normalizeState(run?.status)
+  if (Number(run?.next_gate || 0) === gate && status === 'HITL_WAIT') return 'HITL_WAIT'
   if (phase.status === 'Review') return 'HITL_WAIT'
   return phaseStatusToStepState(phase.status)
 }
 
-function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus, hasGoldProgress = false) {
-  const normalizedSilver = String(silverState || '').toUpperCase()
-  const normalizedGate = String(gate5State || '').toUpperCase()
+function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus, hasGoldProgress = false, mergeReviewState = '', silverExecutionState = '') {
+  const normalizedSilver = normalizeState(silverState)
+  const normalizedGate4 = normalizeState(gate4State)
+  const normalizedGate = normalizeState(gate5State)
+  const normalizedMergeReview = mergeReviewState ? normalizeState(mergeReviewState) : ''
+  const normalizedSilverExecution = silverExecutionState ? normalizeState(silverExecutionState) : ''
   const normalizedPhase = String(phaseStatus || '').toLowerCase()
 
-  if (hasGoldProgress || normalizedPhase === 'done') {
+  if (hasGoldProgress) {
     return {
       mergeResolution: 'COMPLETED',
       mergeReview: 'COMPLETED',
       codeGeneration: 'COMPLETED',
       reviewGate: 'COMPLETED',
       codeExecution: 'COMPLETED',
+    }
+  }
+
+  if (['RUNNING', 'FAILED', 'COMPLETED'].includes(normalizedSilverExecution)) {
+    return {
+      mergeResolution: 'COMPLETED',
+      mergeReview: 'COMPLETED',
+      codeGeneration: 'COMPLETED',
+      reviewGate: 'COMPLETED',
+      codeExecution: normalizedSilverExecution,
+    }
+  }
+
+  if (normalizedMergeReview === 'HITL_WAIT') {
+    return {
+      mergeResolution: 'COMPLETED',
+      mergeReview: 'HITL_WAIT',
+      codeGeneration: 'PENDING',
+      reviewGate: 'PENDING',
+      codeExecution: 'PENDING',
     }
   }
 
@@ -1503,11 +1433,31 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
     }
   }
 
+  if (normalizedGate4 === 'HITL_WAIT') {
+    return {
+      mergeResolution: 'PENDING',
+      mergeReview: 'PENDING',
+      codeGeneration: 'PENDING',
+      reviewGate: 'PENDING',
+      codeExecution: 'PENDING',
+    }
+  }
+
   if (normalizedSilver === 'RUNNING') {
     return {
       mergeResolution: 'COMPLETED',
       mergeReview: 'COMPLETED',
       codeGeneration: 'RUNNING',
+      reviewGate: 'PENDING',
+      codeExecution: 'PENDING',
+    }
+  }
+
+  if (normalizedSilver === 'FAILED') {
+    return {
+      mergeResolution: normalizedMergeReview === 'COMPLETED' ? 'COMPLETED' : 'FAILED',
+      mergeReview: normalizedMergeReview === 'COMPLETED' ? 'COMPLETED' : 'PENDING',
+      codeGeneration: 'FAILED',
       reviewGate: 'PENDING',
       codeExecution: 'PENDING',
     }
@@ -1552,8 +1502,48 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
   }
 }
 
+function buildGoldPhaseStates(goldState, goldExecutionState, phaseStatus, runStatus) {
+  const normalizedGold = normalizeState(goldState)
+  const normalizedGoldExecution = goldExecutionState ? normalizeState(goldExecutionState) : ''
+  const normalizedRun = normalizeState(runStatus)
+  const normalizedPhase = String(phaseStatus || '').toLowerCase()
+
+  if (['RUNNING', 'FAILED', 'COMPLETED'].includes(normalizedGoldExecution)) {
+    return {
+      codeGeneration: 'COMPLETED',
+      codeExecution: normalizedGoldExecution,
+    }
+  }
+
+  if (normalizedGold === 'RUNNING') {
+    return {
+      codeGeneration: 'RUNNING',
+      codeExecution: 'PENDING',
+    }
+  }
+
+  if (normalizedGold === 'FAILED') {
+    return {
+      codeGeneration: 'FAILED',
+      codeExecution: 'PENDING',
+    }
+  }
+
+  if (normalizedGold === 'COMPLETED') {
+    return {
+      codeGeneration: 'COMPLETED',
+      codeExecution: normalizedRun === 'COMPLETED' || normalizedPhase === 'done' ? 'COMPLETED' : 'PENDING',
+    }
+  }
+
+  return {
+    codeGeneration: 'PENDING',
+    codeExecution: 'PENDING',
+  }
+}
+
 function isCompletedStepState(state) {
-  return ['COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'].includes(String(state || '').toUpperCase())
+  return normalizeState(state) === 'COMPLETED'
 }
 
 export default PipelineMonitor

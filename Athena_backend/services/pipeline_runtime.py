@@ -10,16 +10,25 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from fastapi import HTTPException
+
 from utilis.db import ai_store_db_writer, config, get_completed_items, get_connection, get_pending_items, timed_stage, update_hitl_items_batch
 from utilis.generated_code_paths import generated_code_dir
 from utilis.logger import logger
 
 
-BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("ATHENA_BACKGROUND_WORKERS", "2")))
+BACKGROUND_WORKER_COUNT = max(1, int(os.getenv("ATHENA_BACKGROUND_WORKERS", "2")))
+BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=BACKGROUND_WORKER_COUNT)
 BACKGROUND_JOBS: Dict[str, Future] = {}
 BACKGROUND_JOB_LOCK = threading.Lock()
 SCRIPT_BUNDLE_CACHE_LOCK = threading.Lock()
 SCRIPT_BUNDLE_CACHE: Dict[str, Dict[str, Any]] = {}
+ACTIVE_CHECKPOINT_STATUSES = {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
+GENERATION_ARTIFACT_TYPES = {
+    "bronze": {"BRONZE_GENERATION", "BRONZE_SCRIPTS", "SFTP_BRONZE_GENERATION"},
+    "silver": {"SILVER_GENERATION", "SILVER_SCRIPTS", "SFTP_SILVER_GENERATION"},
+    "gold": {"GOLD_GENERATION", "GOLD_SCRIPTS", "SFTP_GOLD_GENERATION"},
+}
 
 DATABASE_STAGE_SEQUENCE = [
     ("ingestion", "BRD Ingest"),
@@ -288,6 +297,12 @@ def continue_database_pipeline(
             "awaiting_stage_confirmation": False,
             "resume_message": f"{DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key)} is running.",
         }
+        logger.info(
+            "START %s stage=%s",
+            DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key),
+            current_stage_key,
+            extra={"run_id": run_id, "node": current_stage_key, "stage": current_stage_key, "event_type": "stage_start"},
+        )
         save_checkpoint_state(run_id, running_state)
         working_state = running_state
 
@@ -297,6 +312,20 @@ def continue_database_pipeline(
             raise ValueError(f"Stage {current_stage_key} returned an invalid state.")
 
         working_state = {**working_state, **result, "run_id": run_id}
+        logger.info(
+            "END %s stage=%s status=%s duration_seconds=%.3f",
+            DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key),
+            current_stage_key,
+            working_state.get("status"),
+            time.monotonic() - stage_started_at,
+            extra={
+                "run_id": run_id,
+                "node": current_stage_key,
+                "stage": current_stage_key,
+                "event_type": "stage_end",
+                "duration_seconds": round(time.monotonic() - stage_started_at, 3),
+            },
+        )
         working_state["background_stage"] = None
         working_state["awaiting_stage_confirmation"] = False
         working_state["last_completed_stage_key"] = current_stage_key
@@ -484,6 +513,65 @@ def save_checkpoint_state(run_id: str, state: Dict[str, Any]) -> None:
         conn.close()
 
 
+def _interrupted_checkpoint_state(state: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    failed_stage = state.get("background_stage") or state.get("failed_background_stage") or state.get("last_failed_stage_key") or "pipeline"
+    return {
+        **state,
+        "status": "FAILED",
+        "background_stage": None,
+        "failed_background_stage": failed_stage,
+        "error": reason,
+        "error_type": "InterruptedRun",
+        "error_message": reason,
+        "resume_message": "Backend restarted while this run was active. Use Retry Failed Stage or Resume from Failure.",
+        "interrupted_by_backend_restart": True,
+        "interrupted_at": time.time(),
+    }
+
+
+def mark_interrupted_background_runs_on_startup() -> int:
+    if str(os.getenv("ATHENA_MARK_INTERRUPTED_RUNS_ON_STARTUP", "true")).lower() in {"0", "false", "no", "off"}:
+        return 0
+
+    limit = max(1, int(os.getenv("ATHENA_INTERRUPTED_RUN_RECOVERY_LIMIT", "50")))
+    conn = get_connection()
+    rows: List[tuple[str, str]] = []
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT TOP ({limit}) run_id, full_state_json
+            FROM [{_pipeline_schema()}].[kpi_checkpoints]
+            WHERE JSON_VALUE(full_state_json, '$.status') IN ('RUNNING', 'PROCESSING', 'SUBMITTED', 'IN_PROGRESS')
+               OR NULLIF(JSON_VALUE(full_state_json, '$.background_stage'), '') IS NOT NULL
+            ORDER BY checkpoint_at DESC
+            """
+        )
+        rows = [(str(row[0]), str(row[1] or "")) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+    reason = "Backend process restarted while this run was active."
+    recovered = 0
+    for run_id, state_json in rows:
+        try:
+            state = json.loads(state_json) if state_json else {}
+        except Exception:
+            logger.exception("Skipping malformed interrupted checkpoint run_id=%s", run_id)
+            continue
+
+        status = str(state.get("status") or "").upper()
+        if status not in ACTIVE_CHECKPOINT_STATUSES and not state.get("background_stage"):
+            continue
+
+        save_checkpoint_state(run_id, _interrupted_checkpoint_state({**state, "run_id": run_id}, reason))
+        recovered += 1
+
+    if recovered:
+        logger.warning("Marked interrupted background runs as failed/retryable count=%s", recovered)
+    return recovered
+
+
 def mark_run_processing(run_id: str, stage: str) -> None:
     checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
     checkpoint.update(
@@ -491,9 +579,40 @@ def mark_run_processing(run_id: str, stage: str) -> None:
             "run_id": run_id,
             "status": "PROCESSING",
             "background_stage": stage,
+            "next_gate": None,
+            "next_review_key": None,
+            "stage_confirmation": None,
+            "awaiting_stage_confirmation": False,
         }
     )
     save_checkpoint_state(run_id, checkpoint)
+
+
+def _active_background_job_count_locked() -> int:
+    return sum(1 for future in BACKGROUND_JOBS.values() if future and not future.done())
+
+
+def background_capacity_snapshot() -> Dict[str, int]:
+    with BACKGROUND_JOB_LOCK:
+        active = _active_background_job_count_locked()
+    return {
+        "workers": BACKGROUND_WORKER_COUNT,
+        "active": active,
+        "available": max(0, BACKGROUND_WORKER_COUNT - active),
+    }
+
+
+def ensure_background_capacity_locked() -> None:
+    active = _active_background_job_count_locked()
+    if active < BACKGROUND_WORKER_COUNT:
+        return
+    raise HTTPException(
+        status_code=429,
+        detail=(
+            f"Backend background capacity is full: {active}/{BACKGROUND_WORKER_COUNT} active jobs. "
+            "Wait for one run to pause/finish, then retry."
+        ),
+    )
 
 
 def submit_background(run_id: str, stage: str, fn, *args) -> Future:
@@ -504,6 +623,7 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
             logger.info("Background %s already running for run_id=%s", stage, run_id)
             return existing
 
+        ensure_background_capacity_locked()
         mark_run_processing(run_id, stage)
         future = BACKGROUND_EXECUTOR.submit(fn, *args)
         BACKGROUND_JOBS[job_key] = future
@@ -1665,9 +1785,10 @@ def build_pipeline_steps(
                 step["state"] = "RUNNING"
                 if external_message:
                     step["detail"] = external_message
-            elif step["complete"]:
-                step["state"] = "COMPLETED"
             else:
+                # ponytail: this UI is linear; persisted downstream artifacts may be
+                # stale during retry, so the active checkpoint owns the visible frontier.
+                step["complete"] = False
                 step["state"] = "PENDING"
     else:
         last_complete_index = -1
@@ -1708,6 +1829,22 @@ def build_pipeline_steps(
                 step["state"] = "COMPLETED"
 
     return steps
+
+
+def generation_completed(summary: List[Dict[str, Any]], checkpoint: Dict[str, Any], layer: str) -> bool:
+    layer = str(layer or "").lower()
+    artifact_types = {
+        str(row.get("artifact_type") or "").upper()
+        for row in summary
+        if isinstance(row, dict)
+    }
+    status = str(checkpoint.get(f"{layer}_generation_status") or "").upper()
+    return bool(
+        artifact_types.intersection(GENERATION_ARTIFACT_TYPES.get(layer, set()))
+        or status == "COMPLETED"
+        or status.startswith("COMPLETED_")
+        or checkpoint.get(f"{layer}_generation_results")
+    )
 
 
 def apply_waiting_stage_state(steps: List[Dict[str, Any]], gate_key: Optional[str]) -> List[Dict[str, Any]]:
@@ -1769,21 +1906,9 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         certified_tables = []
         pending_gate1 = []  # SFTP gate1 is tracked via checkpoint.gate1, not SQL queue.
         completed_gate1 = []
-    bronze_generation_completed = any(
-        row.get("artifact_type") in {"BRONZE_GENERATION", "BRONZE_SCRIPTS"}
-        or str(row.get("stage", "")).lower().startswith("bronze")
-        for row in summary
-    ) or checkpoint.get("bronze_generation_status") == "COMPLETED" or bool(checkpoint.get("bronze_generation_results"))
-    silver_generation_completed = any(
-        row.get("artifact_type") in {"SILVER_GENERATION", "SILVER_SCRIPTS"}
-        or str(row.get("stage", "")).lower().startswith("silver")
-        for row in summary
-    ) or checkpoint.get("silver_generation_status") == "COMPLETED" or bool(checkpoint.get("silver_generation_results"))
-    gold_generation_completed = any(
-        row.get("artifact_type") in {"GOLD_GENERATION", "GOLD_SCRIPTS"}
-        or str(row.get("stage", "")).lower().startswith("gold")
-        for row in summary
-    ) or str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED") or bool(checkpoint.get("gold_generation_results"))
+    bronze_generation_completed = generation_completed(summary, checkpoint, "bronze")
+    silver_generation_completed = generation_completed(summary, checkpoint, "silver")
+    gold_generation_completed = generation_completed(summary, checkpoint, "gold")
     bronze = load_bronze_scripts(run_id, checkpoint) if gate3_payload or bronze_generation_completed else {"generated_at": None, "scripts": []}
     silver = load_silver_scripts(run_id, checkpoint) if silver_generation_completed else {"generated_at": None, "scripts": []}
     gold = load_gold_scripts(run_id, checkpoint) if gold_generation_completed else {"generated_at": None, "scripts": []}
@@ -2185,15 +2310,35 @@ def submit_gate1_review(run_id: str, decisions: List[Dict[str, str]]) -> Dict[st
     return continue_database_pipeline(run_id, start_stage_key="nomination", state=resumed)
 
 
+def _gate2_execution_scope(tables: List[Dict[str, Any]], approved_keys: List[str]) -> List[Dict[str, Any]]:
+    approved_key_set = set(approved_keys)
+    approved = [item for item in tables if _table_key(item) in approved_key_set]
+
+    # Dimension/lookup candidates are supporting inputs to the approved facts.
+    # Keep them in the execution scope even when the reviewer selected only the
+    # fact tables; otherwise they disappear before Bronze/Silver generation.
+    dimension_prefixes = ("dim_", "ref_", "lkp_", "lookup_", "code_", "type_")
+    dimension_reasons = {"FK Resolution (related to nominated table)"}
+    fact_keys = {_table_key(item) for item in approved}
+    if fact_keys:
+        approved_keys_seen = set(fact_keys)
+        for item in tables:
+            table_name = str(item.get("table_name") or item.get("table") or "").strip().lower()
+            reason = str(item.get("nomination_reason") or "").strip()
+            if (table_name.startswith(dimension_prefixes) or reason in dimension_reasons) and _table_key(item) not in approved_keys_seen:
+                approved.append(item)
+                approved_keys_seen.add(_table_key(item))
+
+    if not approved:
+        raise ValueError("At least one table must be approved for Table Review.")
+    return approved
+
+
 def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]:
     from nodes.hitl import hitl_table_review_node
 
     tables = fetch_json_artifact(run_id, "TABLE_NOMINATIONS").get("nominations", []) or []
-    approved_key_set = set(approved_keys)
-    approved = [item for item in tables if _table_key(item) in approved_key_set]
-
-    if not approved:
-        raise ValueError("At least one table must be approved for Table Review.")
+    approved = _gate2_execution_scope(tables, approved_keys)
 
     resumed_input = load_checkpoint_state(run_id) or {"run_id": run_id}
     resumed_input["human_table_decision"] = "COMPLETED"
@@ -2293,28 +2438,44 @@ def _silver_merge_key_review_artifact(checkpoint: Dict[str, Any]) -> Dict[str, A
     if isinstance(artifact, dict) and artifact.get("feeds"):
         return artifact
 
-    bronze_artifact = checkpoint.get("bronze_review_artifact") or checkpoint.get("gate4_reviewed_merge_keys") or {}
-    feeds = []
-    for feed in (bronze_artifact.get("feeds") if isinstance(bronze_artifact, dict) else []) or []:
-        if not isinstance(feed, dict):
-            continue
-        keys = feed.get("merge_keys") or feed.get("primary_keys") or []
-        feeds.append(
-            {
-                **feed,
-                "merge_keys": keys,
-                "primary_keys": keys,
-                "review_status": "PENDING",
-                "review_type": "silver_merge_key",
-            }
-        )
-    return {"feeds": feeds}
+    from nodes.silver_merge_key_resolution import silver_merge_key_resolution_node
+
+    resolved = silver_merge_key_resolution_node(checkpoint)
+    return resolved.get("silver_merge_key_resolution_artifact") or {"run_id": checkpoint.get("run_id"), "feeds": []}
 
 
 def _pause_for_silver_merge_key_review(run_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
-    artifact = _silver_merge_key_review_artifact(state)
+    from nodes.silver_merge_key_resolution import silver_merge_key_resolution_node
+
+    started_at = time.monotonic()
+    logger.info(
+        "START Silver Merge Key Resolution",
+        extra={"run_id": run_id, "node": "silver_merge_key_resolution", "stage": "silver_merge_key_resolution", "event_type": "stage_start"},
+    )
+    try:
+        resolved_state = silver_merge_key_resolution_node({**state, "run_id": run_id})
+    except Exception:
+        logger.exception(
+            "FAILED Silver Merge Key Resolution",
+            extra={"run_id": run_id, "node": "silver_merge_key_resolution", "stage": "silver_merge_key_resolution", "event_type": "stage_error"},
+        )
+        raise
+    artifact = resolved_state.get("silver_merge_key_resolution_artifact") or {"run_id": run_id, "feeds": []}
+    logger.info(
+        "END Silver Merge Key Resolution feeds=%d duration_seconds=%.3f",
+        len(artifact.get("feeds") or []),
+        time.monotonic() - started_at,
+        extra={
+            "run_id": run_id,
+            "node": "silver_merge_key_resolution",
+            "stage": "silver_merge_key_resolution",
+            "event_type": "stage_end",
+            "feed_count": len(artifact.get("feeds") or []),
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+        },
+    )
     return {
-        **state,
+        **resolved_state,
         "run_id": run_id,
         "status": "HITL_WAIT",
         "background_stage": None,
@@ -2347,6 +2508,23 @@ def _filter_bronze_results_by_gate4_review(
         for key in approved_keys
         if key[2]
     }
+    rejected_keys = {
+        (
+            str(feed.get("database_name") or "").strip().casefold(),
+            str(feed.get("schema_name") or "").strip().casefold(),
+            str(feed.get("table") or feed.get("table_name") or feed.get("entity") or "").strip().casefold(),
+        )
+        for feed in feeds
+        if str(feed.get("review_status") or "").upper() == "REJECTED"
+    }
+    rejected_tables = {
+        key[2]
+        for key in rejected_keys
+        if key[2]
+    }
+    if not approved_tables and not rejected_tables:
+        return bronze_results
+
     filtered: List[Dict[str, Any]] = []
     for result in bronze_results:
         table_name = str(result.get("table") or result.get("table_name") or result.get("entity") or "").strip().casefold()
@@ -2355,9 +2533,83 @@ def _filter_bronze_results_by_gate4_review(
             str(result.get("schema_name") or "").strip().casefold(),
             table_name,
         )
-        if full_key in approved_keys or table_name in approved_tables:
+        if approved_tables:
+            if full_key in approved_keys or table_name in approved_tables:
+                filtered.append(result)
+        elif full_key not in rejected_keys and table_name not in rejected_tables:
             filtered.append(result)
     return filtered
+
+
+def _silver_review_keys(item: Dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for field in ("target_table", "silver_table", "source_table", "bronze_table", "table", "table_name", "entity"):
+        value = str(item.get(field) or "").strip()
+        if not value:
+            continue
+        folded = value.casefold()
+        keys.add(folded)
+        simple = value.split(".")[-1].strip('"').casefold()
+        if simple:
+            keys.add(simple)
+            for prefix in ("silver_", "bronze_"):
+                if simple.startswith(prefix):
+                    keys.add(simple[len(prefix):])
+    return keys
+
+
+def _filter_silver_results_by_gate5_review(
+    silver_results: List[Dict[str, Any]],
+    review_artifact: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    items = [item for item in (review_artifact or {}).get("items") or [] if isinstance(item, dict)]
+    if not items:
+        return silver_results
+
+    approved_items = [item for item in items if str(item.get("review_status") or "").upper() == "APPROVED"]
+    rejected_items = [item for item in items if str(item.get("review_status") or "").upper() == "REJECTED"]
+    if not approved_items and not rejected_items:
+        return silver_results
+
+    def matches(result: Dict[str, Any], review_item: Dict[str, Any]) -> bool:
+        return bool(_silver_review_keys(result) & _silver_review_keys(review_item))
+
+    filtered: List[Dict[str, Any]] = []
+    for result in silver_results:
+        if approved_items:
+            if any(matches(result, item) for item in approved_items):
+                filtered.append(result)
+        elif not any(matches(result, item) for item in rejected_items):
+            filtered.append(result)
+    return filtered
+
+
+def _filter_gold_contract_by_silver_results(contract: Dict[str, Any], silver_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(contract, dict) or not contract:
+        return contract
+
+    allowed_sources = {
+        str(item.get("target_table") or item.get("silver_table") or "").strip().casefold()
+        for item in silver_results
+        if str(item.get("target_table") or item.get("silver_table") or "").strip()
+    }
+    warnings = list(contract.get("warnings") or [])
+    if not allowed_sources:
+        dropped = len(contract.get("kpi_mappings") or [])
+        if dropped:
+            warnings.append(f"Gold scope filtered out {dropped} KPI mapping(s) because no Silver source was approved for execution.")
+            return {**contract, "kpi_mappings": [], "warnings": warnings}
+        return contract
+
+    mappings = [
+        mapping
+        for mapping in contract.get("kpi_mappings") or []
+        if str(mapping.get("source_silver_table") or "").strip().casefold() in allowed_sources
+    ]
+    dropped = len(contract.get("kpi_mappings") or []) - len(mappings)
+    if dropped:
+        warnings.append(f"Gold scope filtered out {dropped} KPI mapping(s) because their Silver source was not approved for execution.")
+    return {**contract, "kpi_mappings": mappings, "warnings": warnings}
 
 
 def submit_gate4_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2582,6 +2834,15 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
         final_state["status"] = "REGENERATE_REQUIRED"
     elif decision == "APPROVED":
         final_state["status"] = "RUNNING"
+        selected_silver_results = _filter_silver_results_by_gate5_review(
+            [item for item in final_state.get("silver_generation_results") or [] if isinstance(item, dict)],
+            final_state["silver_review_artifact"],
+        )
+        final_state["silver_generation_results"] = selected_silver_results
+        final_state["gold_generation_contract"] = _filter_gold_contract_by_silver_results(
+            final_state.get("gold_generation_contract") or {},
+            selected_silver_results,
+        )
         if str(final_state.get("target_warehouse") or "").lower() == "snowflake":
             from services.snowflake_silver_runtime import run_snowflake_silver_scripts
 

@@ -263,6 +263,12 @@ def enrich_column(column: Dict[str, Any], domain_context: Dict[str, Any]) -> Dic
 # ------------------------------------------------------------------------------------
 
 def semantic_enrichment_node(state: Stage01State) -> Stage01State:
+    logger.info(
+        "START Semantic Enrichment tables=%d use_domain_kb=%s",
+        len((state.get("discovered_metadata") or {}).get("tables", [])),
+        bool(state.get("use_domain_kb")),
+        extra={"run_id": state.get("run_id"), "node": "semantic_enrichment", "stage": "enrichment", "event_type": "node_start"},
+    )
     new_state = state.copy()
     discovered = state.get("discovered_metadata", {})
     profiling = state.get("column_profiles", {})
@@ -383,6 +389,15 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
     new_state["join_candidates"] = heuristic_joins
     new_state["table_relationships"] = discovered_relationships
     new_state["semantic_enrichment_status"] = "COMPLETED"
+    logger.info(
+        "END Semantic Enrichment tables=%d columns=%d certified_joins=%d heuristic_joins=%d kb_enabled=%s",
+        len(enriched_tables),
+        len(enriched_columns),
+        len(certified_joins),
+        len(heuristic_joins),
+        use_domain_kb,
+        extra={"run_id": state.get("run_id"), "node": "semantic_enrichment", "stage": "enrichment", "event_type": "node_end"},
+    )
     return new_state
 
 

@@ -104,6 +104,8 @@ npm ci
 npm run build
 ```
 
+For the single-instance Azure App Service B3 deployment procedure, settings, smoke checks, and rollback constraints, see [Athena_backend/DEPLOY_AZURE_B3.md](Athena_backend/DEPLOY_AZURE_B3.md).
+
 ## CI
 
 GitHub Actions:

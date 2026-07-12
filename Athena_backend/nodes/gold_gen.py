@@ -22,6 +22,9 @@ from utilis.logger import logger
 
 USE_LLM_ENV_KEYS = ("ATHENA_GOLD_USE_LLM", "USE_LLM")
 DEFAULT_MAX_GOLD_SOURCE_TABLES = 3
+SILVER_COLUMN_NAME_CORRECTIONS = {
+    "rererence_id": "reference_id",
+}
 
 
 def _gold_output_dir_for(target_warehouse: str = "databricks") -> str:
@@ -79,7 +82,7 @@ def _snowflake_quote_identifier(value: str) -> str:
 
 
 def _snowflake_silver_source_identifier(value: str) -> str:
-    return _snowflake_quote_identifier(str(value or "").strip().strip('"').lower())
+    return _snowflake_quote_identifier(_silver_output_column_name(value))
 
 
 def _snowflake_qualified_name(*parts: str) -> str:
@@ -123,6 +126,12 @@ def _literal(value: Any) -> str:
 
 def _result_column_name(kpi_name: str) -> str:
     return f"{_safe_identifier(kpi_name, 'kpi')}_value"
+
+
+def _silver_output_column_name(value: Any) -> str:
+    """Return the physical Silver column name used by both Gold runtimes."""
+    normalized = str(value or "").strip().strip('"').lower()
+    return SILVER_COLUMN_NAME_CORRECTIONS.get(normalized, normalized)
 
 
 def _date_grain_expr(grain: str, source_column: str) -> str:
@@ -172,12 +181,18 @@ def _dimension_entity_for_column(column: str, table: str | None = None) -> str:
     direct_matches = {
         "customer": ("customer", "client", "insured", "account"),
         "product": ("product", "sku", "item"),
-        "region": ("region", "geog", "state", "zone", "territory", "country"),
         "claim": ("claim",),
         "coverage": ("coverage", "cover"),
         "policy": ("policy", "pol_"),
         "agent": ("agent", "broker", "producer"),
+        "channel": ("channel", "distribution"),
+        "segment": ("segment",),
+        "branch": ("branch", "office"),
+        "region": ("region", "geog", "state", "zone", "territory", "country"),
     }
+    # Column semantics identify the business entity more precisely than the
+    # physical source table; policy_transactions can contain product, agent,
+    # channel, region, and policy attributes side by side.
     for entity, tokens in direct_matches.items():
         if any(token in column_text for token in tokens):
             return entity
@@ -204,18 +219,76 @@ def _dimension_specs(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
         table = str(item.get("table") or (mapping.get("measure") or {}).get("table") or "").strip()
         entity = _dimension_entity_for_column(column, table)
         key = (table, entity)
+        source_table = str(mapping.get("source_silver_table") or "").strip()
+        source_parts = [part for part in source_table.split(".") if part.strip()]
+        if table and len(source_parts) >= 3:
+            source_table = ".".join([source_parts[0], source_parts[1], f"silver_{table}"])
         spec = grouped.setdefault(
             key,
             {
                 "entity": entity,
-                "source_table": mapping.get("source_silver_table"),
+                "source_table": source_table,
                 "logical_table": table,
                 "columns": [],
+                "source_columns": [],
             },
         )
         if column not in spec["columns"]:
             spec["columns"].append(column)
+            spec["source_columns"].append(_silver_output_column_name(column))
     return list(grouped.values())
+
+
+def _mapping_source_columns(mapping: Dict[str, Any]) -> set[str]:
+    source_logical_table = _logical_table_name(mapping.get("source_silver_table"))
+    columns: set[str] = set()
+    measure = mapping.get("measure") or {}
+    measure_column = str(measure.get("column") or "").strip()
+    aggregation = str(measure.get("aggregation") or "").upper()
+    if measure_column and aggregation != "COUNT":
+        columns.add(_silver_output_column_name(measure_column))
+    for item in mapping.get("grouping_dimensions") or []:
+        if not isinstance(item, dict):
+            continue
+        table = _logical_table_name(item.get("table"))
+        if not table or not source_logical_table or table == source_logical_table:
+            column = str(item.get("column") or "").strip()
+            if column:
+                columns.add(_silver_output_column_name(column))
+    time_info = mapping.get("time") or {}
+    time_column = time_info.get("column") if isinstance(time_info, dict) else None
+    if isinstance(time_column, dict):
+        time_table = _logical_table_name(time_column.get("table"))
+        if not time_table or not source_logical_table or time_table == source_logical_table:
+            column = str(time_column.get("column") or "").strip()
+            if column:
+                columns.add(_silver_output_column_name(column))
+    return columns
+
+
+def _shared_dimension_mapping(mappings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build one idempotent dimension contract for the whole Gold run."""
+    dimensions: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, str]] = set()
+    source_table = ""
+    for mapping in mappings:
+        if not isinstance(mapping, dict) or not _usable_mapping(mapping):
+            continue
+        source_table = source_table or str(mapping.get("source_silver_table") or "")
+        for item in mapping.get("grouping_dimensions") or []:
+            if not isinstance(item, dict) or str(item.get("semantic_type") or "").upper() == "DATE":
+                continue
+            table = str(item.get("table") or "").strip()
+            column = str(item.get("column") or "").strip()
+            key = (table.casefold(), column.casefold())
+            if table and column and key not in seen:
+                dimensions.append(item)
+                seen.add(key)
+    return {
+        "kpi_name": "Shared Gold Dimensions",
+        "source_silver_table": source_table,
+        "grouping_dimensions": dimensions,
+    }
 
 
 def _target_dim_table(gold_schema: str, entity: str) -> str:
@@ -294,6 +367,64 @@ def llm_generate_gold_code(
             extra={"run_id": run_id, "node": "gold_generation"},
         )
         return generate_gold_script(mapping=mapping, run_id=run_id, gold_schema=gold_schema)
+
+
+def llm_generate_snowflake_gold_code(
+    mapping: Dict[str, Any],
+    run_id: str,
+    gold_catalog: str,
+    gold_schema: str,
+) -> str:
+    """Ask the model to improve Snowflake SQL, then validate/fallback upstream."""
+    deterministic = generate_snowflake_gold_script(
+        mapping=mapping,
+        run_id=run_id,
+        gold_catalog=gold_catalog,
+        gold_schema=gold_schema,
+    )
+    prompt = f"""Generate production Snowflake SQL for this Gold KPI.
+Return only SQL. Preserve the exact source and target tables, dimensional groupings,
+metadata columns, and MERGE/upsert behavior from the baseline. Do not use Python,
+Spark, or Databricks syntax. Do not invent columns.
+
+KPI: {mapping.get('kpi_name')}
+Mapping: {json.dumps(mapping, default=str)}
+
+BASELINE:
+{deterministic}
+""".strip()
+    provider = os.getenv("ATHENA_GOLD_LLM_PROVIDER", os.getenv("ATHENA_LLM_PROVIDER", "azure_openai"))
+    from nodes.req_extraction import get_llm
+
+    llm = get_llm(provider=provider, model=os.getenv("ATHENA_GOLD_LLM_MODEL"), temperature=0.0)
+    response = llm.invoke(prompt)
+    content = getattr(response, "content", response)
+    text = str(content).strip()
+    match = re.search(r"```(?:sql)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    candidate = match.group(1).strip() if match else text
+    normalized = candidate.upper()
+    if "CREATE TABLE" not in normalized or "MERGE INTO" not in normalized:
+        raise ValueError("LLM Gold SQL must contain CREATE TABLE and MERGE INTO")
+    if any(token in normalized for token in ("SPARK.", "PYSPARK", "DATABRICKS")):
+        raise ValueError("LLM Gold SQL returned non-Snowflake syntax")
+    return candidate
+
+
+def _validate_snowflake_gold_candidate(code: str, mapping: Dict[str, Any], target_table: str) -> None:
+    normalized = str(code or "").lower()
+    normalized_identifiers = normalized.replace('"', "")
+    source_table = str(mapping.get("source_silver_table") or "").lower()
+    required = {source_table, str(target_table).lower()}
+    required.update(_mapping_source_columns(mapping))
+    missing = [token for token in sorted(required) if token and token not in normalized_identifiers]
+    if missing:
+        raise ValueError(f"LLM Gold SQL dropped required contract fields: {', '.join(missing[:10])}")
+    upper = normalized.upper()
+    if "CREATE SCHEMA" not in upper or "CREATE TABLE" not in upper or "MERGE INTO" not in upper:
+        raise ValueError("LLM Gold SQL is missing required DDL or MERGE statements")
+    aggregation = str((mapping.get("measure") or {}).get("aggregation") or "SUM").upper()
+    if aggregation in {"SUM", "AVG", "MIN", "MAX", "COUNT"} and f"{aggregation}(" not in upper:
+        raise ValueError(f"LLM Gold SQL does not preserve the required {aggregation} aggregation")
 
 
 def _usable_mapping(mapping: Dict[str, Any]) -> bool:
@@ -417,6 +548,7 @@ def generate_dimension_script(mapping: Dict[str, Any], gold_schema: str) -> str:
     kpi_name = str(mapping.get("kpi_name") or "KPI")
     source_table = str(mapping.get("source_silver_table") or "")
     specs = _dimension_specs(mapping)
+    silver_schema = _silver_schema_from_source(source_table)
 
     return f'''
 """
@@ -441,12 +573,17 @@ except Exception:
     print("Could not create schema '{gold_schema}' in the current catalog")
 
 SOURCE_TABLE = {source_table!r}
+SILVER_SCHEMA = {silver_schema!r}
 DIMENSIONS = {_literal(specs)}
 
-if not SOURCE_TABLE or not spark.catalog.tableExists(SOURCE_TABLE):
-    raise ValueError(f"Missing dimension source table: {{SOURCE_TABLE}}")
+if not SOURCE_TABLE:
+    raise ValueError("Missing dimension source table.")
 
-src = spark.table(SOURCE_TABLE)
+def _source_table(dim):
+    logical_table = str(dim.get("logical_table") or "").strip()
+    if logical_table:
+        return f"{{SILVER_SCHEMA}}.silver_{{logical_table}}"
+    return SOURCE_TABLE
 
 def _hash_columns(df, columns):
     expressions = [coalesce(col(name).cast("string"), lit("__NULL__")) for name in columns if name in df.columns]
@@ -458,6 +595,13 @@ for dim in DIMENSIONS:
     entity = dim["entity"]
     target_table = "{gold_schema}.dim_" + entity
     key_column = entity + "_key"
+    dim_source_table = _source_table(dim)
+
+    if not spark.catalog.tableExists(dim_source_table):
+        print(f"WARNING: Skipping dimension {{target_table}} because source table is missing: {{dim_source_table}}")
+        continue
+
+    src = spark.table(dim_source_table)
     natural_columns = [name for name in dim.get("columns", []) if name in src.columns]
 
     if not natural_columns:
@@ -762,7 +906,7 @@ def _snowflake_measure_expression(measure: Dict[str, Any], value_alias: str) -> 
     if aggregation == "COUNT":
         return f"COUNT(*) AS {quoted_alias}"
     quoted_column = _snowflake_silver_source_identifier(column)
-    numeric_expr = f"TRY_TO_DECIMAL({quoted_column})"
+    numeric_expr = f"TRY_TO_DECIMAL(TO_VARCHAR({quoted_column}))"
     if aggregation == "AVG":
         return f"AVG({numeric_expr}) AS {quoted_alias}"
     if aggregation == "MIN":
@@ -776,7 +920,124 @@ def _snowflake_grain_expr(grain: str, source_column: str) -> str:
     grain = str(grain or "month").lower()
     if grain not in {"day", "week", "month", "quarter", "year"}:
         grain = "month"
-    return f"DATE_TRUNC('{grain}', TRY_TO_TIMESTAMP_NTZ({_snowflake_silver_source_identifier(source_column)}))"
+    source_expr = _snowflake_silver_source_identifier(source_column)
+    return f"DATE_TRUNC('{grain}', TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR({source_expr})))"
+
+
+def _snowflake_dimension_source_table(source_table: str, logical_table: str) -> str:
+    parts = [part for part in str(source_table or "").split(".") if part.strip()]
+    if logical_table and len(parts) >= 3:
+        return ".".join([parts[0], parts[1], f"silver_{logical_table}"])
+    return source_table
+
+
+def generate_snowflake_dimension_script(
+    *,
+    mapping: Dict[str, Any],
+    run_id: str,
+    gold_catalog: str,
+    gold_schema: str,
+) -> str:
+    specs = _dimension_specs(mapping)
+    if not specs:
+        return ""
+
+    source_table = str(mapping.get("source_silver_table") or "")
+    statements: List[str] = [f"CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(gold_catalog, gold_schema)};"]
+    for spec in specs:
+        entity = _safe_identifier(str(spec.get("entity") or "dimension"), "dimension")
+        columns = list(dict.fromkeys(str(column).strip() for column in spec.get("columns") or [] if str(column).strip()))
+        source_columns = list(
+            dict.fromkeys(
+                _silver_output_column_name(column)
+                for column in spec.get("source_columns") or columns
+                if str(column).strip()
+            )
+        )
+        if not columns:
+            continue
+
+        target_table = _snowflake_qualified_name(gold_catalog, gold_schema, f"dim_{entity}")
+        source_qname = _snowflake_qualified_name(
+            *_snowflake_dimension_source_table(
+                str(spec.get("source_table") or source_table), str(spec.get("logical_table") or "")
+            ).split(".")
+        )
+        key_column = f"{entity}_key"
+        dimension_columns = [(key_column, "VARCHAR"), ("natural_key_hash", "VARCHAR"), ("attribute_hash", "VARCHAR")]
+        dimension_columns.extend((column, "VARCHAR") for column in columns)
+        dimension_columns.extend(
+            [
+                ("effective_from", "TIMESTAMP_NTZ"),
+                ("effective_to", "TIMESTAMP_NTZ"),
+                ("is_current", "BOOLEAN"),
+                ("gold_run_id", "VARCHAR"),
+                ("gold_processed_timestamp", "TIMESTAMP_NTZ"),
+            ]
+        )
+        create_columns = ",\n    ".join(
+            f"{_snowflake_quote_identifier(name)} {data_type}" for name, data_type in dimension_columns
+        )
+        alter_columns = "\n".join(
+            f"ALTER TABLE {target_table} ADD COLUMN IF NOT EXISTS {_snowflake_quote_identifier(name)} {data_type};"
+            for name, data_type in dimension_columns
+        )
+        natural_parts = [
+            f"COALESCE(TO_VARCHAR({_snowflake_silver_source_identifier(column)}), '__NULL__')"
+            for column in source_columns
+        ]
+        natural_expr = f"MD5(CONCAT_WS('||', {', '.join(natural_parts)}))"
+        select_columns = ",\n        ".join(
+            f"{_snowflake_silver_source_identifier(source_column)} AS {_snowflake_quote_identifier(column)}"
+            for column, source_column in zip(columns, source_columns)
+        )
+        insert_columns = [_snowflake_quote_identifier(name) for name, _ in dimension_columns]
+        update_columns = [
+            name
+            for name, _ in dimension_columns
+            if name not in {key_column, "natural_key_hash", "effective_from"}
+        ]
+        update_assignments = ",\n        ".join(
+            f"target.{_snowflake_quote_identifier(name)} = source.{_snowflake_quote_identifier(name)}"
+            for name in update_columns
+        )
+        insert_values = [f"source.{column}" for column in insert_columns]
+
+        statements.append(
+            f"""
+CREATE TABLE IF NOT EXISTS {target_table} (
+    {create_columns}
+);
+
+{alter_columns}
+
+MERGE INTO {target_table} AS target
+USING (
+    SELECT DISTINCT
+        {natural_expr} AS {_snowflake_quote_identifier(key_column)},
+        {natural_expr} AS "natural_key_hash",
+        {natural_expr} AS "attribute_hash",
+        {select_columns},
+        CURRENT_TIMESTAMP() AS "effective_from",
+        TO_TIMESTAMP_NTZ('9999-12-31 23:59:59') AS "effective_to",
+        TRUE AS "is_current",
+        {_snowflake_string_literal(run_id)} AS "gold_run_id",
+        CURRENT_TIMESTAMP() AS "gold_processed_timestamp"
+    FROM {source_qname}
+) AS source
+ON target."natural_key_hash" = source."natural_key_hash" AND target."is_current" = TRUE
+WHEN MATCHED THEN UPDATE SET
+        {update_assignments}
+WHEN NOT MATCHED THEN INSERT (
+        {", ".join(insert_columns)}
+    )
+    VALUES (
+        {", ".join(insert_values)}
+    );
+""".strip()
+        )
+
+    return "\n\n".join(statements) + "\n"
 
 
 def generate_snowflake_gold_script(
@@ -792,14 +1053,26 @@ def generate_snowflake_gold_script(
     target_table = _snowflake_target_fact_table(gold_catalog, gold_schema, kpi_id)
     value_alias = _result_column_name(kpi_name)
     measure = mapping.get("measure") or {}
+    source_logical_table = _logical_table_name(source_table)
     dimensions = [
         str(item.get("column") or "").strip()
         for item in mapping.get("grouping_dimensions", []) or []
-        if isinstance(item, dict) and str(item.get("column") or "").strip()
+        if isinstance(item, dict)
+        and str(item.get("column") or "").strip()
+        and (
+            not _logical_table_name(item.get("table"))
+            or not source_logical_table
+            or _logical_table_name(item.get("table")) == source_logical_table
+        )
     ]
     dimension_columns = list(dict.fromkeys(dimensions))[:12]
     time_info = mapping.get("time") or {}
-    time_column = (time_info.get("column") or {}).get("column") if isinstance(time_info.get("column"), dict) else None
+    time_column_info = time_info.get("column") if isinstance(time_info, dict) else None
+    time_column = None
+    if isinstance(time_column_info, dict):
+        time_table = _logical_table_name(time_column_info.get("table"))
+        if not time_table or not source_logical_table or time_table == source_logical_table:
+            time_column = time_column_info.get("column")
     time_grain = str(time_info.get("grain") or "month")
 
     select_clauses: List[str] = []
@@ -820,12 +1093,23 @@ def generate_snowflake_gold_script(
 
     select_clauses.append(_snowflake_measure_expression(measure, value_alias))
     table_columns.append((value_alias, "FLOAT"))
+    metadata_columns = [
+        ("kpi_name", "VARCHAR"),
+        ("gold_run_id", "VARCHAR"),
+        ("gold_processed_timestamp", "TIMESTAMP_NTZ"),
+        ("gold_upsert_key", "VARCHAR"),
+    ]
+    all_table_columns = [*table_columns, *metadata_columns]
+    target_qname = _snowflake_qualified_name(*target_table.split("."))
+    source_qname = _snowflake_qualified_name(*source_table.split("."))
 
-    create_business_columns = ",\n    ".join(
-        f"{_snowflake_quote_identifier(name)} {data_type}" for name, data_type in table_columns
+    create_columns = ",\n    ".join(
+        f"{_snowflake_quote_identifier(name)} {data_type}" for name, data_type in all_table_columns
     )
-    if create_business_columns:
-        create_business_columns += ",\n    "
+    alter_columns = "\n".join(
+        f"ALTER TABLE {target_qname} ADD COLUMN IF NOT EXISTS {_snowflake_quote_identifier(name)} {data_type};"
+        for name, data_type in all_table_columns
+    )
 
     aggregate_select = ",\n        ".join(select_clauses)
     group_by_clause = f"\n    GROUP BY {', '.join(group_exprs)}" if group_exprs else ""
@@ -857,19 +1141,18 @@ def generate_snowflake_gold_script(
 
 CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(gold_catalog, gold_schema)};
 
-CREATE TABLE IF NOT EXISTS {_snowflake_qualified_name(*target_table.split("."))} (
-    {create_business_columns}"kpi_name" VARCHAR,
-    "gold_run_id" VARCHAR,
-    "gold_processed_timestamp" TIMESTAMP_NTZ,
-    "gold_upsert_key" VARCHAR
+CREATE TABLE IF NOT EXISTS {target_qname} (
+    {create_columns}
 );
 
-MERGE INTO {_snowflake_qualified_name(*target_table.split("."))} AS target
+{alter_columns}
+
+MERGE INTO {target_qname} AS target
 USING (
     WITH aggregate_data AS (
         SELECT
         {aggregate_select}
-        FROM {_snowflake_qualified_name(*source_table.split("."))}{group_by_clause}
+        FROM {source_qname}{group_by_clause}
     )
     SELECT
         {", ".join(_snowflake_quote_identifier(name) for name in final_columns)},
@@ -899,6 +1182,7 @@ def _generate_one_mapping(
     target_warehouse: str,
     gold_catalog: str = "",
     use_domain_kb: bool,
+    include_dimension: bool = True,
 ) -> Dict[str, Any]:
     mapping, source_table_guard = _sanitize_gold_mapping(mapping)
     kpi_name = str(mapping.get("kpi_name") or "KPI")
@@ -949,16 +1233,36 @@ def _generate_one_mapping(
             },
         }
 
-    llm_requested = _llm_enabled_for_gold() and not is_snowflake
-    generation_mode = "SNOWFLAKE_SQL" if is_snowflake else "LLM" if llm_requested else "DETERMINISTIC"
+    llm_requested = _llm_enabled_for_gold()
+    generation_mode = "LLM" if llm_requested else "DETERMINISTIC"
     fallback_reason = None
-    if is_snowflake:
+    if is_snowflake and llm_requested:
+        try:
+            code = llm_generate_snowflake_gold_code(
+                mapping=mapping,
+                run_id=run_id,
+                gold_catalog=gold_catalog,
+                gold_schema=gold_schema,
+            )
+            _validate_snowflake_gold_candidate(code, mapping, target_table)
+        except Exception as exc:
+            fallback_reason = f"Snowflake Gold LLM generation failed: {exc}"
+            logger.warning("Gold Snowflake LLM generation failed, deterministic fallback will be used: %s", exc)
+            code = generate_snowflake_gold_script(
+                mapping=mapping,
+                run_id=run_id,
+                gold_catalog=gold_catalog,
+                gold_schema=gold_schema,
+            )
+            generation_mode = "SNOWFLAKE_SQL_FALLBACK"
+    elif is_snowflake:
         code = generate_snowflake_gold_script(
             mapping=mapping,
             run_id=run_id,
             gold_catalog=gold_catalog,
             gold_schema=gold_schema,
         )
+        generation_mode = "SNOWFLAKE_SQL"
     elif llm_requested:
         code = llm_generate_gold_code(
             mapping=mapping,
@@ -982,9 +1286,21 @@ def _generate_one_mapping(
     if not is_snowflake:
         _validate_python(code)
 
-    dimension_code = "" if is_snowflake else generate_dimension_script(mapping=mapping, gold_schema=gold_schema)
+    if include_dimension:
+        if is_snowflake:
+            dimension_code = generate_snowflake_dimension_script(
+                mapping=mapping,
+                run_id=run_id,
+                gold_catalog=gold_catalog,
+                gold_schema=gold_schema,
+            )
+        else:
+            dimension_code = generate_dimension_script(mapping=mapping, gold_schema=gold_schema)
+    else:
+        dimension_code = ""
     if dimension_code:
-        _validate_python(dimension_code)
+        if not is_snowflake:
+            _validate_python(dimension_code)
 
     output_dir = _gold_output_dir_for(target_warehouse)
     os.makedirs(output_dir, exist_ok=True)
@@ -994,7 +1310,8 @@ def _generate_one_mapping(
         f.write(code)
     dimension_script_path = None
     if dimension_code:
-        dimension_script_path = os.path.join(output_dir, f"gold_dim_{_run_slug(run_id)}_{kpi_id}.py")
+        dimension_extension = "sql" if is_snowflake else "py"
+        dimension_script_path = os.path.join(output_dir, f"gold_dim_{_run_slug(run_id)}_{kpi_id}.{dimension_extension}")
         with open(dimension_script_path, "w", encoding="utf-8") as f:
             f.write(dimension_code)
 
@@ -1011,8 +1328,10 @@ def _generate_one_mapping(
         "generation_mode": generation_mode,
         "fallback_reason": fallback_reason,
         "time_grain": (mapping.get("time") or {}).get("grain"),
+        "validation_columns": sorted(_mapping_source_columns(mapping)),
         "dimension_count": len(mapping.get("grouping_dimensions") or []),
         "kimball_dimension_count": len(_dimension_specs(mapping)),
+        "dimension_contract": _dimension_specs(mapping),
         "join_count": len(mapping.get("join_paths") or []),
         "source_table_guard": source_table_guard,
         "domain_knowledge_base": {
@@ -1031,11 +1350,13 @@ def _write_bundle(
     contract: Dict[str, Any],
     target_warehouse: str = "databricks",
 ) -> str:
+    dimension_paths = sorted({str(item.get("dimension_script_path")) for item in results if item.get("dimension_script_path")})
     bundle = {
         "run_id": contract.get("run_id"),
         "generated_at": generated_at,
         "script_count": sum(1 for item in results if item.get("script_path")),
-        "dimension_script_count": sum(1 for item in results if item.get("dimension_script_path")),
+        "dimension_script_count": len(dimension_paths),
+        "dimension_script_paths": dimension_paths,
         "blocked_count": sum(1 for item in results if item.get("status") == "BLOCKED"),
         "contract_status": contract.get("status"),
         "target_warehouse": str(target_warehouse or "databricks").lower(),
@@ -1229,15 +1550,50 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
             gold_catalog=gold_catalog,
             target_warehouse=target_warehouse,
             use_domain_kb=bool(state.get("use_domain_kb")),
+            include_dimension=False,
         )
         for mapping in mappings
         if isinstance(mapping, dict)
     ]
 
+    # ponytail: one shared dimension artifact avoids generating/executing the
+    # same dim_policy table once per KPI; the script remains idempotent.
+    shared_dimension_mapping = _shared_dimension_mapping(mappings)
+    shared_dimension_code = ""
+    if shared_dimension_mapping.get("grouping_dimensions"):
+        if target_warehouse == "snowflake":
+            shared_dimension_code = generate_snowflake_dimension_script(
+                mapping=shared_dimension_mapping,
+                run_id=run_id,
+                gold_catalog=gold_catalog,
+                gold_schema=gold_schema,
+            )
+        else:
+            shared_dimension_code = generate_dimension_script(shared_dimension_mapping, gold_schema)
+            _validate_python(shared_dimension_code)
+
+    shared_dimension_path = None
+    if shared_dimension_code:
+        output_dir = _gold_output_dir_for(target_warehouse)
+        os.makedirs(output_dir, exist_ok=True)
+        dimension_extension = "sql" if target_warehouse == "snowflake" else "py"
+        shared_dimension_path = os.path.join(
+            output_dir, f"gold_dimensions_{_run_slug(run_id)}.{dimension_extension}"
+        )
+        with open(shared_dimension_path, "w", encoding="utf-8") as f:
+            f.write(shared_dimension_code)
+        for item in results:
+            if item.get("status") == "APPROVED":
+                item["dimension_script_path"] = shared_dimension_path
+                item["dimension_contract"] = _dimension_specs(shared_dimension_mapping)
+                item["kimball_dimension_count"] = len(_dimension_specs(shared_dimension_mapping))
+                break
+
     bundle = {
         "generated_at": generated_at,
         "script_count": sum(1 for item in results if item.get("script_path")),
         "dimension_script_count": sum(1 for item in results if item.get("dimension_script_path")),
+        "dimension_script_path": shared_dimension_path,
         "blocked_count": sum(1 for item in results if item.get("status") == "BLOCKED"),
         "contract_status": contract.get("status"),
         "target_warehouse": target_warehouse,

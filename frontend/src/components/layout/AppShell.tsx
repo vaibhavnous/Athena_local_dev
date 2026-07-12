@@ -1,26 +1,15 @@
 // @ts-nocheck
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Outlet } from 'react-router-dom'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, Clock3, PlayCircle, RotateCcw, X } from 'lucide-react'
 import Sidebar from './Sidebar'
 import Topbar from './Topbar'
 import useAthenaStore from '../../store/useAthenaStore'
 import usePipelineSocket from '../../hooks/usePipelineSocket'
-import {
-  fetchKpiReviews,
-  getBronzeReview,
-  getEnrichmentReviews,
-  getPipelineKpis,
-  getRun,
-  getRuns,
-  getSilverMergeKeyReview,
-  getSilverReview,
-  getTableReviews
-} from '../../api/athenaApi'
+import { getRun, getRuns } from '../../api/athenaApi'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../../utils/demoFallbacks'
-import { getGateDisplayName, getPhaseGroups } from '../../utils/pipelinePhases'
+import { getGateDisplayName, getPhaseGroups, normalizeState } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
 const PAUSED_BANNER_DELAY_MS = 2500
@@ -85,6 +74,7 @@ function AppShell() {
   const [reviewReadyNotifications, setReviewReadyNotifications] = useState(() => loadJsonMap(REVIEW_READY_NOTIFICATIONS_KEY))
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
   const [readyPausedBannerKey, setReadyPausedBannerKey] = useState<string | null>(null)
+  const [verifiedPausedBannerKey, setVerifiedPausedBannerKey] = useState<string | null>(null)
 
   useEffect(() => {
     latestRunsRef.current = runs
@@ -194,6 +184,7 @@ function AppShell() {
       pausedDetailKeyRef.current = null
       setPausedRunDetail(null)
       setReadyPausedBannerKey(null)
+      setVerifiedPausedBannerKey(null)
       return
     }
 
@@ -201,10 +192,14 @@ function AppShell() {
     if (pausedDetailKeyRef.current !== pausedBannerKey) {
       pausedDetailKeyRef.current = pausedBannerKey
       setPausedRunDetail(null)
+      setVerifiedPausedBannerKey(null)
     }
 
     setPausedRunDetail(pausedRun)
-    if (isDemoFallbackRun(pausedRun)) return
+    if (isDemoFallbackRun(pausedRun)) {
+      setVerifiedPausedBannerKey(pausedBannerKey)
+      return
+    }
 
     const hydratePausedRun = async () => {
       try {
@@ -216,11 +211,11 @@ function AppShell() {
         const expectedGate = pausedRunGate
         const expectedReviewKey = pausedRunReviewKey
         const expectedGateKey = expectedReviewKey || (
-          detailGate === 1 ? 'gate1' :
-          detailGate === 2 ? 'gate2' :
-          detailGate === 3 ? 'gate3' :
-          detailGate === 4 ? 'gate4' :
-          detailGate === 5 ? 'gate5' :
+          expectedGate === 1 ? 'gate1' :
+          expectedGate === 2 ? 'gate2' :
+          expectedGate === 3 ? 'gate3' :
+          expectedGate === 4 ? 'gate4' :
+          expectedGate === 5 ? 'gate5' :
           null
         )
 
@@ -231,17 +226,29 @@ function AppShell() {
             state: stage?.state || stage?.status,
           })),
         ]
+        const status = normalizeState(detail?.status)
+        const resolvedReviewKey = detailReviewKey || expectedReviewKey
+        const resolvedGate = detailGate || expectedGate
         const gateStepReady = expectedGateKey
           ? detailSteps.some(
-              (step) => step?.key === expectedGateKey && String(step?.state || '').toUpperCase() === 'HITL_WAIT'
+              (step) => step?.key === expectedGateKey && ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(normalizeState(step?.state))
+            ) || (
+              resolvedGate === expectedGate &&
+              ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(status)
             )
           : false
-        const reviewDataReady = isReviewPausedRun(detail) && gateStepReady
-          ? await isReviewDataReadyForGate(detail.id || pausedRunId, detailReviewKey || detailGate, detail?.source)
-          : false
 
-        if ((detailReviewKey || detailGate) === (expectedReviewKey || expectedGate) && gateStepReady && reviewDataReady) {
+        const reviewPaused = isReviewPausedRun(detail) || (
+          ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(status) &&
+          Boolean(resolvedReviewKey || resolvedGate)
+        )
+        const gateMatches = expectedReviewKey
+          ? resolvedReviewKey === expectedReviewKey
+          : resolvedGate === expectedGate
+
+        if (gateMatches && reviewPaused && gateStepReady) {
           setPausedRunDetail(detail)
+          setVerifiedPausedBannerKey(pausedBannerKey)
         }
       } catch (error) {
         if (!cancelled) {
@@ -257,7 +264,7 @@ function AppShell() {
   }, [pausedBannerKey, pausedRun, pausedRunGate, pausedRunId, pausedRunReviewKey])
 
   useEffect(() => {
-    if (!pausedRunDetail || !pausedBannerKey) {
+    if (!pausedRunDetail || !pausedBannerKey || verifiedPausedBannerKey !== pausedBannerKey) {
       setReadyPausedBannerKey(null)
       return
     }
@@ -269,7 +276,7 @@ function AppShell() {
     return () => {
       window.clearTimeout(timer)
     }
-  }, [pausedBannerKey, pausedRunDetail])
+  }, [pausedBannerKey, pausedRunDetail, verifiedPausedBannerKey])
 
   const pausedRunSummary = useMemo(() => {
     const bannerRun = pausedRunDetail || pausedRun
@@ -324,12 +331,13 @@ function AppShell() {
 
   useEffect(() => {
     if (!pausedRun || !pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return
+    if (verifiedPausedBannerKey !== pausedBannerKey) return
     if (reviewAutoOpenSessionRef.current?.[pausedBannerKey]) return
 
     const timer = window.setTimeout(() => {
       if (!isPausedBannerStillCurrent(pausedBannerKey)) return
-      const targetPath = reviewPathForPausedRun(pausedRun)
-      setActiveRun(pausedRun.id)
+      const targetPath = reviewPathForPausedRun(pausedRunDetail)
+      setActiveRun(pausedRunDetail.id || pausedRun.id)
       if (`${location.pathname}${location.search}` !== targetPath) {
         navigate(targetPath)
       }
@@ -359,6 +367,7 @@ function AppShell() {
     pausedRunDetail,
     pausedRunSummary,
     setActiveRun,
+    verifiedPausedBannerKey,
   ])
 
   useEffect(() => {
@@ -562,75 +571,15 @@ function isSuppressedInitialReviewRun(run) {
 
 function isReviewPausedRun(run) {
   if (isSuppressedInitialReviewRun(run)) return false
-  const status = String(run?.status || '').toUpperCase()
-  const terminalStatuses = ['FAILED', 'SUCCESS', 'COMPLETED', 'PIPELINE_COMPLETED']
+  const status = normalizeState(run?.status)
+  const reviewStatuses = ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW']
   return (
     hasRenderableRunDetail(run) &&
     hasReviewGate(run) &&
     !run?.stage_confirmation?.awaiting_confirmation &&
     status !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
-    !terminalStatuses.includes(status)
+    reviewStatuses.includes(status)
   )
-}
-
-async function isReviewDataReadyForGate(runId, gate, source) {
-  if (!runId || !gate) return false
-
-  try {
-    if (gate === 'silver_merge_key_review') {
-      const review = await getSilverMergeKeyReview(runId)
-      return Boolean((review?.silver_merge_key_review_artifact?.feeds || []).length || review?.next_review_key === 'silver_merge_key_review')
-    }
-
-    if (gate === 1) {
-      const review = await fetchKpiReviews(runId)
-      if (Array.isArray(review) && review.length > 0) return true
-      if (Array.isArray(review?.kpis) && review.kpis.length > 0) return true
-
-      const fallback = await getPipelineKpis(runId)
-      if (Array.isArray(fallback) && fallback.length > 0) return true
-      return Array.isArray(fallback?.kpis) && fallback.kpis.length > 0
-    }
-
-    if (gate === 2) {
-      const review = await getTableReviews(runId)
-      const isFileSource = source === 'sftp' || source === 'adls_gen2'
-      if (isFileSource) {
-        return Boolean(review?.candidate_feed) || Boolean((review?.candidate_feeds || []).length)
-      }
-      return Boolean((review?.nominated_tables || []).length)
-    }
-
-    if (gate === 3) {
-      const review = await getEnrichmentReviews(runId)
-      return Boolean(
-        (review?.enriched_columns || []).length ||
-        (review?.enriched_joins || []).length ||
-        (review?.feed_semantic_summary || []).length ||
-        Object.keys(review?.enriched_metadata || {}).length ||
-        Object.keys(review?.semantic_counts || {}).length ||
-        (review?.pii_columns || []).length ||
-        (review?.join_key_columns || []).length ||
-        (review?.measure_columns || []).length ||
-        review?.resume_message ||
-        Number(review?.next_gate || 0) === 3
-      )
-    }
-
-    if (gate === 4) {
-      const review = await getBronzeReview(runId)
-      return Boolean((review?.bronze_review_artifact?.feeds || []).length)
-    }
-
-    if (gate === 5) {
-      const review = await getSilverReview(runId)
-      return Boolean((review?.silver_review_artifact?.items || []).length)
-    }
-  } catch (error) {
-    console.warn('[AppShell] Review gate data is not ready yet', error)
-  }
-
-  return false
 }
 
 function reviewPathForPausedRun(run) {

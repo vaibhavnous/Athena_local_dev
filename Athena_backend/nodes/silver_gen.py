@@ -23,6 +23,8 @@ from utilis.logger import logger
 
 
 SILVER_MAX_WORKERS = int(os.environ.get("SILVER_MAX_WORKERS", "4"))
+SILVER_LLM_ENV_KEYS = ("ATHENA_SILVER_USE_LLM", "USE_LLM")
+KIMBALL_LLM_ENV_KEYS = ("ATHENA_GOLD_KIMBALL_PLAN_USE_LLM", "ATHENA_GOLD_USE_LLM", "USE_LLM")
 
 
 class SilverTableRef(TypedDict):
@@ -80,6 +82,100 @@ def _silver_ui_path(target_warehouse: str = "databricks") -> str:
 
 def _validate_python(code: str) -> None:
     compile(code, "<silver_generated>", "exec")
+
+
+def _llm_enabled_for_silver() -> bool:
+    return any(str(os.getenv(key, "")).lower() in {"1", "true", "yes", "on"} for key in SILVER_LLM_ENV_KEYS)
+
+
+def _llm_enabled_for_kimball_plan() -> bool:
+    return any(str(os.getenv(key, "")).lower() in {"1", "true", "yes", "on"} for key in KIMBALL_LLM_ENV_KEYS)
+
+
+def _llm_generate_silver_code(
+    *,
+    table_ref: SilverTableRef,
+    enriched_columns: List[Dict[str, Any]],
+    deterministic_code: str,
+    target_warehouse: str,
+) -> str:
+    from nodes.req_extraction import get_llm
+
+    language = "Snowflake SQL" if str(target_warehouse).lower() == "snowflake" else "Databricks PySpark"
+    prompt = f"""Generate production {language} Silver transformation code.
+Return only executable code. Preserve the source/target tables, audit columns,
+type normalization, deduplication, and merge/upsert behavior from the baseline.
+Do not invent columns or change the target table.
+
+Source table: {table_ref['bronze_table']}
+Target table: {table_ref['silver_table']}
+Reviewed columns: {json.dumps(enriched_columns, default=str)}
+
+BASELINE:
+{deterministic_code}
+""".strip()
+    llm = get_llm(
+        provider=os.getenv("ATHENA_SILVER_LLM_PROVIDER", os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")),
+        model=os.getenv("ATHENA_SILVER_LLM_MODEL"),
+        temperature=0.0,
+    )
+    response = llm.invoke(prompt)
+    content = getattr(response, "content", response)
+    text = str(content).strip()
+    match = re.search(r"```(?:python|sql)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    return match.group(1).strip() if match else text
+
+
+def _validate_generated_silver_code(
+    code: str,
+    *,
+    table_ref: SilverTableRef,
+    enriched_columns: List[Dict[str, Any]],
+    target_warehouse: str,
+) -> None:
+    normalized = str(code or "").lower()
+    normalized_identifiers = normalized.replace('"', "")
+    source_table = str(table_ref["bronze_table"]).lower()
+    target_table = str(table_ref["silver_table"]).lower()
+    if source_table not in normalized_identifiers or target_table not in normalized_identifiers:
+        raise ValueError("LLM Silver code changed the approved source or target table")
+
+    required_columns = {_normalized_column_name(column) for column in enriched_columns if _normalized_column_name(column)}
+    required_columns.update({
+        "run_id",
+        "ingestion_timestamp",
+        "source_system",
+        "source_table",
+        "silver_upsert_key",
+        "silver_run_id",
+        "silver_processed_timestamp",
+    })
+    missing = [column for column in sorted(required_columns) if column not in normalized]
+    if missing:
+        raise ValueError(f"LLM Silver code dropped required columns: {', '.join(missing[:10])}")
+
+    if str(target_warehouse or "").lower() == "snowflake":
+        upper = normalized.upper()
+        if "CREATE TABLE" not in upper or "MERGE INTO" not in upper:
+            raise ValueError("LLM Silver SQL must contain CREATE TABLE and MERGE INTO")
+        physical_source_columns = {
+            str(item.get("source_column_name") or item.get("column_name") or "").strip()
+            for item in table_ref.get("source_columns") or []
+            if isinstance(item, dict) and str(item.get("source_column_name") or item.get("column_name") or "").strip()
+        }
+        if physical_source_columns:
+            quoted_source_columns = {
+                match.group(1).replace('""', '"')
+                for match in re.finditer(r'\bsrc\s*\.\s*"((?:""|[^"])*)"', str(code), flags=re.IGNORECASE)
+            }
+            invalid_source_columns = sorted(quoted_source_columns - physical_source_columns)
+            if invalid_source_columns:
+                raise ValueError(
+                    "LLM Silver SQL used source identifiers that do not match the Bronze contract: "
+                    + ", ".join(invalid_source_columns[:10])
+                )
+    else:
+        _validate_python(code)
 
 
 def _load_bronze_bundle(target_warehouse: str = "databricks") -> Dict[str, Any]:
@@ -751,6 +847,26 @@ def _generate_one_table(
         extension = "py"
         merge_strategy = "Delta MERGE on silver_upsert_key built from reviewed merge keys"
 
+    generation_mode = "DETERMINISTIC"
+    if _llm_enabled_for_silver():
+        try:
+            candidate = _llm_generate_silver_code(
+                table_ref=table_ref,
+                enriched_columns=enriched_columns,
+                deterministic_code=code,
+                target_warehouse=target_warehouse,
+            )
+            _validate_generated_silver_code(
+                candidate,
+                table_ref=table_ref,
+                enriched_columns=enriched_columns,
+                target_warehouse=target_warehouse,
+            )
+            code = candidate
+            generation_mode = "LLM"
+        except Exception as exc:
+            logger.warning("Silver LLM generation failed; using deterministic fallback: %s", exc)
+
     output_dir = _silver_output_dir_for(target_warehouse)
     os.makedirs(output_dir, exist_ok=True)
     script_path = os.path.join(output_dir, f"silver_transform_{_run_slug(run_id)}_{_file_slug(table_name)}.{extension}")
@@ -770,6 +886,8 @@ def _generate_one_table(
         "merge_key_source": "reviewed_gate4" if enriched_metadata.get("gate4_reviewed_merge_keys") else "semantic_enrichment",
         "merge_strategy": merge_strategy,
         "script_language": script_language,
+        "generation_mode": generation_mode,
+        "llm_enabled": _llm_enabled_for_silver(),
         "target_warehouse": str(target_warehouse or "databricks").lower(),
         "status": "APPROVED",
         "script_path": script_path,
@@ -955,17 +1073,42 @@ def _best_measure_for_kpi(kpi: Dict[str, Any], columns: List[Dict[str, Any]]) ->
     return max(candidates, key=lambda column: _score_column_for_kpi(kpi, column))
 
 
-def _dimension_columns(columns: List[Dict[str, Any]], measure_table: str | None) -> List[Dict[str, str]]:
+def _dimension_scope_tables(joins: List[Dict[str, Any]], measure_table: str | None) -> set[str]:
+    if not measure_table:
+        return set()
+    scoped = {str(measure_table)}
+    changed = True
+    while changed:
+        changed = False
+        for join in joins or []:
+            left = str(join.get("left_table") or "")
+            right = str(join.get("right_table") or "")
+            if left in scoped and right and right not in scoped:
+                scoped.add(right)
+                changed = True
+            if right in scoped and left and left not in scoped:
+                scoped.add(left)
+                changed = True
+    return scoped
+
+
+def _dimension_columns(
+    columns: List[Dict[str, Any]],
+    measure_table: str | None,
+    joins: List[Dict[str, Any]] | None = None,
+) -> List[Dict[str, str]]:
+    scoped_tables = _dimension_scope_tables(joins or [], measure_table)
     dimensions: List[Dict[str, str]] = []
     for column in columns:
         semantic = str(column.get("semantic_type") or "")
         if semantic not in {"DIMENSION", "DATE", "FLAG"}:
             continue
-        if measure_table and column.get("table_name") != measure_table and semantic != "DATE":
+        table_name = str(column.get("table_name") or "")
+        if scoped_tables and table_name not in scoped_tables and semantic != "DATE":
             continue
         dimensions.append(
             {
-                "table": str(column.get("table_name") or ""),
+                "table": table_name,
                 "column": str(column.get("column_name") or ""),
                 "semantic_type": semantic,
             }
@@ -1032,6 +1175,106 @@ def _silver_tables_by_name(results: List[Dict[str, object]]) -> Dict[str, str]:
     }
 
 
+def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tables: Dict[str, str]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for mapping in kpi_mappings:
+        if not isinstance(mapping, dict):
+            continue
+        kpi_name = str(mapping.get("kpi_name") or "")
+        for dimension in mapping.get("grouping_dimensions") or []:
+            if not isinstance(dimension, dict):
+                continue
+            if str(dimension.get("semantic_type") or "").upper() == "DATE":
+                continue
+            table = str(dimension.get("table") or "").strip()
+            column = str(dimension.get("column") or "").strip()
+            if not table or not column:
+                continue
+            row = grouped.setdefault(
+                table.lower(),
+                {
+                    "logical_table": table,
+                    "source_silver_table": silver_tables.get(table.lower()),
+                    "columns": [],
+                    "consumed_by_kpis": [],
+                },
+            )
+            if column not in row["columns"]:
+                row["columns"].append(column)
+            if kpi_name and kpi_name not in row["consumed_by_kpis"]:
+                row["consumed_by_kpis"].append(kpi_name)
+    return sorted(grouped.values(), key=lambda item: str(item.get("logical_table") or ""))
+
+
+def _extract_json_object(value: Any) -> Dict[str, Any]:
+    text = str(value or "").strip()
+    match = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    parsed = json.loads(match.group(1).strip() if match else text)
+    if not isinstance(parsed, dict):
+        raise ValueError("Kimball plan must be a JSON object")
+    return parsed
+
+
+def _kimball_plan_prompt(*, kpi: Dict[str, Any], mapping: Dict[str, Any], columns: List[Dict[str, Any]], certified_joins: List[Dict[str, Any]]) -> str:
+    available = [{"table": c.get("table_name"), "column": c.get("column_name"), "semantic_type": c.get("semantic_type"), "is_measure": c.get("is_measure")} for c in columns if isinstance(c, dict)]
+    joins = [{key: j.get(key) for key in ("left_table", "left_column", "right_table", "right_column", "join_type", "certified")} for j in certified_joins if isinstance(j, dict)]
+    shape = '{"measure":{"table":"...","column":"...","aggregation":"SUM|AVG|MIN|MAX|COUNT"},"dimensions":[{"table":"...","column":"...","semantic_type":"DIMENSION|DATE|FLAG"}],"time":{"table":"...","column":"...","grain":"day|week|month|quarter|year"},"join_paths":[{"left_table":"...","left_column":"...","right_table":"...","right_column":"..."}],"fact_grain":["columns","period_start"]}'
+    return "Design a Kimball Gold model. Return only JSON matching this shape: " + shape + "\nKPI=" + json.dumps(kpi, default=str) + "\nCURRENT_MAPPING=" + json.dumps(mapping, default=str) + "\nAVAILABLE_COLUMNS=" + json.dumps(available, default=str) + "\nCERTIFIED_JOINS=" + json.dumps(joins, default=str)
+
+
+def _validate_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]], certified_joins: List[Dict[str, Any]]) -> Dict[str, Any]:
+    index = {(str(c.get("table_name") or "").casefold(), str(c.get("column_name") or "").casefold()): c for c in columns if isinstance(c, dict)}
+    measure = plan.get("measure") or {}
+    measure_meta = index.get((str(measure.get("table") or "").casefold(), str(measure.get("column") or "").casefold()))
+    if not measure_meta or str(measure_meta.get("semantic_type") or "").upper() not in {"MEASURE", "FLAG"}:
+        raise ValueError("Kimball plan selected an invalid measure")
+    if str(measure.get("aggregation") or "").upper() not in {"SUM", "AVG", "MIN", "MAX", "COUNT"}:
+        raise ValueError("Kimball plan selected an unsupported aggregation")
+    dimensions = plan.get("dimensions") or []
+    if not isinstance(dimensions, list) or len(dimensions) > 12:
+        raise ValueError("Kimball plan has an invalid dimension list")
+    for item in dimensions:
+        meta = index.get((str(item.get("table") or "").casefold(), str(item.get("column") or "").casefold()))
+        if not meta or str(meta.get("semantic_type") or "").upper() not in {"DIMENSION", "DATE", "FLAG"}:
+            raise ValueError("Kimball plan selected an invalid dimension")
+    time = plan.get("time") or {}
+    if time:
+        meta = index.get((str(time.get("table") or "").casefold(), str(time.get("column") or "").casefold()))
+        if not meta or str(meta.get("semantic_type") or "").upper() not in {"DATE", "AUDIT_TIMESTAMP"}:
+            raise ValueError("Kimball plan selected an invalid time column")
+        if str(time.get("grain") or "").lower() not in {"day", "week", "month", "quarter", "year"}:
+            raise ValueError("Kimball plan selected an invalid time grain")
+    certified = {tuple(str(j.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column")) for j in certified_joins if isinstance(j, dict)}
+    for join in plan.get("join_paths") or []:
+        signature = tuple(str(join.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column"))
+        if signature not in certified:
+            raise ValueError("Kimball plan selected a non-certified join")
+    return plan
+
+
+def _apply_kimball_plan(mapping: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(mapping)
+    aggregation = str(plan["measure"]["aggregation"]).upper()
+    result["measure"] = {**(mapping.get("measure") or {}), **plan["measure"], "aggregation": aggregation}
+    result["measure"]["expression"] = f"{aggregation}({plan['measure']['column']})" if aggregation != "COUNT" else "COUNT(*)"
+    result["formula"] = {"type": "single_measure", "status": "PROPOSED"}
+    result["grouping_dimensions"] = list(plan.get("dimensions") or [])
+    if plan.get("time"):
+        result["time"] = dict(plan["time"])
+    result["join_paths"] = [{**join, "certified": True} for join in plan.get("join_paths") or []]
+    result["kimball_plan"] = plan
+    result["kimball_plan_source"] = "LLM_VALIDATED"
+    return result
+
+
+def _llm_kimball_plan(*, kpi: Dict[str, Any], mapping: Dict[str, Any], columns: List[Dict[str, Any]], certified_joins: List[Dict[str, Any]]) -> Dict[str, Any]:
+    from nodes.req_extraction import get_llm
+    llm = get_llm(provider=os.getenv("ATHENA_GOLD_LLM_PROVIDER", os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")), model=os.getenv("ATHENA_GOLD_KIMBALL_PLAN_MODEL") or os.getenv("ATHENA_GOLD_LLM_MODEL"), temperature=0.0)
+    response = llm.invoke(_kimball_plan_prompt(kpi=kpi, mapping=mapping, columns=columns, certified_joins=certified_joins))
+    plan = _extract_json_object(getattr(response, "content", response))
+    return _validate_kimball_plan(plan, columns=columns, certified_joins=certified_joins)
+
+
 def _build_gold_generation_contract(
     *,
     state: Stage01State,
@@ -1060,8 +1303,8 @@ def _build_gold_generation_contract(
         measure_column = str((measure or {}).get("column_name") or "")
         aggregation = _infer_aggregation(kpi_name, measure)
         date_column = _time_column(columns, measure_table)
-        dimensions = _dimension_columns(columns, measure_table)
         join_paths = _join_paths_for_table(joins, measure_table)
+        dimensions = _dimension_columns(columns, measure_table, join_paths)
 
         if not measure:
             warnings.append(f"No measure column mapped for KPI '{kpi_name}'.")
@@ -1074,8 +1317,7 @@ def _build_gold_generation_contract(
             if heuristic_paths:
                 warnings.append(f"KPI '{kpi_name}' has heuristic join candidates, but no certified FK-backed joins.")
 
-        kpi_mappings.append(
-            {
+        mapping = {
                 "kpi_name": kpi_name,
                 "kpi_description": kpi.get("kpi_description") or kpi.get("description"),
                 "source_silver_table": silver_tables.get(measure_table.lower()) if measure_table else None,
@@ -1103,7 +1345,17 @@ def _build_gold_generation_contract(
                 "join_paths": join_paths,
                 "readiness": "BLOCKED" if not measure else "READY_WITH_WARNINGS" if join_paths else "READY",
             }
-        )
+        if _llm_enabled_for_kimball_plan() and measure:
+            try:
+                plan = _llm_kimball_plan(kpi=kpi, mapping=mapping, columns=columns, certified_joins=joins)
+                mapping = _apply_kimball_plan(mapping, plan)
+            except Exception as exc:
+                mapping["kimball_plan_source"] = "DETERMINISTIC_FALLBACK"
+                warnings.append(f"KPI '{kpi_name}' Kimball LLM plan rejected; deterministic plan retained: {exc}")
+                logger.warning("Kimball plan rejected for KPI %s; deterministic fallback retained: %s", kpi_name, exc)
+        else:
+            mapping["kimball_plan_source"] = "DETERMINISTIC"
+        kpi_mappings.append(mapping)
 
     status = "READY"
     if warnings:
@@ -1128,7 +1380,9 @@ def _build_gold_generation_contract(
             }
             for item in sorted(results, key=lambda row: str(row.get("table", "")))
         ],
+        "dimension_mappings": _dimension_mappings_from_kpis(kpi_mappings, silver_tables),
         "kpi_mappings": kpi_mappings,
+        "kimball_plan_enabled": _llm_enabled_for_kimball_plan(),
         "available_joins": joins,
         "join_candidates": fallback_joins,
         "warnings": sorted(set(warnings)),
@@ -1228,6 +1482,7 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
         "generated_at": generated_at,
         "script_count": len(results),
         "target_warehouse": target_warehouse,
+        "llm_enabled": _llm_enabled_for_silver(),
         "scripts": results,
     }
 

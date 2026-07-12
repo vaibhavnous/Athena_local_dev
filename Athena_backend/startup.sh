@@ -7,12 +7,17 @@ echo "PWD: $(pwd)"
 echo "Python: $(python --version 2>&1)"
 echo "Port: ${PORT:-8000}"
 
-export ATHENA_BLOCK_EMBEDDINGS=true
-export ATHENA_ENABLE_EMBEDDINGS=false
-export ATHENA_PRELOAD_EMBEDDINGS=false
-export ATHENA_ALLOW_LOCAL_EMBEDDING_FALLBACK=false
-export ATHENA_USE_DOMAIN_KB=false
-echo "Embedding feature blocked for lightweight runtime"
+export ATHENA_BLOCK_EMBEDDINGS="${ATHENA_BLOCK_EMBEDDINGS:-true}"
+export ATHENA_ENABLE_EMBEDDINGS="${ATHENA_ENABLE_EMBEDDINGS:-false}"
+export ATHENA_PRELOAD_EMBEDDINGS="${ATHENA_PRELOAD_EMBEDDINGS:-false}"
+export ATHENA_ALLOW_LOCAL_EMBEDDING_FALLBACK="${ATHENA_ALLOW_LOCAL_EMBEDDING_FALLBACK:-false}"
+export ATHENA_USE_DOMAIN_KB="${ATHENA_USE_DOMAIN_KB:-false}"
+export ATHENA_BACKGROUND_WORKERS="${ATHENA_BACKGROUND_WORKERS:-1}"
+export BRONZE_MAX_WORKERS="${BRONZE_MAX_WORKERS:-3}"
+export SILVER_MAX_WORKERS="${SILVER_MAX_WORKERS:-3}"
+export COLUMN_PROFILING_MAX_WORKERS="${COLUMN_PROFILING_MAX_WORKERS:-3}"
+echo "Embedding config: blocked=${ATHENA_BLOCK_EMBEDDINGS} enabled=${ATHENA_ENABLE_EMBEDDINGS} preload=${ATHENA_PRELOAD_EMBEDDINGS} domain_kb=${ATHENA_USE_DOMAIN_KB}"
+echo "Worker config: web=1 background=${ATHENA_BACKGROUND_WORKERS} bronze=${BRONZE_MAX_WORKERS} silver=${SILVER_MAX_WORKERS} profiling=${COLUMN_PROFILING_MAX_WORKERS}"
 
 if [ -d "/home/site/wwwroot/antenv" ]; then
   echo "Activating Oryx virtual environment..."
@@ -42,5 +47,14 @@ else
   echo "Import smoke test skipped; ATHENA_STARTUP_IMPORT_SMOKE=${ATHENA_STARTUP_IMPORT_SMOKE:-false}"
 fi
 
-echo "Starting Uvicorn..."
-exec python -m uvicorn api.main:app --host 0.0.0.0 --port "${PORT:-8000}" --log-level debug
+echo "Starting Gunicorn..."
+# ponytail: one web process is intentional until background job claiming is distributed.
+exec gunicorn -k uvicorn.workers.UvicornWorker api.main:app \
+  --bind "0.0.0.0:${PORT:-8000}" \
+  --workers 1 \
+  --timeout "${GUNICORN_TIMEOUT_SECONDS:-600}" \
+  --graceful-timeout 30 \
+  --keep-alive 5 \
+  --log-level info \
+  --access-logfile - \
+  --error-logfile -

@@ -1,6 +1,6 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useState } from 'react'
-import { CheckCircle, ChevronDown, ChevronRight, Clock3, Database, RotateCcw, X, XCircle } from 'lucide-react'
+import { CheckCircle, ChevronDown, ChevronRight, Clock3, Database, Layers3, RotateCcw, X, XCircle } from 'lucide-react'
 
 const TYPE_STYLES = {
   MEASURE: 'border-[#188461]/40 bg-[#0f3f37] text-[#4ee3ad]',
@@ -116,14 +116,14 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
   }
 
   return (
-    <div className={`overflow-hidden rounded-lg border transition-colors ${
+    <div className={`overflow-hidden rounded-[14px] border transition-colors ${
       isApproved
         ? 'border-[#17735f] bg-[#092e2f]'
         : isRejected
         ? 'border-[#723148] bg-[#2a1622]'
         : 'border-[#155f5a] bg-[#092e2f]'
     }`}>
-      <div className="px-4 py-4">
+      <div className="px-4 pb-3 pt-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
@@ -133,10 +133,9 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
                 Enrichment
               </span>
             </div>
-            <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-[#87a7aa]">
-              <span>{draftColumns.length} column{draftColumns.length !== 1 ? 's' : ''}</span>
-              <span>{llmColumns} LLM-enriched</span>
-              <span className="rounded-full border border-[#2c7e75]/50 bg-[#0d3a38] px-2 py-0.5 font-bold text-[#64d9b8]">Dropdown editor</span>
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[#87a7aa]">
+              <span className="inline-flex items-center gap-1"><Layers3 size={11} /> {draftColumns.length} column{draftColumns.length !== 1 ? 's' : ''}</span>
+              <span className="inline-flex items-center gap-1 text-[#4fc8ff]"><CheckCircle size={11} /> {llmColumns} LLM-enriched</span>
               <span className="inline-flex items-center gap-1"><Clock3 size={11} /> Queued: {formatDateTime(queuedAt)}</span>
               <span className="inline-flex items-center gap-1"><Clock3 size={11} /> Decided: {formatDateTime(decidedAt)}</span>
             </div>
@@ -151,37 +150,41 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
                 {isApproved ? 'Approved' : 'Rejected'}
               </span>
             )}
-            <button
-              type="button"
-              onClick={resetDraftColumns}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-[#2f615d] bg-[#0b222b] px-3 text-xs font-semibold text-[#a8c0c4] transition-all hover:border-[#45a391] hover:text-white"
-            >
-              <RotateCcw size={13} />
-              Reset
-            </button>
-            <button
-              type="button"
-              onClick={() => setExpanded((value) => !value)}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-[#2f615d] bg-[#0b222b] px-3 text-xs font-semibold text-[#a8c0c4] transition-all hover:border-[#45a391] hover:text-white"
-            >
-              {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-              {expanded ? `Hide columns (${draftColumns.length})` : `Show columns (${draftColumns.length})`}
-            </button>
+            {expanded && (
+              <button
+                type="button"
+                onClick={resetDraftColumns}
+                className="inline-flex h-8 items-center gap-2 rounded-md border border-[#2f615d] bg-[#0b222b] px-3 text-xs font-semibold text-[#a8c0c4] transition-all hover:border-[#45a391] hover:text-white"
+              >
+                <RotateCcw size={13} />
+                Reset
+              </button>
+            )}
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          className="mt-3 inline-flex items-center gap-1 text-[11px] font-semibold text-[#b7c9cc] transition-colors hover:text-white"
+        >
+          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          {expanded ? `Hide columns (${draftColumns.length})` : `Show columns (${draftColumns.length})`}
+        </button>
       </div>
 
       <div className={`mx-4 mb-4 overflow-hidden transition-all duration-200 ${expanded ? 'max-h-[620px] opacity-100' : 'max-h-0 opacity-0'}`}>
         <div className="overflow-auto rounded-md border border-[#2c6a63]/60 bg-[#071c24]">
-          <div className="grid min-w-[1020px] grid-cols-[1.05fr_1.15fr_1.1fr_1.7fr_0.28fr_0.28fr_0.28fr_1fr] gap-3 border-b border-[#2c6a63]/60 bg-[#061923] px-3 py-3 text-[10px] font-bold uppercase tracking-wide text-[#88a5aa]">
+          <div className="grid min-w-[900px] grid-cols-[1.05fr_1.15fr_1fr_2fr_0.75fr_0.28fr_0.28fr_0.28fr] gap-3 border-b border-[#2c6a63]/60 bg-[#061923] px-3 py-3 text-[10px] font-bold uppercase tracking-wide text-[#88a5aa]">
             <span>Column</span>
             <span>Display Name</span>
             <span>Semantic Type</span>
             <span>Description</span>
+            <span>Source</span>
             <span>M</span>
             <span>D</span>
             <span>PII</span>
-            <span>PII Type</span>
           </div>
 
           {draftColumns.length === 0 ? (
@@ -191,7 +194,7 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
               {draftColumns.map((column, index) => (
                 <div
                   key={`${column.column_name || index}`}
-                  className="grid min-w-[1020px] grid-cols-[1.05fr_1.15fr_1.1fr_1.7fr_0.28fr_0.28fr_0.28fr_1fr] items-center gap-3 px-3 py-3 text-xs text-[#c8dde0]"
+                  className="grid min-w-[900px] grid-cols-[1.05fr_1.15fr_1fr_2fr_0.75fr_0.28fr_0.28fr_0.28fr] items-center gap-3 px-3 py-2.5 text-xs text-[#c8dde0]"
                 >
                   <span className="min-w-0 truncate font-bold text-white" title={column.column_name}>
                     {column.column_name || '-'}
@@ -217,17 +220,25 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
                     value={column.business_description}
                     onChange={(event) => updateColumn(index, 'business_description', event.target.value)}
                     rows={2}
-                    className="min-h-[58px] w-full resize-y rounded-md border border-[#2f615d] bg-[#061923] px-3 py-2 text-xs text-white outline-none focus:border-[#45c7a5]"
+                    className="min-h-[54px] w-full resize-y rounded-md border border-[#2f615d] bg-[#061923] px-3 py-2 text-xs text-white outline-none focus:border-[#45c7a5]"
                   />
 
+                  <span className="inline-flex w-fit rounded bg-[#172633] px-2 py-1 text-[10px] font-semibold text-[#9fb7bd]">
+                    {column.enrichment_source || '-'}
+                  </span>
                   <BooleanCell value={column.is_measure} editable onChange={(value) => updateColumn(index, 'is_measure', value)} />
                   <BooleanCell value={column.is_dimension} editable onChange={(value) => updateColumn(index, 'is_dimension', value)} />
-                  <BooleanCell value={column.is_pii_candidate} editable onChange={(value) => updateColumn(index, 'is_pii_candidate', value)} />
-                  <input
-                    value={column.pii_type}
-                    onChange={(event) => updateColumn(index, 'pii_type', event.target.value)}
-                    className="h-10 min-w-0 rounded-md border border-[#2f615d] bg-[#061923] px-3 text-xs text-white outline-none focus:border-[#45c7a5]"
-                  />
+                  <div className="flex min-w-0 flex-col items-start gap-1">
+                    <BooleanCell value={column.is_pii_candidate} editable onChange={(value) => updateColumn(index, 'is_pii_candidate', value)} />
+                    {column.is_pii_candidate && (
+                      <input
+                        value={column.pii_type === '-' ? '' : column.pii_type}
+                        onChange={(event) => updateColumn(index, 'pii_type', event.target.value)}
+                        placeholder="type"
+                        className="h-7 w-20 rounded border border-[#2f615d] bg-[#061923] px-1 text-[9px] text-white outline-none focus:border-[#45c7a5]"
+                      />
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -247,36 +258,40 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
         </div>
       </div>
 
-      <div className="border-t border-[#155f5a] bg-[#071c24] px-4 py-3 text-[11px] text-[#8ea9ad]">
-        Hover a table to edit semantic values. Approved edits are persisted to the Gate 3 enrichment artifact.
-      </div>
+      {expanded && (
+        <>
+          <div className="border-t border-[#155f5a] bg-[#071c24] px-4 py-3 text-[11px] text-[#8ea9ad]">
+            Hover a table to edit semantic values. Approved edits are persisted to the Gate 3 enrichment artifact.
+          </div>
 
-      <div className="flex flex-col gap-3 border-t border-[#155f5a] bg-[#071c24] px-4 py-4 md:flex-row md:items-center md:justify-between">
-        <input
-          value={reason}
-          onChange={(event) => setReason(event.target.value)}
-          placeholder="Rejection reason..."
-          className="h-10 flex-1 rounded-md border border-[#2f615d] bg-[#061923] px-3 text-xs text-white outline-none placeholder:text-[#638287] focus:border-[#45c7a5]"
-        />
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => onReject(id, reason || 'Rejected by reviewer')}
-            className="inline-flex h-10 items-center gap-2 rounded-md border border-red-500/30 bg-[#2b1724] px-3 text-xs font-bold text-red-300 transition-colors hover:bg-red-500/10"
-          >
-            <X size={14} />
-            Reject
-          </button>
-          <button
-            type="button"
-            onClick={() => onApprove(id, { table_name: tableName, table_summary: draftSummary, columns: draftColumns })}
-            className="inline-flex h-10 items-center gap-2 rounded-md border border-[#14856d] bg-[#103533] px-3 text-xs font-bold text-[#31d49f] transition-colors hover:bg-[#15413d]"
-          >
-            <CheckCircle size={14} />
-            Approve
-          </button>
-        </div>
-      </div>
+          <div className="flex flex-col gap-3 border-t border-[#155f5a] bg-[#071c24] px-4 py-4 md:flex-row md:items-center md:justify-between">
+            <input
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder="Rejection reason..."
+              className="h-10 flex-1 rounded-md border border-[#2f615d] bg-[#061923] px-3 text-xs text-white outline-none placeholder:text-[#638287] focus:border-[#45c7a5]"
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => onReject(id, reason || 'Rejected by reviewer')}
+                className="inline-flex h-10 items-center gap-2 rounded-md border border-red-500/30 bg-[#2b1724] px-3 text-xs font-bold text-red-300 transition-colors hover:bg-red-500/10"
+              >
+                <X size={14} />
+                Reject
+              </button>
+              <button
+                type="button"
+                onClick={() => onApprove(id, { table_name: tableName, table_summary: draftSummary, columns: draftColumns })}
+                className="inline-flex h-10 items-center gap-2 rounded-md border border-[#14856d] bg-[#103533] px-3 text-xs font-bold text-[#31d49f] transition-colors hover:bg-[#15413d]"
+              >
+                <CheckCircle size={14} />
+                Approve
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }
