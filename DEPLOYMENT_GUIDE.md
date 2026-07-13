@@ -80,8 +80,8 @@ Edit `infrastructure.parameters.json`:
 
 ## Step 6: Create Pipelines in Azure DevOps
 
-### Pipeline 1: Backend CI (azure-pipelines-backend.yml)
-*Builds both backend and frontend, packages as one artifact*
+### Pipeline 1: Backend deployment (azure-pipelines-backend.yml)
+*Builds and deploys the backend to the configured Azure App Service*
 
 1. **Pipelines** → **New pipeline** → **GitHub** (or your repo)
 2. Select **Existing Azure Pipelines YAML file**
@@ -89,11 +89,11 @@ Edit `infrastructure.parameters.json`:
 4. Name: `Athena-Backend-CI`
 5. Save & queue
 
-### Pipeline 2: CD Release (azure-pipelines-cd.yml)
+### Legacy CD pipeline (removed)
 *Deploys combined artifact to single App Service*
 
 1. **Pipelines** → **New pipeline**
-2. Path: `azure-pipelines-cd.yml`
+2. This legacy pipeline has been removed; use `azure-pipelines-backend.yml`.
 3. Name: `Athena-CD`
 4. Configure trigger: **Pipeline completion** for Athena-Backend-CI
 5. Save & queue

@@ -9,7 +9,7 @@ This project currently deploys as one Azure App Service:
 
 Because of that, production configuration is mostly backend App Service settings plus one GitHub Actions secret for deployment.
 
-## 1. Required For GitHub Actions Deployment
+## 1. Required For Azure DevOps Deployment
 
 Repository secret:
 
@@ -23,7 +23,7 @@ Value:
 
 Used by:
 
-- [main_Athenademo1.yml](C:/Users/vaibhavmalik/Athena%20agentic/.github/workflows/main_Athenademo1.yml)
+- `azure-pipelines-backend.yml`
 
 Notes:
 
@@ -295,11 +295,11 @@ Notes:
 - Current frontend code uses `REACT_APP_API_BASE_URL`
 - In Azure production build, the workflow sets `REACT_APP_API_BASE_URL=''` so the UI uses same-origin API calls
 
-## 10. Current GitHub Actions Production Behavior
+## 10. Current Azure DevOps Production Behavior
 
 Workflow:
 
-- [main_Athenademo1.yml](C:/Users/vaibhavmalik/Athena%20agentic/.github/workflows/main_Athenademo1.yml)
+- `azure-pipelines-backend.yml`
 
 Current behavior:
 
