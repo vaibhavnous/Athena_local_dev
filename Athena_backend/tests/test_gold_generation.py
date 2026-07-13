@@ -76,7 +76,7 @@ def test_snowflake_gold_generation_writes_sql_from_contract(monkeypatch):
     assert "MERGE INTO \"ATHENA_DB\".\"GOLD\".\"fact_total_claims\" AS target" in sql
     assert "MERGE INTO \"ATHENA_DB\".\"GOLD\".\"DIM_CLAIM_INFORMATION\" AS target" in dim_sql
     assert "MERGE INTO \"ATHENA_DB\".\"GOLD\".\"DIM_POLICY_TRANSACTIONS\" AS target" in dim_sql
-    assert "MERGE INTO \"ATHENA_DB\".\"GOLD\".\"FCT_CLAIM_INFORMATION\" AS target" in dim_sql
+    assert '"FCT_CLAIM_INFORMATION"' not in dim_sql
     assert "\"dim_policy\"" not in dim_sql
     assert "FROM \"ATHENA_DB\".\"SILVER\".\"silver_policy_transactions\"" in dim_sql
     assert 'ALTER TABLE "ATHENA_DB"."GOLD"."fact_total_claims" ADD COLUMN IF NOT EXISTS "ClaimStatus" VARCHAR;' in sql
@@ -413,7 +413,7 @@ def test_dimension_specs_use_source_table_grain_for_one_wide_source_table():
     assert specs[0]["columns"] == ["PRODUCT_NAME", "AGENT_NAME", "GEOG_STATE_NAME", "CHANNEL_NAME"]
 
 
-def test_snowflake_source_table_mart_dedupes_dimensions_and_keeps_facts_row_grain():
+def test_snowflake_source_table_mart_dedupes_dimensions_without_fct_copies():
     sql = gold_gen.generate_snowflake_source_table_mart_script(
         specs=[
             {
@@ -432,9 +432,9 @@ def test_snowflake_source_table_mart_dedupes_dimensions_and_keeps_facts_row_grai
     assert 'SELECT DISTINCT' in sql
     assert 'TO_VARCHAR(src."product_name") AS "product_name"' in sql
     assert 'DELETE FROM "ATHENA_DB"."GOLD"."DIM_POLICY_TRANSACTIONS" WHERE "gold_run_id" = ' in sql
-    assert "table-level dimension so DIM remains smaller than the row-grain FCT" in sql
+    assert "table-level dimension so DIM remains smaller than its Silver source" in sql
     assert '>= (SELECT COUNT(*) FROM "ATHENA_DB"."SILVER"."silver_policy_transactions")' in sql
-    assert 'CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."FCT_POLICY_TRANSACTIONS" LIKE "ATHENA_DB"."SILVER"."silver_policy_transactions";' in sql
+    assert '"FCT_POLICY_TRANSACTIONS"' not in sql
 
 
 def test_source_table_grain_skips_duplicate_deleted_auxiliary_tables():

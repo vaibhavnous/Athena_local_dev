@@ -1230,7 +1230,7 @@ WHEN NOT MATCHED THEN INSERT (
     );
 
 -- ponytail: if every descriptive combination is row-unique, collapse to a
--- table-level dimension so DIM remains smaller than the row-grain FCT.
+-- table-level dimension so DIM remains smaller than its Silver source.
 DELETE FROM {dim_target}
 WHERE "gold_run_id" = {_snowflake_string_literal(run_id)}
   AND (SELECT COUNT(*) FROM {dim_target} WHERE "gold_run_id" = {_snowflake_string_literal(run_id)})
@@ -1248,32 +1248,6 @@ WHERE NOT EXISTS (
         SELECT 1 FROM {dim_target} WHERE "gold_run_id" = {_snowflake_string_literal(run_id)}
     )
   AND (SELECT COUNT(*) FROM {source_qname}) > 1;
-""".strip()
-        )
-
-        fct_target = _snowflake_qualified_name(gold_catalog, gold_schema, f"FCT_{entity.upper()}")
-        statements.append(
-            f"""
-CREATE TABLE IF NOT EXISTS {fct_target} LIKE {source_qname};
-
-ALTER TABLE {fct_target} ADD COLUMN IF NOT EXISTS "gold_run_id" VARCHAR;
-ALTER TABLE {fct_target} ADD COLUMN IF NOT EXISTS "gold_processed_timestamp" TIMESTAMP_NTZ;
-ALTER TABLE {fct_target} ADD COLUMN IF NOT EXISTS "gold_upsert_key" VARCHAR;
-
-DELETE FROM {fct_target} WHERE "gold_run_id" = {_snowflake_string_literal(run_id)};
-
-MERGE INTO {fct_target} AS target
-USING (
-    SELECT
-        src.*,
-        {_snowflake_string_literal(run_id)} AS "gold_run_id",
-        CURRENT_TIMESTAMP() AS "gold_processed_timestamp",
-        TO_VARCHAR(src."silver_upsert_key") AS "gold_upsert_key"
-    FROM {source_qname} AS src
-) AS source
-ON target."gold_upsert_key" = source."gold_upsert_key"
-WHEN MATCHED THEN UPDATE ALL BY NAME
-WHEN NOT MATCHED THEN INSERT ALL BY NAME;
 """.strip()
         )
 
