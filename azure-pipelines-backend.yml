@@ -15,8 +15,8 @@ variables:
   backendFolder: 'Athena_backend'
   artifactName: 'backend-app'
   artifactZip: 'backend-app.zip'
-  azureServiceConnection: 'REPLACE_WITH_AZURE_SERVICE_CONNECTION'
-  webAppName: 'REPLACE_WITH_BACKEND_WEBAPP_NAME'
+  azureServiceConnection: 'azure-devops-service-connection'
+  webAppName: 'astra-data-eecthacqb5eherhk'
 
 stages:
   - stage: Build
