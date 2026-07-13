@@ -56,17 +56,17 @@ jobs:
           if profile is None:
               raise SystemExit("No publishProfile entries found")
 
-          publish_url = profile["publishUrl"]
+          publish_url = profile.attrib["publishUrl"]
           if not publish_url.startswith(("http://", "https://")):
               publish_url = f"https://{publish_url}"
 
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
               env_file.write(f"KUDU_PUBLISH_URL={publish_url}\n")
-              env_file.write(f"KUDU_PUBLISH_USER={profile['userName']}\n")
-              env_file.write(f"KUDU_PUBLISH_PASSWORD={profile['userPWD']}\n")
+              env_file.write(f"KUDU_PUBLISH_USER={profile.attrib['userName']}\n")
+              env_file.write(f"KUDU_PUBLISH_PASSWORD={profile.attrib['userPWD']}\n")
 
-          print(f"::add-mask::{profile['userName']}")
-          print(f"::add-mask::{profile['userPWD']}")
+          print(f"::add-mask::{profile.attrib['userName']}")
+          print(f"::add-mask::{profile.attrib['userPWD']}")
           PY
 
       - name: Deploy to Astra Data App Service
