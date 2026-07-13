@@ -11,6 +11,7 @@ frontend/.git_disabled/
 .gitdir/
 .git_bad/
 .git_denied2/
+.tmp-update-worktree/
 
 # Backend
 Athena_backend/.venv/
