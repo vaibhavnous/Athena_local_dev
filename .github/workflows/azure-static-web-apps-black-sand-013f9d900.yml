@@ -47,10 +47,19 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Verify Static Web App deployment token
+        env:
+          DEPLOYMENT_TOKEN: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_BLACK_SAND_013F9D900 || secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_ASTRADATA || secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+        run: |
+          if [ -z "${DEPLOYMENT_TOKEN}" ]; then
+            echo "::error::Add the Static Web App deployment token as a GitHub Actions repository secret named AZURE_STATIC_WEB_APPS_API_TOKEN_ASTRADATA."
+            exit 1
+          fi
+
       - name: Deploy to Astradata Static Web App
         uses: Azure/static-web-apps-deploy@v1
         with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_BLACK_SAND_013F9D900 }}
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_BLACK_SAND_013F9D900 || secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_ASTRADATA || secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
           action: upload
           app_location: frontend/build
           api_location: ""
