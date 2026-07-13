@@ -1559,7 +1559,6 @@ def build_pipeline_steps(
                     checkpoint.get("sftp_pull_status") == "COMPLETED"
                     or checkpoint.get("bronze_ingestion_status") in {"COMPLETED", "HANDOFF_ONLY"}
                     or checkpoint.get("bronze_validation_status") == "COMPLETED"
-                    or gate4_decision == "APPROVED"
                 ),
                 "detail": "UI-only execution marker; generated Bronze code runs outside Athena",
             },
@@ -1730,9 +1729,6 @@ def build_pipeline_steps(
             "complete": bool(
                 str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
                 and checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
-            ) or bool(
-                str(checkpoint.get("target_warehouse") or "").lower() != "snowflake"
-                and ((checkpoint.get("gate4") or {}).get("decision") == "APPROVED" or checkpoint.get("bronze_review_decision") == "APPROVED")
             ),
             "detail": (
                 "Approved Bronze scripts are executed in Snowflake before Silver generation."
@@ -1770,9 +1766,6 @@ def build_pipeline_steps(
             "complete": bool(
                 str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
                 and checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
-            ) or bool(
-                str(checkpoint.get("target_warehouse") or "").lower() != "snowflake"
-                and ((checkpoint.get("gate5") or {}).get("decision") == "APPROVED" or checkpoint.get("silver_review_decision") == "APPROVED")
             ),
             "detail": (
                 "Approved Silver scripts are executed in Snowflake before Gold generation."
@@ -1792,9 +1785,6 @@ def build_pipeline_steps(
             "complete": bool(
                 str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
                 and checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
-            ) or bool(
-                str(checkpoint.get("target_warehouse") or "").lower() != "snowflake"
-                and gold_generation_completed
             ),
             "detail": (
                 "Generated Gold scripts are executed in Snowflake after Gold generation."
@@ -1814,6 +1804,12 @@ def build_pipeline_steps(
     external_execution = checkpoint.get("external_execution") if isinstance(checkpoint.get("external_execution"), dict) else {}
     external_message = str(external_execution.get("message") or "").strip()
 
+    execution_completion = {
+        step["key"]: bool(step.get("complete"))
+        for step in steps
+        if step.get("key") in {"bronze_code_execution", "silver_code_execution", "gold_code_execution"}
+    }
+
     active_index = next((index for index, step in enumerate(steps) if step.get("key") == active_stage_key), None) if active_stage_key else None
 
     if active_index is not None:
@@ -1831,6 +1827,7 @@ def build_pipeline_steps(
                 # stale during retry, so the active checkpoint owns the visible frontier.
                 step["complete"] = False
                 step["state"] = "PENDING"
+
     else:
         last_complete_index = -1
         for index, step in enumerate(steps):
@@ -1856,6 +1853,14 @@ def build_pipeline_steps(
                 first_incomplete_seen = True
             else:
                 step["state"] = "PENDING"
+
+    # ponytail: downstream progress is not proof that an execution ran; only
+    # executor-owned status (or a real external handoff result) can complete it.
+    for step in steps:
+        key = step.get("key")
+        if key in execution_completion and not execution_completion[key] and key != active_stage_key:
+            step["complete"] = False
+            step["state"] = "PENDING"
 
     # If pipeline failed, mark the failed step
     if checkpoint.get("status") == "FAILED":
@@ -2729,6 +2734,10 @@ def submit_gate4_review(run_id: str, action: str = "APPROVED", review_artifact: 
                     review_artifact=execution_state["bronze_review_artifact"],
                     approved_only=True,
                 )
+                if final_state.get("snowflake_bronze_execution_status") != "COMPLETED":
+                    raise RuntimeError(
+                        "Snowflake Bronze execution did not complete; refusing to continue to Silver."
+                    )
             except Exception as exc:
                 failed_state = {
                     **execution_state,

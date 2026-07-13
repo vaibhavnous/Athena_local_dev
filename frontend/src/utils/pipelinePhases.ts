@@ -356,7 +356,7 @@ function syntheticStepState(key, byKey: Map<string, PipelineStep>) {
     if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
   }
   if (key === 'bronze_code_execution') {
-    if (bronzeExecution === 'COMPLETED' || progressed(mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (bronzeExecution === 'COMPLETED') return 'COMPLETED'
     if (bronze === 'RUNNING') return 'PENDING'
   }
   if (key === 'silver_merge_key_resolution') {
