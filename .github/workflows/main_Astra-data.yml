@@ -37,12 +37,46 @@ jobs:
           cd deploy/Backend
           zip -qr ../backend.zip .
 
+      - name: Extract publish profile credentials
+        env:
+          AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          profile_xml = os.environ["AZURE_WEBAPP_PUBLISH_PROFILE"]
+          root = ET.fromstring(profile_xml)
+          profiles = root.findall("publishProfile")
+          profile = next(
+              (item for item in profiles if item.get("publishMethod") == "ZipDeploy"),
+              profiles[0] if profiles else None,
+          )
+          if profile is None:
+              raise SystemExit("No publishProfile entries found")
+
+          publish_url = profile["publishUrl"]
+          if not publish_url.startswith(("http://", "https://")):
+              publish_url = f"https://{publish_url}"
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"KUDU_PUBLISH_URL={publish_url}\n")
+              env_file.write(f"KUDU_PUBLISH_USER={profile['userName']}\n")
+              env_file.write(f"KUDU_PUBLISH_PASSWORD={profile['userPWD']}\n")
+
+          print(f"::add-mask::{profile['userName']}")
+          print(f"::add-mask::{profile['userPWD']}")
+          PY
+
       - name: Deploy to Astra Data App Service
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: deploy/backend.zip
+        run: |
+          set -euo pipefail
+          curl -sS --fail-with-body \
+            -u "${KUDU_PUBLISH_USER}:${KUDU_PUBLISH_PASSWORD}" \
+            -H "Content-Type: application/zip" \
+            --data-binary @deploy/backend.zip \
+            "${KUDU_PUBLISH_URL%/}/api/zipdeploy?isAsync=false"
 
       - name: Verify backend health
         run: |
