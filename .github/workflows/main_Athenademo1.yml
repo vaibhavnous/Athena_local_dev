@@ -8,8 +8,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AZURE_WEBAPP_NAME: Athenademo1
-  AZURE_WEBAPP_URL: 'https://athenademo1-a6awbcchgxcchraj.southindia-01.azurewebsites.net'
+  AZURE_WEBAPP_NAME: astra-data-eecthacqb5eherhk
+  AZURE_WEBAPP_URL: 'https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net'
   PYTHON_VERSION: '3.10'
 
 jobs:
@@ -28,12 +28,23 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Prepare small backend artifact
+      - name: Prepare backend env file
+        env:
+          BACKEND_ENV_FILE: ${{ secrets.BACKEND_ENV_FILE }}
         run: |
           set -euo pipefail
           mkdir -p deploy/Athena_backend
+          if [ -n "${BACKEND_ENV_FILE}" ]; then
+            printf '%s
+' "${BACKEND_ENV_FILE}" > deploy/Athena_backend/.env
+          else
+            echo "BACKEND_ENV_FILE secret not set; skipping deployment env file generation."
+          fi
+
+      - name: Prepare small backend artifact
+        run: |
+          set -euo pipefail
           rsync -a \
-            --exclude '.env' \
             --exclude '.venv' \
             --exclude '.python_packages' \
             --exclude '.pytest_cache' \
@@ -105,6 +116,60 @@ jobs:
           print(f"KUDU_URL={publish_url.rstrip('/')}")
           print(f"KUDU_USER={profile.get('userName') or ''}")
           print(f"KUDU_PASS={profile.get('userPWD') or ''}")
+          PY
+
+      - name: Apply runtime app settings
+        env:
+          BACKEND_ENV_FILE: ${{ secrets.BACKEND_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          import sys
+          import urllib.request
+          import urllib.error
+
+          env_text = os.environ.get("BACKEND_ENV_FILE", "")
+          if not env_text.strip():
+              print("No BACKEND_ENV_FILE provided; skipping app settings update.")
+              sys.exit(0)
+
+          settings = []
+          for raw_line in env_text.splitlines():
+              line = raw_line.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              name, value = line.split("=", 1)
+              settings.append({"name": name.strip(), "value": value.strip()})
+
+          if not settings:
+              print("No app settings parsed from BACKEND_ENV_FILE.")
+              sys.exit(0)
+
+          auth = base64.b64encode(f"{os.environ['KUDU_USER']}:{os.environ['KUDU_PASS']}".encode("utf-8")).decode("utf-8")
+          headers = {
+              "Content-Type": "application/json",
+              "Authorization": f"Basic {auth}",
+          }
+
+          for setting in settings:
+              payload = json.dumps({"name": setting["name"], "value": setting["value"]}).encode("utf-8")
+              req = urllib.request.Request(
+                  f"{os.environ['KUDU_URL']}/api/settings",
+                  data=payload,
+                  headers=headers,
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      print(f"set {setting['name']}")
+              except urllib.error.HTTPError as exc:
+                  print(f"failed {setting['name']}: {exc.read().decode('utf-8', 'ignore')}")
+                  raise
+
+          print(f"Applied {len(settings)} app settings.")
           PY
 
       - name: Create backend zip package

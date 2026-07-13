@@ -30,6 +30,7 @@ import { getGateDisplayName } from '../utils/pipelinePhases'
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const REVIEW_HYDRATION_ATTEMPTS = 20
 const REVIEW_HYDRATION_DELAY_MS = 1000
+const REVIEW_RUN_POLL_DELAY_MS = 1500
 const ENABLE_DEMO_REVIEW_FALLBACKS = ENABLE_DEMO_FALLBACKS
 
 async function waitForNextReviewGate(runId, updateRun, targetGate, attempts = REVIEW_HYDRATION_ATTEMPTS) {
@@ -651,6 +652,34 @@ function HitlQueue() {
       cancelled = true
     }
   }, [addRun, currentRun, navigate, runs, selectedRunId, setActiveRun, setSearchParams, updateRun])
+
+  useEffect(() => {
+    if (!selectedRunId || currentRun?.is_demo_fallback) return
+
+    let cancelled = false
+    let timer: number | null = null
+    let inFlight = false
+
+    const pollRun = async () => {
+      if (cancelled || inFlight) return
+      inFlight = true
+      try {
+        const detail = await getRun(selectedRunId)
+        if (!cancelled && detail?.id) updateRun(selectedRunId, detail)
+      } catch (error) {
+        if (!cancelled) console.debug('[HitlQueue] Review run poll failed; retaining last known stage state', error)
+      } finally {
+        inFlight = false
+        if (!cancelled) timer = window.setTimeout(pollRun, REVIEW_RUN_POLL_DELAY_MS)
+      }
+    }
+
+    pollRun()
+    return () => {
+      cancelled = true
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [selectedRunId, updateRun, currentRun?.is_demo_fallback])
 
   useEffect(() => {
     if (!selectedRunId || !currentRun) return

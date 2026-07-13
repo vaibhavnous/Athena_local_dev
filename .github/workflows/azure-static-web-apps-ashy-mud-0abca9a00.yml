@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Build and Deploy Job
     env:
-      REACT_APP_API_BASE_URL: https://athenademo1-a6awbcchgxcchraj.southindia-01.azurewebsites.net
+      REACT_APP_API_BASE_URL: https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net
     steps:
       - uses: actions/checkout@v3
         with:
@@ -32,7 +32,7 @@ jobs:
         working-directory: ./frontend
         run: |
           set -euo pipefail
-          grep -R "athenademo1-a6awbcchgxcchraj.southindia-01.azurewebsites.net" build/static/js
+          grep -R "astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net" build/static/js
 
       - name: Build And Deploy
         id: builddeploy

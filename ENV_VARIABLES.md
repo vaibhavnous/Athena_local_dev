@@ -88,13 +88,13 @@ AZURE_SQL_SOURCE_PASSWORD=<sql-password>
 For production on one App Service, set your production URL here.
 
 ```text
-ATHENA_CORS_ORIGINS=https://athenademo1-a6awbcchgxcchraj.southindia-01.azurewebsites.net
+ATHENA_CORS_ORIGINS=https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net
 ```
 
 For local + production together:
 
 ```text
-ATHENA_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,https://athenademo1-a6awbcchgxcchraj.southindia-01.azurewebsites.net
+ATHENA_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net
 ```
 
 ### 2.5 Pipeline Runtime Controls
@@ -309,7 +309,7 @@ Current behavior:
 - health check uses:
 
 ```text
-https://athenademo1-a6awbcchgxcchraj.southindia-01.azurewebsites.net/health
+https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net/health
 ```
 
 ## 11. What To Configure Where
@@ -393,5 +393,5 @@ Reason:
 9. Push to `main`.
 10. Verify:
 ```text
-https://athenademo1-a6awbcchgxcchraj.southindia-01.azurewebsites.net/health
+https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net/health
 ```
