@@ -8,7 +8,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  AZURE_WEBAPP_NAME: astra-data-eecthacqb5eherhk
+  AZURE_WEBAPP_NAME: Astra-data
   AZURE_WEBAPP_URL: https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net
 
 jobs:
