@@ -74,6 +74,8 @@ def test_snowflake_bronze_generation_writes_sql_without_databricks_path(monkeypa
     assert result["bronze_generation_status"] == "COMPLETED"
     assert result["bronze_generation_results"][0]["target_warehouse"] == "snowflake"
     assert result["bronze_generation_results"][0]["script_language"] == "sql"
+    assert result["bronze_generation_results"][0]["source_table"] == "insurance.dbo.Claims"
+    assert result["bronze_generation_results"][0]["target_table"] == "ATHENA_DB.BRONZE.bronze_Claims"
     assert script_path.suffix == ".sql"
     assert script_path.parts[-3:] == ("snowflake", "bronze", script_path.name)
     assert "Expected runtime: Snowflake SQL" in script_path.read_text(encoding="utf-8")
@@ -275,6 +277,28 @@ def test_snowflake_validator_rejects_databricks_format():
         assert "databricks/python token" in str(exc).lower()
     else:
         raise AssertionError("Databricks-style Snowflake SQL should be rejected")
+
+
+def test_snowflake_validator_allows_only_run_scoped_cleanup():
+    target = '"A"."B"."bronze_claims"'
+    sql = (
+        'CREATE SCHEMA IF NOT EXISTS "A"."B";\n'
+        f'CREATE TABLE IF NOT EXISTS {target} ("run_id" VARCHAR, "ingestion_timestamp" TIMESTAMP_NTZ, "source_system" VARCHAR, "source_table" VARCHAR);\n'
+        f"DELETE FROM {target} WHERE \"run_id\" = 'run-1';\n"
+        f"INSERT INTO {target} SELECT 'run-1', CURRENT_TIMESTAMP(), 'insurance', 'claims';"
+    )
+
+    bronze_gen.validate_snowflake_bronze_sql(sql, target_table=target)
+
+    try:
+        bronze_gen.validate_snowflake_bronze_sql(
+            sql.replace('WHERE "run_id" = \'run-1\'', 'WHERE "source_system" = \'insurance\''),
+            target_table=target,
+        )
+    except ValueError as exc:
+        assert "delete" in str(exc).lower()
+    else:
+        raise AssertionError("Non-run-scoped cleanup should be rejected")
 
 
 def test_snowflake_bronze_generation_skips_llm_by_default(monkeypatch):

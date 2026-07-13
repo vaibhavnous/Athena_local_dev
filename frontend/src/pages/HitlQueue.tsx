@@ -1724,7 +1724,7 @@ function HitlQueue() {
                 <div className="min-w-0">
                   <h2 className="text-xl font-bold text-white">Enrichment Review</h2>
                   <p className="mt-1 text-sm text-[#a9b6cc]">
-                    Review extracted and enriched column metadata for {semanticReviewItems.length} item{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
+                    Review semantic enrichment for {semanticReviewItems.length} table{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
                   </p>
                 </div>
               </div>
@@ -2133,7 +2133,7 @@ function HitlQueue() {
                   <div>
                     <h2 className="text-xl font-bold text-text-primary">Enrichment Review</h2>
                     <p className="text-sm text-text-secondary">
-                      Review extracted and enriched column metadata for {semanticReviewItems.length} item{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
+                      Review semantic enrichment for {semanticReviewItems.length} table{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
                     </p>
                   </div>
                 </div>
@@ -2176,6 +2176,7 @@ function HitlQueue() {
                         rejectionReason={semanticRejectionReasons[key]}
                         onApprove={handleApproveSemanticItem}
                         onReject={handleRejectSemanticItem}
+                        onDraftChange={handleSemanticDraftChange}
                       />
                     )
                   })
@@ -2549,7 +2550,12 @@ function buildSemanticReviewSource(enrichmentReview, currentRun, runId) {
     ...(currentRun || {}),
     ...(enrichmentReview || {}),
   }
-  const enrichedColumns = source.enriched_columns || []
+  const metadataColumns = Array.isArray(source.enriched_metadata?.columns)
+    ? source.enriched_metadata.columns
+    : []
+  const enrichedColumns = Array.isArray(source.enriched_columns) && source.enriched_columns.length
+    ? source.enriched_columns
+    : metadataColumns
   const enrichedColumnCount = Array.isArray(enrichedColumns)
     ? enrichedColumns.length
     : Object.keys(enrichedColumns || {}).length
@@ -2578,9 +2584,9 @@ function buildSemanticReviewSource(enrichmentReview, currentRun, runId) {
     }
   }
 
-  if (enrichedColumnCount === 0 && source.enriched_metadata) {
-    source.enriched_columns = source.enriched_metadata
-  }
+  // The Gate 3 API stores the semantic artifact under enriched_metadata.columns.
+  // Promoting the artifact object itself creates a bogus review card.
+  source.enriched_columns = enrichedColumns
 
   return source
 }

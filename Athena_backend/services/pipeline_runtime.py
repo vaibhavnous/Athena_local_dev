@@ -295,6 +295,10 @@ def continue_database_pipeline(
             "status": "RUNNING",
             "background_stage": current_stage_key,
             "awaiting_stage_confirmation": False,
+            "error": None,
+            "failed_stage": None,
+            "error_stage": None,
+            "failed_background_stage": None,
             "resume_message": f"{DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key)} is running.",
         }
         logger.info(
@@ -837,6 +841,35 @@ def _dedupe_scripts(scripts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return deduped
 
 
+def _normalize_bronze_script(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Backfill lineage fields for Bronze bundles written before the schema fix."""
+    row = dict(item)
+    table = str(row.get("table") or row.get("table_name") or "").strip()
+    source_table = str(row.get("source_table") or "").strip()
+    if not source_table and table:
+        source_table = ".".join(
+            part for part in (row.get("database_name"), row.get("schema_name"), table) if str(part or "").strip()
+        )
+    target_table = str(row.get("target_table") or "").strip()
+    if not target_table and table:
+        target_table = ".".join(
+            part
+            for part in (
+                row.get("bronze_catalog"),
+                row.get("bronze_schema"),
+                f"bronze_{table}",
+            )
+            if str(part or "").strip()
+        )
+    if source_table:
+        row.setdefault("source_table", source_table)
+        row.setdefault("source", source_table)
+    if target_table:
+        row.setdefault("target_table", target_table)
+        row.setdefault("target", target_table)
+    return row
+
+
 def _scripts_from_checkpoint(
     checkpoint: Dict[str, Any],
     result_key: str,
@@ -848,7 +881,11 @@ def _scripts_from_checkpoint(
         if not script_body:
             script_body = _read_script_body(item.get("script_path"))
         dimension_script_body = _read_script_body(item.get("dimension_script_path"))
-        row = {
+        row = _normalize_bronze_script({
+            **item,
+            "run_id": item.get("run_id") or checkpoint.get("run_id"),
+            "script_body": script_body,
+        }) if result_key == "bronze_generation_results" else {
             **item,
             "run_id": item.get("run_id") or checkpoint.get("run_id"),
             "script_body": script_body,
@@ -887,12 +924,7 @@ def load_bronze_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None
             script_bodies=[script_body],
         ):
             continue
-        scripts.append(
-            {
-                **item,
-                "script_body": script_body,
-            }
-        )
+        scripts.append(_normalize_bronze_script({**item, "script_body": script_body}))
 
     if not scripts and checkpoint:
         return _scripts_from_checkpoint(checkpoint, "bronze_generation_results", "bronze_generated_at")
@@ -1414,6 +1446,15 @@ def build_pipeline_steps(
     artifact_types = {str(row.get("artifact_type") or "") for row in summary}
     stages = {str(row.get("stage") or "").lower() for row in summary}
 
+    def artifact_failed(artifact_type: str) -> bool:
+        target = str(artifact_type or "").upper()
+        return any(
+            str(row.get("artifact_type") or "").upper() == target
+            and str(row.get("faithfulness_status") or "").upper() == "FAILED"
+            for row in summary
+            if isinstance(row, dict)
+        )
+
     def has_stage(text: str) -> bool:
         needle = text.lower()
         return any(needle in stage for stage in stages)
@@ -1450,7 +1491,7 @@ def build_pipeline_steps(
             {
                 "key": "kpis",
                 "label": "KPI Extract",
-                "complete": bool("KPIS" in artifact_types or checkpoint.get("kpis")),
+                "complete": bool(("KPIS" in artifact_types and not artifact_failed("KPIS")) or checkpoint.get("kpis")),
                 "detail": "KPI candidates generated",
             },
             {
@@ -1626,7 +1667,7 @@ def build_pipeline_steps(
         {
             "key": "kpis",
             "label": "KPI Extract",
-            "complete": bool("KPIS" in artifact_types or pending_gate1 or completed_gate1),
+            "complete": bool(("KPIS" in artifact_types and not artifact_failed("KPIS")) or pending_gate1 or completed_gate1),
             "detail": "KPI candidates generated",
         },
         {
@@ -1818,10 +1859,20 @@ def build_pipeline_steps(
 
     # If pipeline failed, mark the failed step
     if checkpoint.get("status") == "FAILED":
-        for step in steps:
-            if step["state"] == "RUNNING":
-                step["state"] = "FAILED"
-                break
+        failed_key = (
+            checkpoint.get("failed_background_stage")
+            or checkpoint.get("last_failed_stage_key")
+            or checkpoint.get("failed_stage")
+        )
+        failed_step = next((step for step in steps if step.get("key") == failed_key), None)
+        if failed_step:
+            failed_step["complete"] = False
+            failed_step["state"] = "FAILED"
+        else:
+            for step in steps:
+                if step["state"] == "RUNNING":
+                    step["state"] = "FAILED"
+                    break
     # If all steps are complete, ensure at least one shows as completed
     elif all(step["complete"] for step in steps):
         for step in reversed(steps):
@@ -1872,6 +1923,24 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     summary = fetch_run_summary(run_id)
     pending_gate1 = get_pending_items(run_id, 1)
     completed_gate1 = get_completed_items(run_id, 1)
+    kpi_artifact_failed = any(
+        str(row.get("artifact_type") or "").upper() == "KPIS"
+        and str(row.get("faithfulness_status") or "").upper() == "FAILED"
+        for row in summary
+        if isinstance(row, dict)
+    )
+    checkpoint_kpis = any(
+        isinstance(checkpoint.get(key), list) and bool(checkpoint.get(key))
+        for key in ("kpis", "prior_kpis", "extracted_kpis", "certified_kpis")
+    )
+    kpi_review_unavailable = bool(kpi_artifact_failed and not pending_gate1 and not completed_gate1 and not checkpoint_kpis)
+    if kpi_review_unavailable:
+        checkpoint = {
+            **checkpoint,
+            "status": "FAILED",
+            "failed_background_stage": "kpis",
+            "error": checkpoint.get("error") or "KPI extraction failed before review items were created.",
+        }
     nominations_payload = fetch_json_artifact(run_id, "TABLE_NOMINATIONS")
     nominated_tables = (
         nominations_payload.get("nominations", [])
@@ -1977,7 +2046,9 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     if source_value in {"sftp", "adls_gen2"}:
         gate1_decision = (checkpoint.get("gate1") or {}).get("decision")
         gate2_decision = (checkpoint.get("gate2") or {}).get("decision")
-        if gate1_decision in {None, ""}:
+        if kpi_review_unavailable:
+            resume_message = checkpoint["error"]
+        elif gate1_decision in {None, ""}:
             next_gate = 1
             resume_message = "KPI Review is pending. Review KPI items before continuing."
         elif gate1_decision == "APPROVED" and (gate2_decision in {None, ""}):
@@ -1989,6 +2060,8 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
             resume_message = "KPI Review was rejected."
         elif gate2_decision == "REJECTED":
             resume_message = "Feed Review was rejected."
+    elif kpi_review_unavailable:
+        resume_message = checkpoint["error"]
     elif pending_gate1:
         next_gate = 1
         resume_message = "KPI Review is pending. Review the KPI items below."

@@ -19,7 +19,7 @@ def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
         return demo_kpi_reviews(run_id)
 
     from api.services.kpi_service import artifact_kpis, fetch_hitl_rows, map_kpi
-    from services.pipeline_runtime import load_checkpoint_fields
+    from services.pipeline_runtime import fetch_run_summary, load_checkpoint_fields
 
     source = str(load_checkpoint_fields(run_id, "source").get("source") or "database").lower()
 
@@ -30,6 +30,19 @@ def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
 
     if not rows:
         rows = [map_kpi(kpi, run_id=run_id, source=source) for kpi in artifact_kpis(run_id)]
+    if not rows:
+        summary = fetch_run_summary(run_id)
+        kpis_failed = any(
+            str(row.get("artifact_type") or "").upper() == "KPIS"
+            and str(row.get("faithfulness_status") or "").upper() == "FAILED"
+            for row in summary
+            if isinstance(row, dict)
+        )
+        if kpis_failed:
+            raise HTTPException(
+                status_code=409,
+                detail="KPI extraction failed before review items were created. Retry KPI extraction for this run.",
+            )
 
     rows = [
         {**row, "run_id": run_id, "source": source}

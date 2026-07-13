@@ -25,6 +25,37 @@ def test_snowflake_account_url_is_normalized():
     )
 
 
+def test_snowflake_identifiers_drop_configuration_quotes():
+    assert snowflake_bronze_runtime._normalize_identifier('"insurance"') == "insurance"
+    assert snowflake_bronze_runtime._normalize_identifier("'dbo'") == "dbo"
+    assert snowflake_bronze_runtime._snowflake_quote_identifier('"insurance"') == '"insurance"'
+
+
+def test_adls_stage_uses_sas_without_logging_token(monkeypatch):
+    token = "sv=test&sig=secret"
+    monkeypatch.setenv("SNOWFLAKE_ADLS_SAS_TOKEN", "?" + token)
+
+    class FakeCursor:
+        def __init__(self):
+            self.sql = []
+
+        def execute(self, sql):
+            self.sql.append(sql)
+
+        def close(self):
+            pass
+
+    cursor = FakeCursor()
+    result = snowflake_bronze_runtime.ensure_adls_stage(type("Connection", (), {"cursor": lambda self: cursor})())
+
+    stage_sql = cursor.sql[-1]
+    assert "CREATE OR REPLACE STAGE" in stage_sql
+    assert f"AZURE_SAS_TOKEN = '{token}'" in stage_sql
+    assert "STORAGE_INTEGRATION" not in stage_sql
+    assert token not in str(result)
+    assert result["credential_type"] == "sas"
+
+
 def test_snowflake_bronze_runtime_executes_generated_sql(monkeypatch):
     workdir = Path.cwd() / ".tmp-tests" / f"snowflake_runtime_{uuid.uuid4().hex}"
     workdir.mkdir(parents=True, exist_ok=True)
@@ -142,6 +173,7 @@ def test_snowflake_bronze_runtime_adls_executes_only_approved_scripts(monkeypatc
     monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE", "true")
     monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_SOURCE_MODE", "adls")
     monkeypatch.setenv("SNOWFLAKE_ADLS_STAGE_URL", "azure://atheastorage.blob.core.windows.net/athena/Insurance/")
+    monkeypatch.delenv("SNOWFLAKE_ADLS_SAS_TOKEN", raising=False)
     monkeypatch.setattr(snowflake_bronze_runtime, "_snowflake_connect", lambda: fake_conn)
 
     result = snowflake_bronze_runtime.run_snowflake_bronze_scripts(
@@ -187,7 +219,9 @@ def test_snowflake_bronze_runtime_adls_executes_only_approved_scripts(monkeypatc
     assert result["snowflake_bronze_source_mode"] == "adls"
     assert [item["table"] for item in result["snowflake_bronze_execution_results"]] == ["claim_information"]
     assert any("CREATE STAGE IF NOT EXISTS" in sql for sql in fake_conn.sql)
+    assert any("TRUNCATE TABLE \"insurance\".\"dbo\".\"claim_information\"" in sql for sql in fake_conn.sql)
     assert any("COPY INTO \"insurance\".\"dbo\".\"claim_information\"" in sql for sql in fake_conn.sql)
+    assert any("FILES = ('claim_information.csv')" in sql for sql in fake_conn.sql)
     assert not any("COPY INTO \"insurance\".\"dbo\".\"policy_transactions\"" in sql for sql in fake_conn.sql)
     assert fake_conn.closed is True
 

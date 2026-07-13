@@ -57,6 +57,31 @@ def _qualified_name(value: str) -> str:
     return ".".join(_quote_identifier(part) for part in str(value or "").split(".") if part.strip())
 
 
+def _sql_without_comments(sql: str) -> str:
+    return re.sub(r"--[^\n]*|/\*.*?\*/", "", str(sql or ""), flags=re.DOTALL)
+
+
+def _require_approved_snowflake_structure(sql: str, source_table: str, target_table: str) -> None:
+    clean_sql = _sql_without_comments(sql)
+    if source_table and not re.search(
+        rf"(?:^|\s)FROM\s+{re.escape(_qualified_name(source_table))}(?=\s|\)|,|$)",
+        clean_sql,
+        re.IGNORECASE,
+    ):
+        raise ValueError(f"Snowflake gold SQL must read the approved source table: {source_table}")
+    if target_table and not re.search(
+        rf"\bMERGE\s+INTO\s+{re.escape(_qualified_name(target_table))}\s+(?:AS\s+)?target\b",
+        clean_sql,
+        re.IGNORECASE,
+    ):
+        raise ValueError(f"Snowflake gold SQL must merge into the approved target table as target: {target_table}")
+    if re.search(r"\bJOIN\b", clean_sql, re.IGNORECASE):
+        raise ValueError("Snowflake gold SQL must not add joins outside the approved source table")
+    forbidden = re.search(r"\b(DROP|TRUNCATE|DELETE|COPY|CALL|GRANT|REVOKE|USE|EXECUTE\s+IMMEDIATE)\b", clean_sql, re.IGNORECASE)
+    if forbidden:
+        raise ValueError(f"Snowflake gold SQL contains forbidden statement: {forbidden.group(1).upper()}")
+
+
 def _table_name(script: Dict[str, Any]) -> str:
     target_table = str(script.get("target_table") or "").strip()
     if target_table:
@@ -108,6 +133,7 @@ def validate_snowflake_gold_script(script: Dict[str, Any], catalog_connection: A
         raise ValueError(f"Snowflake gold SQL does not read from expected source table: {source_table}")
     if target_table and _qualified_name(target_table) not in sql:
         raise ValueError(f"Snowflake gold SQL does not write to expected target table: {target_table}")
+    _require_approved_snowflake_structure(sql, source_table, target_table)
     required_columns = [
         _silver_output_column_name(column)
         for column in script.get("validation_columns") or []

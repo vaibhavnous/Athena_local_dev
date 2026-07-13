@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+import pytest
+
 from services import pipeline_runtime
 from services import snowflake_silver_runtime
 
@@ -41,6 +43,22 @@ VALUES (
     source."silver_run_id",
     source."silver_processed_timestamp"
 );"""
+
+
+def test_silver_runtime_rejects_destructive_stored_sql():
+    sql = '''
+MERGE INTO "ATHENA_DB"."SILVER"."silver_claims" AS target
+USING (SELECT * FROM "ATHENA_DB"."BRONZE"."bronze_claims" AS src) source ON 1 = 0
+WHEN NOT MATCHED THEN INSERT DEFAULT VALUES;
+TRUNCATE TABLE "ATHENA_DB"."SILVER"."silver_claims";
+'''
+
+    with pytest.raises(ValueError, match="forbidden statement: TRUNCATE"):
+        snowflake_silver_runtime._require_approved_snowflake_structure(
+            sql,
+            "ATHENA_DB.BRONZE.bronze_claims",
+            "ATHENA_DB.SILVER.silver_claims",
+        )
 
 
 def test_snowflake_silver_runtime_is_disabled_by_default(monkeypatch):

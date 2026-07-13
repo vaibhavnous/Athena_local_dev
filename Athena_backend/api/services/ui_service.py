@@ -1,4 +1,8 @@
-from api.services.ui.review_ui_service import bronze_review_from_scripts, silver_review_from_scripts
+from api.services.ui.review_ui_service import (
+    bronze_review_from_scripts,
+    normalize_bronze_review_artifact,
+    silver_review_from_scripts,
+)
 from api.services.ui.run_ui_service import (
     build_kpis,
     build_ui_payload,
@@ -12,6 +16,7 @@ from api.services.ui.stage_ui_service import UI_STAGE_LOG_LIMIT, stage_metrics_f
 __all__ = [
     "UI_STAGE_LOG_LIMIT",
     "bronze_review_from_scripts",
+    "normalize_bronze_review_artifact",
     "build_kpis",
     "build_ui_payload",
     "display_run_name",

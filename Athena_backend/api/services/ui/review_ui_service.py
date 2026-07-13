@@ -16,6 +16,23 @@ def _load_script_bundle(loader, bundle_name: str, run_id: str, checkpoint: Dict[
 
 def _map_bronze_feed(item: Dict[str, Any], checkpoint: Dict[str, Any]) -> Dict[str, Any]:
     config_payload = item.get("bronze_config") or item.get("generated_bronze_config") or {}
+    table = item.get("table") or item.get("table_name") or item.get("entity")
+    source_table = item.get("source_table")
+    if not source_table and table:
+        source_table = ".".join(
+            part for part in (item.get("database_name"), item.get("schema_name"), table) if str(part or "").strip()
+        )
+    target_table = item.get("target_table") or config_payload.get("target_table")
+    if not target_table and table:
+        target_table = ".".join(
+            part
+            for part in (
+                item.get("bronze_catalog") or checkpoint.get("bronze_catalog"),
+                item.get("bronze_schema") or checkpoint.get("bronze_schema"),
+                f"bronze_{table}",
+            )
+            if str(part or "").strip()
+        )
     return {
         "feed_summary": item.get("feed_summary") or f"{item.get('vendor') or 'Vendor'}.{item.get('entity') or 'Feed'}",
         "source_type": item.get("source_type") or config_payload.get("source_type") or checkpoint.get("source"),
@@ -33,7 +50,8 @@ def _map_bronze_feed(item: Dict[str, Any], checkpoint: Dict[str, Any]) -> Dict[s
         "primary_keys": item.get("primary_keys") or config_payload.get("primary_keys") or [],
         "watermark_column": item.get("watermark_column") or config_payload.get("watermark_column"),
         "landing_path": item.get("landing_path") or config_payload.get("landing_path"),
-        "target_table": item.get("target_table") or config_payload.get("target_table"),
+        "source_table": source_table,
+        "target_table": target_table,
         "bronze_output_path": item.get("bronze_output_path") or config_payload.get("bronze_output_path"),
         "checkpoint_path": item.get("checkpoint_path") or config_payload.get("checkpoint_path"),
         "schema_location": item.get("schema_location") or config_payload.get("schema_location"),
@@ -55,6 +73,15 @@ def bronze_review_from_scripts(run_id: str, checkpoint: Dict[str, Any]) -> Dict[
         "run_id": run_id,
         "generated_at": bundle.get("generated_at") or checkpoint.get("bronze_generated_at"),
         "feeds": [_map_bronze_feed(item, checkpoint) for item in scripts],
+    }
+
+
+def normalize_bronze_review_artifact(artifact: Dict[str, Any], checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(artifact, dict):
+        return {}
+    return {
+        **artifact,
+        "feeds": [_map_bronze_feed(item, checkpoint) for item in artifact.get("feeds") or [] if isinstance(item, dict)],
     }
 
 

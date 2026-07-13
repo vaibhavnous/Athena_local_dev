@@ -3,8 +3,119 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+import pytest
+
 from nodes import silver_gen
 from services import pipeline_runtime
+
+
+def test_silver_llm_source_identifier_case_is_repaired():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claims",
+        "bronze_table": "ATHENA_DB.BRONZE.bronze_claims",
+        "silver_table": "ATHENA_DB.SILVER.silver_claims",
+        "existing_script_path": None,
+        "source_columns": [{"column_name": "claimid", "source_column_name": "claimid", "type": "VARCHAR"}],
+    }
+
+    repaired = silver_gen._canonicalize_snowflake_source_identifiers(
+        'SELECT src."ClaimID", src."run_id" FROM "ATHENA_DB"."BRONZE"."bronze_claims" src',
+        table_ref,
+    )
+
+    assert 'src."claimid"' in repaired
+    assert 'src."run_id"' in repaired
+
+
+def test_silver_llm_rejects_unsafe_snowflake_temporal_try_cast():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claims",
+        "bronze_table": "ATHENA_DB.BRONZE.bronze_claims",
+        "silver_table": "ATHENA_DB.SILVER.silver_claims",
+        "existing_script_path": None,
+        "source_columns": [{"column_name": "inserteddate", "source_column_name": "inserteddate", "type": "DATE"}],
+    }
+    sql = '''
+CREATE TABLE "ATHENA_DB"."SILVER"."silver_claims" ("inserteddate" DATE);
+MERGE INTO "ATHENA_DB"."SILVER"."silver_claims" target USING (
+SELECT TRY_CAST(src."inserteddate" AS DATE) AS "inserteddate",
+src."run_id" AS "run_id", src."ingestion_timestamp" AS "ingestion_timestamp",
+src."source_system" AS "source_system", src."source_table" AS "source_table",
+'key' AS "silver_upsert_key", 'run' AS "silver_run_id", CURRENT_TIMESTAMP AS "silver_processed_timestamp"
+FROM "ATHENA_DB"."BRONZE"."bronze_claims" src) source ON 1 = 0;
+'''
+
+    with pytest.raises(ValueError, match="unsafe Snowflake temporal conversion"):
+        silver_gen._validate_generated_silver_code(
+            sql,
+            table_ref=table_ref,
+            enriched_columns=[{"column_name": "inserteddate"}],
+            target_warehouse="snowflake",
+        )
+
+
+def test_silver_llm_rejects_direct_snowflake_temporal_conversion():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claims",
+        "bronze_table": "ATHENA_DB.BRONZE.bronze_claims",
+        "silver_table": "ATHENA_DB.SILVER.silver_claims",
+        "existing_script_path": None,
+        "source_columns": [{"column_name": "inserteddate", "source_column_name": "inserteddate", "type": "DATE"}],
+    }
+    sql = '''
+CREATE TABLE "ATHENA_DB"."SILVER"."silver_claims" ("inserteddate" DATE);
+MERGE INTO "ATHENA_DB"."SILVER"."silver_claims" target USING (
+SELECT TRY_TO_TIMESTAMP_NTZ(src."inserteddate") AS "inserteddate",
+src."run_id" AS "run_id", src."ingestion_timestamp" AS "ingestion_timestamp",
+src."source_system" AS "source_system", src."source_table" AS "source_table",
+'key' AS "silver_upsert_key", 'run' AS "silver_run_id", CURRENT_TIMESTAMP AS "silver_processed_timestamp"
+FROM "ATHENA_DB"."BRONZE"."bronze_claims" src) source ON 1 = 0;
+'''
+
+    with pytest.raises(ValueError, match="unsafe Snowflake temporal conversion"):
+        silver_gen._validate_generated_silver_code(
+            sql,
+            table_ref=table_ref,
+            enriched_columns=[{"column_name": "inserteddate"}],
+            target_warehouse="snowflake",
+        )
+
+
+def test_silver_llm_repairs_direct_snowflake_temporal_conversion():
+    repaired = silver_gen._canonicalize_snowflake_temporal_conversions(
+        'SELECT TRY_TO_TIMESTAMP_NTZ(src."inserteddate"), TRY_TO_DATE(src."paiddate")'
+    )
+
+    assert 'TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR(src."inserteddate"))' in repaired
+    assert 'TRY_TO_DATE(TO_VARCHAR(src."paiddate"))' in repaired
+
+
+def test_silver_llm_rejects_comment_only_source_and_destructive_sql():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claims",
+        "bronze_table": "ATHENA_DB.BRONZE.bronze_claims",
+        "silver_table": "ATHENA_DB.SILVER.silver_claims",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+    sql = '''
+-- FROM "ATHENA_DB"."BRONZE"."bronze_claims" AS src
+MERGE INTO "ATHENA_DB"."SILVER"."silver_claims" AS target
+USING (SELECT * FROM "OTHER_DB"."BRONZE"."claims" AS src) source ON 1 = 0
+WHEN NOT MATCHED THEN INSERT DEFAULT VALUES;
+DROP TABLE "ATHENA_DB"."SILVER"."silver_claims";
+'''
+
+    with pytest.raises(ValueError, match="approved Bronze table"):
+        silver_gen._require_snowflake_silver_structure(sql, table_ref)
 
 
 def test_silver_table_resolution_ignores_existing_silver_outputs(monkeypatch):

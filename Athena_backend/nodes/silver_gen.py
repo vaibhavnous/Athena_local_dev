@@ -98,17 +98,38 @@ def _llm_generate_silver_code(
     enriched_columns: List[Dict[str, Any]],
     deterministic_code: str,
     target_warehouse: str,
+    validation_feedback: str = "",
 ) -> str:
     from nodes.req_extraction import get_llm
 
     language = "Snowflake SQL" if str(target_warehouse).lower() == "snowflake" else "Databricks PySpark"
+    canonical_source_columns = sorted(
+        {
+            str(item.get("source_column_name") or item.get("column_name") or "").strip()
+            for item in table_ref.get("source_columns") or []
+            if isinstance(item, dict) and str(item.get("source_column_name") or item.get("column_name") or "").strip()
+        }
+        | {"run_id", "ingestion_timestamp", "source_system", "source_table"}
+    )
+    retry_context = (
+        f"\nA previous candidate was rejected by the hard validator for this reason:\n{validation_feedback}\n"
+        "Correct that exact violation without changing transformation semantics.\n"
+        if validation_feedback
+        else ""
+    )
     prompt = f"""Generate production {language} Silver transformation code.
 Return only executable code. Preserve the source/target tables, audit columns,
 type normalization, deduplication, and merge/upsert behavior from the baseline.
 Do not invent columns or change the target table.
+For quoted src column references, use only the exact case-sensitive identifiers
+in Canonical source columns. Copy identifiers exactly; do not restore source-system casing.
+For Snowflake temporal conversion, use TRY_TO_DATE or TRY_TO_TIMESTAMP_NTZ over
+TO_VARCHAR(source); never TRY_CAST a DATE/TIMESTAMP expression to another temporal type.
+{retry_context}
 
 Source table: {table_ref['bronze_table']}
 Target table: {table_ref['silver_table']}
+Canonical source columns: {json.dumps(canonical_source_columns)}
 Reviewed columns: {json.dumps(enriched_columns, default=str)}
 
 BASELINE:
@@ -124,6 +145,52 @@ BASELINE:
     text = str(content).strip()
     match = re.search(r"```(?:python|sql)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
     return match.group(1).strip() if match else text
+
+
+def _canonicalize_snowflake_source_identifiers(code: str, table_ref: SilverTableRef) -> str:
+    canonical = {
+        str(item.get("source_column_name") or item.get("column_name") or "").strip()
+        for item in table_ref.get("source_columns") or []
+        if isinstance(item, dict) and str(item.get("source_column_name") or item.get("column_name") or "").strip()
+    }
+    canonical.update({"run_id", "ingestion_timestamp", "source_system", "source_table"})
+    by_casefold = {column.casefold(): column for column in canonical}
+
+    def replace(match: re.Match[str]) -> str:
+        identifier = match.group(1).replace('""', '"')
+        replacement = by_casefold.get(identifier.casefold())
+        if replacement is None:
+            return match.group(0)
+        return f'src."{replacement.replace(chr(34), chr(34) * 2)}"'
+
+    return re.sub(r'\bsrc\s*\.\s*"((?:""|[^"])*)"', replace, str(code or ""), flags=re.IGNORECASE)
+
+
+def _canonicalize_snowflake_temporal_conversions(code: str) -> str:
+    """Make direct source temporal parsing explicit so Snowflake never coerces DATE values implicitly."""
+    return re.sub(
+        r'\b(TRY_TO_(?:DATE|TIMESTAMP_NTZ))\s*\(\s*(src\s*\.\s*"(?:""|[^"])*")\s*\)',
+        r'\1(TO_VARCHAR(\2))',
+        str(code or ""),
+        flags=re.IGNORECASE,
+    )
+
+
+def _sql_without_comments(code: str) -> str:
+    return re.sub(r"--[^\n]*|/\*.*?\*/", "", str(code or ""), flags=re.DOTALL)
+
+
+def _require_snowflake_silver_structure(code: str, table_ref: SilverTableRef) -> None:
+    source = _snowflake_qualified_name(*str(table_ref["bronze_table"]).split("."))
+    target = _snowflake_qualified_name(*str(table_ref["silver_table"]).split("."))
+    sql = _sql_without_comments(code)
+    if not re.search(rf"(?:^|\s)FROM\s+{re.escape(source)}\s+(?:AS\s+)?src\b", sql, re.IGNORECASE):
+        raise ValueError("LLM Silver SQL must read the approved Bronze table as src")
+    if not re.search(rf"\bMERGE\s+INTO\s+{re.escape(target)}\s+(?:AS\s+)?target\b", sql, re.IGNORECASE):
+        raise ValueError("LLM Silver SQL must merge into the approved Silver table as target")
+    forbidden = re.search(r"\b(DROP|TRUNCATE|DELETE|COPY|CALL|GRANT|REVOKE|USE|EXECUTE\s+IMMEDIATE)\b", sql, re.IGNORECASE)
+    if forbidden:
+        raise ValueError(f"LLM Silver SQL contains forbidden statement: {forbidden.group(1).upper()}")
 
 
 def _validate_generated_silver_code(
@@ -158,11 +225,21 @@ def _validate_generated_silver_code(
         upper = normalized.upper()
         if "CREATE TABLE" not in upper or "MERGE INTO" not in upper:
             raise ValueError("LLM Silver SQL must contain CREATE TABLE and MERGE INTO")
+        if re.search(r"TRY_CAST\s*\([^)]*\bAS\s+(?:DATE|TIMESTAMP(?:_NTZ)?)(?:\s*\([^)]*\))?\s*\)", code, re.IGNORECASE) or re.search(
+            r"TRY_TO_(?:DATE|TIMESTAMP_NTZ)\s*\(\s*(?:src\s*\.|GET_IGNORE_CASE)",
+            code,
+            re.IGNORECASE,
+        ):
+            raise ValueError(
+                "LLM Silver SQL used unsafe Snowflake temporal conversion; use TRY_TO_DATE/TRY_TO_TIMESTAMP_NTZ over TO_VARCHAR"
+            )
+        _require_snowflake_silver_structure(code, table_ref)
         physical_source_columns = {
             str(item.get("source_column_name") or item.get("column_name") or "").strip()
             for item in table_ref.get("source_columns") or []
             if isinstance(item, dict) and str(item.get("source_column_name") or item.get("column_name") or "").strip()
         }
+        physical_source_columns.update({"run_id", "ingestion_timestamp", "source_system", "source_table"})
         if physical_source_columns:
             quoted_source_columns = {
                 match.group(1).replace('""', '"')
@@ -856,16 +933,50 @@ def _generate_one_table(
                 deterministic_code=code,
                 target_warehouse=target_warehouse,
             )
+            repaired_candidate = (
+                _canonicalize_snowflake_temporal_conversions(
+                    _canonicalize_snowflake_source_identifiers(candidate, table_ref)
+                )
+                if str(target_warehouse or "").lower() == "snowflake"
+                else candidate
+            )
             _validate_generated_silver_code(
-                candidate,
+                repaired_candidate,
                 table_ref=table_ref,
                 enriched_columns=enriched_columns,
                 target_warehouse=target_warehouse,
             )
-            code = candidate
-            generation_mode = "LLM"
-        except Exception as exc:
-            logger.warning("Silver LLM generation failed; using deterministic fallback: %s", exc)
+            code = repaired_candidate
+            generation_mode = "LLM_REPAIRED" if repaired_candidate != candidate else "LLM"
+        except Exception as first_exc:
+            try:
+                retry_candidate = _llm_generate_silver_code(
+                    table_ref=table_ref,
+                    enriched_columns=enriched_columns,
+                    deterministic_code=code,
+                    target_warehouse=target_warehouse,
+                    validation_feedback=str(first_exc),
+                )
+                repaired_retry = (
+                    _canonicalize_snowflake_temporal_conversions(
+                        _canonicalize_snowflake_source_identifiers(retry_candidate, table_ref)
+                    )
+                    if str(target_warehouse or "").lower() == "snowflake"
+                    else retry_candidate
+                )
+                _validate_generated_silver_code(
+                    repaired_retry,
+                    table_ref=table_ref,
+                    enriched_columns=enriched_columns,
+                    target_warehouse=target_warehouse,
+                )
+                code = repaired_retry
+                generation_mode = "LLM_RETRY_REPAIRED" if repaired_retry != retry_candidate else "LLM_RETRY"
+            except Exception as retry_exc:
+                logger.warning(
+                    "Silver LLM generation and validation-feedback retry failed; using deterministic fallback: %s",
+                    retry_exc,
+                )
 
     output_dir = _silver_output_dir_for(target_warehouse)
     os.makedirs(output_dir, exist_ok=True)
@@ -1215,14 +1326,118 @@ def _extract_json_object(value: Any) -> Dict[str, Any]:
     return parsed
 
 
-def _kimball_plan_prompt(*, kpi: Dict[str, Any], mapping: Dict[str, Any], columns: List[Dict[str, Any]], certified_joins: List[Dict[str, Any]]) -> str:
-    available = [{"table": c.get("table_name"), "column": c.get("column_name"), "semantic_type": c.get("semantic_type"), "is_measure": c.get("is_measure")} for c in columns if isinstance(c, dict)]
-    joins = [{key: j.get(key) for key in ("left_table", "left_column", "right_table", "right_column", "join_type", "certified")} for j in certified_joins if isinstance(j, dict)]
-    shape = '{"measure":{"table":"...","column":"...","aggregation":"SUM|AVG|MIN|MAX|COUNT"},"dimensions":[{"table":"...","column":"...","semantic_type":"DIMENSION|DATE|FLAG"}],"time":{"table":"...","column":"...","grain":"day|week|month|quarter|year"},"join_paths":[{"left_table":"...","left_column":"...","right_table":"...","right_column":"..."}],"fact_grain":["columns","period_start"]}'
-    return "Design a Kimball Gold model. Return only JSON matching this shape: " + shape + "\nKPI=" + json.dumps(kpi, default=str) + "\nCURRENT_MAPPING=" + json.dumps(mapping, default=str) + "\nAVAILABLE_COLUMNS=" + json.dumps(available, default=str) + "\nCERTIFIED_JOINS=" + json.dumps(joins, default=str)
+def _kimball_candidates(columns: List[Dict[str, Any]], certified_joins: List[Dict[str, Any]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    measures: Dict[str, Dict[str, Any]] = {}
+    dimensions: Dict[str, Dict[str, Any]] = {}
+    times: Dict[str, Dict[str, Any]] = {}
+    joins: Dict[str, Dict[str, Any]] = {}
+    for column in columns:
+        if not isinstance(column, dict):
+            continue
+        candidate = {
+            "table": str(column.get("table_name") or ""),
+            "column": str(column.get("column_name") or ""),
+            "semantic_type": str(column.get("semantic_type") or "").upper(),
+        }
+        if not candidate["table"] or not candidate["column"]:
+            continue
+        if candidate["semantic_type"] in {"MEASURE", "FLAG"}:
+            measures[f"M{len(measures) + 1}"] = candidate
+        if candidate["semantic_type"] in {"DIMENSION", "DATE", "FLAG"}:
+            dimensions[f"D{len(dimensions) + 1}"] = candidate
+        if candidate["semantic_type"] in {"DATE", "AUDIT_TIMESTAMP"}:
+            times[f"T{len(times) + 1}"] = candidate
+    for join in certified_joins:
+        if not isinstance(join, dict) or not join.get("certified"):
+            continue
+        joins[f"J{len(joins) + 1}"] = {
+            key: join.get(key)
+            for key in ("left_table", "left_column", "right_table", "right_column", "join_type", "cardinality", "confidence")
+        }
+    return {"measures": measures, "dimensions": dimensions, "times": times, "joins": joins}
+
+
+def _kimball_plan_prompt(
+    *,
+    kpi: Dict[str, Any],
+    mapping: Dict[str, Any],
+    columns: List[Dict[str, Any]],
+    certified_joins: List[Dict[str, Any]],
+    validation_feedback: str = "",
+) -> str:
+    candidates = _kimball_candidates(columns, certified_joins)
+    retry_context = (
+        f"\nPrevious plan rejected: {validation_feedback}\nCorrect only that violation.\n"
+        if validation_feedback
+        else ""
+    )
+    shape = '{"measure_id":"M1","aggregation":"SUM|AVG|MIN|MAX|COUNT","dimension_ids":["D1"],"time_id":"T1|null","time_grain":"day|week|month|quarter|year","join_ids":["J1"],"fact_grain":["D1","period_start"]}'
+    return (
+        "Design a Kimball Gold model. Return only JSON matching this exact shape. "
+        "Use only candidate IDs. Do not invent IDs, columns, joins, or aggregations. "
+        "fact_grain must include every selected dimension ID and include period_start only when time_id is set."
+        + retry_context
+        + "\nKPI=" + json.dumps(kpi, default=str)
+        + "\nCURRENT_MAPPING=" + json.dumps(mapping, default=str)
+        + "\nCANDIDATES=" + json.dumps(candidates, default=str)
+    )
+
+
+def _normalize_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]], certified_joins: List[Dict[str, Any]]) -> Dict[str, Any]:
+    candidates = _kimball_candidates(columns, certified_joins)
+    index = {(str(c.get("table_name") or "").casefold(), str(c.get("column_name") or "").casefold()): c for c in columns if isinstance(c, dict)}
+
+    def canonical_column(item: Dict[str, Any]) -> Dict[str, Any]:
+        meta = index.get((str(item.get("table") or "").casefold(), str(item.get("column") or "").casefold()))
+        return {
+            "table": str((meta or item).get("table_name") or item.get("table") or ""),
+            "column": str((meta or item).get("column_name") or item.get("column") or ""),
+            "semantic_type": str((meta or item).get("semantic_type") or item.get("semantic_type") or "").upper(),
+        }
+
+    measure_input = plan.get("measure") or candidates["measures"].get(str(plan.get("measure_id") or ""), {})
+    dimensions_input = plan.get("dimensions") if isinstance(plan.get("dimensions"), list) else [
+        candidates["dimensions"].get(str(identifier) or "", {}) for identifier in plan.get("dimension_ids") or []
+    ]
+    time_input = plan.get("time") or candidates["times"].get(str(plan.get("time_id") or ""), {})
+    join_lookup = {
+        tuple(str(join.get(key) or "").casefold() for key in ("left_table", "left_column", "right_table", "right_column")): join
+        for join in candidates["joins"].values()
+    }
+    joins_input = plan.get("join_paths") if isinstance(plan.get("join_paths"), list) else [
+        candidates["joins"].get(str(identifier) or "", {}) for identifier in plan.get("join_ids") or []
+    ]
+    normalized_joins = []
+    for join in joins_input:
+        signature = tuple(str(join.get(key) or "").casefold() for key in ("left_table", "left_column", "right_table", "right_column"))
+        reverse = (signature[2], signature[3], signature[0], signature[1])
+        normalized_joins.append(join_lookup.get(signature) or join_lookup.get(reverse) or join)
+
+    normalized_dimensions = [canonical_column(item) for item in dimensions_input if isinstance(item, dict)]
+    normalized_time = canonical_column(time_input) if isinstance(time_input, dict) and time_input else {}
+    if normalized_time:
+        normalized_time["grain"] = str((time_input or {}).get("grain") or plan.get("time_grain") or "").lower()
+    fact_grain = list(plan.get("fact_grain") or [])
+    if fact_grain and any(str(value).upper().startswith("D") for value in fact_grain):
+        fact_grain = [
+            candidates["dimensions"].get(str(value), {}).get("column", value)
+            for value in fact_grain
+        ]
+    if not fact_grain:
+        fact_grain = [item["column"] for item in normalized_dimensions]
+        if normalized_time:
+            fact_grain.append("period_start")
+    return {
+        "measure": {**canonical_column(measure_input), "aggregation": str(plan.get("aggregation") or measure_input.get("aggregation") or "").upper()},
+        "dimensions": normalized_dimensions,
+        "time": normalized_time,
+        "join_paths": normalized_joins,
+        "fact_grain": fact_grain,
+    }
 
 
 def _validate_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]], certified_joins: List[Dict[str, Any]]) -> Dict[str, Any]:
+    plan = _normalize_kimball_plan(plan, columns=columns, certified_joins=certified_joins)
     index = {(str(c.get("table_name") or "").casefold(), str(c.get("column_name") or "").casefold()): c for c in columns if isinstance(c, dict)}
     measure = plan.get("measure") or {}
     measure_meta = index.get((str(measure.get("table") or "").casefold(), str(measure.get("column") or "").casefold()))
@@ -1249,6 +1464,12 @@ def _validate_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]
         signature = tuple(str(join.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column"))
         if signature not in certified:
             raise ValueError("Kimball plan selected a non-certified join")
+    expected_grain = {str(item.get("column") or "") for item in dimensions}
+    if time:
+        expected_grain.add("period_start")
+    actual_grain = [str(item or "") for item in plan.get("fact_grain") or []]
+    if not actual_grain or len(actual_grain) != len(set(actual_grain)) or set(actual_grain) != expected_grain:
+        raise ValueError("Kimball plan has an invalid fact grain")
     return plan
 
 
@@ -1262,15 +1483,23 @@ def _apply_kimball_plan(mapping: Dict[str, Any], plan: Dict[str, Any]) -> Dict[s
     if plan.get("time"):
         result["time"] = dict(plan["time"])
     result["join_paths"] = [{**join, "certified": True} for join in plan.get("join_paths") or []]
+    result["fact_grain"] = list(plan.get("fact_grain") or [])
     result["kimball_plan"] = plan
     result["kimball_plan_source"] = "LLM_VALIDATED"
     return result
 
 
-def _llm_kimball_plan(*, kpi: Dict[str, Any], mapping: Dict[str, Any], columns: List[Dict[str, Any]], certified_joins: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _llm_kimball_plan(
+    *,
+    kpi: Dict[str, Any],
+    mapping: Dict[str, Any],
+    columns: List[Dict[str, Any]],
+    certified_joins: List[Dict[str, Any]],
+    validation_feedback: str = "",
+) -> Dict[str, Any]:
     from nodes.req_extraction import get_llm
     llm = get_llm(provider=os.getenv("ATHENA_GOLD_LLM_PROVIDER", os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")), model=os.getenv("ATHENA_GOLD_KIMBALL_PLAN_MODEL") or os.getenv("ATHENA_GOLD_LLM_MODEL"), temperature=0.0)
-    response = llm.invoke(_kimball_plan_prompt(kpi=kpi, mapping=mapping, columns=columns, certified_joins=certified_joins))
+    response = llm.invoke(_kimball_plan_prompt(kpi=kpi, mapping=mapping, columns=columns, certified_joins=certified_joins, validation_feedback=validation_feedback))
     plan = _extract_json_object(getattr(response, "content", response))
     return _validate_kimball_plan(plan, columns=columns, certified_joins=certified_joins)
 
@@ -1349,10 +1578,21 @@ def _build_gold_generation_contract(
             try:
                 plan = _llm_kimball_plan(kpi=kpi, mapping=mapping, columns=columns, certified_joins=joins)
                 mapping = _apply_kimball_plan(mapping, plan)
-            except Exception as exc:
-                mapping["kimball_plan_source"] = "DETERMINISTIC_FALLBACK"
-                warnings.append(f"KPI '{kpi_name}' Kimball LLM plan rejected; deterministic plan retained: {exc}")
-                logger.warning("Kimball plan rejected for KPI %s; deterministic fallback retained: %s", kpi_name, exc)
+            except Exception as first_exc:
+                try:
+                    plan = _llm_kimball_plan(
+                        kpi=kpi,
+                        mapping=mapping,
+                        columns=columns,
+                        certified_joins=joins,
+                        validation_feedback=str(first_exc),
+                    )
+                    mapping = _apply_kimball_plan(mapping, plan)
+                    mapping["kimball_plan_source"] = "LLM_RETRY_VALIDATED"
+                except Exception as retry_exc:
+                    mapping["kimball_plan_source"] = "DETERMINISTIC_FALLBACK"
+                    warnings.append(f"KPI '{kpi_name}' Kimball LLM plan rejected; deterministic plan retained: {retry_exc}")
+                    logger.warning("Kimball plan rejected for KPI %s; deterministic fallback retained: %s", kpi_name, retry_exc)
         else:
             mapping["kimball_plan_source"] = "DETERMINISTIC"
         kpi_mappings.append(mapping)

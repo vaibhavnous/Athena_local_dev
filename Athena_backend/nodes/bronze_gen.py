@@ -253,7 +253,8 @@ def validate_snowflake_bronze_sql(
     source_table: str | None = None,
     target_table: str | None = None,
 ) -> None:
-    upper = str(sql or "").upper()
+    sql = str(sql or "")
+    upper = sql.upper()
     required = (
         "CREATE SCHEMA IF NOT EXISTS",
         "CREATE TABLE IF NOT EXISTS",
@@ -267,16 +268,26 @@ def validate_snowflake_bronze_sql(
     missing = [token for token in required if token not in upper]
     if missing:
         raise ValueError(f"Snowflake bronze SQL is missing required statements: {', '.join(missing)}")
-    for keyword in DESTRUCTIVE_SNOWFLAKE_SQL_KEYWORDS:
-        if re.search(rf"\b{keyword}\b", upper):
-            raise ValueError(f"Disallowed Snowflake SQL keyword detected: {keyword}")
-    for token in ("SPARK.", "PYSPARK", ".FORMAT(", ".OPTION(", "JDBC"):
-        if token in upper:
-            raise ValueError(f"Snowflake bronze SQL contains Databricks/Python token: {token}")
     if source_table and source_table not in sql:
         raise ValueError(f"Snowflake bronze SQL does not read from expected source table: {source_table}")
     if target_table and target_table not in sql:
         raise ValueError(f"Snowflake bronze SQL does not write to expected target table: {target_table}")
+    # Bronze generation is idempotent per run. Its only permitted destructive
+    # operation is deleting that same run's rows from its expected target table.
+    # ponytail: this is intentionally narrow; widening it requires statement parsing.
+    allowed_cleanup = re.escape(str(target_table or ""))
+    cleanup_pattern = (
+        rf"DELETE\s+FROM\s+{allowed_cleanup}\s+WHERE\s+\"run_id\"\s*=\s*'[^']*'\s*;"
+        if target_table else None
+    )
+    safety_sql = re.sub(cleanup_pattern, "", sql, flags=re.IGNORECASE) if cleanup_pattern else sql
+    safety_upper = safety_sql.upper()
+    for keyword in DESTRUCTIVE_SNOWFLAKE_SQL_KEYWORDS:
+        if re.search(rf"\b{keyword}\b", safety_upper):
+            raise ValueError(f"Disallowed Snowflake SQL keyword detected: {keyword}")
+    for token in ("SPARK.", "PYSPARK", ".FORMAT(", ".OPTION(", "JDBC"):
+        if token in upper:
+            raise ValueError(f"Snowflake bronze SQL contains Databricks/Python token: {token}")
 
 
 def _validate_snowflake_sql(
@@ -925,6 +936,8 @@ CREATE SCHEMA IF NOT EXISTS {target_schema};
 
 {create_table}
 
+DELETE FROM {target_table} WHERE "run_id" = {_snowflake_string_literal(run_id)};
+
 {insert_sql}
 """
 
@@ -1167,8 +1180,11 @@ def _generate_one_table(
         "table": table_name,
         "database_name": database_name,
         "schema_name": schema_name,
+        # Keep lineage consumers independent from parsing generated SQL comments.
+        "source_table": f"{database_name}.{schema_name}.{table_name}",
         "bronze_catalog": bronze_catalog,
         "bronze_schema": bronze_schema,
+        "target_table": f"{bronze_catalog}.{bronze_schema}.bronze_{table_name}",
         "status": "APPROVED",
         "cast_rule_count": len(cast_rules or {}),
         "source_columns": [

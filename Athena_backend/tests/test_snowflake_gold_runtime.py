@@ -3,8 +3,152 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+import pytest
+
 from services import pipeline_runtime
 from services import snowflake_gold_runtime
+from nodes.gold_gen import _canonicalize_snowflake_gold_identifiers, _require_snowflake_gold_structure, _validate_snowflake_gold_candidate
+
+
+def test_gold_llm_candidate_rejects_noncanonical_silver_column_case():
+    mapping = {
+        "source_silver_table": "ATHENA_DB.SILVER.silver_claims",
+        "measure": {"column": "PaidAmount", "aggregation": "AVG"},
+    }
+    sql = '''
+CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
+CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_average" ("value" NUMBER);
+MERGE INTO "ATHENA_DB"."GOLD"."fact_average" target
+USING (SELECT AVG("PaidAmount") AS "value" FROM "ATHENA_DB"."SILVER"."silver_claims") source
+ON 1 = 0 WHEN NOT MATCHED THEN INSERT ("value") VALUES (source."value");
+'''
+
+    try:
+        _validate_snowflake_gold_candidate(sql, mapping, "ATHENA_DB.GOLD.fact_average")
+    except ValueError as exc:
+        assert "non-canonical Silver identifiers" in str(exc)
+    else:
+        raise AssertionError("Expected non-canonical Silver identifier casing to be rejected")
+
+
+def test_gold_llm_candidate_repairs_canonical_silver_column_case():
+    mapping = {
+        "source_silver_table": "ATHENA_DB.SILVER.silver_claims",
+        "measure": {"column": "PaidAmount", "aggregation": "AVG"},
+    }
+    sql = '''
+CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
+CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_average" ("value" NUMBER);
+MERGE INTO "ATHENA_DB"."GOLD"."fact_average" target
+USING (SELECT AVG("PaidAmount") AS "value" FROM "ATHENA_DB"."SILVER"."silver_claims") source
+ON 1 = 0 WHEN NOT MATCHED THEN INSERT ("value") VALUES (source."value");
+'''
+
+    repaired = _canonicalize_snowflake_gold_identifiers(sql, mapping)
+
+    assert 'AVG("paidamount")' in repaired
+    _validate_snowflake_gold_candidate(repaired, mapping, "ATHENA_DB.GOLD.fact_average")
+
+
+def test_gold_llm_candidate_repairs_corrected_count_identifier():
+    mapping = {
+        "source_silver_table": "ATHENA_DB.SILVER.silver_policy_transactions",
+        "measure": {"column": "RERERENCE_ID", "aggregation": "COUNT"},
+    }
+    sql = '''
+CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
+CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_unique" ("value" NUMBER);
+MERGE INTO "ATHENA_DB"."GOLD"."fact_unique" AS target
+USING (SELECT COUNT(DISTINCT "RERERENCE_ID") AS "value" FROM "ATHENA_DB"."SILVER"."silver_policy_transactions") AS source
+ON 1 = 0 WHEN NOT MATCHED THEN INSERT ("value") VALUES (source."value");
+'''
+
+    repaired = _canonicalize_snowflake_gold_identifiers(sql, mapping)
+
+    assert 'COUNT(DISTINCT "reference_id")' in repaired
+    _validate_snowflake_gold_candidate(repaired, mapping, "ATHENA_DB.GOLD.fact_unique")
+
+
+def test_gold_llm_candidate_rejects_unknown_source_identifier():
+    mapping = {
+        "source_silver_table": "ATHENA_DB.SILVER.silver_policy_transactions",
+        "measure": {"column": "RERERENCE_ID", "aggregation": "COUNT"},
+    }
+    sql = '''
+CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
+CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_unique" ("value" NUMBER);
+MERGE INTO "ATHENA_DB"."GOLD"."fact_unique" AS target
+USING (SELECT COUNT(DISTINCT "CLAIM_NUMBER") AS "value" FROM "ATHENA_DB"."SILVER"."silver_policy_transactions") AS source
+ON 1 = 0 WHEN NOT MATCHED THEN INSERT ("value") VALUES (source."value");
+'''
+
+    with pytest.raises(ValueError, match="non-contract Silver identifiers"):
+        _validate_snowflake_gold_candidate(sql, mapping, "ATHENA_DB.GOLD.fact_unique")
+
+
+def test_gold_llm_repair_preserves_output_alias_case():
+    mapping = {
+        "source_silver_table": "ATHENA_DB.SILVER.silver_claims",
+        "measure": {"column": "PaidAmount", "aggregation": "AVG"},
+    }
+    sql = '''
+WITH aggregate_data AS (
+    SELECT AVG("PaidAmount") AS "PaidAmount"
+    FROM "ATHENA_DB"."SILVER"."silver_claims"
+)
+SELECT "PaidAmount" FROM aggregate_data;
+'''
+
+    repaired = _canonicalize_snowflake_gold_identifiers(sql, mapping)
+
+    assert 'AVG("paidamount") AS "PaidAmount"' in repaired
+    assert 'SELECT "PaidAmount" FROM aggregate_data' in repaired
+
+
+def test_gold_llm_rejects_comment_only_source_and_destructive_sql():
+    mapping = {"source_silver_table": "ATHENA_DB.SILVER.silver_claims"}
+    sql = '''
+-- FROM "ATHENA_DB"."SILVER"."silver_claims"
+MERGE INTO "ATHENA_DB"."GOLD"."fact_average" AS target
+USING (SELECT * FROM "OTHER_DB"."SILVER"."claims") source ON 1 = 0
+WHEN NOT MATCHED THEN INSERT DEFAULT VALUES;
+DELETE FROM "ATHENA_DB"."SILVER"."silver_claims";
+'''
+
+    with pytest.raises(ValueError, match="approved Silver table"):
+        _require_snowflake_gold_structure(sql, mapping, "ATHENA_DB.GOLD.fact_average")
+
+
+def test_gold_llm_rejects_join_outside_approved_source():
+    mapping = {"source_silver_table": "ATHENA_DB.SILVER.silver_claims"}
+    sql = '''
+MERGE INTO "ATHENA_DB"."GOLD"."fact_average" AS target
+USING (
+    SELECT COUNT(*) AS "value"
+    FROM "ATHENA_DB"."SILVER"."silver_claims" AS claims
+    JOIN "ATHENA_DB"."SILVER"."silver_payments" AS payments ON 1 = 1
+) AS source ON 1 = 0
+WHEN NOT MATCHED THEN INSERT DEFAULT VALUES;
+'''
+
+    with pytest.raises(ValueError, match="must not add joins"):
+        _require_snowflake_gold_structure(sql, mapping, "ATHENA_DB.GOLD.fact_average")
+
+
+def test_gold_runtime_rejects_destructive_stored_sql():
+    sql = '''
+MERGE INTO "ATHENA_DB"."GOLD"."fact_average" AS target
+USING (SELECT * FROM "ATHENA_DB"."SILVER"."silver_claims") source ON 1 = 0
+WHEN NOT MATCHED THEN INSERT DEFAULT VALUES;
+DROP TABLE "ATHENA_DB"."GOLD"."fact_average";
+'''
+
+    with pytest.raises(ValueError, match="forbidden statement: DROP"):
+        snowflake_gold_runtime._require_approved_snowflake_structure(
+            sql,
+            "ATHENA_DB.SILVER.silver_claims",
+            "ATHENA_DB.GOLD.fact_average",
+        )
 
 
 def _gold_sql() -> str:

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("ATHENA_DEMO_MODE", "false")
@@ -41,6 +42,25 @@ def test_silver_merge_key_review_get_returns_checkpoint_artifact(monkeypatch):
 
     assert response["next_review_key"] == "silver_merge_key_review"
     assert response["silver_merge_key_review_artifact"]["feeds"][0]["merge_keys"] == ["claim_id"]
+
+
+def test_kpi_review_returns_conflict_when_kpi_artifact_failed_without_rows(monkeypatch):
+    from api.routers import kpi_router
+
+    monkeypatch.setattr(kpi_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_fields", lambda run_id, *fields: {"source": "database"})
+    monkeypatch.setattr("api.services.kpi_service.fetch_hitl_rows", lambda run_id, status=None: [])
+    monkeypatch.setattr("api.services.kpi_service.artifact_kpis", lambda run_id: [])
+    monkeypatch.setattr(
+        "services.pipeline_runtime.fetch_run_summary",
+        lambda run_id: [{"artifact_type": "KPIS", "faithfulness_status": "FAILED"}],
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        kpi_router.kpi_reviews("run-kpi-failed")
+
+    assert exc.value.status_code == 409
+    assert "KPI extraction failed" in exc.value.detail
 
 
 def test_sql_tcp_probe_failure_is_cached(monkeypatch):
@@ -420,6 +440,18 @@ def test_bronze_review_submit_rejects_when_artifact_not_ready(monkeypatch):
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Bronze review is not ready yet. Generated Bronze scripts are still loading."
+
+
+def test_bronze_review_normalizes_legacy_feed_lineage_fields():
+    from api.services.ui.review_ui_service import normalize_bronze_review_artifact
+
+    artifact = normalize_bronze_review_artifact(
+        {"feeds": [{"database_name": "insurance", "schema_name": "dbo", "table": "claims"}]},
+        {"bronze_catalog": "ATHENA_DB", "bronze_schema": "BRONZE"},
+    )
+
+    assert artifact["feeds"][0]["source_table"] == "insurance.dbo.claims"
+    assert artifact["feeds"][0]["target_table"] == "ATHENA_DB.BRONZE.bronze_claims"
 
 
 def test_retry_failed_stage_rejects_non_failed_run(monkeypatch):

@@ -159,7 +159,7 @@ def bronze_reviews(run_id: str) -> Dict[str, Any]:
     if demo_enabled():
         return demo_bronze_review(run_id)
 
-    from api.services.ui_service import bronze_review_from_scripts, ui_run
+    from api.services.ui_service import bronze_review_from_scripts, normalize_bronze_review_artifact, ui_run
     from services.pipeline_runtime import load_checkpoint_state
 
     try:
@@ -175,6 +175,7 @@ def bronze_reviews(run_id: str) -> Dict[str, Any]:
 
     if not (bronze_artifact.get("feeds") or []):
         bronze_artifact = bronze_review_from_scripts(run_id, checkpoint)
+    bronze_artifact = normalize_bronze_review_artifact(bronze_artifact, checkpoint)
 
     return {
         "run_id": run_id,

@@ -43,6 +43,8 @@ def display_run_name(checkpoint: Dict[str, Any], context: Optional[Dict[str, Any
 
 
 def failed_stage_key(checkpoint: Dict[str, Any], pipeline_steps: List[Dict[str, Any]]) -> Optional[str]:
+    if str(checkpoint.get("status") or "").upper() in {"SUCCESS", "COMPLETED", "PIPELINE_COMPLETED"}:
+        return None
     return (
         checkpoint.get("failed_background_stage")
         or api_utils.stage_key(checkpoint.get("background_stage"))

@@ -49,6 +49,28 @@ def test_gate2_scope_keeps_lookup_and_fk_dimension_tables():
     ]
 
 
+def test_failed_kpi_artifact_does_not_open_empty_gate1():
+    context = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={"status": "FAILED", "failed_background_stage": "kpis"},
+        summary=[{"artifact_type": "KPIS", "faithfulness_status": "FAILED"}],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=False,
+        silver_generation_completed=False,
+        gold_generation_completed=False,
+    )
+
+    kpis = next(step for step in context if step["key"] == "kpis")
+    gate1 = next(step for step in context if step["key"] == "gate1")
+    assert kpis["state"] == "FAILED"
+    assert gate1["state"] == "PENDING"
+
+
 def test_silver_merge_key_resolution_node_builds_review_input():
     from nodes.silver_merge_key_resolution import silver_merge_key_resolution_node
 
@@ -539,6 +561,49 @@ def test_build_run_lineage_prefers_certified_fk_edges(monkeypatch):
     assert payload["summary"]["heuristic_edge_count"] == 1
 
 
+def test_build_run_lineage_renders_bronze_artifacts_with_generator_fields(monkeypatch):
+    from services import pipeline_runtime
+
+    checkpoint = {"run_id": "run-lineage-bronze-artifact", "gold_generation_contract": {}}
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_bronze_scripts",
+        lambda run_id, checkpoint=None: {
+            "scripts": [
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table": "claims",
+                    "source_table": "insurance.dbo.claims",
+                    "target_table": "ATHENA_DB.BRONZE.bronze_claims",
+                    "script_body": "CREATE TABLE ...",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(pipeline_runtime, "load_silver_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+    monkeypatch.setattr(pipeline_runtime, "load_gold_scripts", lambda run_id, checkpoint=None: {"scripts": []})
+    monkeypatch.setattr(pipeline_runtime, "fetch_json_artifact", lambda run_id, artifact: {})
+
+    payload = pipeline_runtime.build_run_lineage("run-lineage-bronze-artifact", checkpoint)
+
+    assert payload["summary"]["fallback"] is False
+    assert payload["summary"]["source_count"] == 1
+    assert payload["summary"]["bronze_count"] == 1
+
+    normalized = pipeline_runtime._normalize_bronze_script(
+        {
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table": "claims",
+            "bronze_catalog": "ATHENA_DB",
+            "bronze_schema": "BRONZE",
+        }
+    )
+    assert normalized["source"] == "insurance.dbo.claims"
+    assert normalized["target"] == "ATHENA_DB.BRONZE.bronze_claims"
+
+
 def test_build_run_lineage_uses_checkpoint_fallback_when_scripts_missing(monkeypatch):
     from services import pipeline_runtime
 
@@ -794,6 +859,37 @@ def test_database_continue_skips_stage_confirmation_before_review_gates(monkeypa
     assert all(state.get("status") != "PAUSED_FOR_STAGE_CONFIRMATION" for state in saved_states)
     assert any(state.get("background_stage") == start_stage for state in saved_states)
     assert any(state.get("background_stage") == expected_gate for state in saved_states)
+
+
+def test_database_continue_clears_stale_failure_when_retrying(monkeypatch):
+    from services import pipeline_runtime
+
+    saved_states = []
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_database_stage_runner",
+        lambda _stage: lambda _state: {"status": "HITL_WAIT"},
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state",
+        lambda run_id, state: saved_states.append(dict(state)),
+    )
+
+    pipeline_runtime.continue_database_pipeline(
+        "run-retry",
+        start_stage_key="bronze",
+        state={
+            "run_id": "run-retry",
+            "error": "old failure",
+            "failed_stage": "bronze",
+            "failed_background_stage": "bronze",
+        },
+    )
+
+    assert saved_states[0]["error"] is None
+    assert saved_states[0]["failed_stage"] is None
+    assert saved_states[0]["failed_background_stage"] is None
 
 
 def test_mark_run_processing_moves_off_stale_review_gate(monkeypatch):

@@ -47,6 +47,13 @@ def _normalize_account(value: str) -> str:
     return raw
 
 
+def _normalize_identifier(value: Any) -> str:
+    cleaned = str(value or "").strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {'"', "'"}:
+        return cleaned[1:-1].strip()
+    return cleaned
+
+
 def _get_snowflake_connector():
     try:
         import snowflake.connector
@@ -84,12 +91,12 @@ def _snowflake_connect():
     ):
         value = os.getenv(env_name)
         if str(value or "").strip():
-            kwargs[key] = value
+            kwargs[key] = _normalize_identifier(value)
     return connector.connect(**kwargs)
 
 
 def _snowflake_quote_identifier(value: str) -> str:
-    cleaned = str(value or "").strip()
+    cleaned = _normalize_identifier(value)
     if not cleaned:
         raise ValueError("Snowflake identifier cannot be empty.")
     return '"' + cleaned.replace('"', '""') + '"'
@@ -255,6 +262,10 @@ def _adls_integration_name() -> str:
     return str(os.getenv("SNOWFLAKE_ADLS_INTEGRATION") or "ADLS_INSURANCE_INT").strip()
 
 
+def _adls_sas_token() -> str:
+    return str(os.getenv("SNOWFLAKE_ADLS_SAS_TOKEN") or "").strip().lstrip("?")
+
+
 def _adls_stage_url() -> str:
     return str(
         os.getenv("SNOWFLAKE_ADLS_STAGE_URL")
@@ -262,9 +273,8 @@ def _adls_stage_url() -> str:
     ).strip()
 
 
-def _adls_folder_for_script(script: Dict[str, Any]) -> str:
-    folder = str(script.get("adls_folder") or script.get("landing_path") or _table_name(script)).strip().strip("/")
-    return folder
+def _adls_file_for_script(script: Dict[str, Any]) -> str:
+    return str(script.get("adls_file") or f"{_table_name(script)}.csv").strip().strip("/")
 
 
 def _stage_ref(*, include_name: bool = True) -> str:
@@ -280,6 +290,13 @@ def _file_format_ref() -> str:
 
 def ensure_adls_stage(snowflake_conn: Any) -> Dict[str, Any]:
     stage_schema = _snowflake_qualified_name(_adls_stage_database(), _adls_stage_schema())
+    sas_token = _adls_sas_token()
+    create_stage = "CREATE OR REPLACE STAGE" if sas_token else "CREATE STAGE IF NOT EXISTS"
+    credentials = (
+        f"CREDENTIALS = (AZURE_SAS_TOKEN = {_snowflake_string_literal(sas_token)})"
+        if sas_token
+        else f"STORAGE_INTEGRATION = {_adls_integration_name()}"
+    )
     cursor = snowflake_conn.cursor()
     try:
         cursor.execute(f"CREATE DATABASE IF NOT EXISTS {_snowflake_quote_identifier(_adls_stage_database())}")
@@ -297,9 +314,9 @@ CREATE FILE FORMAT IF NOT EXISTS {_file_format_ref()}
         )
         cursor.execute(
             f"""
-CREATE STAGE IF NOT EXISTS {_stage_ref()}
+{create_stage} {_stage_ref()}
     URL = {_snowflake_string_literal(_adls_stage_url())}
-    STORAGE_INTEGRATION = {_adls_integration_name()}
+    {credentials}
     FILE_FORMAT = {_file_format_ref()}
             """.strip()
         )
@@ -310,7 +327,7 @@ CREATE STAGE IF NOT EXISTS {_stage_ref()}
         "stage": _stage_ref(),
         "file_format": _file_format_ref(),
         "stage_url": _adls_stage_url(),
-        "storage_integration": _adls_integration_name(),
+        "credential_type": "sas" if sas_token else "storage_integration",
     }
 
 
@@ -342,8 +359,8 @@ def load_adls_table_to_snowflake(script: Dict[str, Any], snowflake_conn: Any) ->
     table_name = _table_name(script)
     landing_table = _snowflake_qualified_name(database_name, schema_name, table_name)
     columns = _landing_columns(script)
-    folder = _adls_folder_for_script(script)
-    stage_path = f"@{_stage_ref()}/{folder}/"
+    adls_file = _adls_file_for_script(script)
+    stage_path = f"@{_stage_ref()}"
 
     cursor = snowflake_conn.cursor()
     try:
@@ -368,10 +385,12 @@ USING TEMPLATE (
 )
                 """.strip()
             )
+        cursor.execute(f"TRUNCATE TABLE {landing_table}")
         cursor.execute(
             f"""
 COPY INTO {landing_table}
 FROM {stage_path}
+FILES = ({_snowflake_string_literal(adls_file)})
 FILE_FORMAT = (FORMAT_NAME = {_file_format_ref()})
 MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
             """.strip()
@@ -384,6 +403,7 @@ MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
         "source_table": f"{database_name}.{schema_name}.{table_name}",
         "snowflake_landing_table": f"{database_name}.{schema_name}.{table_name}",
         "adls_stage_path": stage_path,
+        "adls_file": adls_file,
         "copy_result_count": len(copy_rows or []),
     }
 

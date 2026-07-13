@@ -176,6 +176,10 @@ def _logical_table_from_silver(source_table: str) -> str:
 
 
 def _dimension_entity_for_column(column: str, table: str | None = None) -> str:
+    table_entity = _safe_identifier(table or "", "dimension")
+    if table_entity != "dimension":
+        return table_entity
+
     column_text = str(column or "").lower()
     table_text = str(table or "").lower()
     direct_matches = {
@@ -266,6 +270,15 @@ def _mapping_source_columns(mapping: Dict[str, Any]) -> set[str]:
     return columns
 
 
+def _allowed_llm_source_columns(mapping: Dict[str, Any]) -> set[str]:
+    columns = set(_mapping_source_columns(mapping))
+    measure = mapping.get("measure") or {}
+    measure_column = str(measure.get("column") or "").strip()
+    if measure_column:
+        columns.add(_silver_output_column_name(measure_column))
+    return columns
+
+
 def _shared_dimension_mapping(mappings: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Build one idempotent dimension contract for the whole Gold run."""
     dimensions: List[Dict[str, Any]] = []
@@ -289,6 +302,81 @@ def _shared_dimension_mapping(mappings: List[Dict[str, Any]]) -> Dict[str, Any]:
         "source_silver_table": source_table,
         "grouping_dimensions": dimensions,
     }
+
+
+def _gold_dimension_columns_for_table(enriched_metadata: Dict[str, Any], table_name: str) -> List[str]:
+    columns = enriched_metadata.get("columns", []) if isinstance(enriched_metadata, dict) else []
+    selected: List[str] = []
+    seen: set[str] = set()
+    for column in columns:
+        if not isinstance(column, dict):
+            continue
+        if str(column.get("table_name") or "").casefold() != str(table_name or "").casefold():
+            continue
+        if str(column.get("semantic_type") or "").upper() != "DIMENSION":
+            continue
+        if column.get("is_pii_candidate") or column.get("is_primary_key"):
+            continue
+        name = _silver_output_column_name(column.get("column_name"))
+        if name and name not in seen:
+            selected.append(name)
+            seen.add(name)
+    return selected
+
+
+def _source_table_grain_specs(
+    contract: Dict[str, Any],
+    mappings: List[Dict[str, Any]],
+    enriched_metadata: Dict[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    enriched_metadata = enriched_metadata or {}
+    specs: Dict[str, Dict[str, Any]] = {}
+    for item in contract.get("silver_tables") or []:
+        if not isinstance(item, dict):
+            continue
+        source_table = str(item.get("target_table") or "").strip()
+        logical_table = str(item.get("table") or _logical_table_from_silver(source_table)).strip()
+        # ponytail: duplicate/deleted extracts support reconciliation KPIs but are
+        # not business entities; keep them in Silver without creating Gold marts.
+        if logical_table.casefold().endswith("_dup_del"):
+            continue
+        if source_table and logical_table:
+            dimension_columns = _gold_dimension_columns_for_table(enriched_metadata, logical_table)
+            specs.setdefault(
+                logical_table.casefold(),
+                {
+                    "entity": _safe_identifier(logical_table, "dimension"),
+                    "source_table": source_table,
+                    "logical_table": logical_table,
+                    "columns": dimension_columns,
+                    "source_columns": dimension_columns,
+                    "grain": "source_table",
+                },
+            )
+    if specs:
+        return list(specs.values())
+
+    for mapping in mappings:
+        if not isinstance(mapping, dict) or not _usable_mapping(mapping):
+            continue
+        source_table = str(mapping.get("source_silver_table") or "").strip()
+        logical_table = _logical_table_from_silver(source_table)
+        if logical_table.casefold().endswith("_dup_del"):
+            continue
+        if source_table and logical_table:
+            dimension_columns = _gold_dimension_columns_for_table(enriched_metadata, logical_table)
+            specs.setdefault(
+                logical_table.casefold(),
+                {
+                    "entity": _safe_identifier(logical_table, "dimension"),
+                    "source_table": source_table,
+                    "logical_table": logical_table,
+                    "columns": dimension_columns,
+                    "source_columns": dimension_columns,
+                    "grain": "source_table",
+                },
+            )
+    return list(specs.values())
 
 
 def _target_dim_table(gold_schema: str, entity: str) -> str:
@@ -374,6 +462,7 @@ def llm_generate_snowflake_gold_code(
     run_id: str,
     gold_catalog: str,
     gold_schema: str,
+    validation_feedback: str = "",
 ) -> str:
     """Ask the model to improve Snowflake SQL, then validate/fallback upstream."""
     deterministic = generate_snowflake_gold_script(
@@ -382,12 +471,23 @@ def llm_generate_snowflake_gold_code(
         gold_catalog=gold_catalog,
         gold_schema=gold_schema,
     )
+    canonical_source_columns = sorted(_mapping_source_columns(mapping))
+    retry_context = (
+        f"\nA previous candidate was rejected by the hard validator for this reason:\n{validation_feedback}\n"
+        "Correct that exact violation without changing KPI semantics.\n"
+        if validation_feedback
+        else ""
+    )
     prompt = f"""Generate production Snowflake SQL for this Gold KPI.
 Return only SQL. Preserve the exact source and target tables, dimensional groupings,
 metadata columns, and MERGE/upsert behavior from the baseline. Do not use Python,
 Spark, or Databricks syntax. Do not invent columns.
+Use only exact case-sensitive identifiers from Canonical Silver columns when reading
+the source table. Copy those identifiers exactly from the baseline.
+{retry_context}
 
 KPI: {mapping.get('kpi_name')}
+Canonical Silver columns: {json.dumps(canonical_source_columns)}
 Mapping: {json.dumps(mapping, default=str)}
 
 BASELINE:
@@ -410,6 +510,75 @@ BASELINE:
     return candidate
 
 
+def _snowflake_source_select_region(code: str, mapping: Dict[str, Any]) -> str:
+    source_table = _snowflake_qualified_name(*str(mapping.get("source_silver_table") or "").split("."))
+    source_match = re.search(rf"(?:^|\s)FROM\s+{re.escape(source_table)}(?=\s|\)|,|$)", str(code or ""), re.IGNORECASE)
+    if not source_match:
+        return ""
+
+    select_start = str(code).upper().rfind("SELECT", 0, source_match.start())
+    if select_start < 0:
+        return ""
+    return str(code)[select_start:source_match.start()]
+
+
+def _canonicalize_snowflake_gold_identifiers(code: str, mapping: Dict[str, Any]) -> str:
+    by_casefold = {column.casefold(): column for column in _allowed_llm_source_columns(mapping)}
+    by_casefold.update({raw.casefold(): canonical for raw, canonical in SILVER_COLUMN_NAME_CORRECTIONS.items()})
+
+    source_region = _snowflake_source_select_region(code, mapping)
+    if not source_region:
+        return str(code or "")
+    select_start = str(code).find(source_region)
+    region_end = select_start + len(source_region)
+    prefix = str(code)[:select_start]
+    suffix = str(code)[region_end:]
+
+    def replace(match: re.Match[str]) -> str:
+        if re.search(r"\bAS\s*$", source_region[:match.start()], re.IGNORECASE):
+            return match.group(0)
+        identifier = match.group(1).replace('""', '"')
+        replacement = by_casefold.get(identifier.casefold())
+        if replacement is None:
+            return match.group(0)
+        return '"' + replacement.replace('"', '""') + '"'
+
+    return prefix + re.sub(r'"((?:""|[^"])*)"', replace, source_region) + suffix
+
+
+def _snowflake_source_identifier_references(code: str, mapping: Dict[str, Any]) -> set[str]:
+    source_region = _snowflake_source_select_region(code, mapping)
+    if not source_region:
+        return set()
+    references = set()
+    for match in re.finditer(r'"((?:""|[^"])*)"', source_region):
+        if re.search(r"\bAS\s*$", source_region[:match.start()], re.IGNORECASE):
+            continue
+        references.add(match.group(1).replace('""', '"'))
+    return references
+
+
+def _sql_without_comments(code: str) -> str:
+    return re.sub(r"--[^\n]*|/\*.*?\*/", "", str(code or ""), flags=re.DOTALL)
+
+
+def _require_snowflake_gold_structure(code: str, mapping: Dict[str, Any], target_table: str) -> None:
+    source = _snowflake_qualified_name(*str(mapping.get("source_silver_table") or "").split("."))
+    target = _snowflake_qualified_name(*str(target_table or "").split("."))
+    sql = _sql_without_comments(code)
+    if not re.search(rf"(?:^|\s)FROM\s+{re.escape(source)}(?=\s|\)|,|$)", sql, re.IGNORECASE):
+        raise ValueError("LLM Gold SQL must read the approved Silver table")
+    if not re.search(rf"\bMERGE\s+INTO\s+{re.escape(target)}\s+(?:AS\s+)?target\b", sql, re.IGNORECASE):
+        raise ValueError("LLM Gold SQL must merge into the approved Gold table as target")
+    # Gold facts are generated from one certified Silver contract. Dimensions are
+    # built separately, so an LLM-added join can only broaden that contract.
+    if re.search(r"\bJOIN\b", sql, re.IGNORECASE):
+        raise ValueError("LLM Gold SQL must not add joins outside the approved Silver source")
+    forbidden = re.search(r"\b(DROP|TRUNCATE|DELETE|COPY|CALL|GRANT|REVOKE|USE|EXECUTE\s+IMMEDIATE)\b", sql, re.IGNORECASE)
+    if forbidden:
+        raise ValueError(f"LLM Gold SQL contains forbidden statement: {forbidden.group(1).upper()}")
+
+
 def _validate_snowflake_gold_candidate(code: str, mapping: Dict[str, Any], target_table: str) -> None:
     normalized = str(code or "").lower()
     normalized_identifiers = normalized.replace('"', "")
@@ -419,6 +588,29 @@ def _validate_snowflake_gold_candidate(code: str, mapping: Dict[str, Any], targe
     missing = [token for token in sorted(required) if token and token not in normalized_identifiers]
     if missing:
         raise ValueError(f"LLM Gold SQL dropped required contract fields: {', '.join(missing[:10])}")
+    _require_snowflake_gold_structure(code, mapping, target_table)
+    quoted = {
+        match.group(1).replace('""', '"')
+        for match in re.finditer(r'"((?:""|[^"])*)"', str(code or ""))
+    }
+    wrong_case = [column for column in _mapping_source_columns(mapping) if column not in quoted]
+    if wrong_case:
+        raise ValueError(
+            "LLM Gold SQL used non-canonical Silver identifiers: " + ", ".join(sorted(wrong_case)[:10])
+        )
+    allowed_source_columns = {column.casefold() for column in _allowed_llm_source_columns(mapping)}
+    unknown_source_refs = sorted(
+        {
+            reference
+            for reference in _snowflake_source_identifier_references(code, mapping)
+            if reference.casefold() not in allowed_source_columns
+        }
+    )
+    if unknown_source_refs:
+        raise ValueError(
+            "LLM Gold SQL referenced non-contract Silver identifiers: "
+            + ", ".join(unknown_source_refs[:10])
+        )
     upper = normalized.upper()
     if "CREATE SCHEMA" not in upper or "CREATE TABLE" not in upper or "MERGE INTO" not in upper:
         raise ValueError("LLM Gold SQL is missing required DDL or MERGE statements")
@@ -931,6 +1123,163 @@ def _snowflake_dimension_source_table(source_table: str, logical_table: str) -> 
     return source_table
 
 
+def generate_snowflake_source_table_mart_script(
+    *,
+    specs: List[Dict[str, Any]],
+    run_id: str,
+    gold_catalog: str,
+    gold_schema: str,
+) -> str:
+    if not specs:
+        return ""
+
+    statements: List[str] = [f"CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(gold_catalog, gold_schema)};"]
+    for spec in specs:
+        source_table = str(spec.get("source_table") or "").strip()
+        entity = _safe_identifier(str(spec.get("logical_table") or spec.get("entity") or ""), "dimension")
+        if not source_table or not entity:
+            continue
+        source_qname = _snowflake_qualified_name(*source_table.split("."))
+        dimension_columns = list(
+            dict.fromkeys(
+                _silver_output_column_name(column)
+                for column in spec.get("source_columns") or spec.get("columns") or []
+                if str(column).strip()
+            )
+        )
+        dim_target = _snowflake_qualified_name(gold_catalog, gold_schema, f"DIM_{entity.upper()}")
+        dim_key = f"{entity}_key"
+        dim_column_defs = [(dim_key, "VARCHAR"), *[(column, "VARCHAR") for column in dimension_columns]]
+        dim_column_defs.extend(
+            [
+                ("gold_run_id", "VARCHAR"),
+                ("gold_processed_timestamp", "TIMESTAMP_NTZ"),
+                ("gold_upsert_key", "VARCHAR"),
+            ]
+        )
+        create_dim_columns = ",\n    ".join(
+            f"{_snowflake_quote_identifier(name)} {data_type}" for name, data_type in dim_column_defs
+        )
+        alter_dim_columns = "\n".join(
+            f"ALTER TABLE {dim_target} ADD COLUMN IF NOT EXISTS {_snowflake_quote_identifier(name)} {data_type};"
+            for name, data_type in dim_column_defs
+        )
+        if dimension_columns:
+            distinct_select = ",\n        ".join(
+                f"TO_VARCHAR(src.{_snowflake_quote_identifier(column)}) AS {_snowflake_quote_identifier(column)}"
+                for column in dimension_columns
+            )
+            natural_parts = ",\n            ".join(
+                f"COALESCE(TO_VARCHAR({_snowflake_quote_identifier(column)}), '__NULL__')"
+                for column in dimension_columns
+            )
+            natural_expr = f"MD5(CONCAT_WS('||',\n            {natural_parts}\n        ))"
+            distinct_cte = f"""distinct_dimensions AS (
+        SELECT DISTINCT
+        {distinct_select}
+        FROM {source_qname} AS src
+            )"""
+            source_dimension_columns = ",\n        " + ",\n        ".join(_snowflake_quote_identifier(column) for column in dimension_columns)
+            update_dimension_columns = [dim_key, *dimension_columns, "gold_run_id", "gold_processed_timestamp"]
+            insert_dimension_columns = [dim_key, *dimension_columns, "gold_run_id", "gold_processed_timestamp", "gold_upsert_key"]
+        else:
+            natural_expr = "MD5('__ALL__')"
+            distinct_cte = f"""distinct_dimensions AS (
+        SELECT 1 AS "__dimension_row"
+        FROM {source_qname} AS src
+        QUALIFY ROW_NUMBER() OVER (ORDER BY 1) = 1
+    )"""
+            source_dimension_columns = ""
+            update_dimension_columns = [dim_key, "gold_run_id", "gold_processed_timestamp"]
+            insert_dimension_columns = [dim_key, "gold_run_id", "gold_processed_timestamp", "gold_upsert_key"]
+        update_dim_assignments = ",\n        ".join(
+            f"target.{_snowflake_quote_identifier(column)} = source.{_snowflake_quote_identifier(column)}"
+            for column in update_dimension_columns
+            if column != dim_key
+        )
+        insert_dim_columns = [_snowflake_quote_identifier(column) for column in insert_dimension_columns]
+        insert_dim_values = [f"source.{column}" for column in insert_dim_columns]
+        statements.append(
+            f"""
+CREATE TABLE IF NOT EXISTS {dim_target} (
+    {create_dim_columns}
+);
+
+{alter_dim_columns}
+
+DELETE FROM {dim_target} WHERE "gold_run_id" = {_snowflake_string_literal(run_id)};
+
+MERGE INTO {dim_target} AS target
+USING (
+    WITH {distinct_cte}
+    SELECT
+        {natural_expr} AS {_snowflake_quote_identifier(dim_key)}{source_dimension_columns},
+        {_snowflake_string_literal(run_id)} AS "gold_run_id",
+        CURRENT_TIMESTAMP() AS "gold_processed_timestamp",
+        {natural_expr} AS "gold_upsert_key"
+    FROM distinct_dimensions
+) AS source
+ON target."gold_upsert_key" = source."gold_upsert_key"
+WHEN MATCHED THEN UPDATE SET
+        {update_dim_assignments}
+WHEN NOT MATCHED THEN INSERT (
+        {", ".join(insert_dim_columns)}
+    )
+    VALUES (
+        {", ".join(insert_dim_values)}
+    );
+
+-- ponytail: if every descriptive combination is row-unique, collapse to a
+-- table-level dimension so DIM remains smaller than the row-grain FCT.
+DELETE FROM {dim_target}
+WHERE "gold_run_id" = {_snowflake_string_literal(run_id)}
+  AND (SELECT COUNT(*) FROM {dim_target} WHERE "gold_run_id" = {_snowflake_string_literal(run_id)})
+      >= (SELECT COUNT(*) FROM {source_qname});
+
+INSERT INTO {dim_target} (
+        {_snowflake_quote_identifier(dim_key)}, "gold_run_id", "gold_processed_timestamp", "gold_upsert_key"
+    )
+SELECT
+        MD5('__ALL__') AS {_snowflake_quote_identifier(dim_key)},
+        {_snowflake_string_literal(run_id)} AS "gold_run_id",
+        CURRENT_TIMESTAMP() AS "gold_processed_timestamp",
+        MD5('__ALL__') AS "gold_upsert_key"
+WHERE NOT EXISTS (
+        SELECT 1 FROM {dim_target} WHERE "gold_run_id" = {_snowflake_string_literal(run_id)}
+    )
+  AND (SELECT COUNT(*) FROM {source_qname}) > 1;
+""".strip()
+        )
+
+        fct_target = _snowflake_qualified_name(gold_catalog, gold_schema, f"FCT_{entity.upper()}")
+        statements.append(
+            f"""
+CREATE TABLE IF NOT EXISTS {fct_target} LIKE {source_qname};
+
+ALTER TABLE {fct_target} ADD COLUMN IF NOT EXISTS "gold_run_id" VARCHAR;
+ALTER TABLE {fct_target} ADD COLUMN IF NOT EXISTS "gold_processed_timestamp" TIMESTAMP_NTZ;
+ALTER TABLE {fct_target} ADD COLUMN IF NOT EXISTS "gold_upsert_key" VARCHAR;
+
+DELETE FROM {fct_target} WHERE "gold_run_id" = {_snowflake_string_literal(run_id)};
+
+MERGE INTO {fct_target} AS target
+USING (
+    SELECT
+        src.*,
+        {_snowflake_string_literal(run_id)} AS "gold_run_id",
+        CURRENT_TIMESTAMP() AS "gold_processed_timestamp",
+        TO_VARCHAR(src."silver_upsert_key") AS "gold_upsert_key"
+    FROM {source_qname} AS src
+) AS source
+ON target."gold_upsert_key" = source."gold_upsert_key"
+WHEN MATCHED THEN UPDATE ALL BY NAME
+WHEN NOT MATCHED THEN INSERT ALL BY NAME;
+""".strip()
+        )
+
+    return "\n\n".join(statements) + "\n"
+
+
 def generate_snowflake_dimension_script(
     *,
     mapping: Dict[str, Any],
@@ -1244,17 +1593,36 @@ def _generate_one_mapping(
                 gold_catalog=gold_catalog,
                 gold_schema=gold_schema,
             )
+            repaired_code = _canonicalize_snowflake_gold_identifiers(code, mapping)
+            generation_mode = "LLM_REPAIRED" if repaired_code != code else "LLM"
+            code = repaired_code
             _validate_snowflake_gold_candidate(code, mapping, target_table)
-        except Exception as exc:
-            fallback_reason = f"Snowflake Gold LLM generation failed: {exc}"
-            logger.warning("Gold Snowflake LLM generation failed, deterministic fallback will be used: %s", exc)
-            code = generate_snowflake_gold_script(
-                mapping=mapping,
-                run_id=run_id,
-                gold_catalog=gold_catalog,
-                gold_schema=gold_schema,
-            )
-            generation_mode = "SNOWFLAKE_SQL_FALLBACK"
+        except Exception as first_exc:
+            try:
+                retry_code = llm_generate_snowflake_gold_code(
+                    mapping=mapping,
+                    run_id=run_id,
+                    gold_catalog=gold_catalog,
+                    gold_schema=gold_schema,
+                    validation_feedback=str(first_exc),
+                )
+                repaired_retry = _canonicalize_snowflake_gold_identifiers(retry_code, mapping)
+                _validate_snowflake_gold_candidate(repaired_retry, mapping, target_table)
+                code = repaired_retry
+                generation_mode = "LLM_RETRY_REPAIRED" if repaired_retry != retry_code else "LLM_RETRY"
+            except Exception as retry_exc:
+                fallback_reason = f"Snowflake Gold LLM generation failed: {first_exc}; retry failed: {retry_exc}"
+                logger.warning(
+                    "Gold Snowflake LLM generation and validation-feedback retry failed; deterministic fallback will be used: %s",
+                    retry_exc,
+                )
+                code = generate_snowflake_gold_script(
+                    mapping=mapping,
+                    run_id=run_id,
+                    gold_catalog=gold_catalog,
+                    gold_schema=gold_schema,
+                )
+                generation_mode = "SNOWFLAKE_SQL_FALLBACK"
     elif is_snowflake:
         code = generate_snowflake_gold_script(
             mapping=mapping,
@@ -1556,11 +1924,26 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         if isinstance(mapping, dict)
     ]
 
-    # ponytail: one shared dimension artifact avoids generating/executing the
-    # same dim_policy table once per KPI; the script remains idempotent.
+    # ponytail: one shared mart artifact avoids generating/executing the same
+    # source-table grain DIM/FCT tables once per KPI.
     shared_dimension_mapping = _shared_dimension_mapping(mappings)
+    enriched_metadata = (
+        state.get("enrichment_review_artifact")
+        or state.get("enriched_metadata")
+        or {}
+    )
+    if isinstance(enriched_metadata, dict) and "enrichment_artifact" in enriched_metadata:
+        enriched_metadata = enriched_metadata.get("enrichment_artifact") or {}
+    source_table_grain_specs = _source_table_grain_specs(contract, mappings, enriched_metadata)
     shared_dimension_code = ""
-    if shared_dimension_mapping.get("grouping_dimensions"):
+    if target_warehouse == "snowflake" and source_table_grain_specs:
+        shared_dimension_code = generate_snowflake_source_table_mart_script(
+            specs=source_table_grain_specs,
+            run_id=run_id,
+            gold_catalog=gold_catalog,
+            gold_schema=gold_schema,
+        )
+    elif shared_dimension_mapping.get("grouping_dimensions"):
         if target_warehouse == "snowflake":
             shared_dimension_code = generate_snowflake_dimension_script(
                 mapping=shared_dimension_mapping,
@@ -1585,8 +1968,13 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         for item in results:
             if item.get("status") == "APPROVED":
                 item["dimension_script_path"] = shared_dimension_path
-                item["dimension_contract"] = _dimension_specs(shared_dimension_mapping)
-                item["kimball_dimension_count"] = len(_dimension_specs(shared_dimension_mapping))
+                dimension_contract = (
+                    source_table_grain_specs
+                    if target_warehouse == "snowflake" and source_table_grain_specs
+                    else _dimension_specs(shared_dimension_mapping)
+                )
+                item["dimension_contract"] = dimension_contract
+                item["kimball_dimension_count"] = len(dimension_contract)
                 break
 
     bundle = {

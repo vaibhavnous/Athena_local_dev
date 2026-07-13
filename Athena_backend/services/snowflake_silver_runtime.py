@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +61,29 @@ def _qualified_name(value: str) -> str:
     return ".".join(_quote_identifier(part) for part in str(value or "").split(".") if part.strip())
 
 
+def _sql_without_comments(sql: str) -> str:
+    return re.sub(r"--[^\n]*|/\*.*?\*/", "", str(sql or ""), flags=re.DOTALL)
+
+
+def _require_approved_snowflake_structure(sql: str, source_table: str, target_table: str) -> None:
+    clean_sql = _sql_without_comments(sql)
+    if source_table and not re.search(
+        rf"(?:^|\s)FROM\s+{re.escape(_qualified_name(source_table))}\s+(?:AS\s+)?src\b",
+        clean_sql,
+        re.IGNORECASE,
+    ):
+        raise ValueError(f"Snowflake silver SQL must read the approved source table as src: {source_table}")
+    if target_table and not re.search(
+        rf"\bMERGE\s+INTO\s+{re.escape(_qualified_name(target_table))}\s+(?:AS\s+)?target\b",
+        clean_sql,
+        re.IGNORECASE,
+    ):
+        raise ValueError(f"Snowflake silver SQL must merge into the approved target table as target: {target_table}")
+    forbidden = re.search(r"\b(DROP|TRUNCATE|DELETE|COPY|CALL|GRANT|REVOKE|USE|EXECUTE\s+IMMEDIATE)\b", clean_sql, re.IGNORECASE)
+    if forbidden:
+        raise ValueError(f"Snowflake silver SQL contains forbidden statement: {forbidden.group(1).upper()}")
+
+
 def _table_name(script: Dict[str, Any]) -> str:
     return str(script.get("table") or script.get("table_name") or script.get("entity") or "").strip()
 
@@ -84,6 +108,7 @@ def validate_snowflake_silver_script(script: Dict[str, Any], catalog_connection:
         raise ValueError(f"Snowflake silver SQL does not read from expected source table: {source_table}")
     if target_table and _qualified_name(target_table) not in sql:
         raise ValueError(f"Snowflake silver SQL does not write to expected target table: {target_table}")
+    _require_approved_snowflake_structure(sql, source_table, target_table)
     if catalog_connection is not None and source_table:
         validate_catalog_columns(
             catalog_connection,

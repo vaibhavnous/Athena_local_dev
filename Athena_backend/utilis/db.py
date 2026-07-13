@@ -66,6 +66,13 @@ SQL_TCP_PROBE_ENABLED = str(os.getenv("ATHENA_SQL_TCP_PROBE_ENABLED", "true")).l
 SQL_FAIL_FAST_ON_TCP_PROBE = str(os.getenv("ATHENA_SQL_FAIL_FAST_ON_TCP_PROBE", "true")).lower() not in {"0", "false", "no"}
 SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS = max(0, float(os.getenv("ATHENA_SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS", "60")))
 NETWORK_ERROR_MARKERS = ("08S01", "10060", "10061", "10054", "08001")
+TLS_CLIENT_ERROR_MARKERS = (
+    "encryption not supported on the client",
+    "no credentials are available in the security package",
+    "ssl provider",
+    "ssl security error",
+    "seccreatecredentials",
+)
 _SQL_ENDPOINT_FAILURE_CACHE: Dict[tuple[str, str, int, str], tuple[float, str]] = {}
 _SQL_ENDPOINT_FAILURE_LOCK = threading.Lock()
 _SQL_ENDPOINT_PROBE_LOCK = threading.Lock()
@@ -194,6 +201,12 @@ def _clear_sql_endpoint_failure(*, role: str, host: str, port: int, database_nam
 
 def _sql_error_hint(exc: Exception, *, role: str, host: str, port: int, database_name: str) -> str:
     message = str(exc)
+    lower_message = message.lower()
+    if any(marker in lower_message for marker in TLS_CLIENT_ERROR_MARKERS):
+        return (
+            f"SQL TLS/client encryption failed for {role} database '{database_name}' at {host}:{port}. "
+            "Check the local Microsoft ODBC Driver/TLS setup and Windows security package; TCP is not enough for login."
+        )
     if any(marker in message for marker in NETWORK_ERROR_MARKERS):
         return (
             f"Likely connectivity issue for {role} database '{database_name}' at {host}:{port}. "
@@ -254,7 +267,9 @@ def _connect_with_retry(
         except pyodbc.Error as exc:
             last_exc = exc
             if attempt >= SQL_CONNECT_RETRIES:
-                if any(marker in str(exc) for marker in NETWORK_ERROR_MARKERS):
+                if _sql_error_hint(exc, role=role, host=host, port=port, database_name=database_name).startswith(
+                    "Likely connectivity issue"
+                ):
                     _cache_sql_endpoint_failure(
                         role=role,
                         host=host,

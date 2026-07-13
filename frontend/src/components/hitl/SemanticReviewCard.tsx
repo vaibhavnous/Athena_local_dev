@@ -1,6 +1,6 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useState } from 'react'
-import { CheckCircle, ChevronDown, ChevronRight, Clock3, Database, Layers3, RotateCcw, X, XCircle } from 'lucide-react'
+import { Check, CheckCircle, ChevronDown, ChevronRight, Clock3, Database, Layers3, Pencil, RotateCcw, X, XCircle } from 'lucide-react'
 
 const TYPE_STYLES = {
   MEASURE: 'border-[#188461]/40 bg-[#0f3f37] text-[#4ee3ad]',
@@ -48,9 +48,9 @@ function formatDateTime(value) {
 
 function BooleanCell({ value, editable, onChange }) {
   if (!editable) {
-    return (
-      <input type="checkbox" checked={Boolean(value)} readOnly className="h-4 w-4 rounded border-[#3f756f] accent-[#20d39b]" />
-    )
+    return value
+      ? <Check size={13} strokeWidth={2.5} className="text-[#27d3a0]" />
+      : <span className="text-[#79969a]">—</span>
   }
 
   return (
@@ -67,6 +67,7 @@ function BooleanCell({ value, editable, onChange }) {
 function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, onReject, onDraftChange }) {
   const [reason, setReason] = useState(rejectionReason || '')
   const [expanded, setExpanded] = useState(false)
+  const [editing, setEditing] = useState(false)
   const columns = item?.item_detail?.columns || EMPTY_COLUMNS
   const decision = localDecision || item?.decision
   const id = itemId(item)
@@ -80,15 +81,17 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
   const decidedAt = item?.decided_at
   const isApproved = decision === 'APPROVED'
   const isRejected = decision === 'REJECTED'
+  const isDirty = JSON.stringify(draftColumns) !== JSON.stringify(initialColumns) || draftSummary !== initialSummary
 
   useEffect(() => {
     setDraftColumns(initialColumns)
     setDraftSummary(initialSummary)
     setReason(rejectionReason || '')
+    setEditing(false)
     onDraftChange?.(id, { table_name: tableName, table_summary: initialSummary, columns: initialColumns })
     // Reset the local edit surface only when the review item changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id])
+  }, [id, initialColumns, initialSummary])
 
   useEffect(() => {
     setReason(rejectionReason || '')
@@ -113,6 +116,13 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
     setDraftColumns(initialColumns)
     setDraftSummary(initialSummary)
     onDraftChange?.(id, { table_name: tableName, table_summary: initialSummary, columns: initialColumns })
+  }
+
+  const toggleExpanded = () => {
+    setExpanded((value) => {
+      if (value) setEditing(false)
+      return !value
+    })
   }
 
   return (
@@ -151,21 +161,37 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
               </span>
             )}
             {expanded && (
-              <button
-                type="button"
-                onClick={resetDraftColumns}
-                className="inline-flex h-8 items-center gap-2 rounded-md border border-[#2f615d] bg-[#0b222b] px-3 text-xs font-semibold text-[#a8c0c4] transition-all hover:border-[#45a391] hover:text-white"
-              >
-                <RotateCcw size={13} />
-                Reset
-              </button>
+              <div className="flex items-center gap-2">
+                {editing && isDirty && (
+                  <button
+                    type="button"
+                    onClick={resetDraftColumns}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#2f615d] bg-[#0b222b] px-2.5 text-[11px] font-semibold text-[#a8c0c4] transition-all hover:border-[#45a391] hover:text-white"
+                  >
+                    <RotateCcw size={12} />
+                    Reset
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setEditing((value) => !value)}
+                  className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold transition-all ${
+                    editing
+                      ? 'border-[#28a989] bg-[#123b35] text-[#58e2b6]'
+                      : 'border-[#2f615d] bg-[#0b222b] text-[#a8c0c4] hover:border-[#45a391] hover:text-white'
+                  }`}
+                >
+                  {editing ? <Check size={12} /> : <Pencil size={12} />}
+                  {editing ? 'Finish editing' : 'Edit columns'}
+                </button>
+              </div>
             )}
           </div>
         </div>
 
         <button
           type="button"
-          onClick={() => setExpanded((value) => !value)}
+          onClick={toggleExpanded}
           aria-expanded={expanded}
           className="mt-3 inline-flex items-center gap-1 text-[11px] font-semibold text-[#b7c9cc] transition-colors hover:text-white"
         >
@@ -174,8 +200,8 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
         </button>
       </div>
 
-      <div className={`mx-4 mb-4 overflow-hidden transition-all duration-200 ${expanded ? 'max-h-[620px] opacity-100' : 'max-h-0 opacity-0'}`}>
-        <div className="overflow-auto rounded-md border border-[#2c6a63]/60 bg-[#071c24]">
+      <div className={`mx-4 mb-4 overflow-hidden transition-all duration-200 ${expanded ? 'max-h-[min(72vh,760px)] opacity-100' : 'max-h-0 opacity-0'}`}>
+        <div className="max-h-[min(68vh,720px)] overflow-auto rounded-md border border-[#2c6a63]/60 bg-[#071c24]">
           <div className="grid min-w-[900px] grid-cols-[1.05fr_1.15fr_1fr_2fr_0.75fr_0.28fr_0.28fr_0.28fr] gap-3 border-b border-[#2c6a63]/60 bg-[#061923] px-3 py-3 text-[10px] font-bold uppercase tracking-wide text-[#88a5aa]">
             <span>Column</span>
             <span>Display Name</span>
@@ -200,37 +226,51 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
                     {column.column_name || '-'}
                   </span>
 
-                  <input
-                    value={column.suggested_display_name}
-                    onChange={(event) => updateColumn(index, 'suggested_display_name', event.target.value)}
-                    className="h-10 min-w-0 rounded-md border border-[#2f615d] bg-[#061923] px-3 text-xs text-white outline-none focus:border-[#45c7a5]"
-                  />
+                  {editing ? (
+                    <input
+                      value={column.suggested_display_name}
+                      onChange={(event) => updateColumn(index, 'suggested_display_name', event.target.value)}
+                      className="h-9 min-w-0 rounded-md border border-[#2f615d] bg-[#061923] px-2.5 text-xs text-white outline-none focus:border-[#45c7a5]"
+                    />
+                  ) : (
+                    <span className="min-w-0 truncate text-[#c4d3d6]" title={column.suggested_display_name}>{column.suggested_display_name || '—'}</span>
+                  )}
 
-                  <select
-                    value={column.semantic_type || 'UNKNOWN'}
-                    onChange={(event) => updateColumn(index, 'semantic_type', event.target.value)}
-                    className={`h-10 min-w-0 rounded-md border px-3 text-[10px] font-semibold outline-none focus:border-[#45c7a5] ${semanticTypeClass(column.semantic_type)}`}
-                  >
-                    {SEMANTIC_TYPE_OPTIONS.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </select>
+                  {editing ? (
+                    <select
+                      value={column.semantic_type || 'UNKNOWN'}
+                      onChange={(event) => updateColumn(index, 'semantic_type', event.target.value)}
+                      className={`h-9 min-w-0 rounded-md border px-2 text-[10px] font-semibold outline-none focus:border-[#45c7a5] ${semanticTypeClass(column.semantic_type)}`}
+                    >
+                      {SEMANTIC_TYPE_OPTIONS.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className={`inline-flex w-fit rounded border px-2 py-1 text-[9px] font-bold ${semanticTypeClass(column.semantic_type)}`}>
+                      {column.semantic_type || 'UNKNOWN'}
+                    </span>
+                  )}
 
-                  <textarea
-                    value={column.business_description}
-                    onChange={(event) => updateColumn(index, 'business_description', event.target.value)}
-                    rows={2}
-                    className="min-h-[54px] w-full resize-y rounded-md border border-[#2f615d] bg-[#061923] px-3 py-2 text-xs text-white outline-none focus:border-[#45c7a5]"
-                  />
+                  {editing ? (
+                    <textarea
+                      value={column.business_description}
+                      onChange={(event) => updateColumn(index, 'business_description', event.target.value)}
+                      rows={2}
+                      className="min-h-[48px] w-full resize-y rounded-md border border-[#2f615d] bg-[#061923] px-2.5 py-2 text-xs text-white outline-none focus:border-[#45c7a5]"
+                    />
+                  ) : (
+                    <span className="min-w-0 truncate text-[#c4d3d6]" title={column.business_description}>{column.business_description || '—'}</span>
+                  )}
 
                   <span className="inline-flex w-fit rounded bg-[#172633] px-2 py-1 text-[10px] font-semibold text-[#9fb7bd]">
                     {column.enrichment_source || '-'}
                   </span>
-                  <BooleanCell value={column.is_measure} editable onChange={(value) => updateColumn(index, 'is_measure', value)} />
-                  <BooleanCell value={column.is_dimension} editable onChange={(value) => updateColumn(index, 'is_dimension', value)} />
+                  <BooleanCell value={column.is_measure} editable={editing} onChange={(value) => updateColumn(index, 'is_measure', value)} />
+                  <BooleanCell value={column.is_dimension} editable={editing} onChange={(value) => updateColumn(index, 'is_dimension', value)} />
                   <div className="flex min-w-0 flex-col items-start gap-1">
-                    <BooleanCell value={column.is_pii_candidate} editable onChange={(value) => updateColumn(index, 'is_pii_candidate', value)} />
-                    {column.is_pii_candidate && (
+                    <BooleanCell value={column.is_pii_candidate} editable={editing} onChange={(value) => updateColumn(index, 'is_pii_candidate', value)} />
+                    {editing && column.is_pii_candidate && (
                       <input
                         value={column.pii_type === '-' ? '' : column.pii_type}
                         onChange={(event) => updateColumn(index, 'pii_type', event.target.value)}
@@ -246,13 +286,19 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
 
           {draftColumns.length > 0 && (
             <div className="border-t border-[#2c6a63]/60 px-3 py-3 text-[11px] text-[#9fb7bd]">
-              <div className="mb-2 font-bold text-[#d5e7e8]">Table Summary</div>
-              <textarea
-                value={draftSummary}
-                onChange={(event) => updateSummary(event.target.value)}
-                rows={3}
-                className="w-full resize-y rounded-md border border-[#2f615d] bg-[#061923] px-2 py-2 text-xs text-white outline-none focus:border-[#45c7a5]"
-              />
+              <div className="flex items-start gap-2">
+                <span className="shrink-0 font-bold text-[#d5e7e8]">Table Summary:</span>
+                {editing ? (
+                  <textarea
+                    value={draftSummary}
+                    onChange={(event) => updateSummary(event.target.value)}
+                    rows={2}
+                    className="w-full resize-y rounded-md border border-[#2f615d] bg-[#061923] px-2 py-2 text-xs text-white outline-none focus:border-[#45c7a5]"
+                  />
+                ) : (
+                  <p className="leading-relaxed text-[#9fb7bd]">{draftSummary}</p>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -261,7 +307,7 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
       {expanded && (
         <>
           <div className="border-t border-[#155f5a] bg-[#071c24] px-4 py-3 text-[11px] text-[#8ea9ad]">
-            Hover a table to edit semantic values. Approved edits are persisted to the Gate 3 enrichment artifact.
+            Use Edit columns to change semantic values. Approved edits are persisted to the Gate 3 enrichment artifact.
           </div>
 
           <div className="flex flex-col gap-3 border-t border-[#155f5a] bg-[#071c24] px-4 py-4 md:flex-row md:items-center md:justify-between">
