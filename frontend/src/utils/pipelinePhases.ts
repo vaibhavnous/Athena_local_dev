@@ -461,21 +461,21 @@ function buildStepDetail(run, key, state, existingDetail) {
         if (state === 'RUNNING') return 'Executing approved Bronze scripts in Snowflake.'
         return 'Bronze execution starts immediately after Gate 4 approval for Snowflake runs.'
       }
-      return 'UI-only marker: Bronze scripts are exported for external execution, not run inside Athena.'
+      return 'UI-only marker: Bronze scripts are exported for external execution, not run inside Astra Data.'
     case 'silver_code_execution':
       if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
         if (state === 'COMPLETED') return 'Approved Silver scripts were executed in Snowflake.'
         if (state === 'RUNNING') return 'Executing approved Silver scripts in Snowflake.'
         return 'Silver execution starts immediately after Gate 5 approval for Snowflake runs.'
       }
-      return 'UI-only marker: Silver scripts are exported for external execution, not run inside Athena.'
+      return 'UI-only marker: Silver scripts are exported for external execution, not run inside Astra Data.'
     case 'gold_code_execution':
       if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
         if (state === 'COMPLETED') return 'Generated Gold scripts were executed in Snowflake.'
         if (state === 'RUNNING') return 'Executing generated Gold scripts in Snowflake.'
         return 'Gold execution starts after Gold generation for Snowflake runs.'
       }
-      return 'UI-only marker: Gold scripts are exported for external execution, not run inside Athena.'
+      return 'UI-only marker: Gold scripts are exported for external execution, not run inside Astra Data.'
     default:
       return existingDetail || ''
   }

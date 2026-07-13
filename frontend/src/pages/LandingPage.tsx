@@ -43,9 +43,9 @@ function LandingPage() {
         <header className="relative z-10 border-b border-white/8 bg-[#121833]/95 backdrop-blur">
           <div className="mx-auto flex max-w-[1280px] items-center justify-between px-6 py-4">
             <div className="flex items-center gap-3">
-              <img src={ATHENA_LOGO_SRC} alt="Athena" className="h-9 w-9 object-contain" />
+              <img src={ATHENA_LOGO_SRC} alt="Astra Data" className="h-9 w-9 object-contain" />
               <span className="text-lg font-semibold tracking-tight text-white">
-                Athena
+                Astra Data
               </span>
             </div>
 
@@ -133,10 +133,10 @@ function LandingPage() {
         <footer className="relative z-10 border-t border-white/8 bg-[linear-gradient(90deg,#111834_0%,#080d1d_100%)]">
           <div className="mx-auto flex max-w-[1280px] flex-col items-start justify-between gap-3 px-6 py-4 sm:flex-row sm:items-center">
             <div className="flex items-center gap-3">
-              <img src={ATHENA_LOGO_SRC} alt="Athena" className="h-8 w-8 object-contain" />
-              <span className="text-sm font-semibold tracking-tight text-white">Athena</span>
+              <img src={ATHENA_LOGO_SRC} alt="Astra Data" className="h-8 w-8 object-contain" />
+              <span className="text-sm font-semibold tracking-tight text-white">Astra Data</span>
             </div>
-            <div className="text-xs text-[#aeb8d5]">© 2025 Athena. All rights reserved.</div>
+            <div className="text-xs text-[#aeb8d5]">© 2025 Astra Data. All rights reserved.</div>
           </div>
         </footer>
       </div>

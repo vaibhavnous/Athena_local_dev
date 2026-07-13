@@ -1726,7 +1726,7 @@ function HitlQueue() {
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm font-semibold text-white">Enrichment Review</p>
-            <p className="text-xs text-[#8fa0bf]">Athena semantic enrichment approval for the active run.</p>
+            <p className="text-xs text-[#8fa0bf]">Astra Data semantic enrichment approval for the active run.</p>
           </div>
           {reviewRuns.length > 0 && (
             <select

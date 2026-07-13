@@ -433,7 +433,7 @@ function DataLineagePage() {
                 Data Lineage Studio
               </h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 sm:text-base">
-                Production-focused lineage for Athena runs. Solid paths show medallion pipeline movement, certified FK relationships are tracked separately, and heuristics remain visible without pretending they are truth.
+                Production-focused lineage for Astra Data runs. Solid paths show medallion pipeline movement, certified FK relationships are tracked separately, and heuristics remain visible without pretending they are truth.
               </p>
             </div>
 

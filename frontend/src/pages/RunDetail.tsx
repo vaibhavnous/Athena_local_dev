@@ -1235,7 +1235,7 @@ function HitlDecisionsTab({ run }) {
             <StatusBadge status={decision.decision} size="sm" />
           </div>
           <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
-            <span>Reviewer: <span className="text-gray-300">{decision.reviewer || 'Athena reviewer'}</span></span>
+            <span>Reviewer: <span className="text-gray-300">{decision.reviewer || 'Astra Data reviewer'}</span></span>
             {decision.reviewed_at && (
               <span>{new Date(decision.reviewed_at).toLocaleString()}</span>
             )}

@@ -172,7 +172,7 @@ function DatabaseConfig () {
           </div>
           <p className="text-text-secondary text-[13px] font-semibold m-0">No connections configured</p>
           <p className="text-text-tertiary text-[11px] max-w-xs leading-relaxed m-0 mt-1">
-            Click <span className="text-accent-blue font-medium">Add Connection</span> to define a JDBC source for the Athena pipeline.
+            Click <span className="text-accent-blue font-medium">Add Connection</span> to define a JDBC source for the Astra Data pipeline.
           </p>
         </div>
       ) : (
@@ -504,7 +504,7 @@ function ConnectionForm ({ initial, onSave, onClose }) {
                   <input
                     type="text"
                     className={inputClass()}
-                    placeholder="e.g. athena_db"
+                    placeholder="e.g. astra_data_db"
                     value={form.databaseName}
                     onChange={(e) => set('databaseName', e.target.value)}
                   />

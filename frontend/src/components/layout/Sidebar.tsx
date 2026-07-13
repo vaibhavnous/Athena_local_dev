@@ -40,7 +40,7 @@ function Sidebar({ collapsed, onToggle }) {
       <div className="flex h-[60px] items-center justify-between border-b border-[#253044] px-4">
         <div className="flex items-center gap-3 overflow-hidden">
           <AthenaMark />
-          {!collapsed && <div className="text-[18px] font-semibold text-white">Athena</div>}
+          {!collapsed && <div className="text-[18px] font-semibold text-white">Astra Data</div>}
         </div>
         <button
           onClick={onToggle}
@@ -159,7 +159,7 @@ function NavItem({ item, collapsed }) {
 
 function AthenaMark() {
   return (
-    <img src={ATHENA_LOGO_SRC} alt="Athena" className="h-11 w-11 flex-shrink-0 object-contain" />
+    <img src={ATHENA_LOGO_SRC} alt="Astra Data" className="h-11 w-11 flex-shrink-0 object-contain" />
   )
 }
 

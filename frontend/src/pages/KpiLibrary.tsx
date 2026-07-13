@@ -100,7 +100,7 @@ function KpiLibrary() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `athena_kpis_${new Date().toISOString().slice(0, 10)}.csv`
+    a.download = `astra_data_kpis_${new Date().toISOString().slice(0, 10)}.csv`
     a.click()
     URL.revokeObjectURL(url)
   }
