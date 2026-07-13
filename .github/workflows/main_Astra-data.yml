@@ -3,10 +3,6 @@ name: Deploy Backend to Astra Data
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-  id-token: write
-
 concurrency:
   group: astra-data-backend-production
   cancel-in-progress: true
@@ -23,13 +19,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Sign in to Azure with OIDC
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Build backend package
         run: |
@@ -52,6 +41,7 @@ jobs:
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: deploy/backend.zip
 
       - name: Verify backend health
