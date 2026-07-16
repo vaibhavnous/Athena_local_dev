@@ -279,6 +279,15 @@ AZURE_SQL_SOURCE_PASSWORD=<sql-password>
 ATHENA_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 DEV_MODE=false
 ATHENA_MIN_STAGE_RUNTIME_SECONDS=4
+
+# Authentication (required)
+ASTRA_AUTH_EMAIL=<primary-admin-email>
+ASTRA_AUTH_USERNAME=<primary-admin-name>
+ASTRA_AUTH_PASSWORD=<12+ characters with a letter, number, and special character>
+ASTRA_JWT_SECRET=<cryptographically-random secret of at least 32 bytes>
+ASTRA_JWT_EXPIRES_IN_SECONDS=3600
+ASTRA_JWT_ISSUER=astra-api
+ASTRA_JWT_AUDIENCE=astra-frontend
 ```
 
 ## 9. Local Frontend `.env`
@@ -348,6 +357,11 @@ AZURE_SQL_SOURCE_PASSWORD
 ATHENA_CORS_ORIGINS
 DEV_MODE
 ATHENA_MIN_STAGE_RUNTIME_SECONDS
+ASTRA_AUTH_EMAIL
+ASTRA_AUTH_USERNAME
+ASTRA_AUTH_PASSWORD
+ASTRA_JWT_SECRET
+ASTRA_JWT_EXPIRES_IN_SECONDS
 ```
 
 Add these too if you use those features:

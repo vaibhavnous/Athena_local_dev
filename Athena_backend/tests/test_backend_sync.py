@@ -8,8 +8,12 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("ATHENA_DEMO_MODE", "false")
 
 from api.main import app
+from api.auth import AuthUser, get_current_user
 from api.services.ui import run_ui_service
 
+app.dependency_overrides[get_current_user] = lambda: AuthUser(
+    uid="test-user", username="Test User", email="test@example.com", userType="Admin"
+)
 
 client = TestClient(app)
 

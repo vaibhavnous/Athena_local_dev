@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("ATHENA_DEMO_MODE", "false")
 
 from api.main import app
+from api.auth import AuthUser, get_current_user
 
+app.dependency_overrides[get_current_user] = lambda: AuthUser(
+    uid="test-user", username="Test User", email="test@example.com", userType="Admin"
+)
 
 client = TestClient(app)
 
@@ -23,6 +27,31 @@ def test_health_endpoint():
     embeddings = body["embeddings"]
     assert isinstance(embeddings["enabled"], bool)
     assert embeddings["mode"] in {"blocked", "disabled", "enabled"}
+
+
+def test_business_endpoints_require_authentication():
+    override = app.dependency_overrides.pop(get_current_user)
+    try:
+        response = client.get("/settings")
+    finally:
+        app.dependency_overrides[get_current_user] = override
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Authentication required"
+
+
+def test_configuration_rejects_client_users():
+    override = app.dependency_overrides[get_current_user]
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="client-user", username="Client User", email="client@example.com", userType="Client"
+    )
+    try:
+        response = client.get("/settings")
+    finally:
+        app.dependency_overrides[get_current_user] = override
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Administrator access required"
 
 
 def test_silver_merge_key_review_get_returns_checkpoint_artifact(monkeypatch):

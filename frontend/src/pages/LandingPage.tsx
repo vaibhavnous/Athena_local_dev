@@ -187,7 +187,7 @@ function LandingPage() {
   }
 
   const handleGetStarted = () => {
-    fadeToRoute('/app')
+    fadeToRoute('/login')
   }
 
   return (
@@ -220,7 +220,7 @@ function LandingPage() {
             <div className="flex items-center gap-3">
               <button
                 type="button"
-                onClick={() => fadeToRoute('/app')}
+                onClick={() => fadeToRoute('/login')}
                 className="inline-flex h-10 items-center justify-center rounded-lg border border-blue-200/[0.16] bg-white/[0.04] px-4 text-sm font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] transition hover:border-[#60a5fa]/50 hover:bg-blue-500/[0.12]"
               >
                 Sign In

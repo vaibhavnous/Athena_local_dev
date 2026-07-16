@@ -13,6 +13,24 @@ jest.mock('./components/layout/AppShell', () => ({
   default: () => <div>App Shell Mock</div>,
 }))
 
+jest.mock('./context/AuthContext', () => ({
+  __esModule: true,
+  AuthProvider: ({ children }) => <>{children}</>,
+  useAuth: () => ({
+    user: {
+      uid: 'test-user',
+      username: 'Test User',
+      email: 'test@example.com',
+      userType: 'Admin',
+      isActive: true,
+      canManageAccounts: true,
+    },
+    isLoading: false,
+    login: jest.fn(),
+    logout: jest.fn(),
+  }),
+}))
+
 jest.mock('react-router-dom', () => {
   const React = require('react')
   const Route = ({ path, element, children }) => {

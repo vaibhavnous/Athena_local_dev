@@ -37,5 +37,6 @@ Thumbs.db
 # Misc
 *.bak
 paramiko_debug.log
+.local_logs/
 .tmp-smoke/ponytail/
 generated_code/

@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { getApiBaseUrl } from './baseUrl'
+import { clearSession, getAccessToken, type AuthUser, type UserType } from '../auth/session'
 
 const API_BASE_URL = getApiBaseUrl()
 
@@ -21,7 +22,11 @@ const LOG_TIMEOUT = 10000
 
 // Request interceptor
 api.interceptors.request.use(
-  (config) => config,
+  (config) => {
+    const token = getAccessToken()
+    if (token) config.headers.Authorization = `Bearer ${token}`
+    return config
+  },
   (error) => Promise.reject(error)
 )
 
@@ -29,6 +34,14 @@ api.interceptors.request.use(
 api.interceptors.response.use(
   (response) => response.data,
   (error) => {
+    if (error.response?.status === 401) {
+      clearSession()
+      window.dispatchEvent(new Event('astra:unauthorized'))
+      if (window.location.pathname !== '/login') {
+        const next = `${window.location.pathname}${window.location.search}`
+        window.location.assign(`/login?next=${encodeURIComponent(next)}`)
+      }
+    }
     const message = error.response?.data?.message || error.response?.data?.detail || error.message || 'Network error'
     const normalized = new Error(message) as any
     normalized.code = error.code
@@ -37,6 +50,43 @@ api.interceptors.response.use(
     return Promise.reject(normalized)
   }
 )
+
+export type { AuthUser, UserType }
+
+export interface LoginResponse {
+  access_token: string
+  token_type: string
+  expires_in: number
+  user: AuthUser
+}
+
+export interface UserPayload {
+  username: string
+  email: string
+  password?: string
+  userType: UserType
+}
+
+export const login = (payload: { email: string; password: string }) =>
+  api.post('/auth/login', payload) as unknown as Promise<LoginResponse>
+
+export const getCurrentUser = () =>
+  api.get('/auth/me') as unknown as Promise<AuthUser>
+
+export const getAuthUsers = () =>
+  api.get('/auth/users') as unknown as Promise<{ users: AuthUser[] }>
+
+export const createAuthUser = (payload: UserPayload) =>
+  api.post('/auth/users', payload) as unknown as Promise<{ user: AuthUser }>
+
+export const updateAuthUser = (uid: string, payload: Partial<UserPayload>) =>
+  api.patch(`/auth/users/${uid}`, payload) as unknown as Promise<{ user: AuthUser }>
+
+export const setAuthUserStatus = (uid: string, isActive: boolean) =>
+  api.patch(`/auth/users/${uid}/status`, { isActive }) as unknown as Promise<{ user: AuthUser }>
+
+export const deleteAuthUser = (uid: string) =>
+  api.delete(`/auth/users/${uid}`) as unknown as Promise<void>
 
 export const startRun = (payload: {
   brd_text?: string

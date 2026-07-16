@@ -9,18 +9,22 @@ import {
   Database,
   Folder,
   LayoutDashboard,
-  Settings,
   Shield,
   Sparkles,
-  Trophy,
+  LogOut,
+  UserPlus,
   X,
 } from 'lucide-react'
 import useAthenaStore from '../../store/useAthenaStore'
+import { useNavigate } from 'react-router-dom'
+import { useAuth } from '../../context/AuthContext'
 
 const ASTRA_WORDMARK_SRC = `${process.env.PUBLIC_URL}/astra-wordmark-white.png`
 
 function Sidebar({ collapsed, onToggle, onNavigate, mobile = false }) {
   const userRole = useAthenaStore((s) => s.userRole)
+  const { user, logout } = useAuth()
+  const navigate = useNavigate()
 
   const mainItems = [
     { to: '/app', icon: LayoutDashboard, label: 'Dashboard', exact: true },
@@ -32,8 +36,8 @@ function Sidebar({ collapsed, onToggle, onNavigate, mobile = false }) {
   ]
 
   const secondaryItems = [
-    { to: '/app/db-config', icon: Database, label: 'Configuration' },
-    { to: '/app/settings', icon: Settings, label: 'Settings' },
+    ...(user?.userType === 'Admin' ? [{ to: '/app/db-config', icon: Database, label: 'Configuration' }] : []),
+    ...(user?.canManageAccounts ? [{ to: '/app/accounts', icon: UserPlus, label: 'Accounts' }] : []),
   ]
 
   return (
@@ -92,7 +96,7 @@ function Sidebar({ collapsed, onToggle, onNavigate, mobile = false }) {
 
             <nav className="mt-[9.6px]" aria-label="Secondary navigation">
               {secondaryItems.map((item) => (
-                <NavItem key={item.to} item={item} collapsed={collapsed} onNavigate={onNavigate} />
+                <NavItem key={item.to} item={item} collapsed={collapsed} compact onNavigate={onNavigate} />
               ))}
             </nav>
             </>
@@ -101,7 +105,7 @@ function Sidebar({ collapsed, onToggle, onNavigate, mobile = false }) {
           {collapsed && (
             <nav aria-label="Secondary navigation">
               {secondaryItems.map((item) => (
-                <NavItem key={item.to} item={item} collapsed={collapsed} onNavigate={onNavigate} />
+                <NavItem key={item.to} item={item} collapsed={collapsed} compact onNavigate={onNavigate} />
               ))}
             </nav>
           )}
@@ -109,11 +113,11 @@ function Sidebar({ collapsed, onToggle, onNavigate, mobile = false }) {
           <div className={`mt-[9.6px] border-t border-[#253044] px-2 pt-[9.6px] ${collapsed ? 'hidden' : 'block'}`}>
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="truncate text-[9.6px] font-semibold text-white">Jayaprakasha Sarma C</div>
-                <div className="truncate text-[8px] text-slate-400">{userRole || 'Pipeline Designer & Builder'}</div>
+                <div className="truncate text-[9.6px] font-semibold text-white">{user?.username}</div>
+                <div className="truncate text-[8px] text-slate-400">{user?.userType || userRole || 'Pipeline Designer & Builder'}</div>
               </div>
-              <button className="flex h-[25.6px] w-[25.6px] items-center justify-center rounded-md text-red-300" title="Profile action">
-                <Trophy size={11.2} />
+              <button onClick={() => { logout(); navigate('/login', { replace: true }) }} className="flex h-[25.6px] w-[25.6px] items-center justify-center rounded-md text-red-300 hover:bg-red-500/10" title="Sign out" aria-label="Sign out">
+                <LogOut size={11.2} />
               </button>
             </div>
           </div>
@@ -137,13 +141,13 @@ function SidebarShowcase({ title, subtitle }) {
   )
 }
 
-function NavItem({ item, collapsed, onNavigate }) {
+function NavItem({ item, collapsed, compact = false, onNavigate }) {
   const location = useLocation()
   const isActive = item.exact ? location.pathname === item.to : location.pathname.startsWith(item.to)
   const Icon = item.icon
 
   return (
-    <div className="mb-[3.2px] px-2">
+    <div className={`mb-[3.2px] ${compact ? 'px-0' : 'px-2'}`}>
       <NavLink
         to={item.to}
         onClick={onNavigate}
