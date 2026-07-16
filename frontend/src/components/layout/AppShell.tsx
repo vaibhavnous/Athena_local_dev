@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, Clock3, PlayCircle, RotateCcw, X } from 'lucide-react'
@@ -70,11 +70,29 @@ function AppShell() {
   const demoRunsNotifiedRef = useRef(false)
   const pausedDetailKeyRef = useRef<string | null>(null)
   const reviewAutoOpenSessionRef = useRef({})
+  const mainScrollRef = useRef(null)
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadJsonMap(PAUSED_BANNER_DISMISSALS_KEY))
   const [reviewReadyNotifications, setReviewReadyNotifications] = useState(() => loadJsonMap(REVIEW_READY_NOTIFICATIONS_KEY))
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
   const [readyPausedBannerKey, setReadyPausedBannerKey] = useState<string | null>(null)
   const [verifiedPausedBannerKey, setVerifiedPausedBannerKey] = useState<string | null>(null)
+
+  useLayoutEffect(() => {
+    mainScrollRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+    setMobileSidebarOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    if (!mobileSidebarOpen) return undefined
+
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setMobileSidebarOpen(false)
+    }
+
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [mobileSidebarOpen])
 
   useEffect(() => {
     latestRunsRef.current = runs
@@ -434,9 +452,40 @@ function AppShell() {
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#080e1d] text-text-primary">
-      {/* Sidebar */}
-      <Sidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
+    <div className="flex h-[100dvh] w-screen overflow-hidden bg-[#080e1d] text-text-primary">
+      <div className="hidden h-full md:flex">
+        <Sidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
+      </div>
+
+      <AnimatePresence>
+        {mobileSidebarOpen && (
+          <>
+            <motion.button
+              type="button"
+              aria-label="Close navigation"
+              className="fixed inset-0 z-30 bg-black/60 backdrop-blur-[2px] md:hidden"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setMobileSidebarOpen(false)}
+            />
+            <motion.div
+              className="fixed inset-y-0 left-0 z-40 md:hidden"
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ type: 'spring', stiffness: 360, damping: 34 }}
+            >
+              <Sidebar
+                collapsed={false}
+                mobile
+                onToggle={() => setMobileSidebarOpen(false)}
+                onNavigate={() => setMobileSidebarOpen(false)}
+              />
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
       {/* Main area */}
       <motion.div
@@ -444,8 +493,8 @@ function AppShell() {
         animate={{ marginLeft: 0 }}
         transition={{ type: 'spring', stiffness: 300, damping: 30 }}
       >
-        <Topbar />
-        <main className="flex-1 overflow-auto bg-[#080e1d] px-7 py-4">
+        <Topbar onOpenNavigation={() => setMobileSidebarOpen(true)} onCreateRun={() => navigate('/app/new-run')} />
+        <main ref={mainScrollRef} className="flex-1 overflow-auto bg-[#080e1d] p-3 sm:p-4">
           {isPausedBannerVisible && pausedRun && pausedRunSummary && (
             <div className="mb-5 rounded-xl border border-amber-500/40 bg-[#19171d] px-4 py-3 shadow-[0_12px_40px_rgba(0,0,0,0.18)]">
               <div className="flex flex-wrap items-center justify-between gap-4">
@@ -504,7 +553,7 @@ function AppShell() {
       </motion.div>
 
       {/* Toast notification stack */}
-      <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2 pointer-events-none" style={{ maxWidth: 380 }}>
+      <div className="pointer-events-none fixed inset-x-3 bottom-3 z-50 flex flex-col gap-2 sm:inset-x-auto sm:bottom-6 sm:right-6 sm:w-full sm:max-w-[380px]">
         <AnimatePresence initial={false}>
           {notifications.map((notif) => (
             <motion.div

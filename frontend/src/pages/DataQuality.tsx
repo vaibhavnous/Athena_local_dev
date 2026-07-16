@@ -1,5 +1,6 @@
 // @ts-nochecks
 import React from "react";
+import { Shield } from "lucide-react";
 
 const DataQualityMonitoring = () => {
   const ChevronDownIcon = () => (
@@ -31,7 +32,10 @@ const DataQualityMonitoring = () => {
           
           {/* HEADER */}
           <div className="flex justify-between items-center mb-5">
-            <h1 className="text-[15px] font-semibold text-text-primary m-0">Data Quality Monitoring</h1>
+            <h1 className="m-0 flex items-center gap-2 text-[15px] font-semibold text-text-primary">
+              <Shield size={16} className="text-accent-blue" />
+              Data Quality Monitoring
+            </h1>
 
             <div className="flex gap-3">
               <button className="bg-transparent border border-accent-blue text-accent-blue rounded-lg px-3 py-1.5 text-[11px] font-medium inline-flex items-center gap-1.5 hover:bg-accent-blue/10 transition-colors focus:ring-2 focus:ring-accent-blue focus:ring-offset-2 focus:ring-offset-bg-card">

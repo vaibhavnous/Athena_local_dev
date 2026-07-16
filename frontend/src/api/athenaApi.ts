@@ -134,6 +134,7 @@ export const getConfigurations = () => api.get('/configurations', { timeout: REA
 export const createConfiguration = (data: object) => api.post('/configurations', data, { timeout: WRITE_TIMEOUT })
 export const updateConfiguration = (id: string | number, data: object) => api.put(`/configurations/${id}`, data, { timeout: WRITE_TIMEOUT })
 export const deleteConfiguration = (id: string | number) => api.delete(`/configurations/${id}`, { timeout: WRITE_TIMEOUT })
+export const testConnection = (data: object) => api.post('/configurations/test', data, { timeout: WRITE_TIMEOUT })
 
 // ── HITL KPI Review — KPI Reviews ─────────────────────────────────────────────
 export const fetchKpiReviews = (runId: string, status: string | null = null) =>

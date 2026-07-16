@@ -1,28 +1,36 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   CalendarDays,
   CheckCircle2,
   ChevronDown,
+  Clock,
   FileText,
+  History,
   Info,
   RefreshCw,
   Search,
 } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import { getRun, getRuns } from '../api/athenaApi'
+import { PageHeader } from '../components/shared/DashboardLayout'
 import { getPhaseGroups, normalizeState, statusTone } from '../utils/pipelinePhases'
 
-const FILTERS = ['All', 'Running', 'Completed', 'Failed', 'Cancelled', 'Hitl wait']
+const FILTERS = ['All', 'Running', 'Pending', 'Hitl wait', 'Paused for hitl', 'Pending review', 'Completed', 'Failed', 'Cancelled']
 
 function matchesStatusFilter(statusValue, filterValue) {
   const status = normalizeState(statusValue)
+  const rawStatus = String(statusValue || '').toUpperCase()
   if (filterValue === 'All') return true
   if (filterValue === 'Running') return status === 'RUNNING'
+  if (filterValue === 'Pending') return rawStatus === 'PENDING'
   if (filterValue === 'Completed') return status === 'COMPLETED'
   if (filterValue === 'Failed') return status === 'FAILED'
-  if (filterValue === 'Cancelled') return ['ABORTED', 'CANCELLED', 'CANCELED'].includes(String(statusValue || '').toUpperCase())
-  if (filterValue === 'Hitl wait') return ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(status) || status.includes('HITL')
+  if (filterValue === 'Cancelled') return ['ABORTED', 'CANCELLED', 'CANCELED'].includes(rawStatus)
+  if (filterValue === 'Hitl wait') return rawStatus === 'HITL_WAIT'
+  if (filterValue === 'Paused for hitl') return rawStatus === 'PAUSED_FOR_HITL'
+  if (filterValue === 'Pending review') return rawStatus === 'PENDING_REVIEW'
   return status === String(filterValue || '').toUpperCase()
 }
 
@@ -31,17 +39,30 @@ function isRunningStatus(statusValue) {
 }
 
 function RunHistoryPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const { runs, setRuns, updateRun, setServerOnline } = useAthenaStore()
-  const [selectedRunId, setSelectedRunId] = useState(null)
+  const [selectedRunId, setSelectedRunId] = useState(searchParams.get('runId'))
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('All')
   const [detailRun, setDetailRun] = useState(null)
+  const [runInfoOpen, setRunInfoOpen] = useState(false)
   const runsRequestInFlightRef = useRef(false)
   const detailRequestInFlightRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!selectedRunId && runs[0]?.id) setSelectedRunId(runs[0].id)
   }, [runs, selectedRunId])
+
+  const selectRun = (runId) => {
+    setSelectedRunId(runId)
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.set('runId', runId)
+    setSearchParams(nextParams, { replace: true })
+  }
+
+  useEffect(() => {
+    setRunInfoOpen(false)
+  }, [selectedRunId])
 
   useEffect(() => {
     let cancelled = false
@@ -121,45 +142,44 @@ function RunHistoryPage() {
   const phases = getPhaseGroups(selectedRun)
 
   return (
-    <div className="flex h-full min-h-[calc(100vh-116px)] flex-col">
-      <div className="mb-5 flex items-center justify-between border-b border-[#253044] pb-5">
-        <div className="flex items-center gap-3">
-          <RefreshCw size={20} className="text-[#3f82ff]" />
-          <h1 className="text-[22px] font-semibold text-white">Pipeline History</h1>
-          <span className="rounded-full border border-[#253044] bg-[#0b1120] px-3 py-1 text-sm text-white">
-            {runs.length} runs
-          </span>
-        </div>
-        <button
-          onClick={async () => {
-            const data = await getRuns()
-            setRuns(Array.isArray(data) ? data : [])
-          }}
-          className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#253044] bg-[#202b3b] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#263448]"
-        >
-          <RefreshCw size={15} />
-          Refresh
-        </button>
-      </div>
+    <div className="flex min-h-full flex-col gap-4 lg:h-full lg:min-h-0">
+      <PageHeader
+        eyebrow="Run History"
+        title="Pipeline run history."
+        description={`${filteredRuns.length}${filteredRuns.length !== runs.length ? ` of ${runs.length}` : ''} run${runs.length === 1 ? '' : 's'} available for inspection and rerun.`}
+        icon={History}
+        actions={
+          <button
+            onClick={async () => {
+              const data = await getRuns()
+              setRuns(Array.isArray(data) ? data : [])
+            }}
+            className="btn-secondary inline-flex items-center justify-center gap-2 text-xs"
+          >
+            <RefreshCw size={13} />
+            Refresh
+          </button>
+        }
+      />
 
-      <div className="grid min-h-0 flex-1 xl:grid-cols-[384px_minmax(0,1fr)]">
-        <section className="flex min-h-0 flex-col border-r border-[#253044] pr-4">
-          <div className="pb-4">
+      <div className="flex flex-col overflow-hidden rounded-lg border border-[#253044] bg-[#111827] shadow-card lg:min-h-0 lg:flex-1 lg:flex-row">
+        <section className="flex max-h-[440px] min-h-[320px] flex-col border-b border-[#253044] lg:h-full lg:max-h-none lg:min-h-0 lg:w-80 lg:flex-shrink-0 lg:border-b-0 lg:border-r">
+          <div className="flex-shrink-0 border-b border-[#253044] p-3">
             <div className="relative">
-              <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#8a9ab7]" />
+              <Search size={13} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#8a9ab7]" />
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Search by discovered run ID or filename..."
-                className="h-10 w-full rounded-lg border border-[#253044] bg-[#080e1d] pl-10 pr-3 text-sm text-white outline-none transition-colors placeholder:text-[#8a9ab7] focus:border-[#3f82ff]"
+                className="h-9 w-full rounded-lg border border-[#253044] bg-[#080e1d] pl-9 pr-3 text-xs text-white outline-none transition-colors placeholder:text-[#8a9ab7] focus:border-[#3f82ff]"
               />
             </div>
-            <div className="mt-3 flex flex-wrap gap-2">
+            <div className="mt-2 flex flex-wrap gap-1.5">
               {FILTERS.map((item) => (
                 <button
                   key={item}
                   onClick={() => setFilter(item)}
-                  className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  className={`rounded-full border px-2.5 py-1 text-[10px] font-medium transition-colors ${
                     filter === item
                       ? 'border-[#3f82ff] bg-[#1f325d] text-[#3f82ff]'
                       : 'border-[#253044] bg-[#080e1d] text-white hover:bg-[#111827]'
@@ -171,31 +191,35 @@ function RunHistoryPage() {
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto border-t border-[#253044]">
+          <div className="min-h-0 flex-1 overflow-y-auto">
             {filteredRuns.map((run) => {
               const active = run.id === selectedRunId
               const tone = statusTone(run.status)
               return (
                 <button
                   key={run.id}
-                  onClick={() => setSelectedRunId(run.id)}
-                  className={`w-full border-b border-[#253044] px-5 py-4 text-left transition-colors ${
-                    active ? 'bg-[#101735] shadow-[inset_3px_0_0_0_#3f82ff]' : 'hover:bg-[#111827]'
+                  onClick={() => selectRun(run.id)}
+                  className={`w-full border-b border-[#253044] border-l-2 px-4 py-3 text-left transition-colors ${
+                    active ? 'border-l-[#3f82ff] bg-[#101735]' : 'border-l-transparent hover:bg-[#151f31]'
                   }`}
                 >
-                  <div className="flex items-start justify-between gap-3">
+                  <div className="mb-1.5 flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <FileText size={15} className="text-slate-300" />
-                        <div className="truncate text-sm font-semibold text-white">
+                        <FileText size={12} className="mt-0.5 flex-shrink-0 text-[#8a9ab7]" />
+                        <div className="truncate text-xs font-semibold text-white">
                           {run.brd_filename || 'Untitled run'}
                         </div>
                       </div>
-                      <div className="mt-3 flex items-center gap-3 text-xs text-white">
-                        <span className="truncate font-mono">{String(run.id).slice(0, 9)}...</span>
+                      <div className="mt-2 flex items-center gap-3 text-[10px] text-[#8a9ab7]">
+                        <span className="max-w-[95px] truncate font-mono">{String(run.id).slice(0, 8)}...</span>
                         <span className="flex items-center gap-1">
-                          <CalendarDays size={12} />
+                          <CalendarDays size={9} />
                           {formatCompactDate(run.started_at)}
+                        </span>
+                        <span className="ml-auto flex items-center gap-1 whitespace-nowrap">
+                          <Clock size={9} />
+                          {formatRelativeTime(run.updated_at || run.completed_at || run.started_at)}
                         </span>
                       </div>
                     </div>
@@ -207,12 +231,12 @@ function RunHistoryPage() {
           </div>
         </section>
 
-        <section className="min-h-0 overflow-y-auto pl-6">
+        <section className="min-h-[520px] min-w-0 flex-1 overflow-y-auto p-4 sm:p-5 lg:min-h-0">
           {selectedRun ? (
             <div>
-              <div className="mb-6 flex items-start justify-between gap-4">
+              <div className="mb-5 flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <h2 className="truncate text-[20px] font-semibold uppercase text-white">
+                  <h2 className="truncate text-base font-bold text-white">
                     {selectedRun.brd_filename || 'Untitled run'}
                   </h2>
                   <div className="mt-2 font-mono text-xs text-white">{selectedRun.id}</div>
@@ -223,25 +247,36 @@ function RunHistoryPage() {
                 </div>
               </div>
 
-              <div className="rounded-lg border border-[#253044] bg-[#111827] px-5 py-5">
-                <div className="mb-4 text-sm font-semibold text-white">Run Info</div>
-                <div className="grid gap-3 text-sm">
-                  <InfoRow icon={Info} label="Project Name" value={selectedRun.project_name || selectedRun.brd_filename || '-'} />
-                  <InfoRow icon={Info} label="Project Description" value={selectedRun.project_description || 'NA'} />
-                  <InfoRow icon={Info} label="Source" value={formatSource(selectedRun.source)} />
-                  <InfoRow icon={Info} label="Database Type" value={selectedRun.database_type || '-'} />
-                  <InfoRow icon={Info} label="Database Name" value={selectedRun.database_name || '-'} />
-                  <InfoRow icon={CalendarDays} label="Started" value={formatFullDate(selectedRun.started_at)} />
-                  <InfoRow icon={CalendarDays} label="Last Updated" value={formatFullDate(selectedRun.completed_at || selectedRun.updated_at || selectedRun.started_at)} />
-                  <InfoRow icon={FileText} label="Knowledge Base" value={selectedRun.knowledge_base || 'Not used'} />
-                </div>
+              <div className="overflow-hidden rounded-lg border border-[#253044] bg-[#0d1525]">
+                <button
+                  type="button"
+                  onClick={() => setRunInfoOpen((open) => !open)}
+                  aria-expanded={runInfoOpen}
+                  className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-white/[0.03]"
+                >
+                  <span className="text-xs font-semibold text-white">Run Info</span>
+                  <span className="flex items-center gap-1.5 text-[11px] text-[#8a9ab7]">
+                    {runInfoOpen ? 'Hide' : 'Show'}
+                    <ChevronDown size={13} className={`transition-transform ${runInfoOpen ? 'rotate-180' : '-rotate-90'}`} />
+                  </span>
+                </button>
+                {runInfoOpen && (
+                  <div className="grid gap-2.5 border-t border-[#253044] px-4 py-3 text-xs">
+                    <InfoRow icon={Info} label="Project Name" value={selectedRun.project_name || selectedRun.brd_filename || '-'} />
+                    <InfoRow icon={Info} label="Project Description" value={selectedRun.project_description || 'NA'} />
+                    <InfoRow icon={Info} label="Source" value={formatSource(selectedRun.source)} />
+                    <InfoRow icon={Info} label="Database Type" value={selectedRun.database_type || '-'} />
+                    <InfoRow icon={Info} label="Database Name" value={selectedRun.database_name || '-'} />
+                    <InfoRow icon={CalendarDays} label="Started" value={formatFullDate(selectedRun.started_at)} />
+                    <InfoRow icon={CalendarDays} label="Last Updated" value={formatFullDate(selectedRun.completed_at || selectedRun.updated_at || selectedRun.started_at)} />
+                    <InfoRow icon={FileText} label="Knowledge Base" value={selectedRun.knowledge_base || 'Not used'} />
+                  </div>
+                )}
               </div>
 
-              <div className="mt-7">
-                <div className="mb-3 text-[10px] font-semibold uppercase tracking-[0.28em] text-[#6e7b96]">
-                  Pipeline - Business Requirements Document - {selectedRun.brd_filename || 'Untitled run'}
-                </div>
-                <div className="space-y-2 rounded-xl border border-[#1f2c45] bg-[#070d1b] p-3 shadow-[0_18px_50px_rgba(0,0,0,0.28)]">
+              <div className="mt-5">
+                <div className="mb-3 text-xs font-semibold text-[#c4cee0]">Stages by Phase</div>
+                <div className="overflow-hidden rounded-lg border border-[#253044] bg-[#0d1525]">
                   {phases.map((phase, index) => (
                     <PhaseRow key={phase.id} phase={phase} index={index + 1} />
                   ))}
@@ -264,7 +299,7 @@ function RunHistoryPage() {
 
 function InfoRow({ icon: Icon, label, value }) {
   return (
-    <div className="grid grid-cols-[170px_minmax(0,1fr)] items-start gap-4">
+    <div className="grid items-start gap-1.5 sm:grid-cols-[140px_minmax(0,1fr)] sm:gap-3">
       <div className="flex items-center gap-2 text-white">
         <Icon size={14} className="text-slate-300" />
         <span>{label}</span>
@@ -275,7 +310,7 @@ function InfoRow({ icon: Icon, label, value }) {
 }
 
 function PhaseRow({ phase, index }) {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(false)
   const displaySteps = getHistoryDisplaySteps(phase)
   const completed = displaySteps.filter((step) => isCompletedStep(step.state)).length
   const total = displaySteps.length || phase.total || 0
@@ -295,21 +330,14 @@ function PhaseRow({ phase, index }) {
       : 'text-[#64748b]'
 
   return (
-    <div className="overflow-hidden rounded-lg border border-[#1d2940] bg-[#090f20]">
+    <div className="border-b border-[#253044] last:border-b-0">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
-        className="flex w-full items-center justify-between px-4 py-3 text-left transition-colors hover:bg-[#0d1730]"
+        className="flex w-full items-center justify-between px-4 py-2.5 text-left transition-colors hover:bg-white/[0.03]"
       >
         <div className="flex min-w-0 items-center gap-3">
-          <div className="relative h-8 w-8 flex-shrink-0">
-            {running && (
-              <>
-                <span className="absolute inset-0 rounded-full border border-[#27d6a2]/35 animate-ping" />
-                <span className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#27d6a2] animate-spin" />
-              </>
-            )}
-            <div className={`relative flex h-8 w-8 items-center justify-center rounded-full border bg-[#0c1426] ${
+          <div className={`flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border-2 bg-[#0c1426] ${
               done
                 ? 'border-emerald-500 text-emerald-400'
                 : running
@@ -318,26 +346,25 @@ function PhaseRow({ phase, index }) {
                 ? 'border-amber-300 text-amber-300'
                 : 'border-[#263753] text-[#60708d]'
             }`}>
-              {done ? <CheckCircle2 size={15} /> : <span className="text-xs font-bold">{index}</span>}
-            </div>
+            {done ? <CheckCircle2 size={12} /> : <span className="text-[10px] font-bold">{index}</span>}
           </div>
           <div className="min-w-0">
-            <div className={`truncate text-sm font-bold ${done || running || review ? 'text-white' : 'text-[#8da1c8]'}`}>
+            <div className={`truncate text-xs font-semibold ${done || running || review ? 'text-white' : 'text-[#8da1c8]'}`}>
               {phase.label}
             </div>
-            <div className="mt-1 text-xs text-[#91a4cb]">{completed}/{total} stages complete</div>
+            <div className="mt-0.5 text-[10px] text-[#91a4cb]">{completed}/{total} stages</div>
           </div>
         </div>
-        <div className={`flex items-center gap-3 text-xs font-bold ${toneText}`}>
-          <span className={`h-2 w-2 rounded-full bg-current ${running ? 'animate-pulse' : ''}`} />
+        <div className={`flex items-center gap-2 text-[10px] font-medium ${toneText}`}>
+          <span className={`h-1.5 w-1.5 rounded-full bg-current ${running ? 'animate-pulse' : ''}`} />
           {phase.status}
-          <ChevronDown size={15} className={`text-[#667795] transition-transform ${expanded ? 'rotate-180' : ''}`} />
+          <ChevronDown size={12} className={`text-[#667795] transition-transform ${expanded ? 'rotate-180' : ''}`} />
         </div>
       </button>
 
       {expanded && (
-        <div className="pb-4 pl-9 pr-4">
-          <div className="border-l border-[#23324f] pl-4">
+        <div className="bg-[#080e1d]/50 px-3 pb-2">
+          <div>
             {displaySteps.map((step) => (
               <StageTreeRow key={step.key} step={step} />
             ))}
@@ -365,12 +392,10 @@ function StageTreeRow({ step }) {
     : 'border-[#2a3a58] text-[#6f809e]'
 
   return (
-    <div className="relative flex min-h-[36px] items-center gap-3">
-      <span className="absolute -left-[21px] top-1/2 h-px w-4 -translate-y-1/2 bg-[#23324f]" />
-      <span className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border bg-[#0b1326] ${toneClass}`}>
-        <span className={`h-1.5 w-1.5 rounded-full bg-current ${running ? 'animate-pulse' : ''}`} />
+    <div className="flex min-h-[30px] items-center gap-2 rounded px-2 py-1.5 transition-colors hover:bg-white/[0.03]">
+      <span className={`flex h-2 w-2 flex-shrink-0 items-center justify-center rounded-full bg-current ${toneClass} ${running ? 'animate-pulse' : ''}`}>
       </span>
-      <div className={`text-xs font-bold ${done || running || review ? 'text-white' : 'text-[#7f91b4]'}`}>
+      <div className={`text-xs ${done || running || review ? 'text-[#c4cee0]' : 'text-[#7f91b4]'}`}>
         {step.label}
       </div>
     </div>
@@ -631,7 +656,7 @@ function StatusPill({ status, tone, large = false }) {
   }
   return (
     <div className={`inline-flex items-center gap-2 rounded-full border font-semibold ${toneClasses[tone] || toneClasses.slate} ${
-      large ? 'px-4 py-2 text-sm' : 'px-3 py-1.5 text-xs'
+      large ? 'px-3 py-1.5 text-xs' : 'px-2.5 py-1 text-[10px]'
     }`}>
       <span className={`h-2 w-2 rounded-full bg-current ${isRunningStatus(status) ? 'animate-pulse' : ''}`} />
       {statusLabel(status)}
@@ -640,7 +665,10 @@ function StatusPill({ status, tone, large = false }) {
 }
 
 function statusLabel(status) {
-  const value = String(status || '').replace(/_/g, ' ').trim()
+  const rawValue = String(status || '').toUpperCase()
+  const value = ['SUCCESS', 'PIPELINE_COMPLETED'].includes(rawValue)
+    ? 'Completed'
+    : rawValue.replace(/_/g, ' ').trim()
   return value ? value[0].toUpperCase() + value.slice(1).toLowerCase() : 'Pending'
 }
 
@@ -660,6 +688,17 @@ function formatCompactDate(value) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function formatRelativeTime(value) {
+  if (!value) return ''
+  const elapsed = Math.max(0, Date.now() - new Date(value).getTime())
+  const minutes = Math.floor(elapsed / 60000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
 }
 
 function formatFullDate(value) {

@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Plus,
@@ -12,22 +12,33 @@ import {
   EyeOff,
   ChevronDown,
   Loader2,
-  AlertTriangle
+  AlertTriangle,
+  Zap,
+  CheckCircle2,
+  XCircle
 } from 'lucide-react'
 import {
-  getConfigurations,
-  createConfiguration,
-  updateConfiguration,
-  deleteConfiguration
-} from '../api/athenaApi'
+  useDbConfigurations,
+  useCreateDbConfig,
+  useUpdateDbConfig,
+  useDeleteDbConfig,
+  useTestDbConnection,
+} from '../hooks/useDbConfig'
+import { PageFrame, PageHeader } from '../components/shared/DashboardLayout'
 
 const SOURCE_TYPES = [
   { value: 'database', label: 'Database' },
   { value: 'data_lake', label: 'Data Lake' }
 ]
 
-const DATA_LAKE_TYPES = [
-  { value: 'adls_gen2', label: 'ADLS' }
+const DATA_LAKE_SOURCE_TYPES = [
+  // { value: 'SFTP', label: 'SFTP' },
+  { value: 'ADLS', label: 'ADLS' }
+]
+
+const DATA_LAKE_INTEGRATION_TYPES = [
+  { value: 'SFTP', label: 'SFTP' },
+  { value: 'API', label: 'API' }
 ]
 
 const DB_PRESETS = {
@@ -66,32 +77,27 @@ const EMPTY_CONNECTION = {
   port: '1433',
   databaseName: '',
   schema: '',
-  dataLakeType: 'adls_gen2'
+  integrationType: 'SFTP',
+  dataLakeSourceType: 'ADLS',
+  basePath: '',
+  directoryName: '',
+  secret: '',
+  baseUrl: '',
+  apiKey: ''
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 function DatabaseConfig () {
-  const [connections, setConnections] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [pageError, setPageError] = useState(null)
   const [showForm, setShowForm] = useState(false)
   const [editingConn, setEditingConn] = useState(null)
 
-  const fetchConnections = async () => {
-    setLoading(true)
-    setPageError(null)
-    try {
-      const data = await getConfigurations()
-      setConnections(data)
-    } catch (err) {
-      setPageError(err.message || 'Failed to load connections')
-    } finally {
-      setLoading(false)
-    }
-  }
+  const { data: connections = [], isLoading: loading, error: fetchError } = useDbConfigurations()
+  const createMutation = useCreateDbConfig()
+  const updateMutation = useUpdateDbConfig()
+  const deleteMutation = useDeleteDbConfig()
 
-  useEffect(() => { fetchConnections() }, [])
+  const pageError = fetchError?.message || deleteMutation.error?.message || null
 
   const handleAdd = () => {
     setEditingConn(null)
@@ -103,30 +109,16 @@ function DatabaseConfig () {
     setShowForm(true)
   }
 
-  const handleDelete = async (id) => {
-    try {
-      await deleteConfiguration(id)
-      setConnections((prev) => prev.filter((c) => c.id !== id))
-    } catch (err) {
-      setPageError(err.message || 'Failed to delete connection')
-    }
-  }
+  const handleDelete = (id) => deleteMutation.mutate(id)
 
   const handleSave = async (conn) => {
-    try {
-      if (conn.id && connections.find((c) => c.id === conn.id)) {
-        await updateConfiguration(conn.id, conn)
-        setConnections((prev) => prev.map((c) => (c.id === conn.id ? { ...c, ...conn } : c)))
-      } else {
-        const created = await createConfiguration(conn)
-        setConnections((prev) => [{ ...conn, id: created.id }, ...prev])
-      }
-      setShowForm(false)
-      setEditingConn(null)
-    } catch (err) {
-      // bubble to the form via re-throw so the form can display the error
-      throw err
+    if (conn.id && connections.find((c) => c.id === conn.id)) {
+      await updateMutation.mutateAsync({ id: conn.id, data: conn })
+    } else {
+      await createMutation.mutateAsync(conn)
     }
+    setShowForm(false)
+    setEditingConn(null)
   }
 
   const handleClose = () => {
@@ -135,44 +127,42 @@ function DatabaseConfig () {
   }
 
   return (
-    <div className="flex flex-col gap-6 max-w-6xl w-full pt-1">
-      {/* Page header */}
-      <div className="flex items-center justify-between mb-1 text-text-primary">
-        <div>
-          <h1 className="text-[16px] font-semibold text-text-primary m-0">Database Config</h1>
-          <p className="text-[11px] text-text-tertiary mt-1 mb-0">Manage JDBC source connections for the pipeline</p>
-        </div>
-        <button
-          onClick={handleAdd}
-          className="bg-accent-blue border-transparent text-white rounded-lg px-4 py-2.5 text-[11px] font-medium flex items-center justify-center gap-1.5 hover:bg-blue-600 transition-all shadow-sm hover:shadow-md hover:-translate-y-0.5 focus:ring-2 focus:ring-accent-blue focus:ring-offset-2 focus:ring-offset-bg-base"
-        >
-          <Plus size={14} />
-          Add Connection
-        </button>
-      </div>
+    <PageFrame>
+      <PageHeader
+        eyebrow="Configuration"
+        title="Database source connections."
+        description="Manage JDBC source connections used by Astra-Data pipeline discovery and generation."
+        icon={Database}
+        actions={
+          <button onClick={handleAdd} className="btn-primary flex items-center justify-center gap-2">
+            <Plus size={14} />
+            Add Connection
+          </button>
+        }
+      />
 
       {/* Page-level error */}
       {pageError && (
-        <div className="flex items-start gap-2 p-3 bg-red-900/10 border border-accent-red/30 rounded-lg">
+        <div className="flex items-start gap-2 p-3 bg-red-950/20 border border-accent-red/30 rounded-lg">
           <AlertTriangle size={14} className="text-accent-red mt-0.5 flex-shrink-0" />
-          <p className="text-[11px] text-accent-red m-0 leading-relaxed">{pageError}</p>
+          <p className="text-xs text-accent-red">{pageError}</p>
         </div>
       )}
 
       {/* Connection list */}
       {loading ? (
-        <div className="bg-bg-card border border-bg-border rounded-xl p-12 flex flex-col items-center gap-3">
-          <Loader2 size={18} className="text-accent-blue animate-spin" />
-          <p className="text-text-tertiary text-[11px]">Loading connections…</p>
+        <div className="card p-12 flex flex-col items-center gap-3">
+          <Loader2 size={24} className="text-accent-blue animate-spin" />
+          <p className="text-gray-500 text-sm">Loading connections…</p>
         </div>
       ) : connections.length === 0 ? (
-        <div className="bg-bg-card border border-bg-border rounded-xl p-10 flex flex-col items-center gap-2 text-center shadow-sm">
-          <div className="w-12 h-12 rounded-full bg-bg-base border border-bg-border flex items-center justify-center mb-1 transition-transform hover:scale-110 duration-300">
-            <Database size={20} className="text-text-tertiary" />
+        <div className="card p-12 flex flex-col items-center gap-3 text-center">
+          <div className="w-14 h-14 rounded-xl bg-bg-base border border-bg-border flex items-center justify-center">
+            <Database size={24} className="text-gray-600" />
           </div>
-          <p className="text-text-secondary text-[13px] font-semibold m-0">No connections configured</p>
-          <p className="text-text-tertiary text-[11px] max-w-xs leading-relaxed m-0 mt-1">
-            Click <span className="text-accent-blue font-medium">Add Connection</span> to define a JDBC source for the Astra Data pipeline.
+          <p className="text-gray-400 text-sm font-medium">No connections configured</p>
+          <p className="text-gray-600 text-xs max-w-xs">
+            Click <span className="text-accent-blue">Add Connection</span> to define a JDBC source for the Astra-Data pipeline.
           </p>
         </div>
       ) : (
@@ -198,7 +188,7 @@ function DatabaseConfig () {
           />
         )}
       </AnimatePresence>
-    </div>
+    </PageFrame>
   )
 }
 
@@ -207,64 +197,81 @@ function DatabaseConfig () {
 function ConnectionCard ({ conn, onEdit, onDelete }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const preset = DB_PRESETS[conn.dbType] || DB_PRESETS.custom
+  const isDataLake = conn.sourceType === 'data_lake'
+  const integrationType = conn.integrationType || 'SFTP'
+  const isApiDataLake = isDataLake && integrationType === 'API'
 
   return (
-    <div className="bg-bg-card border border-bg-border rounded-xl p-4 flex items-start gap-4 transition-all duration-300 hover:shadow-card hover:border-accent-blue/30 group">
-      <div className="w-9 h-9 rounded-full bg-accent-blue/10 border border-accent-blue/20 flex items-center justify-center flex-shrink-0 mt-0.5 transition-transform group-hover:scale-110">
-        <Database size={14} className="text-accent-blue" />
+    <div className="card p-5 flex items-start gap-4">
+      <div className="w-10 h-10 rounded-lg bg-accent-blue/10 border border-accent-blue/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+        <Database size={18} className="text-accent-blue" />
       </div>
 
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-3 mb-2.5">
-          <span className="text-[13px] font-semibold text-text-primary transition-colors group-hover:text-accent-blue truncate">{conn.name || 'Unnamed Connection'}</span>
-          <span className="text-[10px] px-2 py-0.5 rounded-full bg-accent-blue/10 text-accent-blue border border-accent-blue/20">
-            {preset.label}
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-sm font-semibold text-white truncate">{conn.name || 'Unnamed Connection'}</span>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-accent-blue/10 text-accent-blue border border-accent-blue/20">
+            {isDataLake ? `Data Lake - ${integrationType}` : preset.label}
           </span>
         </div>
 
-        <div className="grid grid-cols-2 gap-x-6 gap-y-2">
-          {conn.host && (
-            <Detail label="Host" value={`${conn.host}${conn.port ? ':' + conn.port : ''}`} />
-          )}
-          {conn.databaseName && (
-            <Detail label="Database" value={conn.databaseName} />
-          )}
-          {conn.schema && (
-            <Detail label="Schema" value={conn.schema} />
-          )}
-          {conn.username && (
-            <Detail label="Username" value={conn.username} />
-          )}
-          {conn.driverClass && (
-            <Detail label="Driver" value={conn.driverClass} mono />
-          )}
-          {conn.jdbcUrl && (
-            <Detail label="JDBC URL" value={conn.jdbcUrl} mono />
+        <div className="grid grid-cols-2 gap-x-6 gap-y-1 mt-2">
+          {isApiDataLake ? (
+            <>
+              {conn.baseUrl && <Detail label="Base URL" value={conn.baseUrl} mono />}
+              {conn.apiKey && <Detail label="API Key" value="Configured" />}
+            </>
+          ) : isDataLake ? (
+            <>
+              {conn.dataLakeSourceType && <Detail label="Source Type" value={conn.dataLakeSourceType} />}
+              {conn.basePath && <Detail label="Base Path" value={conn.basePath} mono />}
+              {conn.directoryName && <Detail label="Directory" value={conn.directoryName} />}
+            </>
+          ) : (
+            <>
+              {conn.host && (
+                <Detail label="Host" value={`${conn.host}${conn.port ? ':' + conn.port : ''}`} />
+              )}
+              {conn.databaseName && (
+                <Detail label="Database" value={conn.databaseName} />
+              )}
+              {conn.schema && (
+                <Detail label="Schema" value={conn.schema} />
+              )}
+              {conn.username && (
+                <Detail label="Username" value={conn.username} />
+              )}
+              {conn.driverClass && (
+                <Detail label="Driver" value={conn.driverClass} mono />
+              )}
+              {conn.jdbcUrl && (
+                <Detail label="JDBC URL" value={conn.jdbcUrl} mono />
+              )}
+            </>
           )}
         </div>
       </div>
 
-      <div className="flex items-center gap-1.5 flex-shrink-0 mt-1">
+      <div className="flex items-center gap-2 flex-shrink-0">
         <button
           onClick={onEdit}
-          className="w-7 h-7 rounded flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
+          className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-white hover:bg-bg-border transition-colors"
           title="Edit"
         >
-          <Edit2 size={12} />
+          <Edit2 size={14} />
         </button>
 
         {confirmDelete ? (
-          <div className="flex items-center gap-1 bg-red-500/5 px-2 rounded-lg border border-red-500/20">
+          <div className="flex items-center gap-1">
             <button
               onClick={onDelete}
-              className="text-[11px] text-accent-red hover:text-red-400 font-semibold px-1 py-1"
+              className="text-xs text-accent-red hover:text-red-300 font-semibold px-2"
             >
-              Confirm
+              Delete
             </button>
-            <div className="w-px h-3 bg-bg-border mx-1"></div>
             <button
               onClick={() => setConfirmDelete(false)}
-              className="text-[11px] text-text-tertiary hover:text-text-primary px-1 py-1"
+              className="text-xs text-gray-500 hover:text-gray-300 px-1"
             >
               Cancel
             </button>
@@ -272,10 +279,10 @@ function ConnectionCard ({ conn, onEdit, onDelete }) {
         ) : (
           <button
             onClick={() => setConfirmDelete(true)}
-            className="w-7 h-7 rounded flex items-center justify-center text-text-tertiary hover:text-accent-red hover:bg-red-500/10 transition-colors"
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-500 hover:text-accent-red hover:bg-red-950/20 transition-colors"
             title="Delete"
           >
-            <Trash2 size={12} />
+            <Trash2 size={14} />
           </button>
         )}
       </div>
@@ -285,9 +292,9 @@ function ConnectionCard ({ conn, onEdit, onDelete }) {
 
 function Detail ({ label, value, mono = false }) {
   return (
-    <div className="flex items-baseline gap-2 overflow-hidden">
-      <span className="text-[11px] text-text-tertiary flex-shrink-0">{label}:</span>
-      <span className={`text-[11px] text-text-secondary truncate ${mono ? 'font-mono' : ''}`}>{value}</span>
+    <div className="flex items-baseline gap-1.5 overflow-hidden">
+      <span className="text-xs text-gray-500 flex-shrink-0">{label}:</span>
+      <span className={`text-xs text-gray-300 truncate ${mono ? 'font-mono' : ''}`}>{value}</span>
     </div>
   )
 }
@@ -302,37 +309,25 @@ function ConnectionForm ({ initial, onSave, onClose }) {
     ...(initial || {})
   }))
   const [showPassword, setShowPassword] = useState(false)
+  const [showSecret, setShowSecret] = useState(false)
+  const [showApiKey, setShowApiKey] = useState(false)
   const [errors, setErrors] = useState({})
-  const [saving, setSaving] = useState(false)
-  const [saveError, setSaveError] = useState(null)
+  const saveMutation = useCreateDbConfig()
+  const updateMutation = useUpdateDbConfig()
+  const testMutation = useTestDbConnection()
 
-  const set = (key, value) => setForm((f) => ({ ...f, [key]: value }))
+  const saving = saveMutation.isPending || updateMutation.isPending
+  const saveError = saveMutation.error?.message || updateMutation.error?.message || null
+  const testing = testMutation.isPending
+  const testResult = testMutation.isSuccess
+    ? { ok: true, message: 'Connection successful!' }
+    : testMutation.isError
+      ? { ok: false, message: testMutation.error?.message || 'Connection failed' }
+      : null
 
-  const handleSourceTypeChange = (sourceType) => {
-    setForm((f) => ({
-      ...f,
-      sourceType,
-      ...(sourceType === 'data_lake'
-        ? {
-            dataLakeType: f.dataLakeType || 'adls_gen2',
-            dbType: '',
-            host: '',
-            port: '',
-            databaseName: '',
-            schema: '',
-            username: '',
-            password: '',
-            jdbcUrl: '',
-            driverClass: '',
-          }
-        : {
-            dataLakeType: f.dataLakeType || 'adls_gen2',
-            dbType: f.dbType || 'azure_sql',
-            driverClass: f.driverClass || DB_PRESETS.azure_sql.driverClass,
-            port: f.port || DB_PRESETS.azure_sql.port,
-          }),
-    }))
-    setErrors({})
+  const set = (key, value) => {
+    setForm((f) => ({ ...f, [key]: value }))
+    testMutation.reset()  // clear test result when form changes
   }
 
   // When dbType changes, auto-populate driver class & port defaults
@@ -346,10 +341,37 @@ function ConnectionForm ({ initial, onSave, onClose }) {
     }))
   }
 
+  const handleSourceTypeChange = (sourceType) => {
+    setForm((f) => ({ ...f, sourceType }))
+    setErrors({})
+    testMutation.reset()
+  }
+
+  const handleIntegrationTypeChange = (integrationType) => {
+    setForm((f) => ({ ...f, integrationType }))
+    setErrors({})
+    testMutation.reset()
+  }
+
   const validate = () => {
     const e = {}
-    if (!form.name.trim()) e.name = 'Connection name is required'
-    if (form.sourceType === 'database') {
+    if (!form.name.trim()) {
+      e.name = form.sourceType === 'data_lake'
+        ? 'Data lake name is required'
+        : 'Connection name is required'
+    }
+
+    if (form.sourceType === 'data_lake') {
+      if (!form.integrationType) e.integrationType = 'Integration type is required'
+      if (form.integrationType === 'API') {
+        if (!form.baseUrl.trim()) e.baseUrl = 'Base URL is required'
+      } else {
+        if (!form.dataLakeSourceType) e.dataLakeSourceType = 'Source type is required'
+        if (!form.basePath.trim()) e.basePath = 'Base path is required'
+        if (!form.directoryName.trim()) e.directoryName = 'Directory name is required'
+        if (!isEdit && !form.secret.trim()) e.secret = 'Secret is required'
+      }
+    } else {
       if (!form.host.trim()) e.host = 'Host is required'
       if (!form.driverClass.trim()) e.driverClass = 'Driver class is required'
       if (!form.username.trim()) e.username = 'Username is required'
@@ -358,24 +380,20 @@ function ConnectionForm ({ initial, onSave, onClose }) {
     return e
   }
 
+  const handleTest = () => testMutation.mutate({ ...form })
+
   const handleSave = async () => {
     const e = validate()
     if (Object.keys(e).length > 0) {
       setErrors(e)
       return
     }
-    setSaving(true)
-    setSaveError(null)
     try {
       await onSave({ ...form })
     } catch (err) {
-      setSaveError(err.message || 'Failed to save connection')
-    } finally {
-      setSaving(false)
+      // error surfaced via mutation state (saveError above)
     }
   }
-
-  const inputClass = (err) => `w-full bg-bg-base border rounded-lg px-3 py-2.5 text-[11px] text-text-secondary focus:outline-none focus:ring-1 focus:ring-accent-blue focus:border-accent-blue transition-colors ${err ? 'border-accent-red focus:ring-accent-red' : 'border-bg-border hover:border-bg-border/80'}`
 
   return (
     <>
@@ -394,33 +412,41 @@ function ConnectionForm ({ initial, onSave, onClose }) {
         animate={{ x: 0 }}
         exit={{ x: '100%' }}
         transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-        className="fixed right-0 top-0 h-full w-full max-w-[440px] bg-bg-card border-l border-bg-border z-50 flex flex-col shadow-2xl"
+        className="fixed right-0 top-0 h-full w-full max-w-lg bg-bg-card border-l border-bg-border z-50 flex flex-col shadow-2xl"
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-bg-border flex-shrink-0 bg-bg-hover/30">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-bg-border flex-shrink-0">
           <div>
-            <h2 className="text-[14px] font-semibold text-text-primary m-0">
+            <h2 className="text-lg font-bold text-white">
               {isEdit ? 'Edit Connection' : 'Add Connection'}
             </h2>
-            <p className="text-[11px] text-text-tertiary mt-1 m-0">Configure a JDBC source database</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {form.sourceType === 'data_lake'
+                ? 'Configure a Data Lake integration'
+                : 'Configure a JDBC source database'}
+            </p>
           </div>
           <button
             onClick={onClose}
-            className="w-7 h-7 rounded flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-bg-base border border-transparent hover:border-bg-border transition-all"
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-white hover:bg-bg-border transition-colors"
           >
-            <X size={14} />
+            <X size={16} />
           </button>
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex-1 overflow-y-auto p-6 space-y-5">
 
-          {/* Connection Name */}
-          <FormField label="Connection Name" error={errors.name} required>
+          {/* Connection / Data Lake Name */}
+          <FormField
+            label={form.sourceType === 'data_lake' ? 'Data Lake Name' : 'Connection Name'}
+            error={errors.name}
+            required
+          >
             <input
               type="text"
-              className={inputClass(errors.name)}
-              placeholder="e.g. Production Azure SQL"
+              className={`input-field ${errors.name ? 'border-accent-red focus:ring-accent-red' : ''}`}
+              placeholder={form.sourceType === 'data_lake' ? 'e.g. Claims Landing Lake' : 'e.g. Production Azure SQL'}
               value={form.name}
               onChange={(e) => { set('name', e.target.value); setErrors((err) => ({ ...err, name: null })) }}
             />
@@ -428,20 +454,17 @@ function ConnectionForm ({ initial, onSave, onClose }) {
 
           {/* Source Type */}
           <FormField label="Source Type">
-            <div className="flex gap-3">
+            <div className="grid grid-cols-2 gap-2">
               {SOURCE_TYPES.map((opt) => (
                 <button
                   key={opt.value}
                   type="button"
-                  disabled={opt.disabled}
-                  onClick={() => !opt.disabled && handleSourceTypeChange(opt.value)}
+                  onClick={() => handleSourceTypeChange(opt.value)}
                   className={`
-                    flex-1 py-2 rounded-lg border text-[11px] font-medium transition-all duration-150 inline-flex items-center justify-center
-                    ${opt.disabled
-                      ? 'opacity-40 cursor-not-allowed bg-bg-base border-bg-border text-text-tertiary'
-                      : form.sourceType === opt.value
-                        ? 'bg-accent-blue/15 border-accent-blue text-accent-blue'
-                        : 'bg-bg-base border-bg-border text-text-secondary hover:border-text-tertiary hover:text-text-primary hover:bg-bg-hover/50'
+                    px-3 py-2.5 rounded-lg border text-xs font-medium transition-all duration-150
+                    ${form.sourceType === opt.value
+                      ? 'bg-accent-blue/15 border-accent-blue text-accent-blue'
+                      : 'bg-bg-base border-bg-border text-gray-400 hover:border-gray-500 hover:text-gray-200'
                     }
                   `}
                 >
@@ -456,9 +479,9 @@ function ConnectionForm ({ initial, onSave, onClose }) {
             <>
               {/* DB Type */}
               <FormField label="Database Type">
-                <div className="relative group">
+                <div className="relative">
                   <select
-                    className={`${inputClass()} appearance-none pr-8 cursor-pointer`}
+                    className="input-field appearance-none pr-8"
                     value={form.dbType}
                     onChange={(e) => handleDbTypeChange(e.target.value)}
                   >
@@ -466,19 +489,19 @@ function ConnectionForm ({ initial, onSave, onClose }) {
                       <option key={key} value={key}>{preset.label}</option>
                     ))}
                   </select>
-                  <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-tertiary pointer-events-none group-hover:text-text-secondary transition-colors" />
+                  <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
                 </div>
               </FormField>
 
-              <div className="h-px bg-bg-border/60" />
+              <div className="h-px bg-bg-border" />
 
               {/* Host + Port */}
-              <div className="grid grid-cols-4 gap-4">
-                <div className="col-span-3">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2">
                   <FormField label="Host" error={errors.host} required>
                     <input
                       type="text"
-                      className={inputClass(errors.host)}
+                      className={`input-field ${errors.host ? 'border-accent-red focus:ring-accent-red' : ''}`}
                       placeholder="e.g. myserver.database.windows.net"
                       value={form.host}
                       onChange={(e) => { set('host', e.target.value); setErrors((err) => ({ ...err, host: null })) }}
@@ -489,7 +512,7 @@ function ConnectionForm ({ initial, onSave, onClose }) {
                   <FormField label="Port">
                     <input
                       type="text"
-                      className={inputClass()}
+                      className="input-field"
                       placeholder="1433"
                       value={form.port}
                       onChange={(e) => set('port', e.target.value)}
@@ -499,11 +522,11 @@ function ConnectionForm ({ initial, onSave, onClose }) {
               </div>
 
               {/* Database Name + Schema */}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-3">
                 <FormField label="Database Name">
                   <input
                     type="text"
-                    className={inputClass()}
+                    className="input-field"
                     placeholder="e.g. astra_data_db"
                     value={form.databaseName}
                     onChange={(e) => set('databaseName', e.target.value)}
@@ -512,7 +535,7 @@ function ConnectionForm ({ initial, onSave, onClose }) {
                 <FormField label="Schema">
                   <input
                     type="text"
-                    className={inputClass()}
+                    className="input-field"
                     placeholder="e.g. dbo"
                     value={form.schema}
                     onChange={(e) => set('schema', e.target.value)}
@@ -521,21 +544,21 @@ function ConnectionForm ({ initial, onSave, onClose }) {
               </div>
 
               {/* Username + Password */}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-3">
                 <FormField label="Username" error={errors.username} required>
                   <input
                     type="text"
-                    className={inputClass(errors.username)}
+                    className={`input-field ${errors.username ? 'border-accent-red focus:ring-accent-red' : ''}`}
                     placeholder="db_user"
                     value={form.username}
                     onChange={(e) => { set('username', e.target.value); setErrors((err) => ({ ...err, username: null })) }}
                   />
                 </FormField>
-                <FormField label={isEdit ? 'Password (blank to keep)' : 'Password'} error={errors.password} required={!isEdit}>
-                  <div className="relative group">
+                <FormField label={isEdit ? 'Password (leave blank to keep)' : 'Password'} error={errors.password} required={!isEdit}>
+                  <div className="relative">
                     <input
                       type={showPassword ? 'text' : 'password'}
-                      className={`${inputClass(errors.password)} pr-9`}
+                      className={`input-field pr-9 ${errors.password ? 'border-accent-red focus:ring-accent-red' : ''}`}
                       placeholder="••••••••"
                       value={form.password}
                       onChange={(e) => { set('password', e.target.value); setErrors((err) => ({ ...err, password: null })) }}
@@ -543,7 +566,7 @@ function ConnectionForm ({ initial, onSave, onClose }) {
                     <button
                       type="button"
                       onClick={() => setShowPassword((v) => !v)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-text-tertiary hover:text-text-primary transition-colors"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 transition-colors"
                     >
                       {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
                     </button>
@@ -551,13 +574,13 @@ function ConnectionForm ({ initial, onSave, onClose }) {
                 </FormField>
               </div>
 
-              <div className="h-px bg-bg-border/60" />
+              <div className="h-px bg-bg-border" />
 
               {/* JDBC URL */}
               <FormField label="JDBC URL" hint="Auto-filled or override manually">
                 <input
                   type="text"
-                  className={`${inputClass()} font-mono`}
+                  className="input-field font-mono text-xs"
                   placeholder="jdbc:sqlserver://host:1433;databaseName=..."
                   value={form.jdbcUrl}
                   onChange={(e) => set('jdbcUrl', e.target.value)}
@@ -568,7 +591,7 @@ function ConnectionForm ({ initial, onSave, onClose }) {
               <FormField label="Driver Class" error={errors.driverClass} required>
                 <input
                   type="text"
-                  className={`${inputClass(errors.driverClass)} font-mono`}
+                  className={`input-field font-mono text-xs ${errors.driverClass ? 'border-accent-red focus:ring-accent-red' : ''}`}
                   placeholder="com.example.Driver"
                   value={form.driverClass}
                   onChange={(e) => { set('driverClass', e.target.value); setErrors((err) => ({ ...err, driverClass: null })) }}
@@ -577,42 +600,143 @@ function ConnectionForm ({ initial, onSave, onClose }) {
             </>
           )}
 
+          {/* Data Lake when sourceType = data_lake */}
           {form.sourceType === 'data_lake' && (
-            <div className="space-y-4">
-              <FormField label="Data Lake Type" required>
-                <div className="relative group">
+            <>
+              <FormField label="Integration Type" error={errors.integrationType} required>
+                <div className="relative">
                   <select
-                    className={`${inputClass()} appearance-none pr-8 cursor-pointer`}
-                    value={form.dataLakeType || 'adls_gen2'}
-                    onChange={(e) => set('dataLakeType', e.target.value)}
+                    className={`input-field appearance-none pr-8 ${errors.integrationType ? 'border-accent-red focus:ring-accent-red' : ''}`}
+                    value={form.integrationType}
+                    onChange={(e) => handleIntegrationTypeChange(e.target.value)}
                   >
-                    {DATA_LAKE_TYPES.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
+                    {DATA_LAKE_INTEGRATION_TYPES.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
                     ))}
                   </select>
-                  <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-tertiary pointer-events-none group-hover:text-text-secondary transition-colors" />
+                  <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
                 </div>
               </FormField>
 
-              <div className="rounded-lg border border-bg-border bg-bg-base p-4 text-[11px] text-text-secondary">
-                <div className="font-semibold text-text-primary">ADLS Source</div>
-                <div className="mt-2 space-y-1">
-                  <div>Account: <span className="font-mono">https://atheastorage.dfs.core.windows.net</span></div>
-                  <div>File system: backend <span className="font-mono">ADLS_FILE_SYSTEM</span></div>
-                  <div>Root: backend <span className="font-mono">ADLS_SOURCE_ROOT</span></div>
-                  <div>Mode: auto-discover folders and files</div>
-                </div>
-              </div>
+              {form.integrationType === 'API' ? (
+                <>
+                  <div className="h-px bg-bg-border" />
+
+                  <FormField label="Base URL" error={errors.baseUrl} required>
+                    <input
+                      type="url"
+                      className={`input-field font-mono text-xs ${errors.baseUrl ? 'border-accent-red focus:ring-accent-red' : ''}`}
+                      placeholder="https://api.example.com"
+                      value={form.baseUrl}
+                      onChange={(e) => { set('baseUrl', e.target.value); setErrors((err) => ({ ...err, baseUrl: null })) }}
+                    />
+                  </FormField>
+
+                  <FormField label="API Key">
+                    <div className="relative">
+                      <input
+                        type={showApiKey ? 'text' : 'password'}
+                        className="input-field pr-9"
+                        placeholder="Optional API key"
+                        value={form.apiKey}
+                        onChange={(e) => set('apiKey', e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowApiKey((v) => !v)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 transition-colors"
+                      >
+                        {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                    </div>
+                  </FormField>
+                </>
+              ) : (
+                <>
+                  <FormField label="Source Type" error={errors.dataLakeSourceType} required>
+                    <div className="relative">
+                      <select
+                        className={`input-field appearance-none pr-8 ${errors.dataLakeSourceType ? 'border-accent-red focus:ring-accent-red' : ''}`}
+                        value={form.dataLakeSourceType}
+                        onChange={(e) => {
+                          set('dataLakeSourceType', e.target.value)
+                          setErrors((err) => ({ ...err, dataLakeSourceType: null }))
+                        }}
+                      >
+                        {DATA_LAKE_SOURCE_TYPES.map((opt) => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                      <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
+                    </div>
+                  </FormField>
+
+                  <div className="h-px bg-bg-border" />
+
+                  <FormField label="Base Path" error={errors.basePath} required>
+                    <input
+                      type="text"
+                      className={`input-field font-mono text-xs ${errors.basePath ? 'border-accent-red focus:ring-accent-red' : ''}`}
+                      placeholder={form.dataLakeSourceType === 'ADLS' ? 'abfss://container@account.dfs.core.windows.net/path' : '/remote/base/path'}
+                      value={form.basePath}
+                      onChange={(e) => { set('basePath', e.target.value); setErrors((err) => ({ ...err, basePath: null })) }}
+                    />
+                  </FormField>
+
+                  <FormField label="Directory Name" error={errors.directoryName} required>
+                    <input
+                      type="text"
+                      className={`input-field ${errors.directoryName ? 'border-accent-red focus:ring-accent-red' : ''}`}
+                      placeholder="e.g. inbound"
+                      value={form.directoryName}
+                      onChange={(e) => { set('directoryName', e.target.value); setErrors((err) => ({ ...err, directoryName: null })) }}
+                    />
+                  </FormField>
+
+                  <FormField label={isEdit ? 'Secret (leave blank to keep)' : 'Secret'} error={errors.secret} required={!isEdit}>
+                    <div className="relative">
+                      <input
+                        type={showSecret ? 'text' : 'password'}
+                        className={`input-field pr-9 ${errors.secret ? 'border-accent-red focus:ring-accent-red' : ''}`}
+                        placeholder="Enter secret"
+                        value={form.secret}
+                        onChange={(e) => { set('secret', e.target.value); setErrors((err) => ({ ...err, secret: null })) }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowSecret((v) => !v)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 transition-colors"
+                      >
+                        {showSecret ? <EyeOff size={14} /> : <Eye size={14} />}
+                      </button>
+                    </div>
+                  </FormField>
+                </>
+              )}
+            </>
+          )}
+
+          {/* Test connection result */}
+          {testResult && (
+            <div className={`flex items-start gap-2 p-3 rounded-lg border ${
+              testResult.ok
+                ? 'bg-green-950/20 border-green-500/30'
+                : 'bg-red-950/20 border-accent-red/30'
+            }`}>
+              {testResult.ok
+                ? <CheckCircle2 size={14} className="text-green-400 mt-0.5 flex-shrink-0" />
+                : <XCircle size={14} className="text-accent-red mt-0.5 flex-shrink-0" />}
+              <p className={`text-xs ${testResult.ok ? 'text-green-400' : 'text-accent-red'}`}>
+                {testResult.message}
+              </p>
             </div>
           )}
 
           {/* Validation / API error summary */}
           {(Object.values(errors).some(Boolean) || saveError) && (
-            <div className="flex items-start gap-2.5 p-3.5 bg-red-900/10 border border-accent-red/30 rounded-lg">
-              <AlertTriangle size={14} className="text-accent-red flex-shrink-0" />
-              <p className="text-[11px] text-accent-red m-0 leading-relaxed">
+            <div className="flex items-start gap-2 p-3 bg-red-950/20 border border-accent-red/30 rounded-lg">
+              <AlertTriangle size={14} className="text-accent-red mt-0.5 flex-shrink-0" />
+              <p className="text-xs text-accent-red">
                 {saveError || 'Please fill in all required fields.'}
               </p>
             </div>
@@ -620,14 +744,32 @@ function ConnectionForm ({ initial, onSave, onClose }) {
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-bg-border flex gap-3 flex-shrink-0 bg-bg-base/50">
-          <button type="button" onClick={onClose} disabled={saving} className="flex-1 bg-transparent border border-bg-border text-text-secondary hover:text-text-primary rounded-lg px-3 py-2.5 text-[11px] font-medium hover:bg-bg-hover transition-colors text-center disabled:opacity-50">
+        <div className="px-6 py-4 border-t border-bg-border flex gap-3 flex-shrink-0">
+          <button type="button" onClick={onClose} disabled={saving || testing} className="flex-1 btn-secondary">
             Cancel
           </button>
           <button
+            type="button"
+            onClick={handleTest}
+            disabled={testing || saving}
+            className="flex-1 btn-secondary flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {testing ? (
+              <>
+                <Loader2 size={14} className="animate-spin" />
+                Testing…
+              </>
+            ) : (
+              <>
+                <Zap size={14} />
+                Test
+              </>
+            )}
+          </button>
+          <button
             onClick={handleSave}
-            disabled={saving}
-            className="flex-1 bg-accent-blue border-transparent text-white rounded-lg px-3 py-2.5 text-[11px] font-medium flex items-center justify-center gap-1.5 hover:bg-blue-600 transition-all shadow-sm hover:shadow-md focus:ring-2 focus:ring-accent-blue focus:ring-offset-2 focus:ring-offset-bg-card disabled:opacity-50 disabled:hover:translate-y-0"
+            disabled={saving || testing}
+            className="flex-1 btn-primary flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? (
               <>
@@ -637,7 +779,7 @@ function ConnectionForm ({ initial, onSave, onClose }) {
             ) : (
               <>
                 <Save size={14} />
-                {isEdit ? 'Update Connection' : 'Save Connection'}
+                {isEdit ? 'Update' : 'Save'}
               </>
             )}
           </button>
@@ -650,13 +792,13 @@ function ConnectionForm ({ initial, onSave, onClose }) {
 function FormField ({ label, children, error, hint, required }) {
   return (
     <div>
-      <label className="text-[10px] font-semibold text-text-primary uppercase tracking-widest mb-2 block ml-0.5">
+      <label className="label">
         {label}
-        {required && <span className="text-accent-red ml-1">*</span>}
+        {required && <span className="text-accent-red ml-0.5">*</span>}
       </label>
       {children}
-      {hint && !error && <p className="text-[10px] text-text-tertiary mt-1.5 ml-0.5 m-0 leading-none">{hint}</p>}
-      {error && <p className="text-[10px] text-accent-red mt-1.5 ml-0.5 m-0 leading-none">{error}</p>}
+      {hint && !error && <p className="text-xs text-gray-600 mt-1">{hint}</p>}
+      {error && <p className="text-xs text-accent-red mt-1">{error}</p>}
     </div>
   )
 }

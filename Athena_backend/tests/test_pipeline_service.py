@@ -133,6 +133,39 @@ def test_load_checkpoint_fields_uses_json_value_projection(monkeypatch):
     assert recorded["closed"] is True
 
 
+def test_list_runs_uses_lightweight_checkpoint_index(monkeypatch):
+    recorded = {}
+
+    class StubCursor:
+        timeout = None
+
+        def execute(self, query):
+            recorded["query"] = query
+
+        def fetchall(self):
+            return [("run-fast", "2026-07-14T18:00:00")]
+
+    class StubConnection:
+        def cursor(self):
+            return StubCursor()
+
+        def close(self):
+            recorded["closed"] = True
+
+    monkeypatch.setattr(pipeline_runtime, "get_connection", lambda: StubConnection())
+
+    runs = pipeline_runtime.list_runs(10)
+
+    assert runs == [{
+        "run_id": "run-fast",
+        "last_activity": "2026-07-14T18:00:00",
+        "checkpoint": {},
+    }]
+    assert "full_state_json" not in recorded["query"]
+    assert "ai_store" not in recorded["query"]
+    assert recorded["closed"] is True
+
+
 def test_run_pipeline_background_database_flow_saves_completed(monkeypatch):
     saved = {}
 

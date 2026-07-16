@@ -1,0 +1,119 @@
+/* The dashboard uses a deliberately dark operational palette by default.
+   These overrides let it follow the application's existing light theme
+   without affecting any other page or changing its dark-mode appearance. */
+
+.light .dashboard-page {
+  background-color: #f7f8fa !important;
+  color: #111827 !important;
+}
+
+/* Primary page panels and metric cards */
+.light .dashboard-page [class~="bg-[#0b1220]/92"],
+.light .dashboard-page [class~="bg-[#0f172a]/95"],
+.light .dashboard-page [class~="bg-slate-950"] {
+  background-color: #ffffff !important;
+}
+
+/* Nested cards, table rows, buttons, and modal content */
+.light .dashboard-page [class~="bg-[#111827]/88"],
+.light .dashboard-page [class~="bg-slate-950/45"],
+.light .dashboard-page [class~="bg-slate-900"],
+.light .dashboard-page [class~="bg-slate-900/70"],
+.light .dashboard-page [class~="bg-slate-900/75"],
+.light .dashboard-page [class~="bg-slate-900/80"],
+.light .dashboard-page [class~="bg-slate-900/90"] {
+  background-color: #f8fafc !important;
+}
+
+.light .dashboard-page [class~="hover:bg-slate-900"]:hover,
+.light .dashboard-page [class~="hover:bg-slate-900/78"]:hover {
+  background-color: #f1f5f9 !important;
+}
+
+/* Neutral borders and connector lines */
+.light .dashboard-page [class~="border-slate-700"],
+.light .dashboard-page [class~="border-slate-700/60"],
+.light .dashboard-page [class~="border-slate-700/70"],
+.light .dashboard-page [class~="border-slate-700/80"],
+.light .dashboard-page [class~="border-slate-800/80"] {
+  border-color: #dbe2ea !important;
+}
+
+.light .dashboard-page [class~="bg-slate-600/80"] {
+  background-color: #cbd5e1 !important;
+}
+
+.light .dashboard-page [class~="bg-slate-800"] {
+  background-color: #e2e8f0 !important;
+}
+
+/* Text hierarchy */
+.light .dashboard-page .text-white,
+.light .dashboard-page .text-slate-100 {
+  color: #111827 !important;
+}
+
+.light .dashboard-page .text-slate-200,
+.light .dashboard-page .text-slate-300 {
+  color: #334155 !important;
+}
+
+.light .dashboard-page .text-slate-400 {
+  color: #64748b !important;
+}
+
+.light .dashboard-page .text-slate-500 {
+  color: #64748b !important;
+}
+
+.light .dashboard-page [class~="hover:text-white"]:hover {
+  color: #111827 !important;
+}
+
+/* Accents need deeper shades to remain readable on white surfaces. */
+.light .dashboard-page .text-blue-200,
+.light .dashboard-page .text-blue-300 {
+  color: #2563eb !important;
+}
+
+.light .dashboard-page .text-emerald-300 {
+  color: #047857 !important;
+}
+
+.light .dashboard-page .text-amber-300 {
+  color: #b45309 !important;
+}
+
+.light .dashboard-page .text-red-300 {
+  color: #b91c1c !important;
+}
+
+.light .dashboard-page .bg-blue-300 {
+  background-color: #3b82f6 !important;
+}
+
+.light .dashboard-page .bg-emerald-300 {
+  background-color: #10b981 !important;
+}
+
+.light .dashboard-page .bg-amber-300 {
+  background-color: #f59e0b !important;
+}
+
+.light .dashboard-page .group:hover [class~="group-hover:text-blue-300"] {
+  color: #2563eb !important;
+}
+
+/* Use restrained elevation in light mode instead of the dark glow. */
+.light .dashboard-page .shadow-lg,
+.light .dashboard-page .shadow-xl {
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.07) !important;
+}
+
+.light .dashboard-page .shadow-2xl {
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.16) !important;
+}
+
+.light .dashboard-page [class~="hover:shadow-blue-950/30"]:hover {
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.11) !important;
+}

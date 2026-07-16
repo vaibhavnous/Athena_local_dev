@@ -12,6 +12,7 @@ import RunHistoryPage from './pages/RunHistoryPage'
 import ProjectInitiation from './pages/ProjectInitiation'
 import DataQuality from './pages/DataQuality'
 import DataMigration from './pages/DataMigration'
+import NewRunPage from './pages/NewRunPage'
 import useThemeStore from './store/useThemeStore'
 
 function App() {
@@ -41,6 +42,7 @@ function App() {
           <Route path="data-migration" element={<DataMigration />} />
           <Route path="settings" element={<Settings />} />
           <Route path="db-config" element={<DatabaseConfig />} />
+          <Route path="new-run" element={<NewRunPage />} />
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

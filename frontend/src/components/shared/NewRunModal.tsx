@@ -116,7 +116,7 @@ function connectionTypeFromSource(source) {
   return source === 'adls_gen2' || source === 'sftp' ? 'data_lake' : 'database'
 }
 
-function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
+function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false }) {
   const navigate = useNavigate()
   const fileInputRef = useRef(null)
   const sourceSectionRef = useRef(null)
@@ -382,22 +382,26 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
     <AnimatePresence>
       {isOpen && (
         <>
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-40 bg-[#020617]/75 backdrop-blur-sm"
-            onClick={handleClose}
-          />
+          {!pageMode && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-40 bg-[#020617]/75 backdrop-blur-sm"
+              onClick={handleClose}
+            />
+          )}
 
           <motion.div
             initial={{ opacity: 0, y: 20, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 16, scale: 0.98 }}
             transition={{ type: 'spring', stiffness: 280, damping: 28 }}
-            className="fixed inset-0 z-50 overflow-y-auto"
+            className={pageMode ? 'relative h-full overflow-y-auto' : 'fixed inset-0 z-50 overflow-y-auto'}
           >
-            <div className="mx-auto flex min-h-full w-full items-start justify-center px-6 py-12">
+            <div className={pageMode
+              ? 'mx-auto flex min-h-full w-full items-start justify-center px-3 py-3 [zoom:0.82]'
+              : 'mx-auto flex min-h-full w-full items-start justify-center px-6 py-12'}>
               <div className="w-full max-w-[1317px]">
                 <div className="mb-5 flex items-start justify-between">
                   <div className="flex items-start gap-4">

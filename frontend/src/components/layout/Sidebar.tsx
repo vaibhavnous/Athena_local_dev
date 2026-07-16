@@ -5,29 +5,30 @@ import {
   ArrowRightLeft,
   ChevronLeft,
   ChevronRight,
+  Clock3,
   Database,
-  FolderKanban,
+  Folder,
   LayoutDashboard,
-  PlayCircle,
   Settings,
-  ShieldCheck,
+  Shield,
   Sparkles,
   Trophy,
+  X,
 } from 'lucide-react'
 import useAthenaStore from '../../store/useAthenaStore'
 
-const ATHENA_LOGO_SRC = `${process.env.PUBLIC_URL}/Athena_logo.png`
+const ASTRA_WORDMARK_SRC = `${process.env.PUBLIC_URL}/astra-wordmark-white.png`
 
-function Sidebar({ collapsed, onToggle }) {
+function Sidebar({ collapsed, onToggle, onNavigate, mobile = false }) {
   const userRole = useAthenaStore((s) => s.userRole)
 
   const mainItems = [
     { to: '/app', icon: LayoutDashboard, label: 'Dashboard', exact: true },
+    { to: '/app/project', icon: Folder, label: 'Projects' },
     { to: '/app/data-discovery', icon: Sparkles, label: 'Data Discovery' },
-    { to: '/app/run-history', icon: PlayCircle, label: 'Run History' },
-    { to: '/app/project', icon: FolderKanban, label: 'Project' },
-    { to: '/app/data-quality', icon: ShieldCheck, label: 'Data Quality' },
-    { to: '/app/data-migration', icon: ArrowRightLeft, label: 'Data Lineage' },
+    { to: '/app/run-history', icon: Clock3, label: 'Run History' },
+    { to: '/app/data-quality', icon: Shield, label: 'Data Quality' },
+    { to: '/app/data-migration', icon: ArrowRightLeft, label: 'Data Migration' },
   ]
 
   const secondaryItems = [
@@ -36,74 +37,85 @@ function Sidebar({ collapsed, onToggle }) {
   ]
 
   return (
-    <aside className={`relative flex h-full flex-shrink-0 flex-col overflow-hidden border-r border-[#253044] bg-[#131c2c] transition-[width] duration-300 ${collapsed ? 'w-[78px]' : 'w-[280px]'}`}>
-      <div className="flex h-[60px] items-center justify-between border-b border-[#253044] px-4">
-        <div className="flex items-center gap-3 overflow-hidden">
-          <AthenaMark />
-          {!collapsed && <div className="text-[18px] font-semibold text-white">Astra Data</div>}
-        </div>
-        <button
-          onClick={onToggle}
-          className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-white"
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
-        </button>
-      </div>
-
-      <div className="px-3 py-4">
-        {!collapsed && (
-          <SidebarShowcase title="Databricks Edition" subtitle="Unity Catalog, Delta Lake" />
-        )}
-
-        <nav className="mt-9 space-y-2">
-          {mainItems.map((item) => (
-            <NavItem key={item.to} item={item} collapsed={collapsed} />
-          ))}
-        </nav>
-      </div>
-
-      <div className="mt-auto border-t border-[#253044] px-3 py-4">
-        {!collapsed && (
+    <aside
+      role={mobile ? 'dialog' : undefined}
+      aria-modal={mobile || undefined}
+      aria-label={mobile ? 'Navigation' : undefined}
+      className={`relative flex h-full flex-shrink-0 flex-col overflow-hidden border-r border-[#253044] bg-[#131c2c] transition-[width] duration-300 ${mobile ? 'w-[min(86vw,300px)] shadow-2xl' : collapsed ? 'w-16' : 'w-[240px]'}`}
+    >
+      <div className="flex h-[51.2px] flex-shrink-0 items-center justify-between border-b border-[#253044] px-[9.6px]">
+        {collapsed ? (
+          <button
+            onClick={onToggle}
+            className="flex w-full items-center justify-center rounded-md py-1 transition-colors hover:bg-white/5"
+            title="Expand sidebar"
+            aria-label="Expand sidebar"
+          >
+            <AstraWordmark collapsed />
+          </button>
+        ) : (
           <>
-            <SidebarShowcase title="Data Engineer" subtitle="Pipeline Designer & Builder" compact />
-
-            <div className="mt-6 px-2">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-                Databricks Integrations
-              </div>
-              <div className="mt-4 space-y-2.5">
-                <IntegrationItem label="Unity Catalog" tone="emerald" />
-                <IntegrationItem label="Delta Live Tables" tone="emerald" />
-                <IntegrationItem label="MosaicAI" tone="amber" />
-              </div>
+            <div className="flex min-w-0 items-center overflow-hidden">
+              <AstraWordmark collapsed={false} />
             </div>
-
-            <nav className="mt-7 space-y-2">
-              {secondaryItems.map((item) => (
-                <NavItem key={item.to} item={item} collapsed={collapsed} />
-              ))}
-            </nav>
+            <button
+              onClick={onToggle}
+              className="flex h-[25.6px] w-[25.6px] items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-white"
+              title={mobile ? 'Close navigation' : 'Collapse sidebar'}
+              aria-label={mobile ? 'Close navigation' : 'Collapse sidebar'}
+            >
+              {mobile ? <X size={14.4} /> : <ChevronLeft size={14.4} />}
+            </button>
           </>
         )}
+      </div>
 
-        {collapsed && (
-          <nav className="space-y-2">
-            {secondaryItems.map((item) => (
-              <NavItem key={item.to} item={item} collapsed={collapsed} />
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <div>
+          {!collapsed && (
+            <div className="px-[12.8px] py-[9.6px]">
+              <SidebarShowcase title="Databricks Edition" subtitle="Unity Catalog, Delta Lake" />
+            </div>
+          )}
+
+          <nav className="py-[12.8px]" aria-label="Primary navigation">
+            {mainItems.map((item) => (
+              <NavItem key={item.to} item={item} collapsed={collapsed} onNavigate={onNavigate} />
             ))}
           </nav>
-        )}
+        </div>
 
-        <div className={`mt-5 border-t border-[#253044] px-3 pt-4 ${collapsed ? 'hidden' : 'block'}`}>
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="truncate text-[12px] font-semibold text-white">Jayaprakasha Sarma C</div>
-              <div className="truncate text-[10px] text-slate-400">{userRole || 'Pipeline Designer & Builder'}</div>
+        <div className="mt-auto border-t border-[#253044] px-[12.8px] py-[9.6px]">
+          {!collapsed && (
+            <>
+              <SidebarShowcase title="Data Engineer" subtitle="Pipeline Designer & Builder" compact />
+
+            <nav className="mt-[9.6px]" aria-label="Secondary navigation">
+              {secondaryItems.map((item) => (
+                <NavItem key={item.to} item={item} collapsed={collapsed} onNavigate={onNavigate} />
+              ))}
+            </nav>
+            </>
+          )}
+
+          {collapsed && (
+            <nav aria-label="Secondary navigation">
+              {secondaryItems.map((item) => (
+                <NavItem key={item.to} item={item} collapsed={collapsed} onNavigate={onNavigate} />
+              ))}
+            </nav>
+          )}
+
+          <div className={`mt-[9.6px] border-t border-[#253044] px-2 pt-[9.6px] ${collapsed ? 'hidden' : 'block'}`}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="truncate text-[9.6px] font-semibold text-white">Jayaprakasha Sarma C</div>
+                <div className="truncate text-[8px] text-slate-400">{userRole || 'Pipeline Designer & Builder'}</div>
+              </div>
+              <button className="flex h-[25.6px] w-[25.6px] items-center justify-center rounded-md text-red-300" title="Profile action">
+                <Trophy size={11.2} />
+              </button>
             </div>
-            <button className="flex h-7 w-7 items-center justify-center rounded-md text-red-300" title="Profile action">
-              <Trophy size={14} />
-            </button>
           </div>
         </div>
       </div>
@@ -111,55 +123,65 @@ function Sidebar({ collapsed, onToggle }) {
   )
 }
 
-function SidebarShowcase({ title, subtitle, compact = false }) {
+function SidebarShowcase({ title, subtitle }) {
   return (
-    <div className={`rounded-lg ${compact ? 'bg-transparent px-2 py-2' : 'border border-[#2f5fb2] bg-[#182a47] px-3 py-3'}`}>
+    <div className="rounded-lg px-2 py-1.5 transition-colors hover:bg-white/[0.04]">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-[12px] font-semibold text-white">{title}</div>
-          <div className="mt-0.5 text-[10px] text-slate-300">{subtitle}</div>
+          <div className="text-[11.2px] font-semibold leading-tight text-white">{title}</div>
+          <div className="text-[8px] leading-tight text-slate-400">{subtitle}</div>
         </div>
-        <ChevronRight size={14} className="text-slate-300" />
+        <ChevronRight size={11.2} className="text-slate-400" />
       </div>
     </div>
   )
 }
 
-function IntegrationItem({ label, tone }) {
-  const dotClass = tone === 'amber' ? 'bg-amber-400' : 'bg-emerald-400'
-  return (
-    <div className="flex items-center gap-2 text-[12px] text-white">
-      <span className={`h-2 w-2 rounded-full ${dotClass}`} />
-      {label}
-    </div>
-  )
-}
-
-function NavItem({ item, collapsed }) {
+function NavItem({ item, collapsed, onNavigate }) {
   const location = useLocation()
   const isActive = item.exact ? location.pathname === item.to : location.pathname.startsWith(item.to)
   const Icon = item.icon
 
   return (
-    <NavLink
-      to={item.to}
-      className={`group flex items-center gap-3 rounded-lg border px-3 py-2.5 text-[14px] font-semibold transition-colors ${
-        isActive
-          ? 'border-[#2f5fb2] bg-[#1f325d] text-[#3f82ff]'
-          : 'border-transparent text-slate-100 hover:bg-white/[0.05] hover:text-white'
-      } ${collapsed ? 'justify-center px-0' : ''}`}
-    >
-      <div className="flex h-5 w-5 items-center justify-center">
-        <Icon size={18} strokeWidth={1.8} />
-      </div>
-      {!collapsed && <span className="truncate">{item.label}</span>}
-    </NavLink>
+    <div className="mb-[3.2px] px-2">
+      <NavLink
+        to={item.to}
+        onClick={onNavigate}
+        title={collapsed ? item.label : undefined}
+        className={`group flex h-[30.4px] items-center gap-[9.6px] rounded-lg border px-[9.6px] text-[11.2px] font-medium transition-colors ${
+          isActive
+            ? 'border-[#2f5fb2] bg-[#1f325d] text-[#3f82ff]'
+            : 'border-transparent text-slate-100 hover:bg-white/[0.05] hover:text-white'
+        } ${collapsed ? 'justify-center px-0' : ''}`}
+      >
+        <div className="flex h-[14.4px] w-[14.4px] items-center justify-center">
+          <Icon size={14.4} strokeWidth={1.5} />
+        </div>
+        {!collapsed && <span className="truncate">{item.label}</span>}
+      </NavLink>
+    </div>
   )
 }
 
-function AthenaMark() {
+function AstraWordmark({ collapsed }) {
+  if (collapsed) {
+    return (
+      <span className="relative block h-8 w-8 overflow-hidden">
+        <img
+          src={ASTRA_WORDMARK_SRC}
+          alt="Astra"
+          className="absolute left-0 top-1/2 h-auto w-[145px] max-w-none -translate-y-1/2"
+        />
+      </span>
+    )
+  }
+
   return (
-    <img src={ATHENA_LOGO_SRC} alt="Astra Data" className="h-11 w-11 flex-shrink-0 object-contain" />
+    <img
+      src={ASTRA_WORDMARK_SRC}
+      alt="Astra"
+      className="h-auto w-[132px] flex-shrink-0 object-contain"
+    />
   )
 }
 

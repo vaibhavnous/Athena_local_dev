@@ -2,6 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
+@media (min-width: 1024px) {
+  /* ponytail: desktop-only density shortcut; replace with component tokens if per-widget sizing is needed. */
+  .dashboard-desktop-density {
+    width: 117.647%;
+    zoom: 0.85;
+  }
+}
+
 @layer base {
   * {
     box-sizing: border-box;

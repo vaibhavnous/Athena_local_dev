@@ -673,70 +673,28 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
         except Exception:
             # Some drivers may not expose cursor timeout; ignore.
             pass
+        # ponytail: history may briefly show an in-flight checkpoint; remove the
+        # hint once the metadata database uses snapshot isolation.
         cursor.execute(
             f"""
-            SELECT TOP ({limit}) run_id, full_state_json, checkpoint_at AS last_activity
-            FROM [{_pipeline_schema()}].[kpi_checkpoints]
+            SELECT TOP ({limit}) run_id, checkpoint_at AS last_activity
+            FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
             ORDER BY checkpoint_at DESC
             """
         )
         rows = cursor.fetchall()
-        if rows:
-            return [
-                {
-                    "run_id": row[0],
-                    "checkpoint": json.loads(row[1]) if row[1] else {},
-                    "last_activity": row[2],
-                }
-                for row in rows
-                if row and row[0]
-            ]
-
-        cursor.execute(
-            f"""
-            WITH ai_runs AS (
-                SELECT run_id, MAX(stored_at) AS last_activity
-                FROM [{_pipeline_schema()}].[ai_store]
-                GROUP BY run_id
-            ),
-            queue_runs AS (
-                SELECT run_id, MAX(COALESCE(decided_at, queued_at)) AS last_activity
-                FROM [{_pipeline_schema()}].[hitl_review_queue]
-                GROUP BY run_id
-            ),
-            checkpoint_runs AS (
-                SELECT run_id, MAX(checkpoint_at) AS last_activity
-                FROM [{_pipeline_schema()}].[kpi_checkpoints]
-                GROUP BY run_id
-            ),
-            registry_runs AS (
-                SELECT run_id, MAX(timestamp) AS last_activity
-                FROM [{_pipeline_schema()}].[brd_run_registry]
-                GROUP BY run_id
-            ),
-            combined AS (
-                SELECT run_id, last_activity FROM ai_runs
-                UNION
-                SELECT run_id, last_activity FROM queue_runs
-                UNION
-                SELECT run_id, last_activity FROM checkpoint_runs
-                UNION
-                SELECT run_id, last_activity FROM registry_runs
-            )
-            SELECT TOP ({limit}) run_id, MAX(last_activity) AS last_activity
-            FROM combined
-            GROUP BY run_id
-            ORDER BY MAX(last_activity) DESC
-            """
-        )
-        rows = cursor.fetchall()
+        # ponytail: current runs are checkpoint-backed; querying four legacy
+        # stores when this table is empty made an empty history wait for timeout.
         return [
             {
                 "run_id": row[0],
                 "last_activity": row[1],
+                # Avoid loading the potentially large checkpoint blob for the list.
+                # The selected run's detail request hydrates the complete state.
+                "checkpoint": {},
             }
             for row in rows
-            if row[0]
+            if row and row[0]
         ]
     except Exception as exc:
         # If the combined query is slow (missing indexes / large tables), fall back
@@ -750,7 +708,7 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
             cursor.execute(
                 f"""
                 SELECT TOP ({limit}) run_id, MAX(checkpoint_at) AS last_activity
-                FROM [{_pipeline_schema()}].[kpi_checkpoints]
+                FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
                 GROUP BY run_id
                 ORDER BY MAX(checkpoint_at) DESC
                 """
