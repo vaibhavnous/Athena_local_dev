@@ -7,6 +7,7 @@ import pytest
 
 from nodes import gold_gen
 from nodes import silver_gen
+from services import databricks_runtime
 from services import pipeline_runtime
 
 
@@ -521,3 +522,186 @@ def test_gold_contract_caps_dimensions_and_drops_unavailable_silver_joins(monkey
     assert all("missing" not in (join["left_table"], join["right_table"]) for join in constrained["join_paths"])
     assert all(join["left_source_table"].startswith("silver.silver_") for join in constrained["join_paths"])
     assert any("no Silver target exists" in warning for warning in warnings)
+
+
+def test_databricks_gold_baseline_has_quality_guards_and_passes_hard_validation():
+    mapping = {
+        "kpi_name": "Average Claim Payment Amount",
+        "source_silver_table": "silver.silver_claim_payment_indemnity",
+        "measure": {
+            "table": "claim_payment_indemnity",
+            "column": "paidamount",
+            "aggregation": "AVG",
+        },
+        "grouping_dimensions": [
+            {
+                "table": "claim_payment_indemnity",
+                "column": "hospitalname",
+                "semantic_type": "DIMENSION",
+            }
+        ],
+        "time": {
+            "grain": "month",
+            "column": {"table": "claim_payment_indemnity", "column": "paiddate"},
+        },
+        "filters": [],
+        "join_paths": [],
+    }
+    dimensions = gold_gen._dimension_specs(mapping)
+    code = gold_gen.generate_gold_script(mapping=mapping, run_id="run-dq", gold_schema="gold")
+
+    gold_gen._validate_databricks_gold_candidate(code, mapping, "gold", dimensions)
+
+    assert "DQ_MAX_NULL_RATIO" in code
+    assert "duplicate_key_exists" in code
+    assert "NumericType" in code
+    assert "source_age_days" in code
+    assert "DQ_MAX_JOIN_MULTIPLIER" in code
+    assert ".whenMatchedUpdateAll()" in code
+
+
+def test_databricks_gold_hard_validation_rejects_hallucinated_dimension_and_append():
+    mapping = {
+        "kpi_name": "Total Claims",
+        "source_silver_table": "silver.silver_claims",
+        "measure": {"table": "claims", "column": "claimamount", "aggregation": "SUM"},
+        "grouping_dimensions": [],
+        "time": {},
+        "filters": [],
+        "join_paths": [],
+    }
+    candidate = '''
+from pyspark.sql import functions as F
+source = spark.table("silver.silver_claims")
+invented = spark.table("gold.dim_agent")
+result = source.agg(F.sum("claimamount").alias("total_claims_value"))
+result.write.format("delta").mode("append").saveAsTable("gold.fact_total_claims")
+'''
+
+    with pytest.raises(ValueError, match="non-contract tables"):
+        gold_gen._validate_databricks_gold_candidate(candidate, mapping, "gold", [])
+
+
+def test_databricks_gold_execution_runs_dimensions_first_and_skips_blocked():
+    scripts = databricks_runtime._scripts_for_layer(
+        {
+            "run_id": "run-order",
+            "gold_generation_results": [
+                {
+                    "status": "APPROVED",
+                    "script_path": "fact.py",
+                    "script_body": "print('fact')",
+                    "dimension_script_body": "print('dimensions')",
+                    "target_table": "gold.fact_claims",
+                },
+                {
+                    "status": "BLOCKED",
+                    "script_path": None,
+                    "target_table": "gold.fact_uncertified",
+                },
+            ],
+        },
+        "gold",
+        None,
+        False,
+    )
+
+    assert [script["target_table"] for script in scripts] == ["gold_dimensions", "gold.fact_claims"]
+    assert scripts[0]["script_body"] == "print('dimensions')"
+
+
+def test_gold_measure_scoring_rejects_operational_counters_for_money_kpis():
+    columns = [
+        {"table_name": "payments", "column_name": "updatenum", "semantic_type": "MEASURE", "is_measure": True},
+        {"table_name": "payments", "column_name": "paidamount", "semantic_type": "MEASURE", "is_measure": True},
+        {"table_name": "coverage", "column_name": "trans_num", "semantic_type": "MEASURE", "is_measure": True},
+        {"table_name": "coverage", "column_name": "cover_sum_insured", "semantic_type": "MEASURE", "is_measure": True},
+    ]
+
+    payment = silver_gen._best_measure_for_kpi({"kpi_name": "Average Claim Payment Amount"}, columns)
+    insured = silver_gen._best_measure_for_kpi({"kpi_name": "Total Sum Insured"}, columns)
+
+    assert payment["column_name"] == "paidamount"
+    assert insured["column_name"] == "cover_sum_insured"
+    assert silver_gen._infer_aggregation("Claim Payment Frequency", payment) == "COUNT"
+    assert silver_gen._infer_aggregation("Policy Transaction Type Distribution", insured) == "COUNT"
+
+
+def test_databricks_gold_failure_persists_exact_script_and_stage(monkeypatch):
+    monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
+    monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_: None)
+    monkeypatch.setattr(databricks_runtime, "_workspace_import_notebook", lambda *_: {})
+    monkeypatch.setattr(databricks_runtime, "_submit_run", lambda *_args, **_kwargs: {"run_id": 42})
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_wait_for_run",
+        lambda *_: {"run_id": 42, "result_state": "FAILED", "state_message": "workload failed"},
+    )
+    monkeypatch.setattr(databricks_runtime, "_run_failure_detail", lambda *_: "missing gold.dim_claims")
+    saved = []
+
+    def capture_progress(state, **kwargs):
+        saved.append((state, kwargs))
+        return state
+
+    monkeypatch.setattr(databricks_runtime, "save_external_execution_progress", capture_progress)
+
+    with pytest.raises(RuntimeError, match="missing gold.dim_claims"):
+        databricks_runtime.run_databricks_gold_scripts(
+            {
+                "run_id": "run-failed-gold",
+                "target_warehouse": "databricks",
+                "gold_generation_results": [
+                    {
+                        "status": "APPROVED",
+                        "script_body": "print('fact')",
+                        "target_table": "gold.fact_claims",
+                    }
+                ],
+            }
+        )
+
+    failed_state, failed_progress = saved[-1]
+    assert failed_state["failed_background_stage"] == "gold_code_execution"
+    assert failed_state["error"].endswith("missing gold.dim_claims")
+    assert failed_progress["status"] == "FAILED"
+    assert failed_progress["current_name"] == "gold_fact_claims"
+
+
+def test_databricks_gold_llm_retries_then_uses_deterministic_fallback(monkeypatch):
+    output_dir = Path.cwd() / ".tmp-tests" / f"gold_llm_fallback_{uuid.uuid4().hex}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("ATHENA_GOLD_USE_LLM", "true")
+    monkeypatch.setattr(gold_gen, "_gold_output_dir_for", lambda *_: str(output_dir))
+    attempts = []
+
+    def invalid_candidate(**kwargs):
+        attempts.append(kwargs.get("validation_feedback"))
+        return 'spark.table("gold.dim_invented")'
+
+    monkeypatch.setattr(gold_gen, "llm_generate_gold_code", invalid_candidate)
+    result = gold_gen._generate_one_mapping(
+        {
+            "kpi_name": "Total Claims",
+            "source_silver_table": "silver.silver_claims",
+            "measure": {"table": "claims", "column": "claimamount", "aggregation": "SUM"},
+            "grouping_dimensions": [],
+            "time": {},
+            "filters": [],
+            "join_paths": [],
+            "readiness": "READY",
+        },
+        run_id="run-llm-fallback",
+        gold_schema="gold",
+        target_warehouse="databricks",
+        use_domain_kb=False,
+        dimension_contract=[],
+        include_dimension=False,
+    )
+
+    body = Path(result["script_path"]).read_text(encoding="utf-8")
+    assert attempts[0] is None
+    assert "approved source or target" in attempts[1]
+    assert result["generation_mode"] == "DETERMINISTIC_FALLBACK"
+    assert result["fallback_reason"]
+    assert "DQ_MAX_NULL_RATIO" in body

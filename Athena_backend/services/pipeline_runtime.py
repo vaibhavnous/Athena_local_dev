@@ -776,7 +776,7 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
                     "run_id": run_id,
                     "status": "FAILED",
                     "background_stage": None,
-                    "failed_background_stage": stage,
+                    "failed_background_stage": checkpoint.get("failed_background_stage") or stage,
                     "error": str(exc),
                 }
             )

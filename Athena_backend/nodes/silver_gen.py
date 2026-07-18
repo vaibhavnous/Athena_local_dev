@@ -1155,7 +1155,7 @@ def _infer_aggregation(kpi_name: str, column: Dict[str, Any] | None) -> str:
     name = kpi_name.lower()
     if any(word in name for word in ("average", "avg", "mean")):
         return "AVG"
-    if any(word in name for word in ("count", "number", "volume")):
+    if any(word in name for word in ("count", "number", "volume", "frequency", "distribution")):
         return "COUNT"
     if any(word in name for word in ("rate", "ratio", "percent", "percentage")):
         return "RATIO"
@@ -1179,6 +1179,16 @@ def _score_column_for_kpi(kpi: Dict[str, Any], column: Dict[str, Any]) -> int:
         score += 5
     if semantic in {"ID", "SURROGATE_KEY", "PII", "HIGH_CARD_TEXT"}:
         score -= 5
+    column_name = str(column.get("column_name") or "").lower()
+    compact_name = re.sub(r"[^a-z0-9]+", "", column_name)
+    kpi_tokens = _tokens(kpi_text)
+    score += sum(6 for token in kpi_tokens if token in compact_name)
+    monetary_intent = {"amount", "premium", "insured", "estimate", "cost", "expense", "payment", "paid"}
+    monetary_columns = ("amount", "premium", "insured", "estimate", "cost", "expense", "paid", "gross")
+    if kpi_tokens & monetary_intent:
+        score += 25 if any(token in compact_name for token in monetary_columns) else -25
+    if any(token in compact_name for token in ("updatenum", "rownumber", "sequence", "version")):
+        score -= 50
     return score
 
 
@@ -1633,7 +1643,30 @@ def _llm_kimball_plan(
     llm = get_llm(provider=os.getenv("ATHENA_GOLD_LLM_PROVIDER", os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")), model=os.getenv("ATHENA_GOLD_KIMBALL_PLAN_MODEL") or os.getenv("ATHENA_GOLD_LLM_MODEL"), temperature=0.0)
     response = llm.invoke(_kimball_plan_prompt(kpi=kpi, mapping=mapping, columns=columns, certified_joins=certified_joins, validation_feedback=validation_feedback))
     plan = _extract_json_object(getattr(response, "content", response))
-    return _validate_kimball_plan(plan, columns=columns, certified_joins=certified_joins)
+    validated = _validate_kimball_plan(plan, columns=columns, certified_joins=certified_joins)
+    selected = validated.get("measure") or {}
+    selected_meta = next(
+        (
+            column
+            for column in columns
+            if str(column.get("table_name") or "").casefold() == str(selected.get("table") or "").casefold()
+            and str(column.get("column_name") or "").casefold() == str(selected.get("column") or "").casefold()
+        ),
+        None,
+    )
+    best = _best_measure_for_kpi(kpi, columns)
+    if selected_meta and best and _score_column_for_kpi(kpi, selected_meta) < _score_column_for_kpi(kpi, best):
+        raise ValueError(
+            "Kimball plan selected a weaker KPI measure than the deterministic semantic match: "
+            f"{selected.get('column')} < {best.get('column_name')}"
+        )
+    expected_aggregation = _infer_aggregation(_extract_kpi_name(kpi), selected_meta)
+    if expected_aggregation != "RATIO" and str(selected.get("aggregation") or "").upper() != expected_aggregation:
+        raise ValueError(
+            f"Kimball plan changed KPI aggregation from {expected_aggregation} "
+            f"to {selected.get('aggregation')}"
+        )
+    return validated
 
 
 def _build_gold_generation_contract(

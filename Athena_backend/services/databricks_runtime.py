@@ -363,6 +363,37 @@ def _scripts_for_layer(state: Dict[str, Any], layer: str, review_artifact: Optio
             scripts = [item for item in (bundle.get("scripts") or []) if isinstance(item, dict)]
     if approved_only:
         scripts = _filtered_scripts(scripts, review_artifact, layer)
+    if layer == "gold":
+        approved_scripts = [
+            script
+            for script in scripts
+            if str(script.get("status") or "APPROVED").upper() == "APPROVED"
+            and (script.get("script_body") or script.get("script_path"))
+        ]
+        dimension_scripts: List[Dict[str, Any]] = []
+        seen_dimension_paths: set[str] = set()
+        for script in approved_scripts:
+            dimension_path = str(script.get("dimension_script_path") or "").strip()
+            dimension_body = str(script.get("dimension_script_body") or "").strip()
+            if not dimension_body and dimension_path:
+                path = Path(dimension_path)
+                if path.exists():
+                    dimension_body = path.read_text(encoding="utf-8")
+            dimension_key = dimension_path or dimension_body
+            if not dimension_body or dimension_key in seen_dimension_paths:
+                continue
+            seen_dimension_paths.add(dimension_key)
+            dimension_scripts.append(
+                {
+                    "run_id": script.get("run_id") or state.get("run_id"),
+                    "status": "APPROVED",
+                    "script_path": dimension_path,
+                    "script_body": dimension_body,
+                    "target_table": "gold_dimensions",
+                    "kpi_name": "Gold Dimensions",
+                }
+            )
+        scripts = dimension_scripts + approved_scripts
     return scripts
 
 
@@ -482,6 +513,16 @@ def _parse_notebook_result(output_payload: Dict[str, Any]) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {"raw_result": parsed}
 
 
+def _run_failure_detail(run_state: Dict[str, Any]) -> str:
+    detail = str(run_state.get("state_message") or run_state.get("result_state") or "unknown error")
+    try:
+        output_run_id = _task_run_id(run_state)
+        output = _get_run_output(output_run_id) if output_run_id is not None else {}
+        return str(output.get("error") or output.get("error_trace") or detail)[:4000]
+    except Exception:
+        return detail
+
+
 def _execute_databricks_stage_batch(
     state: Dict[str, Any],
     *,
@@ -511,10 +552,19 @@ def _execute_databricks_stage_batch(
     run_state = _wait_for_run(int(run_payload.get("run_id")))
     elapsed_seconds = round(time.monotonic() - started_at, 2)
     if str(run_state.get("result_state") or "").upper() not in {"SUCCESS", "COMPLETED"}:
-        raise RuntimeError(
-            f"Databricks {layer} batch execution failed: "
-            f"{run_state.get('state_message') or run_state.get('result_state') or 'unknown error'}"
+        failure = f"Databricks {layer} batch execution failed: {_run_failure_detail(run_state)}"
+        save_external_execution_progress(
+            {**state, "status": "FAILED", "failed_background_stage": f"{layer}_code_execution", "error": failure},
+            run_id=run_id,
+            platform="databricks",
+            layer=layer,
+            stage_key=f"{layer}_code_execution",
+            status="FAILED",
+            total_count=len(scripts),
+            completed_count=0,
+            message=failure,
         )
+        raise RuntimeError(failure)
 
     output_run_id = _task_run_id(run_state)
     output = _get_run_output(output_run_id) if output_run_id is not None else {}
@@ -634,10 +684,28 @@ def _execute_databricks_stage(
         run_state = _wait_for_run(int(run_payload.get("run_id")))
         elapsed_seconds = round(time.monotonic() - started_at, 2)
         if str(run_state.get("result_state") or "").upper() not in {"SUCCESS", "COMPLETED"}:
-            raise RuntimeError(
-                f"Databricks {layer} execution failed for {script_name}: "
-                f"{run_state.get('state_message') or run_state.get('result_state') or 'unknown error'}"
+            failure = f"Databricks {layer} execution failed for {script_name}: {_run_failure_detail(run_state)}"
+            save_external_execution_progress(
+                {
+                    **state,
+                    "status": "FAILED",
+                    "failed_background_stage": f"{layer}_code_execution",
+                    "error": failure,
+                    f"databricks_{layer}_execution_results": executed_scripts,
+                },
+                run_id=run_id,
+                platform="databricks",
+                layer=layer,
+                stage_key=f"{layer}_code_execution",
+                status="FAILED",
+                total_count=len(scripts),
+                completed_count=len(executed_scripts),
+                current_index=index,
+                current_name=script_name,
+                current_target=script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
+                message=failure,
             )
+            raise RuntimeError(failure)
         executed_scripts.append(
             {
                 "script_name": script_name,
