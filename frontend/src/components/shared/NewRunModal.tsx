@@ -30,10 +30,10 @@ const DEFAULT_FORM = {
   databaseName: 'insurance',
   targetWarehouse: 'databricks',
   useDomainKb: false,
-  stageConfirmationEnabled: false,
+  stageConfirmationEnabled: true,
 }
 
-function buildInitialForm(settings, seedRun) {
+function buildInitialForm(settings, seedRun, project) {
   const seedSource = seedRun?.source || DEFAULT_FORM.source
   return {
     ...DEFAULT_FORM,
@@ -54,6 +54,15 @@ function buildInitialForm(settings, seedRun) {
           useDomainKb: !!seedRun.use_domain_kb,
         }
       : {}),
+    ...(project ? {
+      projectName: project.name,
+      projectDescription: project.description,
+      source: project.connectionType === 'data_lake' ? 'adls_gen2' : 'database',
+      databaseType: project.dbType || DEFAULT_FORM.databaseType,
+      databaseName: project.databaseName || DEFAULT_FORM.databaseName,
+      targetWarehouse: String(project.target || 'Databricks').toLowerCase(),
+      useDomainKb: !!project.useDomainKB,
+    } : {}),
   }
 }
 
@@ -116,7 +125,7 @@ function connectionTypeFromSource(source) {
   return source === 'adls_gen2' || source === 'sftp' ? 'data_lake' : 'database'
 }
 
-function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false }) {
+function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false, project = null }) {
   const navigate = useNavigate()
   const fileInputRef = useRef(null)
   const sourceSectionRef = useRef(null)
@@ -125,7 +134,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false 
   const addNotification = useAthenaStore((s) => s.addNotification)
   const settings = useAthenaStore((s) => s.settings)
 
-  const [form, setForm] = useState(() => buildInitialForm(settings, initialSeedRun))
+  const [form, setForm] = useState(() => buildInitialForm(settings, initialSeedRun, project))
   const [uploadedFile, setUploadedFile] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -133,7 +142,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false 
   const [openSourceSelect, setOpenSourceSelect] = useState(null)
 
   const resetState = () => {
-    setForm(buildInitialForm(settings, initialSeedRun))
+    setForm(buildInitialForm(settings, initialSeedRun, project))
     setUploadedFile(null)
     setError(null)
     setIsDragging(false)
@@ -164,12 +173,12 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false 
 
   useEffect(() => {
     if (!isOpen) return
-    setForm(buildInitialForm(settings, initialSeedRun))
+    setForm(buildInitialForm(settings, initialSeedRun, project))
     setUploadedFile(null)
     setError(null)
     setIsDragging(false)
     setOpenSourceSelect(null)
-  }, [initialSeedRun, isOpen, settings])
+  }, [initialSeedRun, isOpen, project, settings])
 
   useEffect(() => {
     if (!openSourceSelect) return
@@ -303,6 +312,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false 
       }
 
       const run = await startRun({
+        project_id: project?.id,
         source: form.source,
         sftp_entity: normalizedSftpEntity,
         brd_text: form.brdText,
@@ -433,6 +443,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false 
                             onChange={(event) => setForm((current) => ({ ...current, projectName: event.target.value }))}
                             placeholder="Enter project name..."
                             className="modal-input h-[60px] rounded-[10px] border-[#26344b] bg-[#070d1a] px-4 text-[18px] text-white placeholder:text-[#b8c5db]"
+                            readOnly={!!project}
                           />
                         </Field>
 
@@ -442,6 +453,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false 
                             onChange={(event) => setForm((current) => ({ ...current, projectDescription: event.target.value }))}
                             placeholder="Briefly describe the project..."
                             className="modal-input min-h-[107px] resize-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-4 py-4 text-[18px] text-white placeholder:text-[#b8c5db]"
+                            readOnly={!!project}
                           />
                         </Field>
 
@@ -534,6 +546,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false 
                                 setForm((current) => ({ ...current, targetWarehouse }))
                               }
                               activeBorder
+                              disabled={!!project}
                             />
                           </Field>
 
@@ -548,6 +561,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false 
                                 setOpenSelect={setOpenSourceSelect}
                                 onChange={handleConnectionTypeChange}
                                 activeBorder
+                                disabled={!!project}
                               />
                             </Field>
 
@@ -558,6 +572,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false 
                                     <select
                                       className="modal-input h-[60px] w-full appearance-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-5 pr-12 text-[18px] text-white"
                                       value={form.databaseType}
+                                      disabled={!!project}
                                       onChange={(event) => {
                                         const databaseType = event.target.value
                                         setForm((current) => ({
@@ -579,6 +594,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false 
                                     <select
                                       className="modal-input h-[60px] w-full appearance-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-5 pr-12 text-[18px] text-white"
                                       value={form.databaseName}
+                                      disabled={!!project}
                                       onChange={(event) =>
                                         setForm((current) => ({ ...current, databaseName: event.target.value }))
                                       }
@@ -725,6 +741,7 @@ function ModalSelect({
   setOpenSelect,
   onChange,
   activeBorder = false,
+  disabled = false,
 }) {
   const open = openSelect === id
   const selected = options.find((option) => option.id === value)
@@ -733,7 +750,8 @@ function ModalSelect({
     <div className="relative">
       <button
         type="button"
-        onClick={() => setOpenSelect(open ? null : id)}
+        disabled={disabled}
+        onClick={() => !disabled && setOpenSelect(open ? null : id)}
         className={`flex h-[60px] w-full items-center justify-between rounded-[12px] border bg-[#070d1a] px-5 text-left text-[18px] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-[border-color,box-shadow,background-color] duration-150 ${
           open ? 'border-[#4585f5] shadow-[0_0_0_1px_rgba(69,133,245,0.55),0_10px_26px_rgba(9,17,31,0.22)]' : activeBorder ? 'border-[#26344b] hover:border-[#4585f5]/70' : 'border-[#26344b] hover:border-[#4585f5]/70'
         }`}

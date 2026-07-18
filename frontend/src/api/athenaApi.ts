@@ -88,7 +88,15 @@ export const setAuthUserStatus = (uid: string, isActive: boolean) =>
 export const deleteAuthUser = (uid: string) =>
   api.delete(`/auth/users/${uid}`) as unknown as Promise<void>
 
+export const getProjects = () => api.get('/projects', { timeout: READ_TIMEOUT })
+export const getProject = (id: string) => api.get(`/projects/${id}`, { timeout: READ_TIMEOUT })
+export const createProject = (data: object) => api.post('/projects', data, { timeout: WRITE_TIMEOUT })
+export const updateProject = (id: string, data: object) => api.put(`/projects/${id}`, data, { timeout: WRITE_TIMEOUT })
+export const deleteProject = (id: string) => api.delete(`/projects/${id}`, { timeout: WRITE_TIMEOUT })
+export const getProjectRuns = (id: string) => api.get(`/projects/${id}/runs`, { timeout: RUNS_LIST_TIMEOUT })
+
 export const startRun = (payload: {
+  project_id?: string
   brd_text?: string
   source?: string
   sftp_entity?: string
@@ -144,6 +152,11 @@ export const getSilverReview = (runId: string) => api.get(`/silver-reviews/${run
 
 export const submitSilverReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE', reviewArtifact?: Record<string, any>) =>
   api.post(`/silver-reviews/${runId}`, { action, review_artifact: reviewArtifact }, { timeout: WRITE_TIMEOUT })
+
+export const getGoldReview = (runId: string) => api.get(`/gold-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
+
+export const submitGoldReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE', reviewArtifact?: Record<string, any>) =>
+  api.post(`/gold-reviews/${runId}`, { action, review_artifact: reviewArtifact }, { timeout: WRITE_TIMEOUT })
 
 export const abortRun = (runId: string) => api.post(`/pipeline/${runId}/abort`, undefined, { timeout: WRITE_TIMEOUT })
 export const continueStage = (runId: string, autoAdvance = false) =>

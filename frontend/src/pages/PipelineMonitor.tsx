@@ -1,12 +1,13 @@
 // @ts-nocheck
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Play, Square } from 'lucide-react'
+import { Code2, X, Play, Square } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PhasedPipelineDag from '../components/pipeline/PhasedPipelineDag'
 import StageNode from '../components/pipeline/StageNode'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
-import { abortRun, retryFailedStage } from '../api/athenaApi'
+import PythonCodeDialog from '../components/shared/PythonCodeDialog'
+import { abortRun, getRun, retryFailedStage } from '../api/athenaApi'
 import { PageHeader } from '../components/shared/DashboardLayout'
 
 function PipelineMonitor() {
@@ -20,6 +21,37 @@ function PipelineMonitor() {
   const [selectedStage, setSelectedStage] = useState(null)
   const [cancelling, setCancelling] = useState(false)
   const [cancelError, setCancelError] = useState(null)
+  const [codeDialogOpen, setCodeDialogOpen] = useState(false)
+  const [codeDialogStage, setCodeDialogStage] = useState('')
+  const detailRequestRef = useRef(false)
+
+  // The run list intentionally contains lightweight summaries. Hydrate the active
+  // run here so phases, substages and review gates advance alongside the log stream.
+  useEffect(() => {
+    if (!activeRunId) return
+    let cancelled = false
+    let timer
+
+    const hydrate = async () => {
+      if (detailRequestRef.current) return
+      detailRequestRef.current = true
+      try {
+        const detail = await getRun(activeRunId)
+        if (!cancelled && detail) updateRun(activeRunId, detail.run || detail)
+      } catch (error) {
+        if (!cancelled) console.warn('[PipelineMonitor] Failed to hydrate active run', error)
+      } finally {
+        detailRequestRef.current = false
+        if (!cancelled) timer = window.setTimeout(hydrate, 2000)
+      }
+    }
+
+    hydrate()
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [activeRunId, updateRun])
   const handleCancel = async () => {
     if (!activeRun?.id) return
     setCancelling(true)
@@ -40,6 +72,9 @@ function PipelineMonitor() {
   const activeBrdFilename = activeRun?.brd_filename || activeRun?.form_params?.fileName || ''
   const activeDisplayRunId = activeRun
     ? activeRun.databricks_run_id || activeRun.run_id || activeRun.id
+    : ''
+  const activeRunTarget = activeRun
+    ? activeRun.target || activeRun.target_warehouse || activeRun.target_platform || activeRun.targetPlatform || activeRun.form_params?.target
     : ''
   const headerDescription = activeRun ? (
     <>
@@ -103,9 +138,9 @@ function PipelineMonitor() {
           {activeRun ? (
             <>
               {/* Pipeline phases + Logs side by side */}
-              <div className="flex gap-4 flex-1 min-h-0">
+              <div className="flex flex-1 min-h-0 flex-col gap-4 lg:flex-row">
                 {/* Phases — 1/3 width, fills height */}
-                <div className="w-1/3 flex-shrink-0 min-h-0">
+                <div className="min-h-[360px] flex-shrink-0 lg:min-h-0 lg:w-1/3">
                   <PhasedPipelineDag
                     key={activeRun.id}
                     stages={activeRun.stages || []}
@@ -114,21 +149,14 @@ function PipelineMonitor() {
                       activeRun.connection_type ||
                       activeRun.form_params?.connectionType
                     }
-                    target={
-                      activeRun.target ||
-                      activeRun.target_platform ||
-                      activeRun.targetPlatform ||
-                      activeRun.form_params?.target ||
-                      activeRun.form_params?.target_platform ||
-                      activeRun.form_params?.targetPlatform
-                    }
+                    target={activeRunTarget}
                     onStageClick={handleStageClick}
                     onRetry={handleRetryStage}
                   />
                 </div>
 
                 {/* Logs — remaining 2/3 */}
-                <div className="flex-1 min-w-0 min-h-0">
+                <div className="min-h-[420px] min-w-0 flex-1 lg:min-h-0">
                   <PipelineLogsPanel
                     runId={activeRun.run_id || activeRun.id}
                     isActive={activeRun.status === 'RUNNING'}
@@ -155,15 +183,27 @@ function PipelineMonitor() {
           <StageDrawer
             stage={selectedStage}
             onClose={() => setSelectedStage(null)}
+            onViewCode={(stageName) => {
+              setCodeDialogStage(stageName)
+              setCodeDialogOpen(true)
+            }}
           />
         )}
       </AnimatePresence>
+
+      <PythonCodeDialog
+        isOpen={codeDialogOpen}
+        onClose={() => setCodeDialogOpen(false)}
+        stageName={codeDialogStage}
+        runId={activeRunId || ''}
+        target={activeRunTarget}
+      />
 
     </div>
   )
 }
 
-function StageDrawer({ stage, onClose }) {
+function StageDrawer({ stage, onClose, onViewCode }) {
   return (
     <>
       <motion.div
@@ -183,6 +223,15 @@ function StageDrawer({ stage, onClose }) {
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-bold text-white text-sm">Stage Details</h3>
           <div className="flex items-center gap-2">
+            {/(bronze|silver|gold)/i.test(stage?.name || stage?.stage_name || '') && (
+              <button
+                onClick={() => onViewCode?.(stage?.name || stage?.stage_name)}
+                className="flex items-center gap-1.5 rounded-lg border border-accent-blue/30 bg-accent-blue/10 px-2.5 py-1 text-xs font-medium text-accent-blue hover:bg-accent-blue/20"
+              >
+                <Code2 size={11}/>
+                View Code
+              </button>
+            )}
             <button onClick={onClose} className="text-gray-500 hover:text-gray-300 transition-colors">
               <X size={16} />
             </button>

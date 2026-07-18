@@ -14,6 +14,7 @@ from api.routers.config_router import router as config_router
 from api.routers.kpi_router import router as kpi_router
 from api.routers.logs_router import router as logs_router
 from api.routers.pipeline_router import router as pipeline_router
+from api.routers.projects_router import router as projects_router
 from api.routers.reviews_router import router as reviews_router
 from api.routers.runs_router import router as runs_router
 from api.auth import get_admin, get_current_user
@@ -136,6 +137,7 @@ app.include_router(kpi_router, dependencies=protected)
 app.include_router(analytics_router, dependencies=protected)
 app.include_router(config_router, dependencies=[Depends(get_admin)])
 app.include_router(logs_router, dependencies=protected)
+app.include_router(projects_router)
 
 
 # Mount static files for React SPA (frontend)

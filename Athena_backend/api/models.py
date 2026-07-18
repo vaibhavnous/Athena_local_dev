@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class PipelineRunRequest(BaseModel):
+    project_id: Optional[str] = None
     brd_text: str = Field(default="")
     brd_filename: Optional[str] = None
     source: Optional[str] = "database"
@@ -19,6 +20,23 @@ class PipelineRunRequest(BaseModel):
     source_databases: Optional[List[str]] = None
     sftp_entity: Optional[str] = "transactions"
     stage_confirmation_enabled: Optional[bool] = False
+
+
+class ProjectRequest(BaseModel):
+    name: str
+    description: str
+    target: str = "Databricks"
+    status: str = "ACTIVE"
+    connection_type: str
+    connection_name: Optional[str] = None
+    db_type: Optional[str] = None
+    database_name: Optional[str] = None
+    integration_type: Optional[str] = None
+    data_lake_type: Optional[str] = None
+    data_lake_name: Optional[str] = None
+    use_domain_knowledge_base: bool = False
+    domain_profile: Optional[str] = None
+    knowledge_base_id: Optional[str] = None
 
 
 class StageContinueRequest(BaseModel):

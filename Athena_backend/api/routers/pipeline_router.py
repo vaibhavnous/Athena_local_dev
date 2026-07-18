@@ -32,6 +32,7 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
         "run": {
             "id": run_id,
             "run_id": run_id,
+            "project_id": checkpoint.get("project_id"),
             "status": result_state,
             "source": checkpoint.get("source") or "database",
             "brd_filename": checkpoint.get("brd_filename") or run_id,
@@ -87,6 +88,7 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest) -> None:
         {
             **existing,
             "run_id": run_id,
+            "project_id": existing.get("project_id") or payload.project_id,
             "status": existing.get("status") or "RUNNING",
             "background_stage": existing.get("background_stage") or "ingestion",
             "resume_message": existing.get("resume_message") or "BRD Ingest is running.",
@@ -103,7 +105,7 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest) -> None:
             "use_domain_kb": (
                 existing.get("use_domain_kb")
                 if existing.get("use_domain_kb") is not None
-                else False
+                else bool(payload.use_domain_kb)
             ),
             "stage_confirmation_enabled": (
                 existing.get("stage_confirmation_enabled")

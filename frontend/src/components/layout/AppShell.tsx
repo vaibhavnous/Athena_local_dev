@@ -1,13 +1,15 @@
 // @ts-nocheck
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { Outlet, useLocation } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, Clock3, PlayCircle, RotateCcw, X } from 'lucide-react'
+import { AlertTriangle, Clock3, PlayCircle, X } from 'lucide-react'
 import Sidebar from './Sidebar'
 import Topbar from './Topbar'
+import StageGateDialog from '../pipeline/StageGateDialog'
+import HitlQueue from '../../pages/HitlQueue'
 import useAthenaStore from '../../store/useAthenaStore'
 import usePipelineSocket from '../../hooks/usePipelineSocket'
-import { getRun, getRuns } from '../../api/athenaApi'
+import { abortRun, continueStage, getRun, getRuns } from '../../api/athenaApi'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../../utils/demoFallbacks'
 import { getGateDisplayName, getPhaseGroups, normalizeState } from '../../utils/pipelinePhases'
 
@@ -45,7 +47,6 @@ function persistJsonMap(key, value) {
  * Manages the notification toast stack.
  */
 function AppShell() {
-  const navigate = useNavigate()
   const location = useLocation()
   const {
     runs,
@@ -77,6 +78,8 @@ function AppShell() {
   const [pausedRunDetail, setPausedRunDetail] = useState(null)
   const [readyPausedBannerKey, setReadyPausedBannerKey] = useState<string | null>(null)
   const [verifiedPausedBannerKey, setVerifiedPausedBannerKey] = useState<string | null>(null)
+  const [stageGateBusy, setStageGateBusy] = useState(false)
+  const [openReviewDialogKey, setOpenReviewDialogKey] = useState<string | null>(null)
 
   useLayoutEffect(() => {
     mainScrollRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' })
@@ -203,6 +206,7 @@ function AppShell() {
       setPausedRunDetail(null)
       setReadyPausedBannerKey(null)
       setVerifiedPausedBannerKey(null)
+      setOpenReviewDialogKey(null)
       return
     }
 
@@ -228,7 +232,7 @@ function AppShell() {
         const detailReviewKey = detail?.next_review_key || ''
         const expectedGate = pausedRunGate
         const expectedReviewKey = pausedRunReviewKey
-        const expectedGateKey = expectedReviewKey || (
+        const expectedGateKey = expectedReviewKey === 'gold_review' ? 'gold_code_execution' : expectedReviewKey || (
           expectedGate === 1 ? 'gate1' :
           expectedGate === 2 ? 'gate2' :
           expectedGate === 3 ? 'gate3' :
@@ -307,7 +311,11 @@ function AppShell() {
     return {
       gate,
       reviewKey,
-      gateLabel: reviewKey === 'silver_merge_key_review' ? 'Silver Merge Key Review' : getGateDisplayName(gate, bannerRun.source),
+      gateLabel: reviewKey === 'silver_merge_key_review'
+        ? 'Silver Merge Key Review'
+        : reviewKey === 'gold_review'
+          ? 'Gold Code Review'
+          : getGateDisplayName(gate, bannerRun.source),
       progressLabel: total > 0 ? `${completed}/${total} stages done` : 'Pipeline paused',
       timeAgo: formatTimeAgo(bannerRun.updated_at || bannerRun.started_at || bannerRun.created_at),
       resumeMessage: bannerRun.resume_message || 'Pipeline progress is saved. Resume review when you are ready.',
@@ -354,11 +362,8 @@ function AppShell() {
 
     const timer = window.setTimeout(() => {
       if (!isPausedBannerStillCurrent(pausedBannerKey)) return
-      const targetPath = reviewPathForPausedRun(pausedRunDetail)
       setActiveRun(pausedRunDetail.id || pausedRun.id)
-      if (`${location.pathname}${location.search}` !== targetPath) {
-        navigate(targetPath)
-      }
+      setOpenReviewDialogKey(pausedBannerKey)
       addNotification({
         type: 'amber',
         title: `${pausedGateLabel} opened automatically`,
@@ -375,9 +380,6 @@ function AppShell() {
   }, [
     addNotification,
     isPausedBannerStillCurrent,
-    location.pathname,
-    location.search,
-    navigate,
     pausedBannerKey,
     pausedGateLabel,
     pausedResumeMessage,
@@ -443,12 +445,46 @@ function AppShell() {
   const handleResumePausedRun = () => {
     if (!pausedRun) return
     setActiveRun(pausedRun.id)
-    navigate(reviewPathForPausedRun(pausedRun))
+    setOpenReviewDialogKey(pausedBannerKey)
   }
 
-  const handleRestartPausedRun = () => {
-    if (!pausedRun) return
-    window.dispatchEvent(new CustomEvent('athena:new-run', { detail: { seedRun: pausedRun } }))
+  const activeRun = activeRunId ? runs.find((run) => run.id === activeRunId) : null
+  const stageConfirmation = activeRun?.stage_confirmation
+  const stageGateOpen = Boolean(
+    activeRun &&
+    normalizeState(activeRun.status) === 'PAUSED_FOR_STAGE_CONFIRMATION' &&
+    stageConfirmation?.awaiting_confirmation
+  )
+
+  const handleStageGateContinue = async (autoAdvance) => {
+    if (!activeRunId) return
+    setStageGateBusy(true)
+    try {
+      await continueStage(activeRunId, autoAdvance)
+      useAthenaStore.getState().updateRun(activeRunId, {
+        status: 'PROCESSING',
+        background_stage: stageConfirmation?.next_stage_key,
+        stage_confirmation: null,
+        resume_message: `${stageConfirmation?.next_stage_label || 'Next stage'} is starting.`,
+      })
+    } catch (error) {
+      addNotification({ type: 'error', title: 'Unable to continue', message: error.message || 'The next stage could not be started.', duration: 5000 })
+    } finally {
+      setStageGateBusy(false)
+    }
+  }
+
+  const handleStageGateCancel = async () => {
+    if (!activeRunId) return
+    setStageGateBusy(true)
+    try {
+      await abortRun(activeRunId)
+      useAthenaStore.getState().updateRun(activeRunId, { status: 'ABORTED', stage_confirmation: null })
+    } catch (error) {
+      addNotification({ type: 'error', title: 'Unable to cancel', message: error.message || 'The run could not be cancelled.', duration: 5000 })
+    } finally {
+      setStageGateBusy(false)
+    }
   }
 
   return (
@@ -493,7 +529,7 @@ function AppShell() {
         animate={{ marginLeft: 0 }}
         transition={{ type: 'spring', stiffness: 300, damping: 30 }}
       >
-        <Topbar onOpenNavigation={() => setMobileSidebarOpen(true)} onCreateRun={() => navigate('/app/new-run')} />
+        <Topbar onOpenNavigation={() => setMobileSidebarOpen(true)} />
         <main ref={mainScrollRef} className="flex-1 overflow-auto bg-[#080e1d] p-3 sm:p-4">
           {isPausedBannerVisible && pausedRun && pausedRunSummary && (
             <div className="mb-5 rounded-xl border border-amber-500/40 bg-[#19171d] px-4 py-3 shadow-[0_12px_40px_rgba(0,0,0,0.18)]">
@@ -531,13 +567,6 @@ function AppShell() {
                     Resume {pausedRunSummary.gateLabel}
                   </button>
                   <button
-                    onClick={handleRestartPausedRun}
-                    className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#32435f] bg-[#0f172a] px-4 text-sm font-semibold text-slate-100 transition-colors hover:border-[#4b6aa1] hover:bg-[#121c31]"
-                  >
-                    <RotateCcw size={15} />
-                    Restart
-                  </button>
-                  <button
                     onClick={dismissPausedBanner}
                     className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/5 hover:text-white"
                     title="Dismiss paused pipeline banner"
@@ -551,6 +580,33 @@ function AppShell() {
           <Outlet />
         </main>
       </motion.div>
+
+      <StageGateDialog
+        isOpen={stageGateOpen}
+        completedStage={{ name: stageConfirmation?.last_completed_stage_label }}
+        nextStage={{ name: stageConfirmation?.next_stage_label }}
+        onContinue={handleStageGateContinue}
+        onCancel={handleStageGateCancel}
+        busy={stageGateBusy}
+      />
+
+      <AnimatePresence>
+        {openReviewDialogKey && openReviewDialogKey === pausedBannerKey && pausedRunDetail && (
+          <>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm" />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.98, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.98, y: 12 }}
+              className="fixed inset-0 z-[61] flex items-center justify-center p-3 sm:p-6"
+            >
+              <div className="h-full w-full max-w-[1500px] overflow-hidden rounded-2xl border border-bg-border bg-[#080e1d] shadow-2xl">
+                <HitlQueue onClose={() => setOpenReviewDialogKey(null)} />
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
       {/* Toast notification stack */}
       <div className="pointer-events-none fixed inset-x-3 bottom-3 z-50 flex flex-col gap-2 sm:inset-x-auto sm:bottom-6 sm:right-6 sm:w-full sm:max-w-[380px]">
@@ -629,14 +685,6 @@ function isReviewPausedRun(run) {
     status !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
     reviewStatuses.includes(status)
   )
-}
-
-function reviewPathForPausedRun(run) {
-  const runId = encodeURIComponent(run.id || run.run_id)
-  if (run?.next_review_key) {
-    return `/app/hitl?runId=${runId}&review=${encodeURIComponent(run.next_review_key)}`
-  }
-  return `/app/hitl?runId=${runId}&gate=${Number(run.next_gate || 0)}`
 }
 
 /** Individual toast card */

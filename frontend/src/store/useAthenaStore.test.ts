@@ -56,3 +56,21 @@ test('clears the completed-stage dialog when the next stage starts', () => {
 
   expect(useAthenaStore.getState().runs[0].stage_confirmation).toBeNull()
 })
+
+test('keeps detailed HITL status when history refresh returns an UNKNOWN summary', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-hitl',
+    status: 'HITL_WAIT',
+    next_gate: 3,
+    pipeline_steps: [{ key: 'gate3', state: 'HITL_WAIT' }],
+  })
+
+  useAthenaStore.getState().setRuns([{ id: 'run-hitl', status: 'UNKNOWN' }])
+
+  expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    status: 'HITL_WAIT',
+    next_gate: 3,
+    pipeline_steps: [{ key: 'gate3', state: 'HITL_WAIT' }],
+  })
+})

@@ -13,6 +13,7 @@ import Settings from './pages/Settings'
 import DatabaseConfig from './pages/DatabaseConfig'
 import RunHistoryPage from './pages/RunHistoryPage'
 import ProjectInitiation from './pages/ProjectInitiation'
+import ProjectDetailsPage from './pages/ProjectDetailsPage'
 import DataQuality from './pages/DataQuality'
 import DataMigration from './pages/DataMigration'
 import NewRunPage from './pages/NewRunPage'
@@ -44,11 +45,12 @@ function App() {
           <Route path="runs/:runId" element={<RunDetail />} />
           <Route path="hitl" element={<HitlQueue />} />
           <Route path="project" element={<ProjectInitiation />} />
+          <Route path="project/:projectId" element={<ProjectDetailsPage />} />
+          <Route path="project/:projectId/new-run" element={<NewRunPage />} />
           <Route path="data-quality" element={<DataQuality />} />
           <Route path="data-migration" element={<DataMigration />} />
           <Route path="settings" element={<Settings />} />
           <Route path="db-config" element={<ProtectedRoute requireAdmin><DatabaseConfig /></ProtectedRoute>} />
-          <Route path="new-run" element={<NewRunPage />} />
           <Route path="accounts" element={<ProtectedRoute requireAccountManager><AccountManagementPage /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Route>

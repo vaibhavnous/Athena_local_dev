@@ -225,6 +225,12 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
     ]
   }
 
+  if (run?.next_review_key === 'gold_review') {
+    return steps.map((step) => step.key === 'gold_code_execution'
+      ? { ...step, label: 'Gold Review & Execution', state: 'HITL_WAIT', complete: false }
+      : step)
+  }
+
   if (gate < 1 || gate > 5) return steps
 
   const gateKey = `gate${gate}`

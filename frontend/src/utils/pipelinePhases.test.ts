@@ -85,3 +85,19 @@ test('does not infer Silver generation or execution from a completed merge-key r
   expect(phaseState(run, 'phase-4', 'gate5')).toBe('PENDING')
   expect(phaseState(run, 'phase-4', 'silver_code_execution')).toBe('PENDING')
 })
+
+test('shows Gold execution as waiting while generated Gold code is under review', () => {
+  const run = {
+    status: 'HITL_WAIT',
+    next_review_key: 'gold_review',
+    pipeline_steps: [
+      { key: 'gold', label: 'Gold Code Generation', state: 'COMPLETED' },
+      { key: 'gold_code_execution', label: 'Gold Code Execution', state: 'PENDING' },
+    ],
+  }
+
+  expect(getPipelineSteps(run).find((step) => step.key === 'gold_code_execution')).toMatchObject({
+    label: 'Gold Review & Execution',
+    state: 'HITL_WAIT',
+  })
+})

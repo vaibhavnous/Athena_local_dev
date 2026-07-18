@@ -310,3 +310,28 @@ def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
         submit_background(run_id, stage, submit_gate5_review, run_id, payload.action, payload.review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
+
+
+@router.get("/gold-reviews/{run_id}")
+def gold_reviews(run_id: str) -> Dict[str, Any]:
+    from services.pipeline_runtime import load_checkpoint_state
+
+    run = load_checkpoint_state(run_id) or {}
+    artifact = run.get("gold_review_artifact") or {
+        "items": [item for item in run.get("gold_generation_results") or [] if isinstance(item, dict)]
+    }
+    return {
+        "run_id": run_id,
+        "next_review_key": run.get("next_review_key"),
+        "resume_message": run.get("resume_message"),
+        "gold_review_artifact": artifact,
+    }
+
+
+@router.post("/gold-reviews/{run_id}")
+def submit_gold_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
+    from services.pipeline_runtime import submit_background, submit_gold_review
+
+    logger.info("Submitting Gold review", extra={"run_id": run_id, "action": payload.action})
+    submit_background(run_id, "gold_code_execution", submit_gold_review, run_id, payload.action, payload.review_artifact)
+    return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}

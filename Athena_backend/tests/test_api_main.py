@@ -471,6 +471,24 @@ def test_bronze_review_submit_rejects_when_artifact_not_ready(monkeypatch):
     assert response.json()["detail"] == "Bronze review is not ready yet. Generated Bronze scripts are still loading."
 
 
+def test_gold_review_submit_runs_execution_in_background(monkeypatch):
+    recorded = {}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update({"run_id": run_id, "stage": stage, "args": args}),
+    )
+
+    response = client.post(
+        "/gold-reviews/run-123",
+        json={"action": "APPROVED", "review_artifact": {"items": [{"script_body": "select 1"}]}},
+    )
+
+    assert response.status_code == 200
+    assert recorded["run_id"] == "run-123"
+    assert recorded["stage"] == "gold_code_execution"
+    assert recorded["args"][1] == "APPROVED"
+
+
 def test_bronze_review_normalizes_legacy_feed_lineage_fields():
     from api.services.ui.review_ui_service import normalize_bronze_review_artifact
 
