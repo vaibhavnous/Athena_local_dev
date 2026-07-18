@@ -157,6 +157,7 @@ def test_databricks_batch_driver_keeps_separate_script_targets(monkeypatch):
                 "script_body": 'spark.sql("CREATE TABLE IF NOT EXISTS workspace.bronze.orders_raw(id INT)")',
             },
         ],
+        workspace_dir="/Workspace/athena/run-1",
     )
 
     encoded = re.search(r'b64decode\("([^"]+)"\)', notebook).group(1)
@@ -209,6 +210,8 @@ def test_file_bronze_generation_uses_tolerant_databricks_casts():
 def test_snowflake_bronze_generation_writes_sql_without_databricks_path(monkeypatch):
     monkeypatch.setenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "false")
     monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", "*")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
     workdir = Path.cwd() / ".tmp-tests" / f"bronze_{uuid.uuid4().hex}"
     workdir.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(workdir)

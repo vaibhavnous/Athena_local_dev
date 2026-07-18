@@ -3,18 +3,21 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.routers.analytics_router import router as analytics_router
+from api.routers.auth_router import router as auth_router
 from api.routers.config_router import router as config_router
 from api.routers.kpi_router import router as kpi_router
 from api.routers.logs_router import router as logs_router
 from api.routers.pipeline_router import router as pipeline_router
+from api.routers.projects_router import router as projects_router
 from api.routers.reviews_router import router as reviews_router
 from api.routers.runs_router import router as runs_router
+from api.auth import get_admin, get_current_user
 from utilis.embedding_status import get_embedding_runtime_status
 from utilis.logger import logger
 
@@ -55,7 +58,7 @@ app = FastAPI(
 def get_allowed_origins() -> list[str]:
     origins = os.getenv(
         "ATHENA_CORS_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000,https://ashy-mud-0abca9a00.7.azurestaticapps.net",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3002,http://127.0.0.1:3002,https://ashy-mud-0abca9a00.7.azurestaticapps.net",
     )
     return [origin.strip().rstrip("/") for origin in origins.split(",") if origin.strip()]
 
@@ -125,13 +128,16 @@ async def athena_http_exception_handler(
     )
 
 
-app.include_router(pipeline_router)
-app.include_router(runs_router)
-app.include_router(reviews_router)
-app.include_router(kpi_router)
-app.include_router(analytics_router)
-app.include_router(config_router)
-app.include_router(logs_router)
+protected = [Depends(get_current_user)]
+app.include_router(auth_router)
+app.include_router(pipeline_router, dependencies=protected)
+app.include_router(runs_router, dependencies=protected)
+app.include_router(reviews_router, dependencies=protected)
+app.include_router(kpi_router, dependencies=protected)
+app.include_router(analytics_router, dependencies=protected)
+app.include_router(config_router, dependencies=[Depends(get_admin)])
+app.include_router(logs_router, dependencies=protected)
+app.include_router(projects_router)
 
 
 # Mount static files for React SPA (frontend)

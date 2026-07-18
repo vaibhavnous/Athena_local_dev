@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("ATHENA_DEMO_MODE", "false")
 
 from api.main import app
+from api.auth import AuthUser, get_current_user
 
+app.dependency_overrides[get_current_user] = lambda: AuthUser(
+    uid="test-user", username="Test User", email="test@example.com", userType="Admin"
+)
 
 client = TestClient(app)
 
@@ -23,6 +27,31 @@ def test_health_endpoint():
     embeddings = body["embeddings"]
     assert isinstance(embeddings["enabled"], bool)
     assert embeddings["mode"] in {"blocked", "disabled", "enabled"}
+
+
+def test_business_endpoints_require_authentication():
+    override = app.dependency_overrides.pop(get_current_user)
+    try:
+        response = client.get("/settings")
+    finally:
+        app.dependency_overrides[get_current_user] = override
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Authentication required"
+
+
+def test_configuration_rejects_client_users():
+    override = app.dependency_overrides[get_current_user]
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="client-user", username="Client User", email="client@example.com", userType="Client"
+    )
+    try:
+        response = client.get("/settings")
+    finally:
+        app.dependency_overrides[get_current_user] = override
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Administrator access required"
 
 
 def test_silver_merge_key_review_get_returns_checkpoint_artifact(monkeypatch):
@@ -484,7 +513,7 @@ def test_bronze_review_submit_uses_checkpoint_artifact_when_payload_empty(monkey
     response = client.post("/bronze-reviews/run-123", json={"action": "APPROVED", "review_artifact": {"feeds": []}})
 
     assert response.status_code == 200
-    assert recorded["stage"] == "silver"
+    assert recorded["stage"] == "silver_merge_key_review"
     assert recorded["args"][2] == checkpoint_artifact
 
 
@@ -499,6 +528,24 @@ def test_bronze_review_submit_rejects_when_artifact_not_ready(monkeypatch):
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Bronze review is not ready yet. Generated Bronze scripts are still loading."
+
+
+def test_gold_review_submit_runs_execution_in_background(monkeypatch):
+    recorded = {}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update({"run_id": run_id, "stage": stage, "args": args}),
+    )
+
+    response = client.post(
+        "/gold-reviews/run-123",
+        json={"action": "APPROVED", "review_artifact": {"items": [{"script_body": "select 1"}]}},
+    )
+
+    assert response.status_code == 200
+    assert recorded["run_id"] == "run-123"
+    assert recorded["stage"] == "gold_code_execution"
+    assert recorded["args"][1] == "APPROVED"
 
 
 def test_bronze_review_normalizes_legacy_feed_lineage_fields():

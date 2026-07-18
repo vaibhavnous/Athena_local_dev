@@ -2,9 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
+@media (min-width: 1024px) {
+  /* ponytail: desktop-only density shortcut; replace with component tokens if per-widget sizing is needed. */
+  .dashboard-desktop-density {
+    width: 117.647%;
+    zoom: 0.85;
+  }
+}
+
 @layer base {
   * {
     box-sizing: border-box;
+  }
+
+  .login-password-input::-ms-reveal,
+  .login-password-input::-ms-clear {
+    display: none;
   }
 
   :root {
@@ -182,6 +195,39 @@
 @keyframes pulseRing {
   0% { transform: scale(1); opacity: 0.8; }
   100% { transform: scale(2.5); opacity: 0; }
+}
+
+@keyframes athenaSingleFlowFill {
+  0% {
+    transform: scaleX(0);
+    opacity: 0.58;
+  }
+  100% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+@keyframes athenaSingleFlowDot {
+  0% {
+    left: 0;
+    opacity: 0;
+    transform: translateY(-50%) scale(0.75);
+  }
+  12%, 88% {
+    opacity: 1;
+  }
+  100% {
+    left: calc(100% - 10px);
+    opacity: 0;
+    transform: translateY(-50%) scale(1);
+  }
+}
+
+@keyframes athenaSingleFlowGlow {
+  0% { opacity: 0.25; }
+  50% { opacity: 0.72; }
+  100% { opacity: 0.95; }
 }
 
 .pulse-ring::before {

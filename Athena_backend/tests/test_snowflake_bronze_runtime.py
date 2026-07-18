@@ -86,6 +86,8 @@ def test_adls_stage_uses_sas_without_logging_token(monkeypatch):
 
 
 def test_snowflake_bronze_runtime_executes_generated_sql(monkeypatch):
+    monkeypatch.setenv("BRONZE_CATALOG", "main")
+    monkeypatch.setenv("BRONZE_SCHEMA", "bronze")
     workdir = Path.cwd() / ".tmp-tests" / f"snowflake_runtime_{uuid.uuid4().hex}"
     workdir.mkdir(parents=True, exist_ok=True)
     sql_path = workdir / "bronze_claims.sql"
@@ -144,6 +146,8 @@ def test_snowflake_bronze_runtime_executes_generated_sql(monkeypatch):
 
 
 def test_snowflake_bronze_runtime_adls_executes_only_approved_scripts(monkeypatch):
+    monkeypatch.setenv("BRONZE_CATALOG", "main")
+    monkeypatch.setenv("BRONZE_SCHEMA", "bronze")
     workdir = Path.cwd() / ".tmp-tests" / f"snowflake_adls_{uuid.uuid4().hex}"
     workdir.mkdir(parents=True, exist_ok=True)
 

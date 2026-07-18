@@ -86,17 +86,18 @@ test('does not infer Silver generation or execution from a completed merge-key r
   expect(phaseState(run, 'phase-4', 'silver_code_execution')).toBe('PENDING')
 })
 
-test('does not infer Bronze execution from downstream Silver progress', () => {
+test('shows Gold execution as waiting while generated Gold code is under review', () => {
   const run = {
-    status: 'RUNNING',
-    target_warehouse: 'snowflake',
+    status: 'HITL_WAIT',
+    next_review_key: 'gold_review',
     pipeline_steps: [
-      { key: 'bronze', state: 'COMPLETED' },
-      { key: 'gate4', state: 'COMPLETED' },
-      { key: 'silver_merge_key_review', state: 'COMPLETED' },
-      { key: 'silver', state: 'RUNNING' },
+      { key: 'gold', label: 'Gold Code Generation', state: 'COMPLETED' },
+      { key: 'gold_code_execution', label: 'Gold Code Execution', state: 'PENDING' },
     ],
   }
 
-  expect(phaseState(run, 'phase-3', 'bronze_code_execution')).toBe('PENDING')
+  expect(getPipelineSteps(run).find((step) => step.key === 'gold_code_execution')).toMatchObject({
+    label: 'Gold Review & Execution',
+    state: 'HITL_WAIT',
+  })
 })

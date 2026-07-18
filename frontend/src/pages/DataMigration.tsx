@@ -4,6 +4,7 @@ import { motion } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
 import {
   AlertCircle,
+  ArrowRightLeft,
   ArrowRight,
   Box,
   CheckCircle2,
@@ -426,7 +427,7 @@ function DataLineagePage() {
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-3xl">
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-slate-200">
-                <Sparkles size={14} />
+                <ArrowRightLeft size={14} />
                 Databricks Medallion View
               </div>
               <h1 className="mt-4 text-3xl font-semibold tracking-[-0.04em] text-white sm:text-4xl">

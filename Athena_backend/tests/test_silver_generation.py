@@ -378,6 +378,10 @@ def test_databricks_silver_skips_duplicate_expected_output_columns():
 
 
 def test_load_silver_scripts_prefers_snowflake_bundle_for_snowflake_run(monkeypatch):
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
+    monkeypatch.setenv("SNOWFLAKE_SILVER_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_SILVER_SCHEMA", "SILVER")
     monkeypatch.setattr(silver_gen, "ai_store_db_writer", lambda **_: None)
     workdir = Path.cwd() / ".tmp-tests" / f"silver_loader_{uuid.uuid4().hex}"
     workdir.mkdir(parents=True, exist_ok=True)

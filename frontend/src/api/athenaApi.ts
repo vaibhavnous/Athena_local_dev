@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { getApiBaseUrl } from './baseUrl'
+import { clearSession, getAccessToken, type AuthUser, type UserType } from '../auth/session'
 
 const API_BASE_URL = getApiBaseUrl()
 
@@ -21,7 +22,11 @@ const LOG_TIMEOUT = 10000
 
 // Request interceptor
 api.interceptors.request.use(
-  (config) => config,
+  (config) => {
+    const token = getAccessToken()
+    if (token) config.headers.Authorization = `Bearer ${token}`
+    return config
+  },
   (error) => Promise.reject(error)
 )
 
@@ -29,6 +34,14 @@ api.interceptors.request.use(
 api.interceptors.response.use(
   (response) => response.data,
   (error) => {
+    if (error.response?.status === 401) {
+      clearSession()
+      window.dispatchEvent(new Event('astra:unauthorized'))
+      if (window.location.pathname !== '/login') {
+        const next = `${window.location.pathname}${window.location.search}`
+        window.location.assign(`/login?next=${encodeURIComponent(next)}`)
+      }
+    }
     const message = error.response?.data?.message || error.response?.data?.detail || error.message || 'Network error'
     const normalized = new Error(message) as any
     normalized.code = error.code
@@ -38,7 +51,52 @@ api.interceptors.response.use(
   }
 )
 
+export type { AuthUser, UserType }
+
+export interface LoginResponse {
+  access_token: string
+  token_type: string
+  expires_in: number
+  user: AuthUser
+}
+
+export interface UserPayload {
+  username: string
+  email: string
+  password?: string
+  userType: UserType
+}
+
+export const login = (payload: { email: string; password: string }) =>
+  api.post('/auth/login', payload) as unknown as Promise<LoginResponse>
+
+export const getCurrentUser = () =>
+  api.get('/auth/me') as unknown as Promise<AuthUser>
+
+export const getAuthUsers = () =>
+  api.get('/auth/users') as unknown as Promise<{ users: AuthUser[] }>
+
+export const createAuthUser = (payload: UserPayload) =>
+  api.post('/auth/users', payload) as unknown as Promise<{ user: AuthUser }>
+
+export const updateAuthUser = (uid: string, payload: Partial<UserPayload>) =>
+  api.patch(`/auth/users/${uid}`, payload) as unknown as Promise<{ user: AuthUser }>
+
+export const setAuthUserStatus = (uid: string, isActive: boolean) =>
+  api.patch(`/auth/users/${uid}/status`, { isActive }) as unknown as Promise<{ user: AuthUser }>
+
+export const deleteAuthUser = (uid: string) =>
+  api.delete(`/auth/users/${uid}`) as unknown as Promise<void>
+
+export const getProjects = () => api.get('/projects', { timeout: READ_TIMEOUT })
+export const getProject = (id: string) => api.get(`/projects/${id}`, { timeout: READ_TIMEOUT })
+export const createProject = (data: object) => api.post('/projects', data, { timeout: WRITE_TIMEOUT })
+export const updateProject = (id: string, data: object) => api.put(`/projects/${id}`, data, { timeout: WRITE_TIMEOUT })
+export const deleteProject = (id: string) => api.delete(`/projects/${id}`, { timeout: WRITE_TIMEOUT })
+export const getProjectRuns = (id: string) => api.get(`/projects/${id}/runs`, { timeout: RUNS_LIST_TIMEOUT })
+
 export const startRun = (payload: {
+  project_id?: string
   brd_text?: string
   source?: string
   sftp_entity?: string
@@ -106,6 +164,11 @@ export const getSilverReview = (runId: string) => api.get(`/silver-reviews/${run
 export const submitSilverReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE', reviewArtifact?: Record<string, any>) =>
   api.post(`/silver-reviews/${runId}`, { action, review_artifact: reviewArtifact }, { timeout: WRITE_TIMEOUT })
 
+export const getGoldReview = (runId: string) => api.get(`/gold-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
+
+export const submitGoldReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE', reviewArtifact?: Record<string, any>) =>
+  api.post(`/gold-reviews/${runId}`, { action, review_artifact: reviewArtifact }, { timeout: WRITE_TIMEOUT })
+
 export const abortRun = (runId: string) => api.post(`/pipeline/${runId}/abort`, undefined, { timeout: WRITE_TIMEOUT })
 export const continueStage = (runId: string, autoAdvance = false) =>
   api.post(`/pipeline/${runId}/continue-stage`, { auto_advance: autoAdvance }, { timeout: WRITE_TIMEOUT })
@@ -146,6 +209,7 @@ export const getConfigurations = () => api.get('/configurations', { timeout: REA
 export const createConfiguration = (data: object) => api.post('/configurations', data, { timeout: WRITE_TIMEOUT })
 export const updateConfiguration = (id: string | number, data: object) => api.put(`/configurations/${id}`, data, { timeout: WRITE_TIMEOUT })
 export const deleteConfiguration = (id: string | number) => api.delete(`/configurations/${id}`, { timeout: WRITE_TIMEOUT })
+export const testConnection = (data: object) => api.post('/configurations/test', data, { timeout: WRITE_TIMEOUT })
 
 // ── HITL KPI Review — KPI Reviews ─────────────────────────────────────────────
 export const fetchKpiReviews = (runId: string, status: string | null = null) =>

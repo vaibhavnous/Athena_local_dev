@@ -286,69 +286,17 @@ def _run_database_gold_stage(state: Dict[str, Any]) -> Dict[str, Any]:
 
     result = gold_code_generation_node(state)
     if str(result.get("gold_generation_status") or "").upper().startswith("COMPLETED"):
-        final_state = {**result, "status": "PIPELINE_COMPLETED", "next_gate": None}
-        if str(final_state.get("target_warehouse") or "").lower() == "snowflake":
-            from services.snowflake_gold_runtime import run_snowflake_gold_scripts
-
-            run_id = str(final_state.get("run_id") or "")
-            execution_state = {
-                **final_state,
-                "status": "RUNNING",
-                "background_stage": "gold_code_execution",
-                "resume_message": "Executing generated Gold scripts in Snowflake.",
-            }
-            if run_id:
-                save_checkpoint_state(run_id, execution_state)
-            try:
-                final_state = run_snowflake_gold_scripts(execution_state)
-            except Exception as exc:
-                failed_state = {
-                    **execution_state,
-                    "status": "FAILED",
-                    "background_stage": "gold_code_execution",
-                    "failed_background_stage": "gold_code_execution",
-                    "error": str(exc),
-                }
-                if run_id:
-                    save_checkpoint_state(run_id, failed_state)
-                raise
-            final_state["background_stage"] = None
-            final_state["status"] = "PIPELINE_COMPLETED"
-            final_state["next_gate"] = None
-            if run_id:
-                save_checkpoint_state(run_id, final_state)
-        elif str(final_state.get("target_warehouse") or "").lower() == "databricks":
-            from services.databricks_runtime import databricks_gold_execution_enabled, run_databricks_gold_scripts
-
-            if databricks_gold_execution_enabled():
-                run_id = str(final_state.get("run_id") or "")
-                execution_state = {
-                    **final_state,
-                    "status": "RUNNING",
-                    "background_stage": "gold_code_execution",
-                    "resume_message": "Executing generated Gold scripts in Databricks.",
-                }
-                if run_id:
-                    save_checkpoint_state(run_id, execution_state)
-                try:
-                    final_state = run_databricks_gold_scripts(execution_state)
-                except Exception as exc:
-                    failed_state = {
-                        **execution_state,
-                        "status": "FAILED",
-                        "background_stage": "gold_code_execution",
-                        "failed_background_stage": "gold_code_execution",
-                        "error": str(exc),
-                    }
-                    if run_id:
-                        save_checkpoint_state(run_id, failed_state)
-                    raise
-                final_state["background_stage"] = None
-                final_state["status"] = "PIPELINE_COMPLETED"
-                final_state["next_gate"] = None
-                if run_id:
-                    save_checkpoint_state(run_id, final_state)
-        return final_state
+        return {
+            **result,
+            "status": "HITL_WAIT",
+            "background_stage": None,
+            "next_gate": None,
+            "next_review_key": "gold_review",
+            "gold_review_artifact": {
+                "items": [item for item in result.get("gold_generation_results") or [] if isinstance(item, dict)],
+            },
+            "resume_message": "Gold Review is pending. Review generated Gold scripts before execution.",
+        }
     return result
 
 
@@ -802,70 +750,28 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
         except Exception:
             # Some drivers may not expose cursor timeout; ignore.
             pass
+        # ponytail: history may briefly show an in-flight checkpoint; remove the
+        # hint once the metadata database uses snapshot isolation.
         cursor.execute(
             f"""
-            SELECT TOP ({limit}) run_id, full_state_json, checkpoint_at AS last_activity
-            FROM [{_pipeline_schema()}].[kpi_checkpoints]
+            SELECT TOP ({limit}) run_id, checkpoint_at AS last_activity
+            FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
             ORDER BY checkpoint_at DESC
             """
         )
         rows = cursor.fetchall()
-        if rows:
-            return [
-                {
-                    "run_id": row[0],
-                    "checkpoint": json.loads(row[1]) if row[1] else {},
-                    "last_activity": row[2],
-                }
-                for row in rows
-                if row and row[0]
-            ]
-
-        cursor.execute(
-            f"""
-            WITH ai_runs AS (
-                SELECT run_id, MAX(stored_at) AS last_activity
-                FROM [{_pipeline_schema()}].[ai_store]
-                GROUP BY run_id
-            ),
-            queue_runs AS (
-                SELECT run_id, MAX(COALESCE(decided_at, queued_at)) AS last_activity
-                FROM [{_pipeline_schema()}].[hitl_review_queue]
-                GROUP BY run_id
-            ),
-            checkpoint_runs AS (
-                SELECT run_id, MAX(checkpoint_at) AS last_activity
-                FROM [{_pipeline_schema()}].[kpi_checkpoints]
-                GROUP BY run_id
-            ),
-            registry_runs AS (
-                SELECT run_id, MAX(timestamp) AS last_activity
-                FROM [{_pipeline_schema()}].[brd_run_registry]
-                GROUP BY run_id
-            ),
-            combined AS (
-                SELECT run_id, last_activity FROM ai_runs
-                UNION
-                SELECT run_id, last_activity FROM queue_runs
-                UNION
-                SELECT run_id, last_activity FROM checkpoint_runs
-                UNION
-                SELECT run_id, last_activity FROM registry_runs
-            )
-            SELECT TOP ({limit}) run_id, MAX(last_activity) AS last_activity
-            FROM combined
-            GROUP BY run_id
-            ORDER BY MAX(last_activity) DESC
-            """
-        )
-        rows = cursor.fetchall()
+        # ponytail: current runs are checkpoint-backed; querying four legacy
+        # stores when this table is empty made an empty history wait for timeout.
         return [
             {
                 "run_id": row[0],
                 "last_activity": row[1],
+                # Avoid loading the potentially large checkpoint blob for the list.
+                # The selected run's detail request hydrates the complete state.
+                "checkpoint": {},
             }
             for row in rows
-            if row[0]
+            if row and row[0]
         ]
     except Exception as exc:
         # If the combined query is slow (missing indexes / large tables), fall back
@@ -879,7 +785,7 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
             cursor.execute(
                 f"""
                 SELECT TOP ({limit}) run_id, MAX(checkpoint_at) AS last_activity
-                FROM [{_pipeline_schema()}].[kpi_checkpoints]
+                FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
                 GROUP BY run_id
                 ORDER BY MAX(checkpoint_at) DESC
                 """
@@ -2308,13 +2214,13 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         if checkpoint.get("resume_message"):
             resume_message = checkpoint.get("resume_message")
 
-    gold_progress_exists = bool(
-        gold_generation_completed
-        or checkpoint.get("background_stage") == "gold_code_execution"
+    gold_execution_progress_exists = bool(
+        checkpoint.get("background_stage") == "gold_code_execution"
         or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
         or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
+        or str(checkpoint.get("status") or "").upper() == "PIPELINE_COMPLETED"
     )
-    if gold_progress_exists:
+    if gold_execution_progress_exists:
         next_gate = None
         next_review_key = None
 
@@ -2384,7 +2290,9 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         else "gate5" if next_gate == 5
         else None
     )
-    waiting_stage_key = str(next_review_key or waiting_gate_key or "") or None
+    waiting_stage_key = str(
+        "gold_code_execution" if next_review_key == "gold_review" else next_review_key or waiting_gate_key or ""
+    ) or None
     pipeline_steps = apply_waiting_stage_state(pipeline_steps, waiting_stage_key)
     if checkpoint.get("status") == "PAUSED_FOR_STAGE_CONFIRMATION" and checkpoint.get("next_stage_key"):
         for step in pipeline_steps:
@@ -3250,56 +3158,84 @@ def submit_gold_generation(run_id: str) -> Dict[str, Any]:
     result = gold_code_generation_node(state)
     final_state = {**checkpoint_state, **result, "run_id": run_id}
     if str(result.get("gold_generation_status") or "").startswith("COMPLETED"):
-        target_warehouse = str(final_state.get("target_warehouse") or "").lower()
-        if target_warehouse == "snowflake":
-            from services.snowflake_gold_runtime import run_snowflake_gold_scripts
+        final_state.update(
+            {
+                "status": "HITL_WAIT",
+                "background_stage": None,
+                "next_gate": None,
+                "next_review_key": "gold_review",
+                "gold_review_artifact": {
+                    "items": [item for item in result.get("gold_generation_results") or [] if isinstance(item, dict)],
+                },
+                "resume_message": "Gold Review is pending. Review generated Gold scripts before execution.",
+            }
+        )
+    save_checkpoint_state(run_id, final_state)
+    return final_state
 
+
+def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+    decision = str(action or "APPROVED").upper()
+    final_state = {
+        **checkpoint,
+        "run_id": run_id,
+        "gold_review_decision": decision,
+        "gold_review_artifact": review_artifact or checkpoint.get("gold_review_artifact") or {},
+        "next_review_key": None,
+    }
+
+    if decision == "REJECTED":
+        final_state.update({"status": "FAILED", "error": "Gold Review rejected generated Gold scripts"})
+    elif decision == "REGENERATE":
+        final_state.update({"status": "REGENERATE_REQUIRED", "resume_message": "Gold Review requested regeneration."})
+    elif decision == "APPROVED" and str(final_state.get("target_warehouse") or "").lower() == "snowflake":
+        from services.snowflake_gold_runtime import run_snowflake_gold_scripts
+
+        execution_state = {
+            **final_state,
+            "status": "RUNNING",
+            "background_stage": "gold_code_execution",
+            "resume_message": "Executing approved Gold scripts in Snowflake.",
+        }
+        save_checkpoint_state(run_id, execution_state)
+        try:
+            final_state = run_snowflake_gold_scripts(execution_state)
+        except Exception as exc:
+            failed_state = {
+                **execution_state,
+                "status": "FAILED",
+                "failed_background_stage": "gold_code_execution",
+                "error": str(exc),
+            }
+            save_checkpoint_state(run_id, failed_state)
+            raise
+        final_state.update({"status": "PIPELINE_COMPLETED", "background_stage": None, "next_review_key": None})
+    elif decision == "APPROVED" and str(final_state.get("target_warehouse") or "").lower() == "databricks":
+        from services.databricks_runtime import databricks_gold_execution_enabled, run_databricks_gold_scripts
+
+        if databricks_gold_execution_enabled():
             execution_state = {
                 **final_state,
                 "status": "RUNNING",
                 "background_stage": "gold_code_execution",
-                "next_gate": None,
-                "resume_message": "Executing generated Gold scripts in Snowflake.",
+                "resume_message": "Executing approved Gold scripts in Databricks.",
             }
             save_checkpoint_state(run_id, execution_state)
             try:
-                final_state = run_snowflake_gold_scripts(execution_state)
+                final_state = run_databricks_gold_scripts(execution_state)
             except Exception as exc:
                 failed_state = {
                     **execution_state,
                     "status": "FAILED",
-                    "background_stage": "gold_code_execution",
                     "failed_background_stage": "gold_code_execution",
                     "error": str(exc),
                 }
                 save_checkpoint_state(run_id, failed_state)
                 raise
-            final_state["background_stage"] = None
-        elif target_warehouse == "databricks":
-            from services.databricks_runtime import databricks_gold_execution_enabled, run_databricks_gold_scripts
+        final_state.update({"status": "PIPELINE_COMPLETED", "background_stage": None, "next_review_key": None})
+    elif decision == "APPROVED":
+        final_state.update({"status": "PIPELINE_COMPLETED", "background_stage": None})
 
-            if databricks_gold_execution_enabled():
-                execution_state = {
-                    **final_state,
-                    "status": "RUNNING",
-                    "background_stage": "gold_code_execution",
-                    "next_gate": None,
-                    "resume_message": "Executing generated Gold scripts in Databricks.",
-                }
-                save_checkpoint_state(run_id, execution_state)
-                try:
-                    final_state = run_databricks_gold_scripts(execution_state)
-                except Exception as exc:
-                    failed_state = {
-                        **execution_state,
-                        "status": "FAILED",
-                        "background_stage": "gold_code_execution",
-                        "failed_background_stage": "gold_code_execution",
-                        "error": str(exc),
-                    }
-                    save_checkpoint_state(run_id, failed_state)
-                    raise
-                final_state["background_stage"] = None
-        final_state["status"] = "PIPELINE_COMPLETED"
     save_checkpoint_state(run_id, final_state)
     return final_state

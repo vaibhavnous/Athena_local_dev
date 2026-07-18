@@ -9,7 +9,6 @@ import {
   FileText,
   Loader2,
   Play,
-  ShieldCheck,
   Upload,
 } from 'lucide-react'
 import * as mammoth from 'mammoth'
@@ -35,7 +34,7 @@ const DEFAULT_FORM = {
   stageConfirmationEnabled: false,
 }
 
-function buildInitialForm(settings, seedRun) {
+function buildInitialForm(settings, seedRun, project) {
   const seedSource = seedRun?.source || DEFAULT_FORM.source
   return {
     ...DEFAULT_FORM,
@@ -57,6 +56,15 @@ function buildInitialForm(settings, seedRun) {
           complianceEnabled: !!seedRun.compliance_enabled,
         }
       : {}),
+    ...(project ? {
+      projectName: project.name,
+      projectDescription: project.description,
+      source: project.connectionType === 'data_lake' ? 'adls_gen2' : 'database',
+      databaseType: project.dbType || DEFAULT_FORM.databaseType,
+      databaseName: project.databaseName || DEFAULT_FORM.databaseName,
+      targetWarehouse: String(project.target || 'Databricks').toLowerCase(),
+      useDomainKb: !!project.useDomainKB,
+    } : {}),
   }
 }
 
@@ -119,7 +127,7 @@ function connectionTypeFromSource(source) {
   return source === 'adls_gen2' || source === 'sftp' ? 'data_lake' : 'database'
 }
 
-function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
+function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false, project = null }) {
   const navigate = useNavigate()
   const fileInputRef = useRef(null)
   const sourceSectionRef = useRef(null)
@@ -128,20 +136,15 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
   const addNotification = useAthenaStore((s) => s.addNotification)
   const settings = useAthenaStore((s) => s.settings)
 
-  const [form, setForm] = useState(() => buildInitialForm(settings, initialSeedRun))
+  const [form, setForm] = useState(() => buildInitialForm(settings, initialSeedRun, project))
   const [uploadedFile, setUploadedFile] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
   const [openSourceSelect, setOpenSourceSelect] = useState(null)
-  const settingsRef = useRef(settings)
-
-  useEffect(() => {
-    settingsRef.current = settings
-  }, [settings])
 
   const resetState = () => {
-    setForm(buildInitialForm(settings, initialSeedRun))
+    setForm(buildInitialForm(settings, initialSeedRun, project))
     setUploadedFile(null)
     setError(null)
     setIsDragging(false)
@@ -172,12 +175,12 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
 
   useEffect(() => {
     if (!isOpen) return
-    setForm(buildInitialForm(settingsRef.current, initialSeedRun))
+    setForm(buildInitialForm(settings, initialSeedRun, project))
     setUploadedFile(null)
     setError(null)
     setIsDragging(false)
     setOpenSourceSelect(null)
-  }, [initialSeedRun, isOpen])
+  }, [initialSeedRun, isOpen, project, settings])
 
   useEffect(() => {
     if (!openSourceSelect) return
@@ -311,6 +314,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
       }
 
       const run = await startRun({
+        project_id: project?.id,
         source: form.source,
         sftp_entity: normalizedSftpEntity,
         brd_text: form.brdText,
@@ -324,10 +328,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         maxKpis: settings.maxKpis,
         devMode: settings.devMode,
         use_domain_kb: !!form.useDomainKb,
-        stage_confirmation_enabled: form.stageConfirmationEnabled,
         compliance_enabled: !!form.complianceEnabled,
-        compliance_domain: 'Insurance',
-        compliance_countries: ['US'],
+        stage_confirmation_enabled: form.stageConfirmationEnabled,
       })
 
       const newRun = {
@@ -343,8 +345,6 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         deployment: form.deployment || null,
         target_warehouse: form.targetWarehouse,
         use_domain_kb: !!form.useDomainKb,
-        compliance_enabled: !!form.complianceEnabled,
-        compliance_assessment_status: form.complianceEnabled ? 'PENDING' : null,
         started_at: startedAt,
         stages: [],
         kpis: [],
@@ -395,22 +395,26 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
     <AnimatePresence>
       {isOpen && (
         <>
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-40 bg-[#020617]/75 backdrop-blur-sm"
-            onClick={handleClose}
-          />
+          {!pageMode && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-40 bg-[#020617]/75 backdrop-blur-sm"
+              onClick={handleClose}
+            />
+          )}
 
           <motion.div
             initial={{ opacity: 0, y: 20, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 16, scale: 0.98 }}
             transition={{ type: 'spring', stiffness: 280, damping: 28 }}
-            className="fixed inset-0 z-50 overflow-y-auto"
+            className={pageMode ? 'relative h-full overflow-y-auto' : 'fixed inset-0 z-50 overflow-y-auto'}
           >
-            <div className="mx-auto flex min-h-full w-full items-start justify-center px-6 py-12">
+            <div className={pageMode
+              ? 'mx-auto flex min-h-full w-full items-start justify-center px-3 py-3 [zoom:0.82]'
+              : 'mx-auto flex min-h-full w-full items-start justify-center px-6 py-12'}>
               <div className="w-full max-w-[1317px]">
                 <div className="mb-5 flex items-start justify-between">
                   <div className="flex items-start gap-4">
@@ -442,6 +446,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                             onChange={(event) => setForm((current) => ({ ...current, projectName: event.target.value }))}
                             placeholder="Enter project name..."
                             className="modal-input h-[60px] rounded-[10px] border-[#26344b] bg-[#070d1a] px-4 text-[18px] text-white placeholder:text-[#b8c5db]"
+                            readOnly={!!project}
                           />
                         </Field>
 
@@ -451,6 +456,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                             onChange={(event) => setForm((current) => ({ ...current, projectDescription: event.target.value }))}
                             placeholder="Briefly describe the project..."
                             className="modal-input min-h-[107px] resize-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-4 py-4 text-[18px] text-white placeholder:text-[#b8c5db]"
+                            readOnly={!!project}
                           />
                         </Field>
 
@@ -543,6 +549,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                 setForm((current) => ({ ...current, targetWarehouse }))
                               }
                               activeBorder
+                              disabled={!!project}
                             />
                           </Field>
 
@@ -557,6 +564,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                 setOpenSelect={setOpenSourceSelect}
                                 onChange={handleConnectionTypeChange}
                                 activeBorder
+                                disabled={!!project}
                               />
                             </Field>
 
@@ -567,6 +575,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                     <select
                                       className="modal-input h-[60px] w-full appearance-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-5 pr-12 text-[18px] text-white"
                                       value={form.databaseType}
+                                      disabled={!!project}
                                       onChange={(event) => {
                                         const databaseType = event.target.value
                                         setForm((current) => ({
@@ -588,6 +597,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                     <select
                                       className="modal-input h-[60px] w-full appearance-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-5 pr-12 text-[18px] text-white"
                                       value={form.databaseName}
+                                      disabled={!!project}
                                       onChange={(event) =>
                                         setForm((current) => ({ ...current, databaseName: event.target.value }))
                                       }
@@ -620,31 +630,6 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                     </span>
                                     <span className="min-w-0">
                                       <span className="block text-[16px] font-semibold text-white">Domain Knowledge Check</span>
-                                    </span>
-                                  </span>
-                                </label>
-                                <label className={`flex cursor-pointer items-start gap-3 rounded-[10px] border px-4 py-4 transition-colors ${
-                                  form.complianceEnabled
-                                    ? 'border-emerald-400/70 bg-emerald-500/10'
-                                    : 'border-[#26344b] bg-[#070d1a] hover:border-emerald-400/50'
-                                }`}>
-                                  <input
-                                    type="checkbox"
-                                    checked={form.complianceEnabled}
-                                    onChange={(event) =>
-                                      setForm((current) => ({ ...current, complianceEnabled: event.target.checked }))
-                                    }
-                                    className="mt-1 h-5 w-5 rounded border-[#4b5d78] bg-[#0b1220] text-emerald-400 accent-emerald-400"
-                                  />
-                                  <span className="flex min-w-0 flex-1 gap-3">
-                                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[9px] border border-emerald-400/30 bg-emerald-400/10 text-emerald-200">
-                                      <ShieldCheck size={18} />
-                                    </span>
-                                    <span className="min-w-0">
-                                      <span className="block text-[16px] font-semibold text-white">Compliance Governance Review</span>
-                                      <span className="mt-1 block text-[13px] leading-5 text-[#9fb1ca]">
-                                        Sends profiled columns to the Insurance compliance pipeline after column profiling.
-                                      </span>
                                     </span>
                                   </span>
                                 </label>
@@ -759,6 +744,7 @@ function ModalSelect({
   setOpenSelect,
   onChange,
   activeBorder = false,
+  disabled = false,
 }) {
   const open = openSelect === id
   const selected = options.find((option) => option.id === value)
@@ -767,7 +753,8 @@ function ModalSelect({
     <div className="relative">
       <button
         type="button"
-        onClick={() => setOpenSelect(open ? null : id)}
+        disabled={disabled}
+        onClick={() => !disabled && setOpenSelect(open ? null : id)}
         className={`flex h-[60px] w-full items-center justify-between rounded-[12px] border bg-[#070d1a] px-5 text-left text-[18px] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-[border-color,box-shadow,background-color] duration-150 ${
           open ? 'border-[#4585f5] shadow-[0_0_0_1px_rgba(69,133,245,0.55),0_10px_26px_rgba(9,17,31,0.22)]' : activeBorder ? 'border-[#26344b] hover:border-[#4585f5]/70' : 'border-[#26344b] hover:border-[#4585f5]/70'
         }`}

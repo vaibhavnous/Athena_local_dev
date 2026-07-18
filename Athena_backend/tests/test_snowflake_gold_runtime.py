@@ -477,7 +477,7 @@ def test_snowflake_dimension_catalog_preflight_checks_each_logical_source_table(
     assert any("silver_policy_transactions" in sql for sql in calls)
 
 
-def test_gold_stage_executes_snowflake_gold_after_generation(monkeypatch):
+def test_gold_stage_waits_for_review_before_snowflake_execution(monkeypatch):
     saved_states = []
     calls = []
 
@@ -502,14 +502,22 @@ def test_gold_stage_executes_snowflake_gold_after_generation(monkeypatch):
 
     result = pipeline_runtime._run_database_gold_stage({"run_id": "run-gold", "target_warehouse": "snowflake"})
 
+    assert not calls
+    assert result["status"] == "HITL_WAIT"
+    assert result["next_review_key"] == "gold_review"
+    assert result["gold_review_artifact"]["items"]
+
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: result)
+    completed = pipeline_runtime.submit_gold_review("run-gold", "APPROVED", result["gold_review_artifact"])
+
     assert calls
     assert calls[0]["background_stage"] == "gold_code_execution"
-    assert result["status"] == "PIPELINE_COMPLETED"
-    assert result["snowflake_gold_execution_status"] == "COMPLETED"
+    assert completed["status"] == "PIPELINE_COMPLETED"
+    assert completed["snowflake_gold_execution_status"] == "COMPLETED"
     assert any(state.get("background_stage") == "gold_code_execution" for state in saved_states)
 
 
-def test_gold_stage_executes_databricks_gold_after_generation(monkeypatch):
+def test_gold_stage_executes_databricks_gold_after_review(monkeypatch):
     saved_states = []
     calls = []
 
@@ -535,10 +543,18 @@ def test_gold_stage_executes_databricks_gold_after_generation(monkeypatch):
 
     result = pipeline_runtime._run_database_gold_stage({"run_id": "run-gold", "target_warehouse": "databricks"})
 
+    assert not calls
+    assert result["status"] == "HITL_WAIT"
+    assert result["next_review_key"] == "gold_review"
+    assert result["gold_review_artifact"]["items"]
+
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: result)
+    completed = pipeline_runtime.submit_gold_review("run-gold", "APPROVED", result["gold_review_artifact"])
+
     assert calls
     assert calls[0]["background_stage"] == "gold_code_execution"
-    assert result["status"] == "PIPELINE_COMPLETED"
-    assert result["databricks_gold_execution_status"] == "COMPLETED"
+    assert completed["status"] == "PIPELINE_COMPLETED"
+    assert completed["databricks_gold_execution_status"] == "COMPLETED"
     assert any(state.get("background_stage") == "gold_code_execution" for state in saved_states)
     assert saved_states[-1]["background_stage"] is None
     assert saved_states[-1]["status"] == "PIPELINE_COMPLETED"

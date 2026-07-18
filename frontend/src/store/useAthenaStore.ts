@@ -111,6 +111,12 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
     incomingStatus === 'HITL_WAIT' ||
     incomingTerminal
 
+  // The history endpoint intentionally returns lightweight UNKNOWN summaries.
+  // Keep the authoritative status from the selected run's detail response.
+  if (existingHasDetail && !incomingHasDetail && (!incomingStatus || incomingStatus === 'UNKNOWN')) {
+    merged.status = existing.status
+  }
+
   // Status hydration can return a sparse checkpoint snapshot after its detail query times out.
   // Keep the furthest known stage; a slower response must not move the UI back to an earlier phase.
   if (runProgressIndex(incoming) < runProgressIndex(existing)) {
@@ -149,6 +155,7 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
       'enriched_metadata',
       'enriched_columns',
       'enriched_joins',
+      'gold_review_artifact',
     ]) {
       if (existing[key] !== undefined && (incoming[key] === undefined || incoming[key] === null)) merged[key] = existing[key]
     }

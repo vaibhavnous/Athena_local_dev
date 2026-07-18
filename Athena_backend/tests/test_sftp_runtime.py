@@ -52,7 +52,7 @@ def test_start_sftp_pipeline_uses_auto_entity_for_adls(monkeypatch):
     assert captured["state"]["sftp_entity"] == "auto"
 
 
-def test_adls_source_ingestion_uses_demo_fallback_when_live_read_fails(monkeypatch, tmp_path):
+def test_adls_source_ingestion_uses_demo_fallback_when_live_read_fails(monkeypatch):
     class StubCredential:
         pass
 
