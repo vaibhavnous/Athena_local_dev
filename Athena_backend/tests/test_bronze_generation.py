@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import re
 import uuid
 from pathlib import Path
 
@@ -31,6 +33,177 @@ def test_snowflake_bronze_script_uses_sql_patterns():
     assert 'TRY_CAST(src."ClaimDate" AS TIMESTAMP_NTZ) AS "claimdate"' in script
     assert 'TRY_CAST(src."Amount" AS NUMBER(12,2)) AS "amount"' in script
     assert 'INSERT INTO "ATHENA_DB"."BRONZE"."bronze_Claims"' in script
+
+
+def test_databricks_bronze_script_uses_catalog_qualified_target():
+    script = bronze_gen.generate_bronze_script(
+        table="Claims",
+        schema="dbo",
+        database="insurance",
+        run_id="run-1",
+        bronze_catalog="workspace",
+        bronze_schema="bronze",
+        source_jdbc_url="jdbc:sqlserver://example",
+        cast_rules={"claimid": "int"},
+    )
+
+    assert 'spark.sql("CREATE SCHEMA IF NOT EXISTS workspace.bronze")' in script
+    assert 'TARGET_TABLE = "workspace.bronze.bronze_Claims"' in script
+    assert "try_cast(`" in script
+
+
+def test_databricks_bronze_script_keeps_security_optional():
+    script = bronze_gen.generate_bronze_script(
+        table="Claims",
+        schema="dbo",
+        database="insurance",
+        run_id="run-1",
+        bronze_catalog="workspace",
+        bronze_schema="bronze",
+        source_jdbc_url="jdbc:sqlserver://example",
+    )
+
+    assert "from security_control import" not in script
+    assert "apply_security_controls(" not in script
+
+
+def test_databricks_bronze_script_can_embed_security_controls():
+    script = bronze_gen.generate_bronze_script(
+        assessment_id="assessment-1",
+        policies={"ClaimID": "Hash", "Email": "Mask"},
+        table="Claims",
+        schema="dbo",
+        database="insurance",
+        run_id="run-1",
+        bronze_catalog="workspace",
+        bronze_schema="bronze",
+        source_jdbc_url="jdbc:sqlserver://example",
+    )
+
+    assert "from security_control import apply_security_controls, SecurityControlType" in script
+    assert "SECURITY_ASSESSMENT_ID = 'assessment-1'" in script
+    assert "'claimid': 'Hash'" in script
+    assert "'email': 'Mask'" in script
+    assert "df = apply_security_controls(" in script
+
+
+def test_databricks_bronze_script_can_use_adls_landing_path():
+    script = bronze_gen.generate_bronze_script(
+        table="Claims",
+        schema="dbo",
+        database="insurance",
+        run_id="run-1",
+        bronze_catalog="workspace",
+        bronze_schema="bronze",
+        landing_path="abfss://raw@acct.dfs.core.windows.net/vendor/claims/",
+        file_format="csv",
+        source_type="adls_gen2",
+        cast_rules={"claimid": "int"},
+    )
+
+    assert 'SOURCE_PATH = \'abfss://raw@acct.dfs.core.windows.net/vendor/claims/\'' in script
+    assert 'FILE_FORMAT = \'csv\'' in script
+    assert 'spark.read.format("csv")' in script
+    assert '.option("dbtable",' not in script
+    assert 'source_system", lit("adls_gen2")' in script
+
+
+def test_databricks_runtime_prefers_script_body_for_plan_artifacts():
+    from services import databricks_runtime
+
+    script = databricks_runtime._read_script_text(
+        {
+            "script_path": "generated_code/bronze/run_feed_bronze_plan.json",
+            "script_body": "print('real script')",
+        }
+    )
+    name = databricks_runtime._script_name(
+        {
+            "script_path": "generated_code/bronze/run_feed_bronze_plan.json",
+            "script_body": "print('real script')",
+            "target_table": "workspace.bronze.vendor1_transactions_raw",
+        }
+    )
+
+    assert script == "print('real script')"
+    assert name == "workspace_bronze_vendor1_transactions_raw"
+
+
+def test_databricks_bronze_and_silver_default_to_batch_execution(monkeypatch):
+    from services import databricks_runtime
+
+    monkeypatch.delenv("ATHENA_DATABRICKS_BRONZE_EXECUTION_MODE", raising=False)
+    monkeypatch.delenv("ATHENA_DATABRICKS_SILVER_EXECUTION_MODE", raising=False)
+    monkeypatch.delenv("ATHENA_DATABRICKS_EXECUTION_MODE", raising=False)
+
+    assert databricks_runtime._databricks_execution_mode("bronze") == "batch"
+    assert databricks_runtime._databricks_execution_mode("silver") == "batch"
+    assert databricks_runtime._databricks_execution_mode("gold") == "per_script"
+
+
+def test_databricks_batch_driver_keeps_separate_script_targets(monkeypatch):
+    from services import databricks_runtime
+
+    monkeypatch.delenv("ATHENA_DATABRICKS_CONTINUE_ON_ERROR", raising=False)
+    notebook = databricks_runtime._build_batch_driver_notebook(
+        "bronze",
+        [
+            {
+                "target_table": "workspace.bronze.customer_raw",
+                "script_body": 'spark.sql("CREATE TABLE IF NOT EXISTS workspace.bronze.customer_raw(id INT)")',
+            },
+            {
+                "target_table": "workspace.bronze.orders_raw",
+                "script_body": 'spark.sql("CREATE TABLE IF NOT EXISTS workspace.bronze.orders_raw(id INT)")',
+            },
+        ],
+    )
+
+    encoded = re.search(r'b64decode\("([^"]+)"\)', notebook).group(1)
+    payload = json.loads(base64.b64decode(encoded).decode("utf-8"))
+
+    assert [item["target_table"] for item in payload] == [
+        "workspace.bronze.customer_raw",
+        "workspace.bronze.orders_raw",
+    ]
+    assert "dbutils.notebook.exit" in notebook
+    assert "exec(compile" in notebook
+
+
+def test_databricks_task_run_id_expands_parent_submit_run(monkeypatch):
+    from services import databricks_runtime
+
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_request_json",
+        lambda method, path: {"tasks": [{"run_id": 456}]} if "run_id=123" in path else {},
+    )
+
+    assert databricks_runtime._task_run_id({"run_id": 123}) == 456
+
+
+def test_file_bronze_generation_uses_tolerant_databricks_casts():
+    from sftp_nodes import bronze_code_generation
+
+    script = bronze_code_generation._generate_script(
+        {
+            "source_type": "adls_gen2",
+            "source_feed": "Vendor.Feed",
+            "vendor": "vendor",
+            "entity": "feed",
+            "file_format": "csv",
+            "landing_path": "abfss://raw@example.dfs.core.windows.net/vendor/feed/",
+            "target_table": "workspace.bronze.bronze_feed",
+            "schema_location": "/tmp/schema",
+            "checkpoint_path": "/tmp/checkpoint",
+            "expected_columns": ["paiddate", "paidamount"],
+            "expected_types": {"paiddate": "timestamp", "paidamount": "double"},
+        },
+        run_id="run-1",
+        pipeline_version="v1",
+    )
+
+    assert "try_cast(`{escaped_name}` AS {target_type})" in script
 
 
 def test_snowflake_bronze_generation_writes_sql_without_databricks_path(monkeypatch):
@@ -80,6 +253,82 @@ def test_snowflake_bronze_generation_writes_sql_without_databricks_path(monkeypa
     assert script_path.parts[-3:] == ("snowflake", "bronze", script_path.name)
     assert "Expected runtime: Snowflake SQL" in script_path.read_text(encoding="utf-8")
     assert bundle["target_warehouse"] == "snowflake"
+
+
+def test_bronze_generation_copies_security_helper_when_enabled(monkeypatch):
+    monkeypatch.setenv("ATHENA_ENABLE_LLM_BRONZE_ENHANCEMENT", "false")
+    workdir = Path.cwd() / ".tmp-tests" / f"bronze_security_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+    copied = []
+
+    monkeypatch.setattr(bronze_gen, "build_source_jdbc_url", lambda database_name=None: "jdbc:sqlserver://example")
+    monkeypatch.setattr(bronze_gen, "copy_security_control_module", lambda output_dir: copied.append(output_dir) or str(Path(output_dir) / "security_control.py"))
+
+    state = {
+        "run_id": "run-security",
+        "target_warehouse": "databricks",
+        "bronze_catalog": "workspace",
+        "bronze_schema": "bronze",
+        "compliance_assessment_id": "assessment-1",
+        "security_policies": {
+            "Claims": {
+                "ClaimID": "Hash",
+                "Email": "Mask",
+            }
+        },
+        "certified_tables": [
+            {"database_name": "insurance", "schema_name": "dbo", "table_name": "Claims"}
+        ],
+    }
+
+    result = bronze_gen.bronze_code_generation_node(state)
+    script_path = Path(result["bronze_generation_results"][0]["script_path"])
+    script = script_path.read_text(encoding="utf-8")
+
+    assert copied
+    assert result["bronze_generation_results"][0]["security_enabled"] is True
+    assert result["bronze_generation_results"][0]["assessment_id"] == "assessment-1"
+    assert result["bronze_generation_results"][0]["security_policy_columns"] == ["claimid", "email"]
+    assert "apply_security_controls(" in script
+
+
+def test_bronze_generation_uses_adls_landing_path_without_jdbc(monkeypatch):
+    monkeypatch.setenv("ATHENA_ENABLE_LLM_BRONZE_ENHANCEMENT", "false")
+    workdir = Path.cwd() / ".tmp-tests" / f"bronze_adls_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+    monkeypatch.setattr(
+        bronze_gen,
+        "build_source_jdbc_url",
+        lambda database_name=None: (_ for _ in ()).throw(AssertionError("JDBC path should not run for ADLS bronze")),
+    )
+
+    state = {
+        "run_id": "run-adls",
+        "target_warehouse": "databricks",
+        "source": "adls_gen2",
+        "bronze_catalog": "workspace",
+        "bronze_schema": "bronze",
+        "candidate_feed": {
+            "entity": "Claims",
+            "source": "adls_gen2",
+            "landing_path": "abfss://raw@acct.dfs.core.windows.net/vendor/claims/",
+            "file_format": "json",
+        },
+        "certified_tables": [
+            {"database_name": "insurance", "schema_name": "dbo", "table_name": "Claims"}
+        ],
+    }
+
+    result = bronze_gen.bronze_code_generation_node(state)
+    script_path = Path(result["bronze_generation_results"][0]["script_path"])
+    script = script_path.read_text(encoding="utf-8")
+
+    assert result["bronze_generation_status"] == "COMPLETED"
+    assert 'SOURCE_PATH = \'abfss://raw@acct.dfs.core.windows.net/vendor/claims/\'' in script
+    assert 'FILE_FORMAT = \'json\'' in script
+    assert 'spark.read.format("json").load(SOURCE_PATH)' in script
 
 
 def test_bronze_generation_avoids_case_only_duplicate_source_tables(monkeypatch):

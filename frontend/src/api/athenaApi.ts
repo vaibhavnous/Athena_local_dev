@@ -53,6 +53,9 @@ export const startRun = (payload: {
   devMode?: boolean
   use_domain_kb?: boolean
   stage_confirmation_enabled?: boolean
+  compliance_enabled?: boolean
+  compliance_domain?: string
+  compliance_countries?: string[]
 }) => api.post('/pipeline/run', payload, { timeout: WRITE_TIMEOUT })
 
 export const uploadBrd = (file: File) => {
@@ -67,6 +70,8 @@ export const uploadBrd = (file: File) => {
 export const getRunStatus = (runId: string) => api.get(`/pipeline/${runId}/status`, { timeout: READ_TIMEOUT })
 
 export const getPipelineKpis = (runId: string) => api.get(`/kpi-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
+export const createKpiReview = (runId: string, payload: { name: string; definition: string }) =>
+  api.post(`/kpi-reviews/${runId}`, payload, { timeout: WRITE_TIMEOUT })
 
 export const getRuns = () => api.get('/runs', { timeout: RUNS_LIST_TIMEOUT })
 
@@ -79,6 +84,12 @@ export const submitTableReviews = (runId: string, approvedTables: string[]) =>
 export const getEnrichmentReviews = (runId: string) => api.get(`/enrichment-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 export const submitEnrichmentReview = (runId: string, approve: boolean, enrichedMetadata?: Record<string, any>) =>
   api.post(`/enrichment-reviews/${runId}`, { approve, enriched_metadata: enrichedMetadata }, { timeout: WRITE_TIMEOUT })
+export const getComplianceReview = (runId: string) => api.get(`/compliance-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
+export const submitComplianceReview = (
+  runId: string,
+  findings: Array<{ table_name: string; column_name: string; status: string; reviewer_comments?: string | null }> = [],
+  overall_comments?: string | null
+) => api.post(`/compliance-reviews/${runId}`, { findings, overall_comments }, { timeout: WRITE_TIMEOUT })
 
 export const getBronzeReview = (runId: string) => api.get(`/bronze-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 
@@ -112,6 +123,7 @@ export const submitDecisions = (
     reviewer?: string
     notes?: string
     edited_definition?: string
+    edited_content?: Record<string, any>
   }>
 ) => api.post(`/hitl/${runId}/decisions`, { decisions }, { timeout: WRITE_TIMEOUT })
 

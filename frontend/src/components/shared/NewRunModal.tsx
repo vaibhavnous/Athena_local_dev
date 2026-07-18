@@ -9,6 +9,7 @@ import {
   FileText,
   Loader2,
   Play,
+  ShieldCheck,
   Upload,
 } from 'lucide-react'
 import * as mammoth from 'mammoth'
@@ -30,6 +31,7 @@ const DEFAULT_FORM = {
   databaseName: 'insurance',
   targetWarehouse: 'databricks',
   useDomainKb: false,
+  complianceEnabled: false,
   stageConfirmationEnabled: false,
 }
 
@@ -52,6 +54,7 @@ function buildInitialForm(settings, seedRun) {
           databaseName: seedRun.database_name || DEFAULT_FORM.databaseName,
           targetWarehouse: seedRun.target_warehouse || DEFAULT_FORM.targetWarehouse,
           useDomainKb: !!seedRun.use_domain_kb,
+          complianceEnabled: !!seedRun.compliance_enabled,
         }
       : {}),
   }
@@ -131,6 +134,11 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
   const [error, setError] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
   const [openSourceSelect, setOpenSourceSelect] = useState(null)
+  const settingsRef = useRef(settings)
+
+  useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
 
   const resetState = () => {
     setForm(buildInitialForm(settings, initialSeedRun))
@@ -164,12 +172,12 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
 
   useEffect(() => {
     if (!isOpen) return
-    setForm(buildInitialForm(settings, initialSeedRun))
+    setForm(buildInitialForm(settingsRef.current, initialSeedRun))
     setUploadedFile(null)
     setError(null)
     setIsDragging(false)
     setOpenSourceSelect(null)
-  }, [initialSeedRun, isOpen, settings])
+  }, [initialSeedRun, isOpen])
 
   useEffect(() => {
     if (!openSourceSelect) return
@@ -317,6 +325,9 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         devMode: settings.devMode,
         use_domain_kb: !!form.useDomainKb,
         stage_confirmation_enabled: form.stageConfirmationEnabled,
+        compliance_enabled: !!form.complianceEnabled,
+        compliance_domain: 'Insurance',
+        compliance_countries: ['US'],
       })
 
       const newRun = {
@@ -332,6 +343,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
         deployment: form.deployment || null,
         target_warehouse: form.targetWarehouse,
         use_domain_kb: !!form.useDomainKb,
+        compliance_enabled: !!form.complianceEnabled,
+        compliance_assessment_status: form.complianceEnabled ? 'PENDING' : null,
         started_at: startedAt,
         stages: [],
         kpis: [],
@@ -607,6 +620,31 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null }) {
                                     </span>
                                     <span className="min-w-0">
                                       <span className="block text-[16px] font-semibold text-white">Domain Knowledge Check</span>
+                                    </span>
+                                  </span>
+                                </label>
+                                <label className={`flex cursor-pointer items-start gap-3 rounded-[10px] border px-4 py-4 transition-colors ${
+                                  form.complianceEnabled
+                                    ? 'border-emerald-400/70 bg-emerald-500/10'
+                                    : 'border-[#26344b] bg-[#070d1a] hover:border-emerald-400/50'
+                                }`}>
+                                  <input
+                                    type="checkbox"
+                                    checked={form.complianceEnabled}
+                                    onChange={(event) =>
+                                      setForm((current) => ({ ...current, complianceEnabled: event.target.checked }))
+                                    }
+                                    className="mt-1 h-5 w-5 rounded border-[#4b5d78] bg-[#0b1220] text-emerald-400 accent-emerald-400"
+                                  />
+                                  <span className="flex min-w-0 flex-1 gap-3">
+                                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[9px] border border-emerald-400/30 bg-emerald-400/10 text-emerald-200">
+                                      <ShieldCheck size={18} />
+                                    </span>
+                                    <span className="min-w-0">
+                                      <span className="block text-[16px] font-semibold text-white">Compliance Governance Review</span>
+                                      <span className="mt-1 block text-[13px] leading-5 text-[#9fb1ca]">
+                                        Sends profiled columns to the Insurance compliance pipeline after column profiling.
+                                      </span>
                                     </span>
                                   </span>
                                 </label>

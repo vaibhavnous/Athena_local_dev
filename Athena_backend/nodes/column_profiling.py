@@ -20,6 +20,7 @@ from langgraph.graph import StateGraph
 from pydantic import BaseModel, Field
 
 from state import Stage01State
+from services.compliance_client import attach_assessment_result
 from utilis.db import ai_store_db_writer, get_client_connection, save_checkpoint_state, timed_stage
 from utilis.logger import logger
 
@@ -608,6 +609,7 @@ def column_profiling_node(state: Stage01State) -> Stage01State:
             "column_profiles": payload,
             "column_profiling_status": status,
             "column_profiling_error": None,
+            **attach_assessment_result(new_state, payload),
         }
     )
 

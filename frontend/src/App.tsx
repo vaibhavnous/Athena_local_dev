@@ -12,6 +12,7 @@ import RunHistoryPage from './pages/RunHistoryPage'
 import ProjectInitiation from './pages/ProjectInitiation'
 import DataQuality from './pages/DataQuality'
 import DataMigration from './pages/DataMigration'
+import ComplianceGovernance from './pages/ComplianceGovernance'
 import useThemeStore from './store/useThemeStore'
 
 function App() {
@@ -38,6 +39,7 @@ function App() {
           <Route path="hitl" element={<HitlQueue />} />
           <Route path="project" element={<ProjectInitiation />} />
           <Route path="data-quality" element={<DataQuality />} />
+          <Route path="compliance-governance" element={<ComplianceGovernance />} />
           <Route path="data-migration" element={<DataMigration />} />
           <Route path="settings" element={<Settings />} />
           <Route path="db-config" element={<DatabaseConfig />} />

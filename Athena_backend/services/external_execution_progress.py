@@ -41,6 +41,7 @@ def save_external_execution_progress(
     state: Dict[str, Any],
     *,
     run_id: Any,
+    platform: str = "snowflake",
     layer: str,
     stage_key: str,
     status: str,
@@ -54,8 +55,9 @@ def save_external_execution_progress(
     if not run_id:
         return state
 
+    platform_name = str(platform or "snowflake").strip().lower() or "snowflake"
     progress = {
-        "platform": "snowflake",
+        "platform": platform_name,
         "layer": layer,
         "stage_key": stage_key,
         "status": status,
@@ -67,17 +69,20 @@ def save_external_execution_progress(
         "message": message,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    next_status = "RUNNING" if status == "RUNNING" else state.get("status", "RUNNING")
+    if str(status or "").upper() == "COMPLETED" and str(layer or "").lower() == "gold":
+        next_status = "PIPELINE_COMPLETED"
     updated = {
         **state,
         "run_id": run_id,
-        "status": "RUNNING" if status == "RUNNING" else state.get("status", "RUNNING"),
+        "status": next_status,
         "background_stage": None if status == "COMPLETED" else stage_key,
         "failed_background_stage": None if status == "COMPLETED" else state.get("failed_background_stage"),
         "last_failed_stage_key": None if status == "COMPLETED" else state.get("last_failed_stage_key"),
         "error": None if status == "COMPLETED" else state.get("error"),
         "external_execution": progress,
-        f"snowflake_{layer}_execution_status": status,
-        f"snowflake_{layer}_execution_progress": progress,
+        f"{platform_name}_{layer}_execution_status": status,
+        f"{platform_name}_{layer}_execution_progress": progress,
         "resume_message": message or state.get("resume_message"),
     }
 

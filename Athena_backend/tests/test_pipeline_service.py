@@ -99,7 +99,52 @@ def test_minimum_stage_runtime_falls_back_for_bad_env(monkeypatch):
 
     monkeypatch.setenv("ATHENA_MIN_STAGE_RUNTIME_SECONDS", "bad")
 
-    assert pipeline_runtime._minimum_stage_runtime_seconds() == 4.0
+    assert pipeline_runtime._minimum_stage_runtime_seconds() == 10.0
+
+
+def test_minimum_stage_runtime_skips_profiling_reviews_and_failures(monkeypatch):
+    from services import pipeline_runtime
+
+    sleeps = []
+    monkeypatch.setenv("ATHENA_MIN_STAGE_RUNTIME_SECONDS", "10")
+    monkeypatch.setattr(pipeline_runtime.time, "sleep", sleeps.append)
+    monkeypatch.setattr(pipeline_runtime.time, "monotonic", lambda: 5.0)
+
+    pipeline_runtime.wait_for_minimum_stage_runtime("requirements", 2.0, {"status": "RUNNING"})
+    pipeline_runtime.wait_for_minimum_stage_runtime("profiling", 2.0, {"status": "RUNNING"})
+    pipeline_runtime.wait_for_minimum_stage_runtime("gate1", 2.0, {"status": "RUNNING"})
+    pipeline_runtime.wait_for_minimum_stage_runtime("enrichment", 2.0, {"status": "FAILED"})
+
+    assert sleeps == [7.0]
+
+
+def test_visible_stage_checkpoints_completion_before_wait(monkeypatch):
+    from services import pipeline_runtime
+
+    events = []
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state_timed",
+        lambda run_id, state, context: events.append((context, state.get("background_stage"))),
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "wait_for_minimum_stage_runtime",
+        lambda stage, started, state: events.append(("wait", state.get("background_stage"))),
+    )
+
+    result = pipeline_runtime.run_with_minimum_stage_runtime(
+        "requirements",
+        lambda state: {**state, "requirement_status": "COMPLETED"},
+        {"run_id": "run-visible"},
+    )
+
+    assert events == [
+        ("requirements:running", "requirements"),
+        ("requirements:complete", None),
+        ("wait", None),
+    ]
+    assert result["requirement_status"] == "COMPLETED"
 
 
 def test_load_checkpoint_fields_uses_json_value_projection(monkeypatch):
@@ -287,7 +332,15 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
     monkeypatch.setattr(pipeline_service.api_utils, "normalize_file_entity", lambda source, entity: "transactions")
     monkeypatch.setattr(pipeline_service.api_utils, "is_file_source", lambda source: False)
 
-    payload = PipelineRunRequest(brd_text="brd", brd_filename="Claims BRD", source="database", database_name="db1")
+    payload = PipelineRunRequest(
+        brd_text="brd",
+        brd_filename="Claims BRD",
+        source="database",
+        database_name="db1",
+        compliance_enabled=True,
+        compliance_domain="Insurance",
+        compliance_countries=["US", "AU"],
+    )
     pipeline_service.submit_pipeline_start("run-submit", payload)
 
     assert recorded["fn"] == pipeline_service.run_pipeline_background
@@ -295,6 +348,9 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
     assert recorded["kwargs"]["brd_filename"] == "Claims BRD"
     assert recorded["kwargs"]["source_databases"] == ["db1"]
     assert recorded["kwargs"]["stage_confirmation_enabled"] is False
+    assert recorded["kwargs"]["compliance_enabled"] is True
+    assert recorded["kwargs"]["compliance_domain"] == "Insurance"
+    assert recorded["kwargs"]["compliance_countries"] == ["US", "AU"]
     assert callable(recorded["callback"])
     pipeline_service.BACKGROUND_JOBS.pop("run-submit:pipeline", None)
 
@@ -398,6 +454,86 @@ def test_active_bronze_execution_hides_stale_downstream_completion():
     assert by_key["bronze_code_execution"]["state"] == "RUNNING"
     assert by_key["silver"]["state"] == "PENDING"
     assert by_key["gold_code_execution"]["state"] == "PENDING"
+
+
+def test_databricks_gate4_does_not_mark_merge_key_review_complete():
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            "status": "HITL_WAIT",
+            "target_warehouse": "databricks",
+            "bronze_review_decision": "APPROVED",
+            "next_review_key": "silver_merge_key_review",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=False,
+        gold_generation_completed=False,
+    )
+
+    by_key = {step["key"]: step for step in steps}
+    assert by_key["silver_merge_key_review"]["state"] == "PENDING"
+    assert by_key["silver"]["state"] == "PENDING"
+
+
+def test_databricks_gold_generation_does_not_imply_execution_completion():
+    from services import pipeline_runtime
+
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="sftp",
+        checkpoint={
+            "status": "RUNNING",
+            "target_warehouse": "databricks",
+            "gold_generation_status": "COMPLETED",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=True,
+        gold_generation_completed=True,
+    )
+
+    by_key = {step["key"]: step for step in steps}
+    assert by_key["gold"]["state"] == "COMPLETED"
+    assert by_key["gold_code_execution"]["state"] == "PENDING"
+
+
+def test_later_stage_cannot_infer_bronze_execution_completion():
+    from services import pipeline_runtime
+
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            "status": "RUNNING",
+            "target_warehouse": "snowflake",
+            "background_stage": "silver_code_execution",
+            "snowflake_silver_execution_status": "RUNNING",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=True,
+        gold_generation_completed=False,
+    )
+
+    by_key = {step["key"]: step for step in steps}
+    assert by_key["bronze_code_execution"]["state"] == "PENDING"
 
 
 def test_review_artifacts_do_not_count_as_generated_or_executed_silver():
@@ -846,6 +982,7 @@ def test_database_continue_skips_stage_confirmation_before_review_gates(monkeypa
 
     monkeypatch.setattr(pipeline_runtime, "_database_stage_runner", fake_runner)
     monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved_states.append(dict(state)))
+    monkeypatch.setattr(pipeline_runtime, "wait_for_minimum_stage_runtime", lambda *args, **kwargs: None)
 
     result = pipeline_runtime.continue_database_pipeline(
         "run-review",
@@ -969,6 +1106,78 @@ def test_gate4_review_filters_rejected_bronze_results_before_silver():
     )
 
     assert [item["table"] for item in filtered] == ["claim_information"]
+
+
+def test_databricks_gate4_always_pauses_for_merge_key_review_when_execution_disabled(monkeypatch):
+    from services import databricks_runtime
+
+    saved = []
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "target_warehouse": "databricks",
+            "bronze_generation_results": [{"table": "claims"}],
+        },
+    )
+    monkeypatch.setattr(databricks_runtime, "databricks_bronze_execution_enabled", lambda: False)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_pause_for_silver_merge_key_review",
+        lambda run_id, state: {**state, "status": "HITL_WAIT", "next_review_key": "silver_merge_key_review"},
+    )
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda run_id, state, **_: saved.append(dict(state)))
+    monkeypatch.setattr(pipeline_runtime, "ai_store_db_writer", lambda **_: None)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "continue_database_pipeline",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Silver must wait for merge-key approval")),
+    )
+
+    result = pipeline_runtime.submit_gate4_review(
+        "run-databricks-merge-review",
+        action="APPROVED",
+        review_artifact={"feeds": [{"table": "claims", "merge_keys": ["claim_id"]}]},
+    )
+
+    assert result["status"] == "HITL_WAIT"
+    assert result["next_review_key"] == "silver_merge_key_review"
+    assert saved[-1]["next_review_key"] == "silver_merge_key_review"
+
+
+def test_gate4_review_uses_provided_checkpoint_snapshot(monkeypatch):
+    from services import databricks_runtime
+
+    checkpoint = {
+        "run_id": "run-gate4-snapshot",
+        "target_warehouse": "databricks",
+        "bronze_generation_results": [{"table": "claims"}],
+    }
+
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_checkpoint_state",
+        lambda run_id: (_ for _ in ()).throw(AssertionError("checkpoint should come from submitter")),
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_pause_for_silver_merge_key_review",
+        lambda run_id, state: {**state, "status": "HITL_WAIT", "next_review_key": "silver_merge_key_review"},
+    )
+    monkeypatch.setattr(databricks_runtime, "databricks_bronze_execution_enabled", lambda: False)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_runtime, "ai_store_db_writer", lambda **_: None)
+
+    result = pipeline_runtime.submit_gate4_review(
+        "run-gate4-snapshot",
+        action="APPROVED",
+        review_artifact={"feeds": [{"table": "claims", "merge_keys": ["claim_id"]}]},
+        checkpoint_state=checkpoint,
+    )
+
+    assert result["status"] == "HITL_WAIT"
+    assert result["next_review_key"] == "silver_merge_key_review"
 
 
 def test_gate4_review_uses_selected_bronze_subset_before_silver():

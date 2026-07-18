@@ -48,15 +48,62 @@ DATABASE_STAGE_SEQUENCE = [
 ]
 
 DATABASE_STAGE_LABELS = dict(DATABASE_STAGE_SEQUENCE)
+MINIMUM_RUNTIME_STAGE_KEYS = {
+    "ingestion",
+    "memory",
+    "requirements",
+    "kpis",
+    "nomination",
+    "discovery",
+    "schema",
+    "enrichment",
+}
 
 
 def _minimum_stage_runtime_seconds() -> float:
-    raw = os.getenv("ATHENA_MIN_STAGE_RUNTIME_SECONDS", "4")
+    raw = os.getenv("ATHENA_MIN_STAGE_RUNTIME_SECONDS", "10")
     try:
         return max(0.0, float(raw))
     except ValueError:
-        logger.warning("Invalid ATHENA_MIN_STAGE_RUNTIME_SECONDS=%r; using 4 seconds", raw)
-        return 4.0
+        logger.warning("Invalid ATHENA_MIN_STAGE_RUNTIME_SECONDS=%r; using 10 seconds", raw)
+        return 10.0
+
+
+def wait_for_minimum_stage_runtime(stage_key: str, started_at: float, state: Optional[Dict[str, Any]] = None) -> None:
+    if stage_key not in MINIMUM_RUNTIME_STAGE_KEYS:
+        return
+    status = str((state or {}).get("status") or "").upper()
+    if status in {"FAILED", "HITL_WAIT", "PAUSED_FOR_HITL", "PAUSED_FOR_STAGE_CONFIRMATION"}:
+        return
+    remaining = _minimum_stage_runtime_seconds() - (time.monotonic() - started_at)
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def run_with_minimum_stage_runtime(stage_key: str, runner, state: Dict[str, Any]) -> Dict[str, Any]:
+    started_at = time.monotonic()
+    run_id = str(state.get("run_id") or "").strip()
+    running_state = {
+        **state,
+        "status": "RUNNING",
+        "background_stage": stage_key,
+        "resume_message": f"{DATABASE_STAGE_LABELS.get(stage_key, stage_key).replace('_', ' ').title()} is running.",
+    }
+    if run_id:
+        save_checkpoint_state_timed(run_id, running_state, context=f"{stage_key}:running")
+
+    result = runner(running_state)
+    if isinstance(result, dict):
+        result = {
+            **running_state,
+            **result,
+            "background_stage": None,
+            "last_completed_stage_key": stage_key,
+        }
+        if run_id:
+            save_checkpoint_state_timed(run_id, result, context=f"{stage_key}:complete")
+        wait_for_minimum_stage_runtime(stage_key, started_at, result)
+    return result
 
 
 def _bundle_cache_token(path: Path) -> Optional[str]:
@@ -268,6 +315,39 @@ def _run_database_gold_stage(state: Dict[str, Any]) -> Dict[str, Any]:
             final_state["background_stage"] = None
             final_state["status"] = "PIPELINE_COMPLETED"
             final_state["next_gate"] = None
+            if run_id:
+                save_checkpoint_state(run_id, final_state)
+        elif str(final_state.get("target_warehouse") or "").lower() == "databricks":
+            from services.databricks_runtime import databricks_gold_execution_enabled, run_databricks_gold_scripts
+
+            if databricks_gold_execution_enabled():
+                run_id = str(final_state.get("run_id") or "")
+                execution_state = {
+                    **final_state,
+                    "status": "RUNNING",
+                    "background_stage": "gold_code_execution",
+                    "resume_message": "Executing generated Gold scripts in Databricks.",
+                }
+                if run_id:
+                    save_checkpoint_state(run_id, execution_state)
+                try:
+                    final_state = run_databricks_gold_scripts(execution_state)
+                except Exception as exc:
+                    failed_state = {
+                        **execution_state,
+                        "status": "FAILED",
+                        "background_stage": "gold_code_execution",
+                        "failed_background_stage": "gold_code_execution",
+                        "error": str(exc),
+                    }
+                    if run_id:
+                        save_checkpoint_state(run_id, failed_state)
+                    raise
+                final_state["background_stage"] = None
+                final_state["status"] = "PIPELINE_COMPLETED"
+                final_state["next_gate"] = None
+                if run_id:
+                    save_checkpoint_state(run_id, final_state)
         return final_state
     return result
 
@@ -307,7 +387,7 @@ def continue_database_pipeline(
             current_stage_key,
             extra={"run_id": run_id, "node": current_stage_key, "stage": current_stage_key, "event_type": "stage_start"},
         )
-        save_checkpoint_state(run_id, running_state)
+        save_checkpoint_state_timed(run_id, running_state, context=f"{current_stage_key}:running")
         working_state = running_state
 
         runner = _database_stage_runner(current_stage_key)
@@ -336,22 +416,20 @@ def continue_database_pipeline(
         working_state["last_completed_stage_label"] = DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key)
         working_state["next_stage_key"] = _database_next_stage_key(current_stage_key)
         working_state["next_stage_label"] = DATABASE_STAGE_LABELS.get(working_state["next_stage_key"], working_state["next_stage_key"]) if working_state.get("next_stage_key") else None
-        save_checkpoint_state(run_id, working_state)
+        save_checkpoint_state_timed(run_id, working_state, context=f"{current_stage_key}:complete")
 
         if working_state.get("status") == "FAILED":
             return working_state
         if str(working_state.get("status") or "").upper() in {"HITL_WAIT", "PAUSED_FOR_HITL"}:
             return working_state
 
+        wait_for_minimum_stage_runtime(current_stage_key, stage_started_at, working_state)
+
         if (
             stage_confirmation_enabled
             and working_state.get("next_stage_key")
             and not _is_database_review_gate(working_state.get("next_stage_key"))
         ):
-            elapsed = time.monotonic() - stage_started_at
-            remaining = _minimum_stage_runtime_seconds() - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
             return _pause_for_stage_confirmation(
                 working_state,
                 run_id=run_id,
@@ -517,6 +595,50 @@ def save_checkpoint_state(run_id: str, state: Dict[str, Any]) -> None:
         conn.close()
 
 
+def _checkpoint_slow_seconds() -> float:
+    raw = os.getenv("ATHENA_CHECKPOINT_SLOW_SECONDS", "2")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 2.0
+
+
+def save_checkpoint_state_timed(run_id: str, state: Dict[str, Any], *, context: str) -> None:
+    stage = state.get("background_stage") or state.get("failed_background_stage") or state.get("last_completed_stage_key")
+    logger.info(
+        "Saving checkpoint context=%s status=%s background_stage=%s",
+        context,
+        state.get("status"),
+        stage,
+        extra={"run_id": run_id, "node": stage or "checkpoint", "stage": stage or "checkpoint", "step_name": "checkpoint_save_start"},
+    )
+    started = time.perf_counter()
+    try:
+        save_checkpoint_state(run_id, state)
+    except Exception:
+        logger.exception(
+            "Checkpoint save failed context=%s",
+            context,
+            extra={"run_id": run_id, "node": stage or "checkpoint", "stage": stage or "checkpoint", "step_name": "checkpoint_save_failed"},
+        )
+        raise
+
+    elapsed = time.perf_counter() - started
+    log = logger.warning if elapsed >= _checkpoint_slow_seconds() else logger.info
+    log(
+        "Checkpoint save finished context=%s elapsed_seconds=%.3f",
+        context,
+        elapsed,
+        extra={
+            "run_id": run_id,
+            "node": stage or "checkpoint",
+            "stage": stage or "checkpoint",
+            "step_name": "checkpoint_save_complete",
+            "duration_seconds": round(elapsed, 3),
+        },
+    )
+
+
 def _interrupted_checkpoint_state(state: Dict[str, Any], reason: str) -> Dict[str, Any]:
     failed_stage = state.get("background_stage") or state.get("failed_background_stage") or state.get("last_failed_stage_key") or "pipeline"
     return {
@@ -589,7 +711,7 @@ def mark_run_processing(run_id: str, stage: str) -> None:
             "awaiting_stage_confirmation": False,
         }
     )
-    save_checkpoint_state(run_id, checkpoint)
+    save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:processing")
 
 
 def _active_background_job_count_locked() -> int:
@@ -641,10 +763,14 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
             checkpoint.update({"run_id": run_id, "background_stage": None})
             if checkpoint.get("status") == "PROCESSING":
                 checkpoint["status"] = checkpoint.get("semantic_enrichment_status") or checkpoint.get("table_nomination_status") or "COMPLETED"
-            save_checkpoint_state(run_id, checkpoint)
+            save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_complete")
         except Exception as exc:
             logger.exception("Background %s failed for run_id=%s", stage, run_id)
-            checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+            try:
+                checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+            except Exception:
+                logger.exception("Failed to load checkpoint while recording background failure run_id=%s stage=%s", run_id, stage)
+                checkpoint = {"run_id": run_id}
             checkpoint.update(
                 {
                     "run_id": run_id,
@@ -654,7 +780,10 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
                     "error": str(exc),
                 }
             )
-            save_checkpoint_state(run_id, checkpoint)
+            try:
+                save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_failed")
+            except Exception:
+                logger.exception("Failed to save background failure checkpoint run_id=%s stage=%s", run_id, stage)
         finally:
             with BACKGROUND_JOB_LOCK:
                 if BACKGROUND_JOBS.get(job_key) is done:
@@ -1593,12 +1722,17 @@ def build_pipeline_steps(
                     str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
                     and checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
                 ) or bool(
-                    str(checkpoint.get("target_warehouse") or "").lower() != "snowflake"
+                    str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    and checkpoint.get("databricks_silver_execution_status") == "COMPLETED"
+                ) or bool(
+                    str(checkpoint.get("target_warehouse") or "").lower() not in {"snowflake", "databricks"}
                     and (checkpoint.get("dq_validation_status") in {"COMPLETED", "SKIPPED"} or gate5_decision == "APPROVED")
                 ),
                 "detail": (
                     "Approved Silver scripts are executed in Snowflake before Gold generation."
                     if str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                    else "Approved Silver scripts are executed in Databricks before Gold generation."
+                    if str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
                     else "UI-only execution marker; generated Silver code runs outside Athena"
                 ),
             },
@@ -1615,12 +1749,17 @@ def build_pipeline_steps(
                     str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
                     and checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
                 ) or bool(
-                    str(checkpoint.get("target_warehouse") or "").lower() != "snowflake"
+                    str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    and checkpoint.get("databricks_gold_execution_status") == "COMPLETED"
+                ) or bool(
+                    str(checkpoint.get("target_warehouse") or "").lower() not in {"snowflake", "databricks"}
                     and gold_generation_completed
                 ),
                 "detail": (
                     "Generated Gold scripts are executed in Snowflake after Gold generation."
                     if str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                    else "Generated Gold scripts are executed in Databricks after Gold generation."
+                    if str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
                     else "UI-only execution marker; generated Gold code runs outside Athena"
                 ),
             },
@@ -1628,11 +1767,7 @@ def build_pipeline_steps(
     else:
         gate4_decision = str((checkpoint.get("gate4") or {}).get("decision") or checkpoint.get("bronze_review_decision") or "").upper()
         silver_merge_key_review_decision = str(checkpoint.get("silver_merge_key_review_decision") or "").upper()
-        requires_silver_merge_key_review = str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-        silver_merge_key_review_complete = (
-            silver_merge_key_review_decision == "APPROVED"
-            or (not requires_silver_merge_key_review and gate4_decision == "APPROVED")
-        )
+        silver_merge_key_review_complete = silver_merge_key_review_decision == "APPROVED"
         steps = [
         {
             "key": "ingestion",
@@ -1723,19 +1858,24 @@ def build_pipeline_steps(
             "complete": bool(gate4_decision == "APPROVED"),
             "detail": "Bronze review and merge-key resolution",
         },
-        {
-            "key": "bronze_code_execution",
-            "label": "Bronze Code Execution",
-            "complete": bool(
-                str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-                and checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
-            ),
-            "detail": (
-                "Approved Bronze scripts are executed in Snowflake before Silver generation."
-                if str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-                else "UI-only execution marker; generated Bronze code runs outside Athena"
-            ),
-        },
+            {
+                "key": "bronze_code_execution",
+                "label": "Bronze Code Execution",
+                "complete": bool(
+                    str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                    and checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
+                ) or bool(
+                    str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    and checkpoint.get("databricks_bronze_execution_status") == "COMPLETED"
+                ),
+                "detail": (
+                    "Approved Bronze scripts are executed in Snowflake before Silver generation."
+                    if str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                    else "Approved Bronze scripts are executed in Databricks before Silver generation."
+                    if str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    else "UI-only execution marker; generated Bronze code runs outside Athena"
+                ),
+            },
         {
             "key": "silver_merge_key_resolution",
             "label": "Silver Merge Key Resolution",
@@ -1760,38 +1900,48 @@ def build_pipeline_steps(
             "complete": bool((checkpoint.get("gate5") or {}).get("decision") == "APPROVED" or checkpoint.get("silver_review_decision") == "APPROVED"),
             "detail": "Silver review",
         },
-        {
-            "key": "silver_code_execution",
-            "label": "Silver Code Execution",
-            "complete": bool(
-                str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-                and checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
-            ),
-            "detail": (
-                "Approved Silver scripts are executed in Snowflake before Gold generation."
-                if str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-                else "UI-only execution marker; generated Silver code runs outside Athena"
-            ),
-        },
+            {
+                "key": "silver_code_execution",
+                "label": "Silver Code Execution",
+                "complete": bool(
+                    str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                    and checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
+                ) or bool(
+                    str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    and checkpoint.get("databricks_silver_execution_status") == "COMPLETED"
+                ),
+                "detail": (
+                    "Approved Silver scripts are executed in Snowflake before Gold generation."
+                    if str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                    else "Approved Silver scripts are executed in Databricks before Gold generation."
+                    if str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    else "UI-only execution marker; generated Silver code runs outside Athena"
+                ),
+            },
         {
             "key": "gold",
             "label": "Gold Code Generation",
             "complete": bool(gold_generation_completed),
             "detail": "Gold KPI scripts generated",
         },
-        {
-            "key": "gold_code_execution",
-            "label": "Gold Code Execution",
-            "complete": bool(
-                str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-                and checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
-            ),
-            "detail": (
-                "Generated Gold scripts are executed in Snowflake after Gold generation."
-                if str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-                else "UI-only execution marker; generated Gold code runs outside Athena"
-            ),
-        },
+            {
+                "key": "gold_code_execution",
+                "label": "Gold Code Execution",
+                "complete": bool(
+                    str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                    and checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
+                ) or bool(
+                    str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    and checkpoint.get("databricks_gold_execution_status") == "COMPLETED"
+                ),
+                "detail": (
+                    "Generated Gold scripts are executed in Snowflake after Gold generation."
+                    if str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                    else "Generated Gold scripts are executed in Databricks after Gold generation."
+                    if str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    else "UI-only execution marker; generated Gold code runs outside Athena"
+                ),
+            },
         ]
 
     checkpoint_status = str(checkpoint.get("status") or "").upper()
@@ -2162,6 +2312,7 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         gold_generation_completed
         or checkpoint.get("background_stage") == "gold_code_execution"
         or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
+        or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
     )
     if gold_progress_exists:
         next_gate = None
@@ -2182,13 +2333,34 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         "FAILED",
         "ABORTED",
     }
-    if can_promote_to_completed and checkpoint.get("bronze_generation_status") == "COMPLETED":
+    if can_promote_to_completed and (
+        checkpoint.get("bronze_generation_status") == "COMPLETED"
+        or checkpoint.get("databricks_bronze_execution_status") == "COMPLETED"
+        or checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
+    ):
         status = "PIPELINE_COMPLETED"
     if can_promote_to_completed and gate3_payload and bronze_generation_completed:
         status = "PIPELINE_COMPLETED"
-    if can_promote_to_completed and silver_generation_completed:
+    if can_promote_to_completed and (
+        silver_generation_completed
+        or checkpoint.get("databricks_silver_execution_status") == "COMPLETED"
+        or checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
+    ):
         status = "PIPELINE_COMPLETED"
-    if can_promote_to_completed and gold_generation_completed:
+    if can_promote_to_completed and (
+        gold_generation_completed
+        or checkpoint.get("databricks_gold_execution_status") == "COMPLETED"
+        or checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
+    ):
+        status = "PIPELINE_COMPLETED"
+    if (
+        not checkpoint.get("background_stage")
+        and str(status or "").upper() in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
+        and (
+            str(checkpoint.get("databricks_gold_execution_status") or "").upper() == "COMPLETED"
+            or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
+        )
+    ):
         status = "PIPELINE_COMPLETED"
     pipeline_steps = build_pipeline_steps(
         source=str(checkpoint.get("source") or "database"),
@@ -2274,6 +2446,9 @@ def start_pipeline(
     run_id: Optional[str] = None,
     use_domain_kb: bool = False,
     stage_confirmation_enabled: bool = False,
+    compliance_enabled: bool = False,
+    compliance_domain: str = "Insurance",
+    compliance_countries: Optional[List[str]] = None,
     target_warehouse: str = "databricks",
 ) -> Dict[str, Any]:
     run_id = run_id or str(uuid.uuid4())
@@ -2291,6 +2466,9 @@ def start_pipeline(
         "source_databases": source_databases or [default_source_db],
         "use_domain_kb": bool(use_domain_kb),
         "stage_confirmation_enabled": bool(stage_confirmation_enabled),
+        "compliance_enabled": bool(compliance_enabled),
+        "compliance_domain": compliance_domain or "Insurance",
+        "compliance_countries": compliance_countries or ["US"],
         "target_warehouse": str(target_warehouse or "databricks").lower(),
     }
 
@@ -2432,6 +2610,7 @@ def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]
 
 def submit_gate3_review(run_id: str, approve: bool, enriched_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from nodes.hitl import build_hitl_enrichment_review_node
+    from services.compliance_client import attach_review_result
 
     checkpoint_state = load_checkpoint_state(run_id) or {}
     metadata = enriched_metadata or fetch_json_artifact(run_id, "ENRICHED_METADATA") or _checkpoint_enriched_payload(checkpoint_state)
@@ -2475,6 +2654,7 @@ def submit_gate3_review(run_id: str, approve: bool, enriched_metadata: Optional[
         "silver_schema": os.getenv("SILVER_SCHEMA", "silver"),
         "gold_schema": os.getenv("GOLD_SCHEMA", "gold"),
     }
+    bronze_state.update(attach_review_result(bronze_state))
     if str(bronze_state.get("target_warehouse") or "").lower() == "snowflake":
         bronze_state["gold_catalog"] = os.getenv("SNOWFLAKE_GOLD_CATALOG") or os.getenv("SNOWFLAKE_SILVER_CATALOG") or "ATHENA_DB"
         bronze_state["gold_schema"] = os.getenv("SNOWFLAKE_GOLD_SCHEMA", "GOLD")
@@ -2690,8 +2870,13 @@ def _filter_gold_contract_by_silver_results(contract: Dict[str, Any], silver_res
     return {**contract, "kpi_mappings": mappings, "warnings": warnings}
 
 
-def submit_gate4_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
+def submit_gate4_review(
+    run_id: str,
+    action: str = "APPROVED",
+    review_artifact: Optional[Dict[str, Any]] = None,
+    checkpoint_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    checkpoint_state = checkpoint_state or load_checkpoint_state(run_id) or {"run_id": run_id}
     decision = str(action or "APPROVED").upper()
     final_state = {
         **checkpoint_state,
@@ -2717,7 +2902,8 @@ def submit_gate4_review(run_id: str, action: str = "APPROVED", review_artifact: 
             [item for item in final_state.get("bronze_generation_results") or [] if isinstance(item, dict)],
             final_state["bronze_review_artifact"],
         )
-        if str(final_state.get("target_warehouse") or "").lower() == "snowflake":
+        target_warehouse = str(final_state.get("target_warehouse") or "").lower()
+        if target_warehouse == "snowflake":
             from services.snowflake_bronze_runtime import run_snowflake_bronze_scripts
 
             execution_state = {
@@ -2727,7 +2913,7 @@ def submit_gate4_review(run_id: str, action: str = "APPROVED", review_artifact: 
                 "next_gate": None,
                 "resume_message": "Executing approved Bronze scripts in Snowflake.",
             }
-            save_checkpoint_state(run_id, execution_state)
+            save_checkpoint_state_timed(run_id, execution_state, context="bronze_code_execution:running")
             try:
                 final_state = run_snowflake_bronze_scripts(
                     execution_state,
@@ -2746,10 +2932,43 @@ def submit_gate4_review(run_id: str, action: str = "APPROVED", review_artifact: 
                     "failed_background_stage": "bronze_code_execution",
                     "error": str(exc),
                 }
-                save_checkpoint_state(run_id, failed_state)
+                save_checkpoint_state_timed(run_id, failed_state, context="bronze_code_execution:failed")
                 raise
             final_state["background_stage"] = None
-            final_state = _pause_for_silver_merge_key_review(run_id, final_state)
+        elif target_warehouse == "databricks":
+            from services.databricks_runtime import databricks_bronze_execution_enabled, run_databricks_bronze_scripts
+
+            if databricks_bronze_execution_enabled():
+                execution_state = {
+                    **final_state,
+                    "status": "RUNNING",
+                    "background_stage": "bronze_code_execution",
+                    "next_gate": None,
+                    "resume_message": "Executing approved Bronze scripts in Databricks.",
+                }
+                save_checkpoint_state_timed(run_id, execution_state, context="bronze_code_execution:running")
+                try:
+                    final_state = run_databricks_bronze_scripts(
+                        execution_state,
+                        review_artifact=execution_state["bronze_review_artifact"],
+                        approved_only=True,
+                    )
+                    if final_state.get("databricks_bronze_execution_status") != "COMPLETED":
+                        raise RuntimeError(
+                            "Databricks Bronze execution did not complete; refusing to continue to Silver."
+                        )
+                except Exception as exc:
+                    failed_state = {
+                        **execution_state,
+                        "status": "FAILED",
+                        "background_stage": "bronze_code_execution",
+                        "failed_background_stage": "bronze_code_execution",
+                        "error": str(exc),
+                    }
+                    save_checkpoint_state_timed(run_id, failed_state, context="bronze_code_execution:failed")
+                    raise
+                final_state["background_stage"] = None
+        final_state = _pause_for_silver_merge_key_review(run_id, final_state)
         ai_store_db_writer(
             run_id=run_id,
             stage="Bronze Review",
@@ -2767,7 +2986,7 @@ def submit_gate4_review(run_id: str, action: str = "APPROVED", review_artifact: 
             output_tokens=0,
             fingerprint=str(final_state.get("fingerprint") or run_id),
         )
-        save_checkpoint_state(run_id, final_state)
+        save_checkpoint_state_timed(run_id, final_state, context="gate4:complete")
         if final_state.get("next_review_key") == "silver_merge_key_review":
             return final_state
         return continue_database_pipeline(run_id, start_stage_key="silver", state=final_state)
@@ -2925,7 +3144,8 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
             final_state.get("gold_generation_contract") or {},
             selected_silver_results,
         )
-        if str(final_state.get("target_warehouse") or "").lower() == "snowflake":
+        target_warehouse = str(final_state.get("target_warehouse") or "").lower()
+        if target_warehouse == "snowflake":
             from services.snowflake_silver_runtime import run_snowflake_silver_scripts
 
             execution_state = {
@@ -2952,6 +3172,38 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
                 save_checkpoint_state(run_id, failed_state)
                 raise
             final_state["background_stage"] = None
+        elif target_warehouse == "databricks":
+            from services.databricks_runtime import databricks_silver_execution_enabled, run_databricks_silver_scripts
+
+            if databricks_silver_execution_enabled():
+                execution_state = {
+                    **final_state,
+                    "background_stage": "silver_code_execution",
+                    "next_gate": None,
+                    "resume_message": "Executing approved Silver scripts in Databricks.",
+                }
+                save_checkpoint_state(run_id, execution_state)
+                try:
+                    final_state = run_databricks_silver_scripts(
+                        execution_state,
+                        review_artifact=execution_state["silver_review_artifact"],
+                        approved_only=True,
+                    )
+                    if final_state.get("databricks_silver_execution_status") != "COMPLETED":
+                        raise RuntimeError(
+                            "Databricks Silver execution did not complete; refusing to continue to Gold."
+                        )
+                except Exception as exc:
+                    failed_state = {
+                        **execution_state,
+                        "status": "FAILED",
+                        "background_stage": "silver_code_execution",
+                        "failed_background_stage": "silver_code_execution",
+                        "error": str(exc),
+                    }
+                    save_checkpoint_state(run_id, failed_state)
+                    raise
+                final_state["background_stage"] = None
 
     ai_store_db_writer(
         run_id=run_id,
@@ -2998,7 +3250,8 @@ def submit_gold_generation(run_id: str) -> Dict[str, Any]:
     result = gold_code_generation_node(state)
     final_state = {**checkpoint_state, **result, "run_id": run_id}
     if str(result.get("gold_generation_status") or "").startswith("COMPLETED"):
-        if str(final_state.get("target_warehouse") or "").lower() == "snowflake":
+        target_warehouse = str(final_state.get("target_warehouse") or "").lower()
+        if target_warehouse == "snowflake":
             from services.snowflake_gold_runtime import run_snowflake_gold_scripts
 
             execution_state = {
@@ -3022,6 +3275,31 @@ def submit_gold_generation(run_id: str) -> Dict[str, Any]:
                 save_checkpoint_state(run_id, failed_state)
                 raise
             final_state["background_stage"] = None
+        elif target_warehouse == "databricks":
+            from services.databricks_runtime import databricks_gold_execution_enabled, run_databricks_gold_scripts
+
+            if databricks_gold_execution_enabled():
+                execution_state = {
+                    **final_state,
+                    "status": "RUNNING",
+                    "background_stage": "gold_code_execution",
+                    "next_gate": None,
+                    "resume_message": "Executing generated Gold scripts in Databricks.",
+                }
+                save_checkpoint_state(run_id, execution_state)
+                try:
+                    final_state = run_databricks_gold_scripts(execution_state)
+                except Exception as exc:
+                    failed_state = {
+                        **execution_state,
+                        "status": "FAILED",
+                        "background_stage": "gold_code_execution",
+                        "failed_background_stage": "gold_code_execution",
+                        "error": str(exc),
+                    }
+                    save_checkpoint_state(run_id, failed_state)
+                    raise
+                final_state["background_stage"] = None
         final_state["status"] = "PIPELINE_COMPLETED"
     save_checkpoint_state(run_id, final_state)
     return final_state

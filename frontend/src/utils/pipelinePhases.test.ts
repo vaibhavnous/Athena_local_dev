@@ -85,3 +85,18 @@ test('does not infer Silver generation or execution from a completed merge-key r
   expect(phaseState(run, 'phase-4', 'gate5')).toBe('PENDING')
   expect(phaseState(run, 'phase-4', 'silver_code_execution')).toBe('PENDING')
 })
+
+test('does not infer Bronze execution from downstream Silver progress', () => {
+  const run = {
+    status: 'RUNNING',
+    target_warehouse: 'snowflake',
+    pipeline_steps: [
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
+      { key: 'silver_merge_key_review', state: 'COMPLETED' },
+      { key: 'silver', state: 'RUNNING' },
+    ],
+  }
+
+  expect(phaseState(run, 'phase-3', 'bronze_code_execution')).toBe('PENDING')
+})

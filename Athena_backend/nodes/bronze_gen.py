@@ -6,8 +6,10 @@ import json
 import os
 import re
 import hashlib
+import shutil
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Dict, List, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -112,6 +114,151 @@ def _metadata_for_table(state: Stage01State, table_name: str) -> Dict[str, Any]:
         if str(table.get("table_name") or "").lower() == table_name.lower():
             return table
     return {}
+
+
+def _security_assessment_id(state: Stage01State) -> str | None:
+    for key in ("compliance_assessment_id", "assessment_id"):
+        value = str(state.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _security_policies_for_table(
+    state: Stage01State,
+    *,
+    database_name: str,
+    schema_name: str,
+    table_name: str,
+) -> Dict[str, str]:
+    raw = (
+        state.get("security_policies")
+        or state.get("policies")
+        or state.get("column_security_policies")
+        or {}
+    )
+    if not isinstance(raw, dict) or not raw:
+        return {}
+
+    candidate_keys = (
+        table_name,
+        table_name.casefold(),
+        f"{database_name}.{schema_name}.{table_name}",
+        f"{database_name}.{schema_name}.{table_name}".casefold(),
+    )
+    table_specific = next(
+        (
+            value
+            for key, value in raw.items()
+            if isinstance(key, str) and key in candidate_keys and isinstance(value, dict)
+        ),
+        None,
+    )
+    selected = table_specific if table_specific is not None else raw
+    if not isinstance(selected, dict):
+        return {}
+
+    normalized: Dict[str, str] = {}
+    for column_name, control in selected.items():
+        clean_column = _normalize_bronze_column_name(column_name)
+        clean_control = str(control or "").strip()
+        if clean_column and clean_control:
+            normalized[clean_column] = clean_control
+    return normalized
+
+
+def copy_security_control_module(output_dir: str) -> str:
+    source_path = Path(__file__).with_name("securitycontrol.py")
+    destination_path = Path(output_dir) / "security_control.py"
+    shutil.copy2(source_path, destination_path)
+    return str(destination_path)
+
+
+def _is_databricks_readable_path(path: str) -> bool:
+    value = str(path or "").strip()
+    return value.startswith(("abfss://", "dbfs:/", "/Volumes/", "s3://"))
+
+
+def _normalize_file_format(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"txt", "text"}:
+        return "csv"
+    return normalized or "csv"
+
+
+def _infer_file_format(*, explicit_format: str = "", landing_path: str = "") -> str:
+    if explicit_format:
+        return _normalize_file_format(explicit_format)
+    suffix = Path(str(landing_path or "").rstrip("/")).suffix.lower().lstrip(".")
+    return _normalize_file_format(suffix)
+
+
+def _file_source_config_for_table(
+    state: Stage01State,
+    *,
+    database_name: str,
+    schema_name: str,
+    table_name: str,
+) -> Dict[str, str]:
+    source_type = str(
+        state.get("source")
+        or state.get("source_type")
+        or ""
+    ).strip().lower()
+
+    candidates: List[Dict[str, Any]] = []
+    for candidate in state.get("candidate_feeds") or []:
+        if isinstance(candidate, dict):
+            candidates.append(candidate)
+    if isinstance(state.get("candidate_feed"), dict):
+        candidates.append(state["candidate_feed"])
+
+    table_keys = {
+        table_name.casefold(),
+        f"{database_name}.{schema_name}.{table_name}".casefold(),
+    }
+    matched_feed = next(
+        (
+            feed for feed in candidates
+            if {
+                str(feed.get("entity") or "").strip().casefold(),
+                str(feed.get("table") or "").strip().casefold(),
+                str(feed.get("table_name") or "").strip().casefold(),
+                str(feed.get("source_table") or "").strip().casefold(),
+            } & table_keys
+        ),
+        None,
+    )
+    feed = matched_feed or (candidates[0] if len(candidates) == 1 else {})
+
+    landing_path = ""
+    for candidate in (
+        feed.get("databricks_source_path") if isinstance(feed, dict) else None,
+        feed.get("landing_path") if isinstance(feed, dict) else None,
+        feed.get("cloud_path") if isinstance(feed, dict) else None,
+        state.get("landing_path"),
+        state.get("databricks_source_path"),
+        state.get("file_path"),
+    ):
+        candidate_str = str(candidate or "").strip()
+        if candidate_str and _is_databricks_readable_path(candidate_str):
+            landing_path = candidate_str
+            break
+
+    file_format = _infer_file_format(
+        explicit_format=str((feed or {}).get("file_format") or (feed or {}).get("format") or state.get("file_format") or ""),
+        landing_path=landing_path,
+    )
+
+    source_type = str((feed or {}).get("source") or source_type or "adls_gen2").strip().lower()
+    if not landing_path or source_type not in {"adls_gen2", "sftp"}:
+        return {}
+
+    return {
+        "landing_path": landing_path,
+        "file_format": file_format,
+        "source_type": source_type,
+    }
 
 
 # ------------------------------------------------------------------------------
@@ -944,19 +1091,190 @@ DELETE FROM {target_table} WHERE "run_id" = {_snowflake_string_literal(run_id)};
 
 def generate_bronze_script(
     *,
+    assessment_id: str | None = None,
+    policies: Dict[str, str] | None = None,
     table: str,
     schema: str = "dbo",
     database: str = "insurance",
     run_id: str = "BRONZE_RUN",
     bronze_catalog: str = "main",
     bronze_schema: str = "bronze",
+    landing_path: str | None = None,
+    file_format: str | None = None,
+    source_type: str | None = None,
     source_jdbc_url: str | None = None,
     cast_rules: Dict[str, str] | None = None,
 ) -> str:
-    if not source_jdbc_url:
+    landing_path = str(landing_path or "").strip()
+    file_format = _normalize_file_format(file_format or "")
+    source_type = str(source_type or "adls_gen2").strip().lower() or "adls_gen2"
+
+    if not landing_path and not source_jdbc_url:
         raise ValueError(f"Missing source JDBC URL for {database}.{schema}.{table}.")
 
     cast_rules = cast_rules or {}
+    assessment_id = str(assessment_id or "").strip()
+    policies = {
+        _normalize_bronze_column_name(column_name): str(control).strip()
+        for column_name, control in (policies or {}).items()
+        if _normalize_bronze_column_name(column_name) and str(control or "").strip()
+    }
+    security_enabled = bool(assessment_id and policies)
+    security_setup = ""
+    security_apply = ""
+    if security_enabled:
+        security_setup = f"""
+SECURITY_ASSESSMENT_ID = {assessment_id!r}
+SECURITY_POLICIES = {repr(policies)}
+from security_control import apply_security_controls, SecurityControlType
+SECURITY_POLICIES = {{
+    column_name: (
+        control if isinstance(control, SecurityControlType) else SecurityControlType(str(control))
+    )
+    for column_name, control in SECURITY_POLICIES.items()
+}}
+"""
+        security_apply = f"""
+df = apply_security_controls(
+    assessment_id=SECURITY_ASSESSMENT_ID,
+    table_name={table!r},
+    dataframe=df,
+    policies=SECURITY_POLICIES,
+)
+"""
+
+    if landing_path:
+        return f'''
+"""
+AUTO-GENERATED BRONZE INGESTION SCRIPT
+
+Source: {landing_path}
+Expected runtime: Spark / Databricks with Delta support
+Target table: {bronze_catalog}.{bronze_schema}.bronze_{table}
+
+DO NOT EDIT MANUALLY
+"""
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, current_timestamp, expr, lit
+
+spark = SparkSession.builder.getOrCreate()
+
+try:
+    spark.sql("CREATE SCHEMA IF NOT EXISTS {bronze_catalog}.{bronze_schema}")
+except Exception:
+    print("Could not create schema '{bronze_catalog}.{bronze_schema}'")
+
+RUN_ID = {run_id!r}
+SOURCE_PATH = {landing_path!r}
+FILE_FORMAT = {file_format!r}
+{security_setup}
+
+TARGET_TABLE = "{bronze_catalog}.{bronze_schema}.bronze_{table}"
+TEMP_VIEW = "bronze_src_{table}"
+CAST_RULES = {repr(cast_rules)}
+DATE_COLUMN_HINTS = ("date", "_dt", "timestamp", "created_at", "updated_at", "modified_at")
+RECREATE_TARGET_ON_SCHEMA_CONFLICT = True
+
+def _try_cast_column(column_name, target_type):
+    escaped_name = column_name.replace("`", "``")
+    return expr(f"try_cast(`{{escaped_name}}` AS {{target_type}})")
+
+if FILE_FORMAT == "csv":
+    df = (
+        spark.read.format("csv")
+        .option("header", "true")
+        .option("inferSchema", "true")
+        .load(SOURCE_PATH)
+    )
+elif FILE_FORMAT == "json":
+    df = spark.read.format("json").load(SOURCE_PATH)
+elif FILE_FORMAT == "parquet":
+    df = spark.read.format("parquet").load(SOURCE_PATH)
+else:
+    raise ValueError(f"Unsupported FILE_FORMAT: {{FILE_FORMAT}}")
+
+if not df.schema or not df.schema.fields:
+    raise ValueError("Source read returned an empty schema for {table}.")
+
+normalized_columns = []
+seen_columns = {{}}
+for original_name in df.columns:
+    normalized_name = original_name.lower()
+    if normalized_name in seen_columns:
+        seen_columns[normalized_name] += 1
+        normalized_name = f"{{normalized_name}}_{{seen_columns[normalized_name]}}"
+    else:
+        seen_columns[normalized_name] = 0
+    normalized_columns.append(col(original_name).alias(normalized_name))
+
+df = df.select(*normalized_columns)
+
+for column_name, target_type in CAST_RULES.items():
+    if column_name in df.columns:
+        df = df.withColumn(column_name, _try_cast_column(column_name, target_type))
+
+for column_name in df.columns:
+    lower_name = column_name.lower()
+    if column_name in CAST_RULES:
+        continue
+    if any(hint in lower_name for hint in DATE_COLUMN_HINTS):
+        df = df.withColumn(column_name, _try_cast_column(column_name, "timestamp"))
+
+df = (
+    df
+    .withColumn("run_id", lit(RUN_ID))
+    .withColumn("ingestion_timestamp", current_timestamp())
+    .withColumn("source_system", lit("{source_type}"))
+    .withColumn("source_table", lit("{table}"))
+)
+{security_apply}
+
+df.createOrReplaceTempView(TEMP_VIEW)
+
+if spark.catalog.tableExists(TARGET_TABLE):
+    target_schema = {{
+        field.name.lower(): field.dataType.simpleString().lower()
+        for field in spark.table(TARGET_TABLE).schema.fields
+    }}
+    incoming_schema = {{
+        field.name.lower(): field.dataType.simpleString().lower()
+        for field in df.schema.fields
+    }}
+    schema_conflicts = [
+        (name, target_schema[name], incoming_type)
+        for name, incoming_type in incoming_schema.items()
+        if name in target_schema and target_schema[name] != incoming_type
+    ]
+
+    if schema_conflicts:
+        conflict_text = ", ".join(
+            f"{{name}}: target={{target_type}}, incoming={{incoming_type}}"
+            for name, target_type, incoming_type in schema_conflicts
+        )
+        if RECREATE_TARGET_ON_SCHEMA_CONFLICT:
+            print(f"Recreating {{TARGET_TABLE}} due to schema conflicts: {{conflict_text}}")
+            spark.sql(f"DROP TABLE IF EXISTS {{TARGET_TABLE}}")
+        else:
+            raise ValueError(f"Schema conflicts detected for {{TARGET_TABLE}}: {{conflict_text}}")
+
+create_table_sql = (
+    f"CREATE TABLE IF NOT EXISTS {{TARGET_TABLE}} "
+    f"USING DELTA "
+    f"AS SELECT * FROM {{TEMP_VIEW}} WHERE 1 = 0"
+)
+spark.sql(create_table_sql)
+
+(
+    df.write
+    .format("delta")
+    .mode("append")
+    .option("mergeSchema", "true")
+    .saveAsTable(TARGET_TABLE)
+)
+
+print(f"SUCCESS: Bronze ingestion completed for {{TARGET_TABLE}}")
+'''
 
     return f'''
 """
@@ -972,7 +1290,7 @@ DO NOT EDIT MANUALLY
 import os
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, current_timestamp, lit
+from pyspark.sql.functions import col, current_timestamp, expr, lit
 
 spark = SparkSession.builder.getOrCreate()
 
@@ -981,9 +1299,9 @@ spark = SparkSession.builder.getOrCreate()
 # ------------------------------------------------------------------------------
 
 try:
-    spark.sql("CREATE SCHEMA IF NOT EXISTS {bronze_schema}")
+    spark.sql("CREATE SCHEMA IF NOT EXISTS {bronze_catalog}.{bronze_schema}")
 except Exception:
-    print("Could not create schema '{bronze_schema}' in the current catalog")
+    print("Could not create schema '{bronze_catalog}.{bronze_schema}'")
 
 RUN_ID = {run_id!r}
 DEFAULT_SOURCE_JDBC_URL = {source_jdbc_url!r}
@@ -991,12 +1309,17 @@ SOURCE_JDBC_URL_ENV = "ATHENA_SOURCE_JDBC_URL"
 SOURCE_JDBC_URL = os.getenv(SOURCE_JDBC_URL_ENV) or os.getenv("SOURCE_JDBC_URL") or DEFAULT_SOURCE_JDBC_URL
 if not SOURCE_JDBC_URL:
     raise RuntimeError(f"Missing source JDBC URL. Set {{SOURCE_JDBC_URL_ENV}} or SOURCE_JDBC_URL at runtime.")
+{security_setup}
 
-TARGET_TABLE = "{bronze_schema}.bronze_{table}"
+TARGET_TABLE = "{bronze_catalog}.{bronze_schema}.bronze_{table}"
 TEMP_VIEW = "bronze_src_{table}"
 CAST_RULES = {repr(cast_rules)}
 DATE_COLUMN_HINTS = ("date", "_dt", "timestamp", "created_at", "updated_at", "modified_at")
 RECREATE_TARGET_ON_SCHEMA_CONFLICT = True
+
+def _try_cast_column(column_name, target_type):
+    escaped_name = column_name.replace("`", "``")
+    return expr(f"try_cast(`{{escaped_name}}` AS {{target_type}})")
 
 df = (
     spark.read.format("jdbc")
@@ -1024,14 +1347,14 @@ df = df.select(*normalized_columns)
 
 for column_name, target_type in CAST_RULES.items():
     if column_name in df.columns:
-        df = df.withColumn(column_name, col(column_name).cast(target_type))
+        df = df.withColumn(column_name, _try_cast_column(column_name, target_type))
 
 for column_name in df.columns:
     lower_name = column_name.lower()
     if column_name in CAST_RULES:
         continue
     if any(hint in lower_name for hint in DATE_COLUMN_HINTS):
-        df = df.withColumn(column_name, col(column_name).cast("timestamp"))
+        df = df.withColumn(column_name, _try_cast_column(column_name, "timestamp"))
 
 df = (
     df
@@ -1040,6 +1363,7 @@ df = (
     .withColumn("source_system", lit("{database}"))
     .withColumn("source_table", lit("{table}"))
 )
+{security_apply}
 
 df.createOrReplaceTempView(TEMP_VIEW)
 
@@ -1093,6 +1417,9 @@ print(f"SUCCESS: Bronze ingestion completed for {{TARGET_TABLE}}")
 def _generate_one_table(
     table_ref: BronzeTableRef,
     *,
+    assessment_id: str | None = None,
+    policies: Dict[str, str] | None = None,
+    file_source_config: Dict[str, str] | None = None,
     run_id: str,
     source_jdbc_url: str | None = None,
     bronze_catalog: str = "main",
@@ -1105,6 +1432,7 @@ def _generate_one_table(
     schema_name = table_ref["schema_name"]
     table_name = table_ref["table_name"]
     target_warehouse = str(target_warehouse or "databricks").lower()
+    file_source_config = file_source_config or {}
 
     if target_warehouse == "snowflake":
         code = generate_snowflake_bronze_script(
@@ -1135,15 +1463,22 @@ def _generate_one_table(
         _validate_snowflake_sql(code, source_table=source_table, target_table=target_table)
         extension = "sql"
     else:
-        resolved_source_jdbc_url = source_jdbc_url or build_source_jdbc_url(database_name)
+        resolved_source_jdbc_url = ""
+        if not file_source_config.get("landing_path"):
+            resolved_source_jdbc_url = source_jdbc_url or build_source_jdbc_url(database_name)
 
         code = generate_bronze_script(
+            assessment_id=assessment_id,
+            policies=policies,
             table=table_name,
             schema=schema_name,
             database=database_name,
             run_id=run_id,
             bronze_catalog=bronze_catalog,
             bronze_schema=bronze_schema,
+            landing_path=str(file_source_config.get("landing_path") or ""),
+            file_format=str(file_source_config.get("file_format") or ""),
+            source_type=str(file_source_config.get("source_type") or ""),
             source_jdbc_url=resolved_source_jdbc_url,
             cast_rules=cast_rules or {},
         )
@@ -1153,6 +1488,7 @@ def _generate_one_table(
             "target_table": f"{bronze_catalog}.{bronze_schema}.bronze_{table_name}",
             "cast_rules": cast_rules or {},
             "table_metadata": table_metadata or {},
+            "file_source_config": file_source_config,
         }
         code, llm_enhanced, llm_error = _maybe_enhance_with_llm(code, enhancement_metadata)
 
@@ -1197,6 +1533,9 @@ def _generate_one_table(
         ] if target_warehouse == "snowflake" else [],
         "llm_enhanced": llm_enhanced,
         "llm_enhancement_error": llm_error,
+        "security_enabled": bool(assessment_id and policies),
+        "assessment_id": assessment_id,
+        "security_policy_columns": sorted((policies or {}).keys()),
         "target_warehouse": target_warehouse,
         "script_language": "sql" if target_warehouse == "snowflake" else "python",
         "script_path": script_path,
@@ -1221,6 +1560,7 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
     if target_warehouse == "snowflake":
         bronze_catalog = _snowflake_bronze_catalog()
         bronze_schema = _snowflake_bronze_schema()
+    assessment_id = _security_assessment_id(state)
 
     table_refs = _resolve_tables_for_bronze(state)
     skipped_by_allowlist: List[BronzeTableRef] = []
@@ -1255,11 +1595,25 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
     )
 
     source_jdbc_url = state.get("source_jdbc_url")
+    should_copy_security_module = False
     with ThreadPoolExecutor(max_workers=BRONZE_MAX_WORKERS) as executor:
         futures = [
             executor.submit(
                 _generate_one_table,
                 table_ref,
+                assessment_id=assessment_id,
+                policies=_security_policies_for_table(
+                    state,
+                    database_name=table_ref["database_name"],
+                    schema_name=table_ref["schema_name"],
+                    table_name=table_ref["table_name"],
+                ),
+                file_source_config=_file_source_config_for_table(
+                    state,
+                    database_name=table_ref["database_name"],
+                    schema_name=table_ref["schema_name"],
+                    table_name=table_ref["table_name"],
+                ),
                 run_id=run_id,
                 source_jdbc_url=source_jdbc_url,
                 bronze_catalog=bronze_catalog,
@@ -1274,6 +1628,13 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
         for f in as_completed(futures):
             result = f.result()
             results.append(result)
+            should_copy_security_module = (
+                should_copy_security_module
+                or (
+                    result.get("target_warehouse") == "databricks"
+                    and bool(result.get("security_enabled"))
+                )
+            )
             logger.info(
                 "Generated Bronze script for %s.%s.%s target=%s.%s.%s script=%s",
                 result.get("database_name"),
@@ -1303,6 +1664,8 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
 
     output_dir = _bronze_output_dir_for(target_warehouse)
     os.makedirs(output_dir, exist_ok=True)
+    if should_copy_security_module:
+        copy_security_control_module(output_dir)
     bundle_path = os.path.join(output_dir, f"{_run_slug(run_id)}_bronze_scripts.json")
     latest_bundle_path = os.path.join(output_dir, "bronze_scripts.json")
     with open(bundle_path, "w", encoding="utf-8") as f:

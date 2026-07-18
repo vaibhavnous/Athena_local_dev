@@ -6,6 +6,7 @@ import hashlib
 import time
 import socket
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
@@ -128,10 +129,15 @@ def _build_connection_string(host, port, database_name, username, password, driv
 
 def _driver_candidates() -> list[str]:
     configured = str(config["azure_sql"].get("driver") or "").strip()
-    candidates = [configured] if configured else []
+    try:
+        installed = set(_get_pyodbc().drivers())
+    except Exception:
+        installed = set()
+
+    candidates = [configured] if configured and (not installed or configured in installed) else []
     # Local Windows installs often have one of these available, not always both.
     for fallback in ("ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"):
-        if fallback not in candidates:
+        if fallback not in candidates and (not installed or fallback in installed):
             candidates.append(fallback)
     return candidates
 
@@ -341,7 +347,8 @@ def get_pipeline_connection() -> pyodbc.Connection:
         )
 
     last_exc = None
-    for driver in _driver_candidates():
+    drivers = _driver_candidates()
+    for index, driver in enumerate(drivers):
         try:
             conn_str = _build_connection_string(
                 db_conf["host"],
@@ -362,7 +369,8 @@ def get_pipeline_connection() -> pyodbc.Connection:
             last_exc = exc
             if "ODBC Driver" not in str(exc):
                 raise
-            logger.warning("Pipeline DB connection failed with driver=%s, retrying fallback driver", driver)
+            if index + 1 < len(drivers):
+                logger.warning("Pipeline DB connection failed with driver=%s, retrying fallback driver", driver)
     if last_exc:
         raise last_exc
     raise RuntimeError("Unable to establish pipeline DB connection")
@@ -394,7 +402,8 @@ def get_client_connection(database_name: Optional[str] = None) -> pyodbc.Connect
     db = _normalize_source_db(database_name)
 
     last_exc = None
-    for driver in _driver_candidates():
+    drivers = _driver_candidates()
+    for index, driver in enumerate(drivers):
         try:
             conn_str = _build_connection_string(
                 db_conf["source_host"],
@@ -415,7 +424,8 @@ def get_client_connection(database_name: Optional[str] = None) -> pyodbc.Connect
             last_exc = exc
             if "ODBC Driver" not in str(exc):
                 raise
-            logger.warning("Source DB connection failed with driver=%s, retrying fallback driver", driver)
+            if index + 1 < len(drivers):
+                logger.warning("Source DB connection failed with driver=%s, retrying fallback driver", driver)
     if last_exc:
         raise last_exc
     raise RuntimeError("Unable to establish source DB connection")
@@ -649,6 +659,37 @@ def insert_hitl_queue_items(run_id: str, kpis: List[Dict[str, Any]], gate_number
         logger.info("Inserted %d HITL queue items for run_id=%s", len(kpis), run_id)
     except Exception as e:
         logger.error("HITL queue insert failed: %s", e)
+        raise
+    finally:
+        conn.close()
+
+
+def insert_hitl_queue_item(run_id: str, kpi: Dict[str, Any], gate_number: int = 1) -> str:
+    """Insert one reviewer-authored item without colliding with extracted item indexes."""
+    db_conf = config["azure_sql"]
+    schema = db_conf["pipeline_schema"]
+    item_id = f"{run_id}:{gate_number}:manual-{uuid.uuid4().hex}"
+
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            INSERT INTO [{schema}].[hitl_review_queue]
+            (item_id, run_id, gate_number, gate_status, original_content, queued_at)
+            VALUES (?, ?, ?, ?, ?, GETUTCDATE())
+            """,
+            item_id,
+            run_id,
+            gate_number,
+            "PENDING",
+            json.dumps(kpi),
+        )
+        conn.commit()
+        return item_id
+    except Exception:
+        conn.rollback()
+        logger.exception("HITL queue item insert failed for run_id=%s", run_id)
         raise
     finally:
         conn.close()

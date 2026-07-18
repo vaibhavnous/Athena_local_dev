@@ -1,25 +1,10 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useState } from 'react'
-import { Check, CheckCircle, ChevronDown, ChevronRight, Clock3, Database, Layers3, Pencil, RotateCcw, X, XCircle } from 'lucide-react'
-
-const TYPE_STYLES = {
-  MEASURE: 'border-[#188461]/40 bg-[#0f3f37] text-[#4ee3ad]',
-  DIMENSION: 'border-[#237c86]/40 bg-[#0d3740] text-[#74d6e7]',
-  ID: 'border-[#237c86]/40 bg-[#0d3740] text-[#74d6e7]',
-  SURROGATE_KEY: 'border-[#237c86]/40 bg-[#0d3740] text-[#74d6e7]',
-  DATE: 'border-[#8b7430]/45 bg-[#3a3218] text-[#f4cf65]',
-  AUDIT_TIMESTAMP: 'border-[#8b7430]/45 bg-[#3a3218] text-[#f4cf65]',
-  PII: 'border-[#8a3148]/45 bg-[#2f1722] text-[#ff7d98]',
-  FLAG: 'border-[#426a76]/45 bg-[#132f36] text-[#a5c7d0]',
-  UNKNOWN: 'border-[#426a76]/45 bg-[#132f36] text-[#a5c7d0]',
-}
+import { createPortal } from 'react-dom'
+import { Check, CheckCircle2, ChevronDown, ChevronRight, Clock3, Database, Layers3, Pencil, Save, Sparkles, X } from 'lucide-react'
 
 const SEMANTIC_TYPE_OPTIONS = ['MEASURE', 'DIMENSION', 'ID', 'SURROGATE_KEY', 'DATE', 'AUDIT_TIMESTAMP', 'PII', 'FLAG', 'UNKNOWN']
 const EMPTY_COLUMNS = []
-
-function semanticTypeClass(type) {
-  return TYPE_STYLES[String(type || '').toUpperCase()] || TYPE_STYLES.UNKNOWN
-}
 
 function itemId(item) {
   return item?.queue_id || item?.id || item?.item_id
@@ -28,9 +13,9 @@ function itemId(item) {
 function normalizeColumns(columns = []) {
   return (columns || []).map((column) => ({
     ...column,
-    suggested_display_name: column?.suggested_display_name || column?.column_name || '',
+    suggested_display_name: column?.suggested_display_name || column?.display_name || column?.column_name || '',
     semantic_type: String(column?.semantic_type || 'UNKNOWN').toUpperCase(),
-    business_description: column?.business_description || '',
+    business_description: column?.business_description || column?.description || '',
     enrichment_source: column?.enrichment_source || '-',
     is_measure: Boolean(column?.is_measure),
     is_dimension: Boolean(column?.is_dimension),
@@ -46,299 +31,216 @@ function formatDateTime(value) {
   return date.toLocaleString()
 }
 
-function BooleanCell({ value, editable, onChange }) {
-  if (!editable) {
-    return value
-      ? <Check size={13} strokeWidth={2.5} className="text-[#27d3a0]" />
-      : <span className="text-[#79969a]">—</span>
+function ColumnCheck({ checked, onChange, label }) {
+  return (
+    <label className="flex items-center justify-center" title={label}>
+      <input
+        type="checkbox"
+        aria-label={label}
+        checked={Boolean(checked)}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-5 w-5 rounded border-[#52617a] bg-[#07101f] accent-[#4388ff]"
+      />
+    </label>
+  )
+}
+
+function SemanticEditModal({ tableName, tableSummary, columns, onClose, onSave }) {
+  const [draftColumns, setDraftColumns] = useState(() => normalizeColumns(columns))
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [onClose])
+
+  const updateColumn = (index, field, value) => {
+    setDraftColumns((current) => current.map((column, columnIndex) => (
+      columnIndex === index ? { ...column, [field]: value } : column
+    )))
   }
 
-  return (
-    <input
-      type="checkbox"
-      checked={Boolean(value)}
-      onChange={(event) => onChange(event.target.checked)}
-      className="h-4 w-4 rounded border-[#3f756f] bg-[#071c24] accent-[#20d39b]"
-      title={value ? 'Enabled' : 'Disabled'}
-    />
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-3 backdrop-blur-[2px] sm:p-5" role="dialog" aria-modal="true" aria-label={`Edit ${tableName} semantic enrichment`}>
+      <div className="flex max-h-[94vh] w-full max-w-[1560px] flex-col overflow-hidden rounded-[22px] border border-[#26334a] bg-[#111a2b] shadow-[0_35px_120px_rgba(0,0,0,0.7)]">
+        <div className="flex shrink-0 items-start justify-between border-b border-[#26334a] px-5 py-5 sm:px-8">
+          <div>
+            <h2 className="text-xl font-extrabold text-white">Edit Semantic Enrichment</h2>
+            <p className="mt-1 text-sm text-[#9ca8bc]">Update column metadata for this table before submitting the HITL decision.</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close editor" className="flex h-10 w-10 items-center justify-center rounded-lg text-[#a5afc0] transition-colors hover:bg-white/5 hover:text-white">
+            <X size={21} />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-auto px-5 py-4 sm:px-8">
+          <div className="mb-5 rounded-xl border border-[#26334a] bg-[#081120] px-4 py-3 font-mono text-sm font-semibold text-[#e5e9f2]">
+            {tableName}
+          </div>
+
+          <div className="overflow-x-auto rounded-xl border border-[#26334a] bg-[#0d1627]">
+            <div className="min-w-[1180px]">
+              <div className="grid grid-cols-[1.1fr_1.15fr_1.05fr_1.65fr_52px_52px_52px_1fr] gap-4 border-b border-[#26334a] bg-[#081120] px-4 py-3 text-xs font-bold uppercase tracking-[0.05em] text-[#9ea9bc]">
+                <span>Column</span>
+                <span>Display Name</span>
+                <span>Semantic Type</span>
+                <span>Description</span>
+                <span className="text-center">M</span>
+                <span className="text-center">D</span>
+                <span className="text-center">PII</span>
+                <span>PII Type</span>
+              </div>
+
+              {draftColumns.length === 0 ? (
+                <div className="px-4 py-12 text-center text-sm text-[#9ca8bc]">No enriched columns were returned for this table.</div>
+              ) : draftColumns.map((column, index) => (
+                <div key={`${column.column_name || index}`} className="grid grid-cols-[1.1fr_1.15fr_1.05fr_1.65fr_52px_52px_52px_1fr] items-center gap-4 border-b border-[#26334a] px-4 py-3 last:border-b-0">
+                  <span className="truncate font-mono text-sm font-semibold text-white" title={column.column_name}>{column.column_name || '-'}</span>
+                  <input
+                    value={column.suggested_display_name}
+                    onChange={(event) => updateColumn(index, 'suggested_display_name', event.target.value)}
+                    className="h-11 min-w-0 rounded-xl border border-[#26334a] bg-[#081120] px-3 text-sm text-white outline-none transition-colors focus:border-[#4388ff]"
+                  />
+                  <select
+                    value={column.semantic_type}
+                    onChange={(event) => updateColumn(index, 'semantic_type', event.target.value)}
+                    className="h-11 min-w-0 rounded-xl border border-[#26334a] bg-[#081120] px-3 text-sm text-white outline-none transition-colors focus:border-[#4388ff]"
+                  >
+                    {SEMANTIC_TYPE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+                  </select>
+                  <textarea
+                    value={column.business_description}
+                    onChange={(event) => updateColumn(index, 'business_description', event.target.value)}
+                    rows={2}
+                    className="min-h-[58px] w-full resize-y rounded-xl border border-[#26334a] bg-[#081120] px-3 py-2.5 text-sm leading-snug text-white outline-none transition-colors focus:border-[#4388ff]"
+                  />
+                  <ColumnCheck label={`${column.column_name} measure`} checked={column.is_measure} onChange={(value) => updateColumn(index, 'is_measure', value)} />
+                  <ColumnCheck label={`${column.column_name} dimension`} checked={column.is_dimension} onChange={(value) => updateColumn(index, 'is_dimension', value)} />
+                  <ColumnCheck label={`${column.column_name} PII`} checked={column.is_pii_candidate} onChange={(value) => updateColumn(index, 'is_pii_candidate', value)} />
+                  <input
+                    value={column.pii_type === '-' ? '' : column.pii_type}
+                    onChange={(event) => updateColumn(index, 'pii_type', event.target.value || '-')}
+                    disabled={!column.is_pii_candidate}
+                    placeholder="-"
+                    className="h-11 min-w-0 rounded-xl border border-[#26334a] bg-[#081120] px-3 text-sm text-white outline-none transition-colors placeholder:text-[#738096] focus:border-[#4388ff] disabled:cursor-not-allowed disabled:opacity-55"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid shrink-0 grid-cols-2 gap-4 border-t border-[#26334a] bg-[#0d1627] px-5 py-4 sm:px-8 sm:py-5">
+          <button type="button" onClick={onClose} className="h-12 rounded-xl bg-[#202c40] text-sm font-bold text-[#d0d6e1] transition-colors hover:bg-[#29364b]">Cancel</button>
+          <button
+            type="button"
+            onClick={() => onSave({ table_name: tableName, table_summary: tableSummary, columns: draftColumns })}
+            className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-[#4388ff] text-sm font-bold text-white transition-colors hover:bg-[#5595ff]"
+          >
+            <Save size={16} />
+            Save Changes
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
   )
 }
 
 function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, onReject, onDraftChange }) {
-  const [reason, setReason] = useState(rejectionReason || '')
-  const [expanded, setExpanded] = useState(false)
-  const [editing, setEditing] = useState(false)
-  const columns = item?.item_detail?.columns || EMPTY_COLUMNS
-  const decision = localDecision || item?.decision
   const id = itemId(item)
   const tableName = item?.item_detail?.table_name || item?.item_id || 'Semantic Review'
-  const initialColumns = useMemo(() => normalizeColumns(columns), [columns])
+  const sourceColumns = item?.item_detail?.columns || EMPTY_COLUMNS
+  const initialColumns = useMemo(() => normalizeColumns(sourceColumns), [sourceColumns])
   const initialSummary = item?.item_detail?.table_summary || item?.summary || 'Review enriched semantic labels and business descriptions before continuing.'
-  const [draftColumns, setDraftColumns] = useState(() => initialColumns)
-  const [draftSummary, setDraftSummary] = useState(initialSummary)
-  const llmColumns = draftColumns.filter((column) => String(column.enrichment_source || '').toLowerCase().includes('llm')).length
-  const queuedAt = item?.queued_at || item?.created_at
-  const decidedAt = item?.decided_at
-  const isApproved = decision === 'APPROVED'
-  const isRejected = decision === 'REJECTED'
-  const isDirty = JSON.stringify(draftColumns) !== JSON.stringify(initialColumns) || draftSummary !== initialSummary
+  const [columns, setColumns] = useState(() => initialColumns)
+  const [summary, setSummary] = useState(initialSummary)
+  const [columnsOpen, setColumnsOpen] = useState(false)
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [reason, setReason] = useState(rejectionReason || '')
+  const decision = localDecision || item?.decision
+  const llmColumns = columns.filter((column) => String(column.enrichment_source || '').toLowerCase().includes('llm')).length
 
   useEffect(() => {
-    setDraftColumns(initialColumns)
-    setDraftSummary(initialSummary)
+    setColumns(initialColumns)
+    setSummary(initialSummary)
     setReason(rejectionReason || '')
-    setEditing(false)
     onDraftChange?.(id, { table_name: tableName, table_summary: initialSummary, columns: initialColumns })
-    // Reset the local edit surface only when the review item changes.
+    // The item id identifies the review draft session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, initialColumns, initialSummary])
 
-  useEffect(() => {
-    setReason(rejectionReason || '')
-  }, [rejectionReason])
-
-  const updateColumn = (index, field, value) => {
-    setDraftColumns((prev) => {
-      const next = prev.map((column, columnIndex) => (
-        columnIndex === index ? { ...column, [field]: value } : column
-      ))
-      onDraftChange?.(id, { table_name: tableName, table_summary: draftSummary, columns: next })
-      return next
-    })
-  }
-
-  const updateSummary = (value) => {
-    setDraftSummary(value)
-    onDraftChange?.(id, { table_name: tableName, table_summary: value, columns: draftColumns })
-  }
-
-  const resetDraftColumns = () => {
-    setDraftColumns(initialColumns)
-    setDraftSummary(initialSummary)
-    onDraftChange?.(id, { table_name: tableName, table_summary: initialSummary, columns: initialColumns })
-  }
-
-  const toggleExpanded = () => {
-    setExpanded((value) => {
-      if (value) setEditing(false)
-      return !value
-    })
+  const saveDraft = (draft) => {
+    setColumns(draft.columns)
+    setSummary(draft.table_summary)
+    onDraftChange?.(id, draft)
+    setEditorOpen(false)
   }
 
   return (
-    <div className={`overflow-hidden rounded-[14px] border transition-colors ${
-      isApproved
-        ? 'border-[#17735f] bg-[#092e2f]'
-        : isRejected
-        ? 'border-[#723148] bg-[#2a1622]'
-        : 'border-[#155f5a] bg-[#092e2f]'
-    }`}>
-      <div className="px-4 pb-3 pt-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-2">
-              <Database size={14} className="shrink-0 text-[#42c9a5]" />
-              <h3 className="truncate text-[15px] font-extrabold text-white">{tableName}</h3>
-              <span className="rounded border border-[#2f615d] bg-[#0b222b] px-2 py-0.5 text-[9px] font-bold uppercase text-[#9fb7bd]">
-                Enrichment
-              </span>
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[#87a7aa]">
-              <span className="inline-flex items-center gap-1"><Layers3 size={11} /> {draftColumns.length} column{draftColumns.length !== 1 ? 's' : ''}</span>
-              <span className="inline-flex items-center gap-1 text-[#4fc8ff]"><CheckCircle size={11} /> {llmColumns} LLM-enriched</span>
-              <span className="inline-flex items-center gap-1"><Clock3 size={11} /> Queued: {formatDateTime(queuedAt)}</span>
-              <span className="inline-flex items-center gap-1"><Clock3 size={11} /> Decided: {formatDateTime(decidedAt)}</span>
-            </div>
+    <article className={`rounded-[18px] border bg-[#10192a] p-5 transition-colors ${decision === 'APPROVED' ? 'border-[#14745e]' : decision === 'REJECTED' ? 'border-[#7d2e43]' : 'border-[#26334a]'}`}>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+            <Database size={17} className="shrink-0 text-[#4388ff]" />
+            <h3 className="truncate font-mono text-lg font-bold text-white">{tableName}</h3>
+            <span className="rounded-full bg-[#202b3d] px-3 py-1 text-[10px] font-extrabold uppercase text-[#b9c2d1]">Enrichment</span>
           </div>
-
-          <div className="flex items-center gap-2">
-            {decision && (
-              <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold ${
-                isApproved ? 'text-[#45daa9]' : 'text-red-300'
-              }`}>
-                {isApproved ? <CheckCircle size={13} /> : <XCircle size={13} />}
-                {isApproved ? 'Approved' : 'Rejected'}
-              </span>
-            )}
-            {expanded && (
-              <div className="flex items-center gap-2">
-                {editing && isDirty && (
-                  <button
-                    type="button"
-                    onClick={resetDraftColumns}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#2f615d] bg-[#0b222b] px-2.5 text-[11px] font-semibold text-[#a8c0c4] transition-all hover:border-[#45a391] hover:text-white"
-                  >
-                    <RotateCcw size={12} />
-                    Reset
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setEditing((value) => !value)}
-                  className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold transition-all ${
-                    editing
-                      ? 'border-[#28a989] bg-[#123b35] text-[#58e2b6]'
-                      : 'border-[#2f615d] bg-[#0b222b] text-[#a8c0c4] hover:border-[#45a391] hover:text-white'
-                  }`}
-                >
-                  {editing ? <Check size={12} /> : <Pencil size={12} />}
-                  {editing ? 'Finish editing' : 'Edit columns'}
-                </button>
-              </div>
-            )}
+          <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-[#98a5ba]">
+            <span className="inline-flex items-center gap-1.5"><Layers3 size={13} /> {columns.length} columns</span>
+            <span className="inline-flex items-center gap-1.5 text-[#4388ff]"><Sparkles size={13} /> {llmColumns} LLM-enriched</span>
+            <span className="inline-flex items-center gap-1.5"><Clock3 size={13} /> Queued: {formatDateTime(item?.queued_at || item?.created_at)}</span>
+            <span className="inline-flex items-center gap-1.5"><CheckCircle2 size={13} /> Decided: {formatDateTime(item?.decided_at)}</span>
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={toggleExpanded}
-          aria-expanded={expanded}
-          className="mt-3 inline-flex items-center gap-1 text-[11px] font-semibold text-[#b7c9cc] transition-colors hover:text-white"
-        >
-          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-          {expanded ? `Hide columns (${draftColumns.length})` : `Show columns (${draftColumns.length})`}
+        <button type="button" onClick={() => setEditorOpen(true)} className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-[#202b3d] px-5 text-sm font-bold text-[#d0d6e1] transition-colors hover:bg-[#29374d] hover:text-white">
+          <Pencil size={15} className="text-[#4388ff]" />
+          Edit
         </button>
       </div>
 
-      <div className={`mx-4 mb-4 overflow-hidden transition-all duration-200 ${expanded ? 'max-h-[min(72vh,760px)] opacity-100' : 'max-h-0 opacity-0'}`}>
-        <div className="max-h-[min(68vh,720px)] overflow-auto rounded-md border border-[#2c6a63]/60 bg-[#071c24]">
-          <div className="grid min-w-[900px] grid-cols-[1.05fr_1.15fr_1fr_2fr_0.75fr_0.28fr_0.28fr_0.28fr] gap-3 border-b border-[#2c6a63]/60 bg-[#061923] px-3 py-3 text-[10px] font-bold uppercase tracking-wide text-[#88a5aa]">
-            <span>Column</span>
-            <span>Display Name</span>
-            <span>Semantic Type</span>
-            <span>Description</span>
-            <span>Source</span>
-            <span>M</span>
-            <span>D</span>
-            <span>PII</span>
-          </div>
+      <button type="button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen} className="mt-5 inline-flex items-center gap-2 text-xs font-bold text-[#c4ccda] transition-colors hover:text-white">
+        {columnsOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+        {columnsOpen ? `Hide columns (${columns.length})` : `Show columns (${columns.length})`}
+      </button>
 
-          {draftColumns.length === 0 ? (
-            <div className="px-3 py-5 text-sm text-[#a8c0c4]">No enriched columns returned for this item.</div>
-          ) : (
-            <div className="divide-y divide-[#2c6a63]/60">
-              {draftColumns.map((column, index) => (
-                <div
-                  key={`${column.column_name || index}`}
-                  className="grid min-w-[900px] grid-cols-[1.05fr_1.15fr_1fr_2fr_0.75fr_0.28fr_0.28fr_0.28fr] items-center gap-3 px-3 py-2.5 text-xs text-[#c8dde0]"
-                >
-                  <span className="min-w-0 truncate font-bold text-white" title={column.column_name}>
-                    {column.column_name || '-'}
-                  </span>
-
-                  {editing ? (
-                    <input
-                      value={column.suggested_display_name}
-                      onChange={(event) => updateColumn(index, 'suggested_display_name', event.target.value)}
-                      className="h-9 min-w-0 rounded-md border border-[#2f615d] bg-[#061923] px-2.5 text-xs text-white outline-none focus:border-[#45c7a5]"
-                    />
-                  ) : (
-                    <span className="min-w-0 truncate text-[#c4d3d6]" title={column.suggested_display_name}>{column.suggested_display_name || '—'}</span>
-                  )}
-
-                  {editing ? (
-                    <select
-                      value={column.semantic_type || 'UNKNOWN'}
-                      onChange={(event) => updateColumn(index, 'semantic_type', event.target.value)}
-                      className={`h-9 min-w-0 rounded-md border px-2 text-[10px] font-semibold outline-none focus:border-[#45c7a5] ${semanticTypeClass(column.semantic_type)}`}
-                    >
-                      {SEMANTIC_TYPE_OPTIONS.map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <span className={`inline-flex w-fit rounded border px-2 py-1 text-[9px] font-bold ${semanticTypeClass(column.semantic_type)}`}>
-                      {column.semantic_type || 'UNKNOWN'}
-                    </span>
-                  )}
-
-                  {editing ? (
-                    <textarea
-                      value={column.business_description}
-                      onChange={(event) => updateColumn(index, 'business_description', event.target.value)}
-                      rows={2}
-                      className="min-h-[48px] w-full resize-y rounded-md border border-[#2f615d] bg-[#061923] px-2.5 py-2 text-xs text-white outline-none focus:border-[#45c7a5]"
-                    />
-                  ) : (
-                    <span className="min-w-0 truncate text-[#c4d3d6]" title={column.business_description}>{column.business_description || '—'}</span>
-                  )}
-
-                  <span className="inline-flex w-fit rounded bg-[#172633] px-2 py-1 text-[10px] font-semibold text-[#9fb7bd]">
-                    {column.enrichment_source || '-'}
-                  </span>
-                  <BooleanCell value={column.is_measure} editable={editing} onChange={(value) => updateColumn(index, 'is_measure', value)} />
-                  <BooleanCell value={column.is_dimension} editable={editing} onChange={(value) => updateColumn(index, 'is_dimension', value)} />
-                  <div className="flex min-w-0 flex-col items-start gap-1">
-                    <BooleanCell value={column.is_pii_candidate} editable={editing} onChange={(value) => updateColumn(index, 'is_pii_candidate', value)} />
-                    {editing && column.is_pii_candidate && (
-                      <input
-                        value={column.pii_type === '-' ? '' : column.pii_type}
-                        onChange={(event) => updateColumn(index, 'pii_type', event.target.value)}
-                        placeholder="type"
-                        className="h-7 w-20 rounded border border-[#2f615d] bg-[#061923] px-1 text-[9px] text-white outline-none focus:border-[#45c7a5]"
-                      />
-                    )}
-                  </div>
-                </div>
-              ))}
+      {columnsOpen && (
+        <div className="mt-3 max-h-56 overflow-auto rounded-xl border border-[#26334a] bg-[#091221]">
+          {columns.map((column) => (
+            <div key={column.column_name} className="grid grid-cols-[minmax(150px,1fr)_minmax(120px,0.8fr)_2fr] gap-3 border-b border-[#202c40] px-4 py-3 text-xs last:border-b-0">
+              <span className="truncate font-mono font-semibold text-white">{column.column_name}</span>
+              <span className="text-[#77a8ff]">{column.semantic_type}</span>
+              <span className="truncate text-[#9ca8bc]">{column.business_description || '-'}</span>
             </div>
-          )}
-
-          {draftColumns.length > 0 && (
-            <div className="border-t border-[#2c6a63]/60 px-3 py-3 text-[11px] text-[#9fb7bd]">
-              <div className="flex items-start gap-2">
-                <span className="shrink-0 font-bold text-[#d5e7e8]">Table Summary:</span>
-                {editing ? (
-                  <textarea
-                    value={draftSummary}
-                    onChange={(event) => updateSummary(event.target.value)}
-                    rows={2}
-                    className="w-full resize-y rounded-md border border-[#2f615d] bg-[#061923] px-2 py-2 text-xs text-white outline-none focus:border-[#45c7a5]"
-                  />
-                ) : (
-                  <p className="leading-relaxed text-[#9fb7bd]">{draftSummary}</p>
-                )}
-              </div>
-            </div>
-          )}
+          ))}
         </div>
+      )}
+
+      {decision === 'REJECTED' && (
+        <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Rejection reason" className="mt-4 h-11 w-full rounded-xl border border-[#673044] bg-[#1d1420] px-3 text-sm text-white outline-none placeholder:text-[#886b76] focus:border-[#b23d5d]" />
+      )}
+
+      <div className="mt-5 grid gap-3 sm:grid-cols-2">
+        <button type="button" onClick={() => onApprove(id, { table_name: tableName, table_summary: summary, columns })} className={`inline-flex h-12 items-center justify-center gap-2 rounded-xl border text-sm font-bold transition-colors ${decision === 'APPROVED' ? 'border-[#13a47d] bg-[#103f36] text-[#26d5a3]' : 'border-[#12634f] bg-[#0d302d] text-[#22c99a] hover:bg-[#104039]'}`}>
+          <Check size={17} /> Approve
+        </button>
+        <button type="button" onClick={() => onReject(id, reason || 'Rejected by reviewer')} className={`inline-flex h-12 items-center justify-center gap-2 rounded-xl border text-sm font-bold transition-colors ${decision === 'REJECTED' ? 'border-[#b43b5c] bg-[#3a1928] text-[#ff506e]' : 'border-[#6d2d42] bg-[#281722] text-[#ff4d68] hover:bg-[#351a28]'}`}>
+          <X size={17} /> Reject
+        </button>
       </div>
 
-      {expanded && (
-        <>
-          <div className="border-t border-[#155f5a] bg-[#071c24] px-4 py-3 text-[11px] text-[#8ea9ad]">
-            Use Edit columns to change semantic values. Approved edits are persisted to the Gate 3 enrichment artifact.
-          </div>
-
-          <div className="flex flex-col gap-3 border-t border-[#155f5a] bg-[#071c24] px-4 py-4 md:flex-row md:items-center md:justify-between">
-            <input
-              value={reason}
-              onChange={(event) => setReason(event.target.value)}
-              placeholder="Rejection reason..."
-              className="h-10 flex-1 rounded-md border border-[#2f615d] bg-[#061923] px-3 text-xs text-white outline-none placeholder:text-[#638287] focus:border-[#45c7a5]"
-            />
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => onReject(id, reason || 'Rejected by reviewer')}
-                className="inline-flex h-10 items-center gap-2 rounded-md border border-red-500/30 bg-[#2b1724] px-3 text-xs font-bold text-red-300 transition-colors hover:bg-red-500/10"
-              >
-                <X size={14} />
-                Reject
-              </button>
-              <button
-                type="button"
-                onClick={() => onApprove(id, { table_name: tableName, table_summary: draftSummary, columns: draftColumns })}
-                className="inline-flex h-10 items-center gap-2 rounded-md border border-[#14856d] bg-[#103533] px-3 text-xs font-bold text-[#31d49f] transition-colors hover:bg-[#15413d]"
-              >
-                <CheckCircle size={14} />
-                Approve
-              </button>
-            </div>
-          </div>
-        </>
+      {editorOpen && (
+        <SemanticEditModal tableName={tableName} tableSummary={summary} columns={columns} onClose={() => setEditorOpen(false)} onSave={saveDraft} />
       )}
-    </div>
+    </article>
   )
 }
 

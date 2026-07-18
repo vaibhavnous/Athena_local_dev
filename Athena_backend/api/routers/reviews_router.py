@@ -11,10 +11,129 @@ from api.demo import (
     demo_silver_review,
     demo_table_reviews,
 )
-from api.models import Gate2DecisionPayload, Gate3DecisionPayload, GenericGateDecisionPayload
+from api.models import ComplianceReviewPayload, Gate2DecisionPayload, Gate3DecisionPayload, GenericGateDecisionPayload
 from utilis.logger import logger
 
 router = APIRouter()
+
+
+def _compliance_review_decision(findings: list[Dict[str, Any]]) -> str:
+    rejected_statuses = {"REJECTED", "EXCLUDED"}
+    return "REJECTED" if any(str(item.get("status") or "").upper() in rejected_statuses for item in findings) else "APPROVED"
+
+
+def _compliance_api_findings(findings: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    status_map = {
+        "approved": "Approved",
+        "modified": "Modified",
+        "excluded": "Excluded",
+        "rejected": "Excluded",
+    }
+    return [
+        {
+            **item,
+            "status": status_map.get(str(item.get("status") or "").strip().lower(), "Approved"),
+        }
+        for item in findings
+    ]
+
+
+@router.get("/compliance-reviews/{run_id}")
+def compliance_reviews(run_id: str) -> Dict[str, Any]:
+    from services.compliance_client import fetch_review
+    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+
+    try:
+        checkpoint = load_checkpoint_state(run_id) or {}
+        review = checkpoint.get("compliance_review")
+        if checkpoint.get("compliance_enabled") and checkpoint.get("compliance_assessment_id") and not review:
+            review = fetch_review({**checkpoint, "run_id": run_id})
+            checkpoint.update(
+                {
+                    "compliance_review_status": "READY",
+                    "compliance_review": review,
+                    "compliance_review_error": None,
+                }
+            )
+            save_checkpoint_state(run_id, checkpoint)
+    except Exception:
+        logger.error("Failed to fetch compliance review", exc_info=True, extra={"run_id": run_id})
+        raise HTTPException(status_code=503, detail="Failed to load compliance review")
+
+    return {
+        "run_id": run_id,
+        "compliance_enabled": bool(checkpoint.get("compliance_enabled")),
+        "assessment_id": checkpoint.get("compliance_assessment_id"),
+        "assessment_status": checkpoint.get("compliance_assessment_status"),
+        "assessment_error": checkpoint.get("compliance_assessment_error"),
+        "review_status": checkpoint.get("compliance_review_status"),
+        "review_error": checkpoint.get("compliance_review_error"),
+        "review": checkpoint.get("compliance_review") or {},
+        "results": checkpoint.get("compliance_results") or {},
+    }
+
+
+@router.post("/compliance-reviews/{run_id}")
+def submit_compliance_reviews(run_id: str, payload: ComplianceReviewPayload) -> Dict[str, Any]:
+    from services.compliance_client import fetch_results, submit_review
+    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+
+    checkpoint = load_checkpoint_state(run_id) or {}
+    if not checkpoint.get("compliance_enabled"):
+        raise HTTPException(status_code=400, detail="Compliance is not enabled for this run.")
+    if not checkpoint.get("compliance_assessment_id"):
+        raise HTTPException(status_code=409, detail="Compliance assessment is not ready yet.")
+
+    findings = [item.model_dump() for item in payload.findings]
+    if not findings:
+        review = checkpoint.get("compliance_review") or {}
+        findings = [
+            {
+                "table_name": item.get("table_name"),
+                "column_name": item.get("column_name"),
+                "status": "Approved",
+                "reviewer_comments": None,
+            }
+            for item in review.get("column_evidence", [])
+            if item.get("table_name") and item.get("column_name")
+        ]
+    if not findings:
+        raise HTTPException(status_code=400, detail="No compliance findings are available to review.")
+
+    try:
+        decision = submit_review(
+            {**checkpoint, "run_id": run_id},
+            {"findings": _compliance_api_findings(findings), "overall_comments": payload.overall_comments},
+        )
+        review_decision = _compliance_review_decision(findings)
+        updated = {
+            **checkpoint,
+            "compliance_review_decision": review_decision,
+            "compliance_review_decision_response": decision,
+            "compliance_assessment_status": decision.get("status") or checkpoint.get("compliance_assessment_status"),
+            "compliance_review_error": None,
+        }
+        try:
+            results = fetch_results({**updated, "run_id": run_id})
+            if results:
+                updated["compliance_results"] = results
+                updated["compliance_results_status"] = results.get("status") or "completed"
+        except Exception as exc:
+            updated["compliance_results_status"] = "PENDING"
+            updated["compliance_results_error"] = str(exc)
+        save_checkpoint_state(run_id, updated)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Failed to submit compliance review", exc_info=True, extra={"run_id": run_id})
+        raise HTTPException(status_code=503, detail="Failed to submit compliance review")
+
+    return {
+        "run_id": run_id,
+        "status": updated.get("compliance_assessment_status"),
+        "decision": updated.get("compliance_review_decision"),
+        "results_status": updated.get("compliance_results_status"),
+    }
 
 
 # -------------------------
@@ -196,6 +315,7 @@ def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
     from api.services.ui_service import bronze_review_from_scripts
     from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate4_review
     from sftp_nodes.hitl import submit_sftp_gate4_review
+    from services.databricks_runtime import databricks_bronze_execution_enabled
 
     logger.info("Submitting bronze review", extra={"run_id": run_id, "action": payload.action})
 
@@ -212,11 +332,18 @@ def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
     else:
         stage = (
             "bronze_code_execution"
-            if str(payload.action).upper() == "APPROVED" and str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-            else "silver" if str(payload.action).upper() == "APPROVED"
+            if str(payload.action).upper() == "APPROVED"
+            and (
+                str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                or (
+                    str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    and databricks_bronze_execution_enabled()
+                )
+            )
+            else "silver_merge_key_review" if str(payload.action).upper() == "APPROVED"
             else "gate4"
         )
-        submit_background(run_id, stage, submit_gate4_review, run_id, payload.action, review_artifact)
+        submit_background(run_id, stage, submit_gate4_review, run_id, payload.action, review_artifact, checkpoint)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
 
@@ -294,13 +421,21 @@ def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
 
     from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate5_review
     from sftp_nodes.hitl import submit_sftp_gate5_review
+    from services.databricks_runtime import databricks_silver_execution_enabled
 
     logger.info("Submitting silver review", extra={"run_id": run_id, "action": payload.action})
 
     checkpoint = load_checkpoint_state(run_id) or {}
     stage = (
         "silver_code_execution"
-        if str(payload.action).upper() == "APPROVED" and str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+        if str(payload.action).upper() == "APPROVED"
+        and (
+            str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+            or (
+                str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                and databricks_silver_execution_enabled()
+            )
+        )
         else "gold" if str(payload.action).upper() == "APPROVED"
         else "gate5"
     )

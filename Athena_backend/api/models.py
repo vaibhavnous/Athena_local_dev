@@ -19,6 +19,9 @@ class PipelineRunRequest(BaseModel):
     source_databases: Optional[List[str]] = None
     sftp_entity: Optional[str] = "transactions"
     stage_confirmation_enabled: Optional[bool] = False
+    compliance_enabled: Optional[bool] = False
+    compliance_domain: Optional[str] = "Insurance"
+    compliance_countries: Optional[List[str]] = Field(default_factory=lambda: ["US"])
 
 
 class StageContinueRequest(BaseModel):
@@ -31,6 +34,7 @@ class HitlDecision(BaseModel):
     reviewer: Optional[str] = None
     notes: Optional[str] = None
     edited_definition: Optional[str] = None
+    edited_content: Optional[Dict[str, Any]] = None
 
 
 class HitlDecisionPayload(BaseModel):
@@ -49,3 +53,15 @@ class Gate3DecisionPayload(BaseModel):
 class GenericGateDecisionPayload(BaseModel):
     action: str = "APPROVED"
     review_artifact: Optional[Dict[str, Any]] = None
+
+
+class ComplianceReviewFinding(BaseModel):
+    table_name: str
+    column_name: str
+    status: str = "Approved"
+    reviewer_comments: Optional[str] = None
+
+
+class ComplianceReviewPayload(BaseModel):
+    findings: List[ComplianceReviewFinding] = Field(default_factory=list)
+    overall_comments: Optional[str] = None

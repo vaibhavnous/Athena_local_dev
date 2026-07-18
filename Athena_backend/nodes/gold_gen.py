@@ -22,6 +22,7 @@ from utilis.logger import logger
 
 USE_LLM_ENV_KEYS = ("ATHENA_GOLD_USE_LLM", "USE_LLM")
 DEFAULT_MAX_GOLD_SOURCE_TABLES = 3
+DEFAULT_MAX_GOLD_DIMENSION_TABLES = 2
 SILVER_COLUMN_NAME_CORRECTIONS = {
     "rererence_id": "reference_id",
 }
@@ -223,9 +224,10 @@ def _dimension_specs(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
         table = str(item.get("table") or (mapping.get("measure") or {}).get("table") or "").strip()
         entity = _dimension_entity_for_column(column, table)
         key = (table, entity)
-        source_table = str(mapping.get("source_silver_table") or "").strip()
+        explicit_source_table = str(item.get("source_silver_table") or "").strip()
+        source_table = explicit_source_table or str(mapping.get("source_silver_table") or "").strip()
         source_parts = [part for part in source_table.split(".") if part.strip()]
-        if table and len(source_parts) >= 3:
+        if not explicit_source_table and table and len(source_parts) >= 3:
             source_table = ".".join([source_parts[0], source_parts[1], f"silver_{table}"])
         spec = grouped.setdefault(
             key,
@@ -283,6 +285,7 @@ def _shared_dimension_mapping(mappings: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Build one idempotent dimension contract for the whole Gold run."""
     dimensions: List[Dict[str, Any]] = []
     seen: set[Tuple[str, str]] = set()
+    table_scores: Dict[str, int] = {}
     source_table = ""
     for mapping in mappings:
         if not isinstance(mapping, dict) or not _usable_mapping(mapping):
@@ -293,14 +296,20 @@ def _shared_dimension_mapping(mappings: List[Dict[str, Any]]) -> Dict[str, Any]:
                 continue
             table = str(item.get("table") or "").strip()
             column = str(item.get("column") or "").strip()
+            if table:
+                table_scores[table.casefold()] = table_scores.get(table.casefold(), 0) + 1
             key = (table.casefold(), column.casefold())
             if table and column and key not in seen:
                 dimensions.append(item)
                 seen.add(key)
+    ranked_tables = sorted(table_scores, key=lambda table: (-table_scores[table], table))
+    kept_tables = set(ranked_tables[:_max_gold_dimension_tables()])
     return {
         "kpi_name": "Shared Gold Dimensions",
         "source_silver_table": source_table,
-        "grouping_dimensions": dimensions,
+        "grouping_dimensions": [
+            item for item in dimensions if str(item.get("table") or "").casefold() in kept_tables
+        ],
     }
 
 
@@ -331,40 +340,15 @@ def _source_table_grain_specs(
 ) -> List[Dict[str, Any]]:
     enriched_metadata = enriched_metadata or {}
     specs: Dict[str, Dict[str, Any]] = {}
-    for item in contract.get("silver_tables") or []:
-        if not isinstance(item, dict):
-            continue
-        source_table = str(item.get("target_table") or "").strip()
-        logical_table = str(item.get("table") or _logical_table_from_silver(source_table)).strip()
-        # ponytail: duplicate/deleted extracts support reconciliation KPIs but are
-        # not business entities; keep them in Silver without creating Gold marts.
+    for spec in _dimension_specs(_shared_dimension_mapping(mappings)):
+        source_table = str(spec.get("source_table") or "").strip()
+        logical_table = str(spec.get("logical_table") or _logical_table_from_silver(source_table)).strip()
         if logical_table.casefold().endswith("_dup_del"):
             continue
         if source_table and logical_table:
             dimension_columns = _gold_dimension_columns_for_table(enriched_metadata, logical_table)
-            specs.setdefault(
-                logical_table.casefold(),
-                {
-                    "entity": _safe_identifier(logical_table, "dimension"),
-                    "source_table": source_table,
-                    "logical_table": logical_table,
-                    "columns": dimension_columns,
-                    "source_columns": dimension_columns,
-                    "grain": "source_table",
-                },
-            )
-    if specs:
-        return list(specs.values())
-
-    for mapping in mappings:
-        if not isinstance(mapping, dict) or not _usable_mapping(mapping):
-            continue
-        source_table = str(mapping.get("source_silver_table") or "").strip()
-        logical_table = _logical_table_from_silver(source_table)
-        if logical_table.casefold().endswith("_dup_del"):
-            continue
-        if source_table and logical_table:
-            dimension_columns = _gold_dimension_columns_for_table(enriched_metadata, logical_table)
+            if not dimension_columns:
+                dimension_columns = list(spec.get("source_columns") or [])
             specs.setdefault(
                 logical_table.casefold(),
                 {
@@ -642,11 +626,97 @@ def _max_gold_source_tables() -> int:
         return DEFAULT_MAX_GOLD_SOURCE_TABLES
 
 
+def _max_gold_dimension_tables() -> int:
+    raw_value = str(os.getenv("ATHENA_GOLD_MAX_DIMENSION_TABLES") or DEFAULT_MAX_GOLD_DIMENSION_TABLES)
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return DEFAULT_MAX_GOLD_DIMENSION_TABLES
+
+
 def _logical_table_name(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
     return _logical_table_from_silver(text)
+
+
+def _normalize_contract_mappings(
+    contract: Dict[str, Any], *, canonicalize_columns: bool
+) -> List[Dict[str, Any]]:
+    silver_by_name: Dict[str, str] = {}
+    silver_by_target: Dict[str, str] = {}
+    for item in contract.get("silver_tables") or []:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target_table") or "").strip()
+        logical = str(item.get("table") or _logical_table_from_silver(target)).strip().casefold()
+        if target and logical:
+            silver_by_name[logical] = target
+            silver_by_target[target.casefold()] = target
+
+    normalized_mappings: List[Dict[str, Any]] = []
+    for raw_mapping in contract.get("kpi_mappings") or []:
+        if not isinstance(raw_mapping, dict):
+            continue
+        mapping = dict(raw_mapping)
+        measure = dict(mapping.get("measure") or {})
+        measure_table = _logical_table_name(measure.get("table"))
+        requested_source = str(mapping.get("source_silver_table") or "").strip()
+        source_table = silver_by_target.get(requested_source.casefold()) or silver_by_name.get(measure_table)
+        if not source_table:
+            normalized_mappings.append({**mapping, "source_silver_table": None, "readiness": "BLOCKED"})
+            continue
+        mapping["source_silver_table"] = source_table
+        if canonicalize_columns and measure.get("column"):
+            measure["column"] = _silver_output_column_name(measure["column"])
+        mapping["measure"] = measure
+
+        dimensions: List[Dict[str, Any]] = []
+        for dimension in mapping.get("grouping_dimensions") or []:
+            if not isinstance(dimension, dict):
+                continue
+            table = _logical_table_name(dimension.get("table") or measure_table)
+            dimension_source = silver_by_name.get(table)
+            if not dimension_source:
+                continue
+            column = dimension.get("column")
+            dimensions.append({
+                **dimension,
+                "table": table,
+                "column": _silver_output_column_name(column) if canonicalize_columns else column,
+                "source_silver_table": dimension_source,
+            })
+        mapping["grouping_dimensions"] = dimensions
+
+        joins: List[Dict[str, Any]] = []
+        for path in mapping.get("join_paths") or []:
+            if not isinstance(path, dict) or path.get("certified") is not True:
+                continue
+            left = _logical_table_name(path.get("left_table"))
+            right = _logical_table_name(path.get("right_table"))
+            if left not in silver_by_name or right not in silver_by_name:
+                continue
+            joins.append({
+                **path,
+                "left_table": left,
+                "left_column": _silver_output_column_name(path.get("left_column")) if canonicalize_columns else path.get("left_column"),
+                "left_source_table": silver_by_name[left],
+                "right_table": right,
+                "right_column": _silver_output_column_name(path.get("right_column")) if canonicalize_columns else path.get("right_column"),
+                "right_source_table": silver_by_name[right],
+            })
+        mapping["join_paths"] = joins
+
+        time_info = dict(mapping.get("time") or {})
+        if canonicalize_columns and isinstance(time_info.get("column"), dict):
+            time_info["column"] = {
+                **time_info["column"],
+                "column": _silver_output_column_name(time_info["column"].get("column")),
+            }
+        mapping["time"] = time_info
+        normalized_mappings.append(mapping)
+    return normalized_mappings
 
 
 def _bump_score(scores: Dict[str, float], table: Any, points: float) -> None:
@@ -724,16 +794,50 @@ def _sanitize_gold_mapping(mapping: Dict[str, Any]) -> Tuple[Dict[str, Any], Dic
     if original_join_paths and not valid_join_paths and len(kept_tables) <= 1:
         warnings.append("Gold join paths were not usable after validation; generating from the primary Silver table only.")
 
+    dimension_tables: List[str] = []
+    for item in mapping.get("grouping_dimensions") or []:
+        if not isinstance(item, dict) or str(item.get("semantic_type") or "").upper() == "DATE":
+            continue
+        table = _logical_table_name(item.get("table"))
+        if table and table not in dimension_tables:
+            dimension_tables.append(table)
+    max_dimensions = _max_gold_dimension_tables()
+    kept_dimension_tables = set(
+        sorted(dimension_tables, key=lambda table: (-scores.get(table, 0.0), table))[:max_dimensions]
+    )
+    dropped_dimension_tables = [table for table in dimension_tables if table not in kept_dimension_tables]
+    grouping_dimensions = [
+        item
+        for item in mapping.get("grouping_dimensions") or []
+        if isinstance(item, dict)
+        and (
+            str(item.get("semantic_type") or "").upper() == "DATE"
+            or _logical_table_name(item.get("table")) in kept_dimension_tables
+        )
+    ]
+    if dropped_dimension_tables:
+        warnings.append(
+            f"Gold dimension table cap applied: dropped {', '.join(dropped_dimension_tables)}."
+        )
+
     guard = {
         "max_source_tables": max_tables,
+        "max_dimension_tables": max_dimensions,
         "ranked_source_tables": ranked_tables,
         "kept_source_tables": [table for table in ranked_tables if table in kept_tables],
         "dropped_source_tables": dropped_tables,
+        "kept_dimension_tables": [table for table in dimension_tables if table in kept_dimension_tables],
+        "dropped_dimension_tables": dropped_dimension_tables,
         "dropped_malformed_join_paths": malformed_count,
         "dropped_join_paths": max(0, len(original_join_paths) - len(valid_join_paths) - malformed_count),
         "warnings": warnings,
     }
-    return {**mapping, "join_paths": valid_join_paths, "_gold_source_table_guard": guard}, guard
+    return {
+        **mapping,
+        "grouping_dimensions": grouping_dimensions,
+        "join_paths": valid_join_paths,
+        "_gold_source_table_guard": guard,
+    }, guard
 
 
 def generate_dimension_script(mapping: Dict[str, Any], gold_schema: str) -> str:
@@ -970,14 +1074,15 @@ for index, path in enumerate(JOIN_PATHS):
         other_table = right_table
         base_column = left_column
         other_column = right_column
+        other_silver_table = str(path.get("right_source_table") or _silver_table(other_table))
     elif right_table in joined_logical_tables and left_table not in joined_logical_tables:
         other_table = left_table
         base_column = right_column
         other_column = left_column
+        other_silver_table = str(path.get("left_source_table") or _silver_table(other_table))
     else:
         continue
 
-    other_silver_table = _silver_table(other_table)
     if not spark.catalog.tableExists(other_silver_table):
         print(f"WARNING: Missing join-path table: {{other_silver_table}}")
         continue
@@ -1862,7 +1967,11 @@ def _persist_gold_generation(*, state: Stage01State, bundle: Dict[str, Any]) -> 
 def gold_code_generation_node(state: Stage01State) -> Stage01State:
     new_state = state.copy()
     contract = _load_contract(state)
-    mappings = contract.get("kpi_mappings") or []
+    target_warehouse = _target_warehouse(state)
+    mappings = _normalize_contract_mappings(
+        contract,
+        canonicalize_columns=target_warehouse == "databricks",
+    )
 
     if not contract:
         new_state["gold_generation_status"] = "SKIPPED"
@@ -1875,7 +1984,6 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         return new_state
 
     run_id = str(state.get("run_id") or contract.get("run_id") or "GOLD_RUN")
-    target_warehouse = _target_warehouse(state)
     if target_warehouse == "snowflake":
         gold_catalog = str(state.get("gold_catalog") or _snowflake_gold_catalog())
         gold_schema = str(state.get("gold_schema") or _snowflake_gold_schema())

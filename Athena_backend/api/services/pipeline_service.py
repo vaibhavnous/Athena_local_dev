@@ -102,6 +102,9 @@ def run_pipeline_background(
     sftp_entity: Optional[str],
     use_domain_kb: bool,
     stage_confirmation_enabled: bool,
+    compliance_enabled: bool = False,
+    compliance_domain: str = "Insurance",
+    compliance_countries: Optional[List[str]] = None,
     target_warehouse: str = "databricks",
 ) -> None:
     started_at = time.monotonic()
@@ -126,6 +129,9 @@ def run_pipeline_background(
                 run_id=run_id,
                 use_domain_kb=use_domain_kb,
                 stage_confirmation_enabled=stage_confirmation_enabled,
+                compliance_enabled=compliance_enabled,
+                compliance_domain=compliance_domain,
+                compliance_countries=compliance_countries or ["US"],
                 target_warehouse=target_warehouse,
             )
         elapsed_seconds = time.monotonic() - started_at
@@ -156,7 +162,12 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             raise HTTPException(status_code=409, detail=f"Pipeline job already running for run_id={run_id}")
 
         ensure_background_capacity_locked()
-        logger.info("Submitting pipeline background job run_id=%s source=%s", run_id, source)
+        logger.info(
+            "Submitting pipeline background job run_id=%s source=%s compliance_enabled=%s",
+            run_id,
+            source,
+            bool(payload.compliance_enabled),
+        )
         future = BACKGROUND_EXECUTOR.submit(
             run_pipeline_background,
             run_id=run_id,
@@ -170,6 +181,9 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             stage_confirmation_enabled=bool(
                 payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else False
             ),
+            compliance_enabled=bool(payload.compliance_enabled if payload.compliance_enabled is not None else False),
+            compliance_domain=str(payload.compliance_domain or "Insurance"),
+            compliance_countries=payload.compliance_countries or ["US"],
             target_warehouse=str(payload.target_warehouse or "databricks").lower(),
         )
         BACKGROUND_JOBS[job_key] = future
@@ -203,6 +217,9 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
         sftp_entity=checkpoint.get("sftp_entity") or "transactions",
         use_domain_kb=bool(checkpoint.get("use_domain_kb")),
         stage_confirmation_enabled=checkpoint.get("stage_confirmation_enabled"),
+        compliance_enabled=bool(checkpoint.get("compliance_enabled")),
+        compliance_domain=checkpoint.get("compliance_domain") or "Insurance",
+        compliance_countries=checkpoint.get("compliance_countries") or ["US"],
     )
 
 

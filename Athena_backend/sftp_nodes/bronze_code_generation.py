@@ -398,6 +398,8 @@ def _bronze_config(feed: Dict[str, Any], schema: Dict[str, Any], state: Stage01S
     vendor_safe = _safe_sql_name(vendor)
     entity_safe = _safe_sql_name(entity)
 
+    bronze_catalog = str(state.get("bronze_catalog") or os.getenv("BRONZE_CATALOG", "workspace"))
+    bronze_catalog_safe = _safe_sql_name(bronze_catalog)
     bronze_schema = str(state.get("bronze_schema") or os.getenv("BRONZE_SCHEMA", "bronze"))
     bronze_schema_safe = _safe_sql_name(bronze_schema)
     volume_catalog = str(os.getenv("DATABRICKS_VOLUME_CATALOG", "main"))
@@ -422,6 +424,8 @@ def _bronze_config(feed: Dict[str, Any], schema: Dict[str, Any], state: Stage01S
         "entity": entity,
         "vendor_safe": vendor_safe,
         "entity_safe": entity_safe,
+        "bronze_catalog": bronze_catalog_safe,
+        "bronze_schema": bronze_schema_safe,
         "source_type": source_type,
         "file_format": file_format,
         "row_tag": _xml_row_tag(feed, schema, state, entity) if file_format == "xml" else None,
@@ -431,7 +435,7 @@ def _bronze_config(feed: Dict[str, Any], schema: Dict[str, Any], state: Stage01S
         "bronze_output_path": f"/Volumes/{volume_catalog}/{volume_schema}/{volume_name}/tables/bronze/{vendor_safe}/{entity_safe}",
         "checkpoint_path": f"/Volumes/{volume_catalog}/{volume_schema}/{volume_name}/checkpoints/bronze/{vendor_safe}/{entity_safe}",
         "schema_location": f"/Volumes/{volume_catalog}/{volume_schema}/{volume_name}/schemas/bronze/{vendor_safe}/{entity_safe}",
-        "target_table": f"{bronze_schema_safe}.{vendor_safe}_{entity_safe}_raw",
+        "target_table": f"{bronze_catalog_safe}.{bronze_schema_safe}.{vendor_safe}_{entity_safe}_raw",
         "schema_columns": schema_columns,
         "schema_version": schema.get("version"),
         "schema_fingerprint": schema.get("schema_fingerprint"),
@@ -658,14 +662,7 @@ def _generate_script(config_json: Dict[str, Any], run_id: str, pipeline_version:
 
     script = f'''
 import json
-import os
 import re
-import xml.etree.ElementTree as ET
-from io import BytesIO
-
-import pandas as pd
-from azure.identity import ClientSecretCredential
-from azure.storage.filedatalake import DataLakeServiceClient
 from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, MapType, StructType
 
@@ -690,58 +687,6 @@ EXPECTED_TYPES = {expected_types_literal}
 print(f"Starting Bronze ingestion for {{SOURCE_FEED}}")
 print(f"Source path: {{SOURCE_PATH}}")
 print(f"Target table: {{TARGET_TABLE}}")
-
-
-def _secret(key):
-    return dbutils.secrets.get(SECRET_SCOPE, key)
-
-
-def _parse_abfss_path(path):
-    match = re.match(r"^abfss://([^@]+)@([^.]+)\\.dfs\\.core\\.windows\\.net/(.*)$", path.strip())
-    if not match:
-        raise ValueError(f"SOURCE_PATH must be an abfss:// ADLS Gen2 path, got: {{path}}")
-    file_system, account_name, source_prefix = match.groups()
-    return file_system, account_name, source_prefix.strip("/")
-
-
-def _file_system_client():
-    file_system, account_name, _ = _parse_abfss_path(SOURCE_PATH)
-    credential = ClientSecretCredential(
-        tenant_id=_secret(TENANT_KEY),
-        client_id=_secret(CLIENT_ID_KEY),
-        client_secret=_secret(CLIENT_SECRET_KEY),
-    )
-    service_client = DataLakeServiceClient(
-        account_url=f"https://{{account_name}}.dfs.core.windows.net",
-        credential=credential,
-    )
-    return service_client.get_file_system_client(file_system)
-
-
-def _list_source_files(file_system_client):
-    _, _, source_prefix = _parse_abfss_path(SOURCE_PATH)
-    paths = list(file_system_client.get_paths(path=source_prefix, recursive=False))
-    source_files = [
-        item
-        for item in paths
-        if not getattr(item, "is_directory", False)
-        and str(getattr(item, "name", "")).lower().endswith(f".{{FILE_FORMAT}}")
-    ]
-    if not source_files:
-        raise ValueError(f"No .{{FILE_FORMAT}} files found under {{SOURCE_PATH}}")
-    return source_files
-
-
-def _download_file(file_system_client, file_path):
-    return file_system_client.get_file_client(file_path).download_file().readall()
-
-
-def _xml_strings_from_bytes(payload):
-    root = ET.fromstring(payload)
-    if root.tag.split("}}")[-1] == ROW_TAG:
-        return [ET.tostring(root, encoding="unicode")]
-    rows = [node for node in root.iter() if node.tag.split("}}")[-1] == ROW_TAG]
-    return [ET.tostring(node, encoding="unicode") for node in rows]
 
 
 def _safe_col_name(value):
@@ -770,7 +715,8 @@ def _flatten_columns(schema, prefix, path):
 
 def _project_column(available_columns, name, target_type):
     if name in available_columns:
-        return F.col(f"`{{name}}`").cast(target_type).alias(name)
+        escaped_name = name.replace("`", "``")
+        return F.expr(f"try_cast(`{{escaped_name}}` AS {{target_type}})").alias(name)
     return F.lit(None).cast(target_type).alias(name)
 
 
@@ -791,45 +737,25 @@ def _project_bronze_df(source_df):
     return source_df.select(*(projected + extra_columns)) if projected or extra_columns else source_df
 
 
-fs_client = _file_system_client()
-_source_files = _list_source_files(fs_client)
-_source_file_names = ", ".join([os.path.basename(item.name) for item in _source_files])
-
 if FILE_FORMAT == "csv":
-    frames = [pd.read_csv(BytesIO(_download_file(fs_client, item.name))) for item in _source_files]
-    pdf = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-    df = spark.createDataFrame(pdf)
+    df = (
+        spark.read
+        .format("csv")
+        .option("header", "true")
+        .option("inferSchema", "true")
+        .load(SOURCE_PATH)
+    )
 elif FILE_FORMAT == "json":
-    records = []
-    for item in _source_files:
-        payload = json.loads(_download_file(fs_client, item.name).decode("utf-8"))
-        if isinstance(payload, list):
-            records.extend([row for row in payload if isinstance(row, dict)])
-        elif isinstance(payload, dict):
-            nested_rows = [
-                value for value in payload.values()
-                if isinstance(value, list) and value and isinstance(value[0], dict)
-            ]
-            if nested_rows:
-                records.extend(nested_rows[0])
-            else:
-                records.append(payload)
-    if not records:
-        raise ValueError(f"No JSON records found under {{SOURCE_PATH}}")
-    df = spark.createDataFrame(pd.DataFrame(records))
+    df = spark.read.format("json").load(SOURCE_PATH)
 elif FILE_FORMAT == "xml":
-    xml_rows = []
-    for item in _source_files:
-        xml_rows.extend(_xml_strings_from_bytes(_download_file(fs_client, item.name)))
-    if not xml_rows:
-        raise ValueError(f"No <{{ROW_TAG}}> records found under {{SOURCE_PATH}}")
-    xml_df = spark.createDataFrame([(text,) for text in xml_rows], ["_xml"])
-    xml_schema = spark.range(1).select(
-        F.schema_of_xml(F.lit(xml_rows[0]), {{"rowTag": ROW_TAG}}).alias("schema")
-    ).first()["schema"]
-    parsed_df = xml_df.select(F.from_xml(F.col("_xml"), xml_schema, {{"rowTag": ROW_TAG}}).alias(ROW_TAG))
-    flattened_columns = _flatten_columns(parsed_df.schema[ROW_TAG].dataType, ROW_TAG, ROW_TAG)
-    df = parsed_df.select(*flattened_columns)
+    df = (
+        spark.read
+        .format("xml")
+        .option("rowTag", ROW_TAG)
+        .load(SOURCE_PATH)
+    )
+    flattened_columns = _flatten_columns(df.schema, ROW_TAG, "")
+    df = df.select(*flattened_columns) if flattened_columns else df
 else:
     raise ValueError(f"Unsupported FILE_FORMAT: {{FILE_FORMAT}}")
 
@@ -848,7 +774,7 @@ bronze_df = (
     .withColumn("_source_system", F.lit(SOURCE_TYPE))
     .withColumn("_source_feed", F.lit(SOURCE_FEED))
     .withColumn("_source_file_path", F.lit(SOURCE_PATH))
-    .withColumn("_source_file_name", F.lit(_source_file_names))
+    .withColumn("_source_file_name", F.element_at(F.split(F.input_file_name(), "/"), -1))
     .withColumn("_file_modification_time", F.lit(None).cast("timestamp"))
     .withColumn("_pipeline_version", F.lit(PIPELINE_VERSION))
     .withColumn("_rescued_data", F.lit(None).cast("string"))

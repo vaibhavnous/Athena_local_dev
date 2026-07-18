@@ -16,6 +16,16 @@ class Stage01State(TypedDict, total=False):
     status: str
     error: Optional[str]
     target_warehouse: Optional[str]
+    compliance_enabled: Optional[bool]
+    compliance_domain: Optional[str]
+    compliance_countries: Optional[List[str]]
+    compliance_assessment_id: Optional[str]
+    compliance_assessment_status: Optional[str]
+    compliance_assessment_message: Optional[str]
+    compliance_assessment_error: Optional[str]
+    compliance_review_status: Optional[str]
+    compliance_review: Optional[Dict[str, Any]]
+    compliance_review_error: Optional[str]
 
     # Source ingestion MVP
     source: Optional[str]

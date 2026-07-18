@@ -184,6 +184,12 @@ def test_databricks_gold_script_uses_sanitized_join_paths(monkeypatch):
         "gold_generation_contract": {
             "run_id": "run-gold-guard",
             "status": "READY",
+            "silver_tables": [
+                {"table": "claim_information", "target_table": "silver.silver_claim_information"},
+                {"table": "policy_transactions", "target_table": "silver.silver_policy_transactions"},
+                {"table": "measures", "target_table": "silver.silver_measures"},
+                {"table": "claim_payment_expenses", "target_table": "silver.silver_claim_payment_expenses"},
+            ],
             "kpi_mappings": [
                 {
                     "kpi_name": "Total Claims",
@@ -240,9 +246,12 @@ def test_databricks_gold_script_uses_sanitized_join_paths(monkeypatch):
         "measures",
     ]
     assert script["source_table_guard"]["dropped_source_tables"] == ["claim_payment_expenses"]
-    assert script["source_table_guard"]["dropped_join_paths"] == 1
+    # Uncertified joins are removed at contract normalization before the source cap guard.
+    assert script["source_table_guard"]["dropped_join_paths"] == 0
     assert "'right_table': 'policy_transactions'" in body
     assert "'right_table': 'measures'" in body
+    assert "'right_source_table': 'silver.silver_policy_transactions'" in body
+    assert "'right_source_table': 'silver.silver_measures'" in body
     assert "'right_table': 'claim_payment_expenses'" not in body
 
 
@@ -451,6 +460,64 @@ def test_source_table_grain_skips_duplicate_deleted_auxiliary_tables():
         ]
     }
 
-    specs = gold_gen._source_table_grain_specs(contract, [], {})
+    mappings = [{
+        "source_silver_table": "ATHENA_DB.SILVER.silver_policy_transactions",
+        "measure": {"table": "policy_transactions", "column": "premium", "aggregation": "SUM"},
+        "readiness": "READY",
+        "grouping_dimensions": [
+            {
+                "table": "policy_transactions",
+                "column": "product_name",
+                "semantic_type": "DIMENSION",
+                "source_silver_table": "ATHENA_DB.SILVER.silver_policy_transactions",
+            },
+            {
+                "table": "policy_cover_level_transactions_dup_del",
+                "column": "coverage_name",
+                "semantic_type": "DIMENSION",
+                "source_silver_table": "ATHENA_DB.SILVER.silver_policy_cover_level_transactions_dup_del",
+            },
+        ],
+    }]
+
+    specs = gold_gen._source_table_grain_specs(contract, mappings, {})
 
     assert [item["logical_table"] for item in specs] == ["policy_transactions"]
+
+
+def test_gold_contract_caps_dimensions_and_drops_unavailable_silver_joins(monkeypatch):
+    monkeypatch.setenv("ATHENA_GOLD_MAX_DIMENSION_TABLES", "2")
+    mapping = {
+        "kpi_name": "Total Claims",
+        "source_silver_table": "silver.silver_claims",
+        "measure": {"table": "claims", "column": "ClaimAmount", "aggregation": "SUM"},
+        "grouping_dimensions": [
+            {"table": "claims", "column": "ClaimStatus", "semantic_type": "DIMENSION"},
+            {"table": "policies", "column": "PolicyState", "semantic_type": "DIMENSION"},
+            {"table": "agents", "column": "AgentName", "semantic_type": "DIMENSION"},
+            {"table": "missing", "column": "Unknown", "semantic_type": "DIMENSION"},
+        ],
+        "join_paths": [
+            {"left_table": "claims", "left_column": "PolicyID", "right_table": "policies", "right_column": "PolicyID", "certified": True},
+            {"left_table": "claims", "left_column": "AgentID", "right_table": "agents", "right_column": "AgentID", "certified": True},
+            {"left_table": "claims", "left_column": "MissingID", "right_table": "missing", "right_column": "MissingID", "certified": True},
+        ],
+        "time": {},
+        "readiness": "READY",
+    }
+
+    constrained, warnings = silver_gen._constrain_gold_mapping(
+        mapping,
+        {
+            "claims": "silver.silver_claims",
+            "policies": "silver.silver_policies",
+            "agents": "silver.silver_agents",
+        },
+    )
+
+    assert constrained["measure"]["column"] == "claimamount"
+    assert len(constrained["selected_dimension_tables"]) == 2
+    assert len({item["table"] for item in constrained["grouping_dimensions"]}) <= 2
+    assert all("missing" not in (join["left_table"], join["right_table"]) for join in constrained["join_paths"])
+    assert all(join["left_source_table"].startswith("silver.silver_") for join in constrained["join_paths"])
+    assert any("no Silver target exists" in warning for warning in warnings)

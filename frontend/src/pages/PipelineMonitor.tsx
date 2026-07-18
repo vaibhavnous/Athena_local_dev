@@ -9,7 +9,6 @@ import { formatPipelineStepLabel, getGateDisplayName, getPhaseGroups, getPipelin
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { abortRun, continueStage, getRun, getRunStatus, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
-const PHASE_AUTO_SWITCH_DELAY_MS = 4000
 const ACTIVE_RUN_REFRESH_INTERVAL_MS = 5000
 const ACTIVE_RUN_FAST_REFRESH_INTERVAL_MS = 1500
 
@@ -80,10 +79,7 @@ function PipelineMonitor() {
   const latestRunsRef = useRef(runs)
   const latestActiveRunRef = useRef(activeRun)
   const actualSteps = useMemo(() => getPipelineSteps(activeRun), [activeRun])
-  const displaySteps = actualSteps
   const actualPhases = useMemo(() => getPhaseGroups(activeRun, actualSteps), [activeRun, actualSteps])
-  const phases = useMemo(() => getPhaseGroups(activeRun, displaySteps), [activeRun, displaySteps])
-  const shouldDebouncePhaseSwitch = ['adls_gen2', 'sftp'].includes(String(activeRun?.source || '').toLowerCase())
 
   useEffect(() => {
     latestRunsRef.current = runs
@@ -214,122 +210,32 @@ function PipelineMonitor() {
     }
   }, [activeRunStableId, activeRunIsDemoFallback, refreshActiveRunNow])
 
-  const actualPhaseIndex = useMemo(() => {
-    const sourcePhases = actualPhases?.length ? actualPhases : phases
-    if (!sourcePhases?.length) return 0
-    const active = furthestActivePhase(sourcePhases)
-    if (active) return active.index
-    const firstIncompleteIndex = sourcePhases.findIndex((phase) => phase.completed < phase.total)
-    if (firstIncompleteIndex >= 0) return firstIncompleteIndex
-    return Math.max(0, sourcePhases.length - 1)
-  }, [actualPhases, phases])
-
-  const [visiblePhaseIndex, setVisiblePhaseIndex] = useState(actualPhaseIndex)
-  const previousVisibleRunIdRef = useRef<string | null>(null)
-  const visiblePhaseTimerRef = useRef<number | null>(null)
-
-  useEffect(() => {
-    if (visiblePhaseTimerRef.current !== null) {
-      window.clearTimeout(visiblePhaseTimerRef.current)
-      visiblePhaseTimerRef.current = null
-    }
-
-    if (!activeRun?.id || !shouldDebouncePhaseSwitch) {
-      setVisiblePhaseIndex(actualPhaseIndex)
-      return
-    }
-
-    const runChanged = previousVisibleRunIdRef.current !== activeRun.id
-    if (runChanged) {
-      previousVisibleRunIdRef.current = activeRun.id
-      setVisiblePhaseIndex(actualPhaseIndex)
-      return
-    }
-
-    if (visiblePhaseIndex === actualPhaseIndex) return
-
-    visiblePhaseTimerRef.current = window.setTimeout(() => {
-      setVisiblePhaseIndex((current) => {
-        if (current === actualPhaseIndex) return current
-        return current + Math.sign(actualPhaseIndex - current)
-      })
-      visiblePhaseTimerRef.current = null
-    }, PHASE_AUTO_SWITCH_DELAY_MS)
-
-    return () => {
-      if (visiblePhaseTimerRef.current !== null) {
-        window.clearTimeout(visiblePhaseTimerRef.current)
-        visiblePhaseTimerRef.current = null
-      }
-    }
-  }, [activeRun?.id, actualPhaseIndex, shouldDebouncePhaseSwitch, visiblePhaseIndex])
-
-  const displayPhases = useMemo(() => {
-    if (!shouldDebouncePhaseSwitch) return phases
-    return phases.map((phase, index) => {
-      if (index <= visiblePhaseIndex) return phase
-      return {
-        ...phase,
-        completed: 0,
-        status: 'Pending',
-        steps: phase.steps.map((step) => ({
-          ...step,
-          state: 'PENDING',
-          complete: false,
-        })),
-      }
-    })
-  }, [phases, shouldDebouncePhaseSwitch, visiblePhaseIndex])
   // pipelinePhases is the single renderer contract; re-inferring completion here
   // previously promoted a review artifact into completed Silver execution.
-  const renderedPhases = displayPhases
+  const renderedPhases = actualPhases
 
   const defaultExpandedPhase = useMemo(() => {
-    const sourcePhases = actualPhases?.length ? actualPhases : displayPhases
-    if (!sourcePhases?.length) return 'phase-1'
-    const active = furthestActivePhase(sourcePhases)
+    if (!actualPhases?.length) return 'phase-1'
+    const active = furthestActivePhase(actualPhases)
     if (active?.phase) return active.phase.id
-    const firstIncomplete = sourcePhases.find((phase) => phase.completed < phase.total)
-    return firstIncomplete?.id || sourcePhases[sourcePhases.length - 1].id
-  }, [actualPhases, displayPhases])
+    const firstIncomplete = actualPhases.find((phase) => phase.completed < phase.total)
+    return firstIncomplete?.id || actualPhases[actualPhases.length - 1].id
+  }, [actualPhases])
 
   const [expandedPhase, setExpandedPhase] = useState(defaultExpandedPhase)
   const autoExpandedPhaseRef = useRef(defaultExpandedPhase)
   const previousRunIdRef = useRef<string | null>(null)
-  const phaseSwitchTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     if (!activeRun?.id || !defaultExpandedPhase) return
 
-    if (phaseSwitchTimerRef.current !== null) {
-      window.clearTimeout(phaseSwitchTimerRef.current)
-      phaseSwitchTimerRef.current = null
-    }
-
     const runChanged = previousRunIdRef.current !== activeRun.id
-    if (runChanged || !shouldDebouncePhaseSwitch) {
-      previousRunIdRef.current = activeRun.id
-      autoExpandedPhaseRef.current = defaultExpandedPhase
-      setExpandedPhase(defaultExpandedPhase)
-      return
-    }
+    if (!runChanged && autoExpandedPhaseRef.current === defaultExpandedPhase) return
 
-    if (autoExpandedPhaseRef.current === defaultExpandedPhase) return
-
-    const nextPhase = defaultExpandedPhase
-    phaseSwitchTimerRef.current = window.setTimeout(() => {
-      autoExpandedPhaseRef.current = nextPhase
-      setExpandedPhase(nextPhase)
-      phaseSwitchTimerRef.current = null
-    }, PHASE_AUTO_SWITCH_DELAY_MS)
-
-    return () => {
-      if (phaseSwitchTimerRef.current !== null) {
-        window.clearTimeout(phaseSwitchTimerRef.current)
-        phaseSwitchTimerRef.current = null
-      }
-    }
-  }, [defaultExpandedPhase, activeRun?.id, shouldDebouncePhaseSwitch])
+    previousRunIdRef.current = activeRun.id
+    autoExpandedPhaseRef.current = defaultExpandedPhase
+    setExpandedPhase(defaultExpandedPhase)
+  }, [defaultExpandedPhase, activeRun?.id])
 
   const monitorRun = activeRun
   const runLabel = summarizeRunSource(monitorRun)

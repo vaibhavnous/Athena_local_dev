@@ -33,6 +33,10 @@ function stableLogKey(log: PipelineLog) {
   ].join('|')
 }
 
+export function isCurrentLogRequest(requestedRunId: string, activeRunId: string | null | undefined) {
+  return requestedRunId === activeRunId
+}
+
 export function usePipelineLogs(
   runId: string | null | undefined,
   isActive = true,
@@ -43,6 +47,8 @@ export function usePipelineLogs(
   const isFetchingRef = useRef(false)
   const onNewLogsRef = useRef<NewLogsHandler | undefined>(onNewLogs)
   const lastLogTimestampRef = useRef<string | null>(null)
+  const activeRunIdRef = useRef<string | null>(runId || null)
+  activeRunIdRef.current = runId || null
 
   const [discoveredRunId, setDiscoveredRunId] = useState<string | null>(null)
   const [isDiscovering, setIsDiscovering] = useState(false)
@@ -79,9 +85,12 @@ export function usePipelineLogs(
         const data: any = since
           ? await getPipelineLogsSinceWithLimit(targetRunId, since, 300)
           : await getPipelineLogs(targetRunId, 300)
+        if (!isCurrentLogRequest(targetRunId, activeRunIdRef.current)) return []
         return Array.isArray(data?.logs) ? (data.logs as PipelineLog[]) : []
       } catch (error: any) {
-        setLogsError(error?.message ?? 'Fetch error')
+        if (isCurrentLogRequest(targetRunId, activeRunIdRef.current)) {
+          setLogsError(error?.message ?? 'Fetch error')
+        }
         return []
       } finally {
         isFetchingRef.current = false

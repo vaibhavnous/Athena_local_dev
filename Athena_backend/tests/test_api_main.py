@@ -63,6 +63,48 @@ def test_kpi_review_returns_conflict_when_kpi_artifact_failed_without_rows(monke
     assert "KPI extraction failed" in exc.value.detail
 
 
+def test_create_kpi_review_adds_pending_gate1_item(monkeypatch):
+    from api.routers import kpi_router
+
+    monkeypatch.setattr(kpi_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "next_gate": 1, "source": "database"},
+    )
+    monkeypatch.setattr("utilis.db.insert_hitl_queue_item", lambda run_id, kpi, gate_number: f"{run_id}:1:manual-test")
+
+    result = kpi_router.create_kpi_review(
+        "run-add-kpi",
+        {"name": "Claim Closure Rate", "definition": "Percentage of claims closed during the period."},
+    )
+
+    assert result["queue_id"] == "run-add-kpi:1:manual-test"
+    assert result["status"] == "PENDING_REVIEW"
+    assert result["name"] == "Claim Closure Rate"
+
+
+def test_submit_edited_kpi_persists_full_content(monkeypatch):
+    from api.models import HitlDecision, HitlDecisionPayload
+    from api.routers import kpi_router
+
+    updates = []
+    monkeypatch.setattr(kpi_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr("utilis.db.update_hitl_item", lambda *args, **kwargs: updates.append((args, kwargs)))
+    monkeypatch.setattr("api.services.kpi_service.maybe_resume_gate1", lambda run_id: None)
+
+    kpi_router.submit_hitl_decisions(
+        "run-edit-kpi",
+        HitlDecisionPayload(decisions=[HitlDecision(
+            kpi_id="run-edit-kpi:1:0",
+            decision="EDITED",
+            edited_content={"name": "Edited KPI", "definition": "Edited definition"},
+        )]),
+    )
+
+    assert updates[0][0][:2] == ("run-edit-kpi:1:0", "APPROVED")
+    assert '"name": "Edited KPI"' in updates[0][1]["edited_content"]
+
+
 def test_sql_tcp_probe_failure_is_cached(monkeypatch):
     from utilis import db
 
@@ -321,6 +363,23 @@ def test_pipeline_status_shapes_running_response(monkeypatch):
     assert body["run_id"] == "run-123"
     assert body["state"]["life_cycle_state"] == "RUNNING"
     assert body["state"]["result_state"] == "RUNNING"
+
+
+def test_pipeline_status_fallback_treats_completed_databricks_gold_as_terminal():
+    from api.routers.pipeline_router import _fallback_status_payload
+
+    payload = _fallback_status_payload(
+        "run-gold",
+        checkpoint={
+            "run_id": "run-gold",
+            "status": "RUNNING",
+            "background_stage": None,
+            "databricks_gold_execution_status": "COMPLETED",
+        },
+    )
+
+    assert payload["status"] == "PIPELINE_COMPLETED"
+    assert payload["state"]["life_cycle_state"] == "TERMINATED"
 
 
 def test_abort_run_persists_aborted_status(monkeypatch):

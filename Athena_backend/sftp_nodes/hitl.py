@@ -6,6 +6,12 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 
+def _run_visible_stage(stage_key: str, runner, state: Dict[str, Any]) -> Dict[str, Any]:
+    from services.pipeline_runtime import run_with_minimum_stage_runtime
+
+    return run_with_minimum_stage_runtime(stage_key, runner, state)
+
+
 class HITLController:
 
     def __init__(self, mode="auto"):
@@ -168,7 +174,7 @@ def submit_sftp_gate1_review(run_id: str, approve: bool = True) -> Dict[str, Any
         save_checkpoint_state(run_id, gate1_state)
         return gate1_state
 
-    source_state = source_ingestion_node(gate1_state)
+    source_state = _run_visible_stage("discovery", source_ingestion_node, gate1_state)
     if source_state.get("status") == "FAILED":
         save_checkpoint_state(run_id, source_state)
         return source_state
@@ -198,9 +204,9 @@ def submit_sftp_gate2_review(run_id: str, approve: bool = True) -> Dict[str, Any
         save_checkpoint_state(run_id, gate2_state)
         return gate2_state
 
-    metadata_state = file_metadata_discovery_node(gate2_state)
+    metadata_state = _run_visible_stage("schema", file_metadata_discovery_node, gate2_state)
     profiling_state = sftp_column_profiling_node(metadata_state)
-    enriched_state = sftp_semantic_enrichment_node(profiling_state)
+    enriched_state = _run_visible_stage("enrichment", sftp_semantic_enrichment_node, profiling_state)
     gate3_state = sftp_gate3_node(enriched_state)
     if gate3_state.get("status") == "HITL_WAIT":
         save_checkpoint_state(run_id, gate3_state)

@@ -393,6 +393,14 @@ def build_ui_payload(
         "candidate_feeds": (context.get("candidate_feeds") or checkpoint.get("candidate_feeds") or []) if api_utils.is_file_source(checkpoint.get("source")) else [],
         "source_row_count": context.get("source_row_count") or checkpoint.get("source_row_count"),
         "source_columns": context.get("source_columns") or checkpoint.get("source_columns") or [],
+        "compliance_enabled": bool(checkpoint.get("compliance_enabled")),
+        "compliance_assessment_id": checkpoint.get("compliance_assessment_id"),
+        "compliance_assessment_status": checkpoint.get("compliance_assessment_status"),
+        "compliance_assessment_error": checkpoint.get("compliance_assessment_error"),
+        "compliance_review_status": checkpoint.get("compliance_review_status"),
+        "compliance_review": checkpoint.get("compliance_review") or {},
+        "compliance_review_error": checkpoint.get("compliance_review_error"),
+        "compliance_results": checkpoint.get("compliance_results") or {},
     }
     if include_scripts:
         payload.update(
@@ -459,6 +467,10 @@ def ui_run_summary(run_id: str) -> Dict[str, Any]:
         "sftp_entity": context.get("sftp_entity"),
         "source_row_count": context.get("source_row_count"),
         "source_columns": context.get("source_columns") or [],
+        "compliance_enabled": bool(checkpoint.get("compliance_enabled")),
+        "compliance_assessment_id": checkpoint.get("compliance_assessment_id"),
+        "compliance_assessment_status": checkpoint.get("compliance_assessment_status"),
+        "compliance_review_status": checkpoint.get("compliance_review_status"),
     }
 
 

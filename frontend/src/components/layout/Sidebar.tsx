@@ -27,6 +27,7 @@ function Sidebar({ collapsed, onToggle }) {
     { to: '/app/run-history', icon: PlayCircle, label: 'Run History' },
     { to: '/app/project', icon: FolderKanban, label: 'Project' },
     { to: '/app/data-quality', icon: ShieldCheck, label: 'Data Quality' },
+    { to: '/app/compliance-governance', icon: ShieldCheck, label: 'Compliance' },
     { to: '/app/data-migration', icon: ArrowRightLeft, label: 'Data Lineage' },
   ]
 

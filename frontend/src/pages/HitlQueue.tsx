@@ -6,13 +6,16 @@ import { AlertTriangle, CheckCircle, CheckCircle2, ChevronDown, ChevronRight, Co
 import useAthenaStore from '../store/useAthenaStore'
 import KpiReviewCard from '../components/hitl/KpiReviewCard'
 import EditKpiModal from '../components/hitl/EditKpiModal'
+import AddKpiModal from '../components/hitl/AddKpiModal'
 import SemanticReviewCard from '../components/hitl/SemanticReviewCard'
+import CodeReviewEditorModal from '../components/hitl/CodeReviewEditorModal'
 import {
   getBronzeReview,
   getEnrichmentReviews,
   fetchKpiReviews,
   getRun,
   getPipelineKpis,
+  createKpiReview,
   getSilverReview,
   getSilverMergeKeyReview,
   getTableReviews,
@@ -489,6 +492,8 @@ function HitlQueue() {
   const [localDecisions, setLocalDecisions] = useState({})
   const [editedKpis, setEditedKpis] = useState({})
   const [editingKpi, setEditingKpi] = useState(null)
+  const [addingKpi, setAddingKpi] = useState(false)
+  const [addingKpiSubmitting, setAddingKpiSubmitting] = useState(false)
   const [rejectionReasons, setRejectionReasons] = useState({})
   const [submitting, setSubmitting] = useState(false)
   const [hydrating, setHydrating] = useState(false)
@@ -1161,6 +1166,31 @@ function HitlQueue() {
     setEditingKpi(null)
   }
 
+  const handleAddKpi = async (payload) => {
+    if (!selectedRunId) return
+    setAddingKpiSubmitting(true)
+    try {
+      const created = await createKpiReview(selectedRunId, payload)
+      setHitlQueue(selectedRunId, [...rawQueue, created])
+      setAddingKpi(false)
+      addNotification({
+        type: 'success',
+        title: 'KPI Added',
+        message: `${created.name || payload.name} was added to the pending review.`,
+        duration: 4000,
+      })
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Unable to Add KPI',
+        message: error.message || 'The KPI could not be added to this review.',
+        duration: 5000,
+      })
+    } finally {
+      setAddingKpiSubmitting(false)
+    }
+  }
+
   const handleClearDecision = (kpiId) => {
     setLocalDecisions((prev) => {
       const next = { ...prev }
@@ -1187,7 +1217,15 @@ function HitlQueue() {
         decision,
         reviewer: REVIEWER_ID,
         notes: edited?.notes || rejectionReasons[key] || '',
-        edited_definition: edited?.definition || null
+        edited_definition: edited?.definition || null,
+        edited_content: edited ? {
+          ...(item.kpi_detail || {}),
+          name: edited.name,
+          kpi_name: edited.name,
+          definition: edited.definition,
+          kpi_description: edited.definition,
+          notes: edited.notes || '',
+        } : undefined,
       }
     })
   }
@@ -1432,7 +1470,12 @@ function HitlQueue() {
             : 'Enrichment review was rejected and the run remains paused for rework.',
           duration: 5000
         })
-        returnToMonitor(selectedRunId)
+        if (!hasRejectedSemanticItem && (currentRun?.compliance_enabled || selectedRunDetail?.compliance_enabled)) {
+          setActiveRun(selectedRunId)
+          navigate('/app/compliance-governance', { state: { activeRunId: selectedRunId } })
+        } else {
+          returnToMonitor(selectedRunId)
+        }
       } catch (error) {
         await refreshRunAfterSubmitError(`${gate3Name} submit did not complete. Waiting on backend state.`)
         addNotification({
@@ -1636,6 +1679,7 @@ function HitlQueue() {
 
   if (selectedRunId && isReviewableRun && isGate1) {
     return (
+      <>
       <div className="flex h-full min-h-0 flex-col gap-4">
         <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto rounded-[28px] bg-[linear-gradient(180deg,#0a1020_0%,#070c16_100%)] px-5 py-6">
           <div className="flex w-full max-w-6xl flex-col overflow-hidden rounded-[24px] border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
@@ -1655,9 +1699,8 @@ function HitlQueue() {
               <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
-                  disabled
-                  title="Add KPI is not connected to a backend create endpoint yet."
-                  className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] opacity-80"
+                  onClick={() => setAddingKpi(true)}
+                  className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
                 >
                   <PlusCircle size={16} className="text-[#12b886]" />
                   Add KPI
@@ -1717,6 +1760,9 @@ function HitlQueue() {
           </div>
         </div>
       </div>
+      <EditKpiModal kpi={editingKpi} isOpen={!!editingKpi} onClose={() => setEditingKpi(null)} onSave={handleSaveEdit} />
+      <AddKpiModal isOpen={addingKpi} submitting={addingKpiSubmitting} onClose={() => setAddingKpi(false)} onAdd={handleAddKpi} />
+      </>
     )
   }
 
@@ -2023,11 +2069,10 @@ function HitlQueue() {
 
           <div className="flex flex-wrap items-center gap-3">
             {!isGate2 && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5 && (
-              <button
-                type="button"
-                disabled
-                title="Add KPI is not connected to a backend create endpoint yet."
-                className="inline-flex h-12 items-center gap-2 rounded-[10px] bg-[#202b3a] px-5 text-[17px] font-bold text-[#b9c1cf] opacity-80"
+            <button
+              type="button"
+              onClick={() => setAddingKpi(true)}
+              className="inline-flex h-12 items-center gap-2 rounded-[10px] bg-[#202b3a] px-5 text-[17px] font-bold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
               >
                 <PlusCircle size={18} className="text-[#12b886]" />
                 Add KPI
@@ -2501,6 +2546,12 @@ function HitlQueue() {
         isOpen={!!editingKpi}
         onClose={() => setEditingKpi(null)}
         onSave={handleSaveEdit}
+      />
+      <AddKpiModal
+        isOpen={addingKpi}
+        submitting={addingKpiSubmitting}
+        onClose={() => setAddingKpi(false)}
+        onAdd={handleAddKpi}
       />
     </div>
   )
@@ -3222,6 +3273,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
   const approved = decision === 'APPROVED'
   const rejected = decision === 'REJECTED'
   const regenerate = decision === 'REGENERATE'
+  const isMergeKeyReview = item.type === 'MERGE_KEY'
 
   return (
     <div className={`rounded-xl border bg-[#101827] p-5 transition-colors ${
@@ -3254,8 +3306,10 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
           onClick={onToggle}
           className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#202b3a] px-4 text-sm font-bold text-[#c6d2e8] transition-colors hover:bg-[#263449] hover:text-white"
         >
-          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          {expanded ? 'Collapse' : 'Edit'}
+          {isMergeKeyReview
+            ? (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />)
+            : <Copy size={14} />}
+          {isMergeKeyReview ? (expanded ? 'Collapse' : 'Edit keys') : 'Review Code'}
         </button>
       </div>
 
@@ -3267,10 +3321,10 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
         className="mt-4 inline-flex items-center gap-2 text-xs font-bold text-[#c6d2e8] hover:text-white"
       >
         <span className="text-[10px] text-[#91a4cb]">{expanded ? '⌃' : '⌄'}</span>
-        {expanded ? 'Hide code' : 'Preview code'}
+        {isMergeKeyReview ? (expanded ? 'Hide details' : 'Review merge keys') : 'Open generated code'}
       </button>
 
-      {expanded && (
+      {expanded && isMergeKeyReview && (
         <div className="mt-3">
           <div className="mb-2 flex justify-end gap-2">
             <button
@@ -3300,6 +3354,10 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
             Edits are local to this review screen. Copy/download uses the edited draft; backend approval still submits the gate decision.
           </div>
         </div>
+      )}
+
+      {expanded && !isMergeKeyReview && (
+        <CodeReviewEditorModal item={item} onClose={onToggle} onSave={onCodeChange} />
       )}
 
       <div className="mt-4 grid gap-2 md:grid-cols-3">

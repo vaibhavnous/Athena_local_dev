@@ -507,3 +507,38 @@ def test_gold_stage_executes_snowflake_gold_after_generation(monkeypatch):
     assert result["status"] == "PIPELINE_COMPLETED"
     assert result["snowflake_gold_execution_status"] == "COMPLETED"
     assert any(state.get("background_stage") == "gold_code_execution" for state in saved_states)
+
+
+def test_gold_stage_executes_databricks_gold_after_generation(monkeypatch):
+    saved_states = []
+    calls = []
+
+    def fake_gold_generation(state):
+        return {
+            **state,
+            "gold_generation_status": "COMPLETED",
+            "gold_generation_results": [{"kpi_name": "Total Claims", "script_body": _gold_sql()}],
+        }
+
+    def fake_gold_execution(state):
+        calls.append(state.copy())
+        return {
+            **state,
+            "databricks_gold_execution_status": "COMPLETED",
+            "databricks_gold_execution_results": [{"kpi_name": "Total Claims"}],
+        }
+
+    monkeypatch.setattr("nodes.gold_gen.gold_code_generation_node", fake_gold_generation)
+    monkeypatch.setattr("services.databricks_runtime.databricks_gold_execution_enabled", lambda: True)
+    monkeypatch.setattr("services.databricks_runtime.run_databricks_gold_scripts", fake_gold_execution)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved_states.append(state.copy()))
+
+    result = pipeline_runtime._run_database_gold_stage({"run_id": "run-gold", "target_warehouse": "databricks"})
+
+    assert calls
+    assert calls[0]["background_stage"] == "gold_code_execution"
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert result["databricks_gold_execution_status"] == "COMPLETED"
+    assert any(state.get("background_stage") == "gold_code_execution" for state in saved_states)
+    assert saved_states[-1]["background_stage"] is None
+    assert saved_states[-1]["status"] == "PIPELINE_COMPLETED"

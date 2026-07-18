@@ -324,6 +324,59 @@ def test_snowflake_silver_uses_cast_not_try_cast_for_typed_bronze_columns():
     assert 'TRY_CAST(' not in sql
 
 
+def test_databricks_silver_uses_serverless_safe_try_cast():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claim_information",
+        "bronze_table": "workspace.bronze.bronze_claim_information",
+        "silver_table": "workspace.silver.silver_claim_information",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+
+    script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=[
+            {
+                "table_name": "claim_information",
+                "column_name": "claim_open_date",
+                "data_type": "datetime2",
+            }
+        ],
+        run_id="run-cast",
+    )
+
+    assert "spark.databricks.delta.schema.autoMerge.enabled" not in script
+    assert "try_cast(`{escaped_name}` AS {target_type})" in script
+
+
+def test_databricks_silver_skips_duplicate_expected_output_columns():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "policy_cover_level_transactions_dup_del",
+        "bronze_table": "workspace.bronze.bronze_policy_cover_level_transactions_dup_del",
+        "silver_table": "workspace.silver.silver_policy_cover_level_transactions_dup_del",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+
+    script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=[
+            {"column_name": "cover_name", "data_type": "varchar"},
+            {"column_name": "cover_name", "data_type": "varchar"},
+            {"column_name": "detail_num", "data_type": "int"},
+        ],
+        run_id="run-duplicates",
+    )
+
+    assert "selected_output_columns = set()" in script
+    assert "if expected_name in selected_output_columns:" in script
+    assert "selected_output_columns.add(expected_name)" in script
+
+
 def test_load_silver_scripts_prefers_snowflake_bundle_for_snowflake_run(monkeypatch):
     monkeypatch.setattr(silver_gen, "ai_store_db_writer", lambda **_: None)
     workdir = Path.cwd() / ".tmp-tests" / f"silver_loader_{uuid.uuid4().hex}"

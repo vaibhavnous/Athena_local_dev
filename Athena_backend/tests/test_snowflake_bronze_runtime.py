@@ -4,6 +4,8 @@ import json
 import uuid
 from pathlib import Path
 
+import pytest
+
 from services import pipeline_runtime
 from services import snowflake_bronze_runtime
 
@@ -16,6 +18,33 @@ def test_snowflake_bronze_runtime_is_disabled_by_default(monkeypatch):
     )
 
     assert result["snowflake_bronze_execution_status"] == "DISABLED"
+
+
+def test_gate4_refuses_silver_when_snowflake_bronze_execution_does_not_complete(monkeypatch):
+    saved = []
+
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "target_warehouse": "snowflake",
+            "bronze_generation_results": [{"table": "claims"}],
+        },
+    )
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved.append(state))
+    monkeypatch.setattr(pipeline_runtime, "continue_database_pipeline", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("silver should not start")))
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "run_snowflake_bronze_scripts",
+        lambda state, **kwargs: {**state, "snowflake_bronze_execution_status": "DISABLED"},
+    )
+
+    with pytest.raises(RuntimeError, match="Snowflake Bronze execution did not complete"):
+        pipeline_runtime.submit_gate4_review("run-1", action="APPROVED", review_artifact={"feeds": [{"table": "claims"}]})
+
+    assert saved[-1]["status"] == "FAILED"
+    assert saved[-1]["failed_background_stage"] == "bronze_code_execution"
 
 
 def test_snowflake_account_url_is_normalized():

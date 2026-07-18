@@ -25,6 +25,7 @@ from utilis.logger import logger
 SILVER_MAX_WORKERS = int(os.environ.get("SILVER_MAX_WORKERS", "4"))
 SILVER_LLM_ENV_KEYS = ("ATHENA_SILVER_USE_LLM", "USE_LLM")
 KIMBALL_LLM_ENV_KEYS = ("ATHENA_GOLD_KIMBALL_PLAN_USE_LLM", "ATHENA_GOLD_USE_LLM", "USE_LLM")
+DEFAULT_MAX_GOLD_DIMENSION_TABLES = 2
 
 
 class SilverTableRef(TypedDict):
@@ -509,11 +510,10 @@ DO NOT EDIT MANUALLY
 
 from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, lit, row_number, sha2, trim, when
+from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, expr, lit, row_number, sha2, trim, when
 from pyspark.sql.window import Window
 
 spark = SparkSession.builder.getOrCreate()
-spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
 
 try:
     spark.sql("CREATE SCHEMA IF NOT EXISTS {silver_schema}")
@@ -531,6 +531,10 @@ PII_COLUMNS = {_safe_python_list(pii_columns)}
 KEY_COLUMNS = {_safe_python_list(key_columns)}
 CAST_RULES = {repr(cast_rules)}
 COLUMN_ALIASES = {repr(column_aliases)}
+
+def _try_cast_column(column_name, target_type):
+    escaped_name = column_name.replace("`", "``")
+    return expr(f"try_cast(`{{escaped_name}}` AS {{target_type}})")
 
 if not spark.catalog.tableExists(SOURCE_TABLE):
     raise ValueError(f"Missing bronze source table: {{SOURCE_TABLE}}")
@@ -562,18 +566,24 @@ available_by_compact = {{
 if EXPECTED_COLUMNS:
     select_expressions = []
     missing_columns = []
+    selected_output_columns = set()
     for expected_name in EXPECTED_COLUMNS:
+        if expected_name in selected_output_columns:
+            continue
         actual_name = available_by_compact.get(compact_name(expected_name))
         if actual_name:
             select_expressions.append(col(actual_name).alias(expected_name))
+            selected_output_columns.add(expected_name)
         else:
             missing_columns.append(expected_name)
 else:
+    selected_output_columns = set()
     select_expressions = [
         col(name)
         for name in df.columns
         if name not in metadata_columns
     ]
+    selected_output_columns.update(name for name in df.columns if name not in metadata_columns)
     missing_columns = []
 
 if not select_expressions:
@@ -582,7 +592,7 @@ if not select_expressions:
         f"Available columns: {{df.columns}}"
     )
 
-metadata_expressions = [col(name) for name in metadata_columns]
+metadata_expressions = [col(name) for name in metadata_columns if name not in selected_output_columns]
 df = df.select(*select_expressions, *metadata_expressions)
 
 if missing_columns:
@@ -597,7 +607,7 @@ for column_name in STRING_COLUMNS:
 
 for column_name, target_type in CAST_RULES.items():
     if column_name in df.columns:
-        df = df.withColumn(column_name, col(column_name).cast(target_type))
+        df = df.withColumn(column_name, _try_cast_column(column_name, target_type))
 
 for column_name in PII_COLUMNS:
     if column_name in df.columns:
@@ -1227,6 +1237,128 @@ def _dimension_columns(
     return dimensions[:12]
 
 
+def _max_gold_dimension_tables() -> int:
+    try:
+        return max(0, int(os.getenv("ATHENA_GOLD_MAX_DIMENSION_TABLES", str(DEFAULT_MAX_GOLD_DIMENSION_TABLES))))
+    except ValueError:
+        return DEFAULT_MAX_GOLD_DIMENSION_TABLES
+
+
+def _canonical_gold_column(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return COLUMN_NAME_CORRECTIONS.get(normalized, normalized)
+
+
+def _constrain_gold_mapping(
+    mapping: Dict[str, Any], silver_tables: Dict[str, str]
+) -> tuple[Dict[str, Any], List[str]]:
+    """Keep Gold lineage executable against registered Silver outputs."""
+    warnings: List[str] = []
+    measure = dict(mapping.get("measure") or {})
+    measure_table = str(measure.get("table") or "").strip().casefold()
+    source_table = silver_tables.get(measure_table)
+    if not source_table:
+        return {**mapping, "source_silver_table": None, "readiness": "BLOCKED"}, [
+            f"Gold measure table '{measure_table or 'unknown'}' has no generated Silver target."
+        ]
+
+    measure["column"] = _canonical_gold_column(measure.get("column"))
+    if measure.get("aggregation") != "COUNT" and measure.get("column"):
+        measure["expression"] = f"{measure.get('aggregation')}({measure['column']})"
+
+    dimensions: List[Dict[str, Any]] = []
+    table_scores: Dict[str, float] = {}
+    for dimension in mapping.get("grouping_dimensions") or []:
+        if not isinstance(dimension, dict):
+            continue
+        table = str(dimension.get("table") or measure_table).strip().casefold()
+        if table not in silver_tables:
+            warnings.append(f"Dropped Gold dimension from '{table}' because no Silver target exists.")
+            continue
+        normalized = {
+            **dimension,
+            "table": table,
+            "column": _canonical_gold_column(dimension.get("column")),
+            "source_silver_table": silver_tables[table],
+        }
+        dimensions.append(normalized)
+        if str(dimension.get("semantic_type") or "").upper() != "DATE":
+            table_scores[table] = table_scores.get(table, 0.0) + 100.0
+
+    valid_joins: List[Dict[str, Any]] = []
+    for join in mapping.get("join_paths") or []:
+        if not isinstance(join, dict) or not join.get("certified"):
+            continue
+        left = str(join.get("left_table") or "").strip().casefold()
+        right = str(join.get("right_table") or "").strip().casefold()
+        if left not in silver_tables or right not in silver_tables:
+            warnings.append(f"Dropped Gold join '{left}->{right}' because a Silver target is unavailable.")
+            continue
+        try:
+            confidence = float(join.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        table_scores[left] = table_scores.get(left, 0.0) + confidence * 10
+        table_scores[right] = table_scores.get(right, 0.0) + confidence * 10
+        valid_joins.append({
+            **join,
+            "left_table": left,
+            "left_column": _canonical_gold_column(join.get("left_column")),
+            "left_source_table": silver_tables[left],
+            "right_table": right,
+            "right_column": _canonical_gold_column(join.get("right_column")),
+            "right_source_table": silver_tables[right],
+            "certified": True,
+        })
+
+    ranked_dimension_tables = sorted(table_scores, key=lambda table: (-table_scores[table], table))
+    kept_dimension_tables = set(ranked_dimension_tables[:_max_gold_dimension_tables()])
+    dropped_dimension_tables = [table for table in ranked_dimension_tables if table not in kept_dimension_tables]
+    if dropped_dimension_tables:
+        warnings.append(f"Gold dimension table cap applied; dropped {', '.join(dropped_dimension_tables)}.")
+    dimensions = [
+        item
+        for item in dimensions
+        if str(item.get("semantic_type") or "").upper() == "DATE"
+        or str(item.get("table") or "").casefold() in kept_dimension_tables
+    ]
+    allowed_join_tables = {measure_table, *kept_dimension_tables}
+    valid_joins = [
+        join
+        for join in valid_joins
+        if join["left_table"] in allowed_join_tables and join["right_table"] in allowed_join_tables
+    ]
+
+    time_info = dict(mapping.get("time") or {})
+    time_column = time_info.get("column")
+    if isinstance(time_column, dict):
+        time_table = str(time_column.get("table") or measure_table).strip().casefold()
+        if time_table in silver_tables:
+            time_info["column"] = {
+                **time_column,
+                "table": time_table,
+                "column": _canonical_gold_column(time_column.get("column")),
+            }
+        else:
+            time_info["column"] = None
+            warnings.append(f"Dropped Gold time column from '{time_table}' because no Silver target exists.")
+
+    fact_grain = [str(item.get("column") or "") for item in dimensions if item.get("column")]
+    if time_info.get("column"):
+        fact_grain.append("period_start")
+    return {
+        **mapping,
+        "source_silver_table": source_table,
+        "measure": measure,
+        "grouping_dimensions": dimensions,
+        "time": time_info,
+        "join_paths": valid_joins,
+        "fact_grain": list(dict.fromkeys(fact_grain)),
+        "dimension_table_limit": _max_gold_dimension_tables(),
+        "selected_dimension_tables": sorted(kept_dimension_tables),
+    }, warnings
+
+
 def _time_column(columns: List[Dict[str, Any]], measure_table: str | None) -> Dict[str, str] | None:
     date_columns = [
         column for column in columns
@@ -1518,6 +1650,11 @@ def _build_gold_generation_contract(
     else:
         joins = []
         fallback_joins = []
+    joins = [
+        join
+        for join in joins
+        if isinstance(join, dict) and join.get("certified") is True
+    ]
     certified_kpis = state.get("certified_kpis") or enriched_metadata.get("certified_kpis") or []
     silver_tables = _silver_tables_by_name(results)
     warnings: List[str] = []
@@ -1595,6 +1732,8 @@ def _build_gold_generation_contract(
                     logger.warning("Kimball plan rejected for KPI %s; deterministic fallback retained: %s", kpi_name, retry_exc)
         else:
             mapping["kimball_plan_source"] = "DETERMINISTIC"
+        mapping, mapping_warnings = _constrain_gold_mapping(mapping, silver_tables)
+        warnings.extend(f"KPI '{kpi_name}': {warning}" for warning in mapping_warnings)
         kpi_mappings.append(mapping)
 
     status = "READY"

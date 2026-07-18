@@ -47,3 +47,27 @@ def test_running_progress_checkpoint_saves_are_throttled(monkeypatch):
     assert saved[1][1]["snowflake_bronze_execution_status"] == "COMPLETED"
     assert saved[1][1]["background_stage"] is None
     assert saved[1][1]["failed_background_stage"] is None
+
+
+def test_completed_gold_progress_marks_pipeline_completed(monkeypatch):
+    saved = []
+    pipeline_runtime = types.ModuleType("services.pipeline_runtime")
+    pipeline_runtime.save_checkpoint_state = lambda run_id, state: saved.append((run_id, state))
+
+    monkeypatch.setitem(sys.modules, "services.pipeline_runtime", pipeline_runtime)
+
+    state = external_execution_progress.save_external_execution_progress(
+        {"run_id": "run-gold", "status": "RUNNING", "background_stage": "gold_code_execution"},
+        run_id="run-gold",
+        platform="databricks",
+        layer="gold",
+        stage_key="gold_code_execution",
+        status="COMPLETED",
+        total_count=1,
+        completed_count=1,
+    )
+
+    assert state["status"] == "PIPELINE_COMPLETED"
+    assert state["background_stage"] is None
+    assert state["databricks_gold_execution_status"] == "COMPLETED"
+    assert saved[-1][1]["status"] == "PIPELINE_COMPLETED"

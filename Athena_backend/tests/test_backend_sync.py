@@ -254,6 +254,27 @@ def test_snowflake_bronze_review_submission_reports_execution_stage(monkeypatch)
     assert submitted == {"run_id": "run-bronze-transition", "stage": "bronze_code_execution"}
 
 
+def test_databricks_bronze_review_reports_merge_key_stage_when_execution_disabled(monkeypatch):
+    submitted = {}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "source": "database", "target_warehouse": "databricks"},
+    )
+    monkeypatch.setattr("services.databricks_runtime.databricks_bronze_execution_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: submitted.update({"run_id": run_id, "stage": stage}),
+    )
+
+    response = client.post(
+        "/bronze-reviews/run-databricks-merge-transition",
+        json={"action": "APPROVED", "review_artifact": {"feeds": [{"table": "claims"}]}},
+    )
+
+    assert response.status_code == 200
+    assert submitted == {"run_id": "run-databricks-merge-transition", "stage": "silver_merge_key_review"}
+
+
 def test_silver_merge_review_submission_reports_generation_stage(monkeypatch):
     submitted = {}
     monkeypatch.setattr(

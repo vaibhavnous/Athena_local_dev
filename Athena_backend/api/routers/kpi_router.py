@@ -58,6 +58,57 @@ def kpi_reviews(run_id: str, status: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
+@router.post("/kpi-reviews/{run_id}")
+def create_kpi_review(run_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    name = str((payload or {}).get("name") or "").strip()
+    definition = str((payload or {}).get("definition") or "").strip()
+    if not name or not definition:
+        raise HTTPException(status_code=400, detail="KPI name and description are required.")
+    if len(name) > 250 or len(definition) > 5000:
+        raise HTTPException(status_code=400, detail="KPI name or description is too long.")
+
+    kpi = {
+        "name": name,
+        "kpi_name": name,
+        "definition": definition,
+        "kpi_description": definition,
+        "category": str(payload.get("category") or "Business KPI"),
+        "domain": str(payload.get("domain") or "Athena"),
+        "derivation_type": "reviewer_authored",
+        "grounding_status": "HUMAN_AUTHORED",
+    }
+    if demo_enabled():
+        return {
+            "id": f"{run_id}:1:manual-demo",
+            "queue_id": f"{run_id}:1:manual-demo",
+            "item_id": f"{run_id}:1:manual-demo",
+            "run_id": run_id,
+            "item_type": "KPI",
+            "status": "PENDING_REVIEW",
+            "name": name,
+            "definition": definition,
+            "kpi_detail": kpi,
+        }
+
+    from api.services.kpi_service import map_kpi
+    from services.pipeline_runtime import load_checkpoint_state
+    from utilis.db import get_pending_items, insert_hitl_queue_item
+
+    checkpoint = load_checkpoint_state(run_id) or {}
+    if not checkpoint:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    if int(checkpoint.get("next_gate") or 0) != 1 and not get_pending_items(run_id, 1):
+        raise HTTPException(status_code=409, detail="KPIs can only be added while KPI Review is pending.")
+
+    try:
+        item_id = insert_hitl_queue_item(run_id, kpi, gate_number=1)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Failed to add KPI to the review queue.") from exc
+
+    logger.info("Reviewer-authored KPI added", extra={"run_id": run_id, "queue_id": item_id})
+    return map_kpi(kpi, run_id=run_id, item_id=item_id, status="PENDING", source=checkpoint.get("source"))
+
+
 # -------------------------
 # Approve KPI
 # -------------------------
@@ -213,8 +264,9 @@ def submit_hitl_decisions(run_id: str, payload: HitlDecisionPayload) -> Dict[str
 
         try:
             if status == "EDITED":
-                edited = {
+                edited = decision.edited_content or {
                     "definition": decision.edited_definition,
+                    "kpi_description": decision.edited_definition,
                     "notes": decision.notes,
                 }
                 update_hitl_item(decision.kpi_id, "APPROVED", edited_content=json.dumps(edited))

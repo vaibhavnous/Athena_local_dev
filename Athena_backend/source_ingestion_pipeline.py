@@ -26,20 +26,29 @@ from sftp_nodes.gold_code_generation import sftp_gold_code_generation_node
 from state import Stage01State
 
 
+def _visible_stage(stage_key, runner):
+    def run(state):
+        from services.pipeline_runtime import run_with_minimum_stage_runtime
+
+        return run_with_minimum_stage_runtime(stage_key, runner, state)
+
+    return run
+
+
 def build_source_ingestion_graph():
     graph = StateGraph(Stage01State)
 
-    graph.add_node("source_ingestion", source_ingestion_node)
-    graph.add_node("ingestion_context_setup", sftp_ingestion_node)
-    graph.add_node("req_extraction", sftp_req_extraction_node)
-    graph.add_node("kpi_extraction", sftp_kpi_extraction_node)
+    graph.add_node("source_ingestion", _visible_stage("discovery", source_ingestion_node))
+    graph.add_node("ingestion_context_setup", _visible_stage("ingestion", sftp_ingestion_node))
+    graph.add_node("req_extraction", _visible_stage("requirements", sftp_req_extraction_node))
+    graph.add_node("kpi_extraction", _visible_stage("kpis", sftp_kpi_extraction_node))
     graph.add_node("sftp_gate1", sftp_gate1_node)
     graph.add_node("feed_discovery", sftp_feed_discovery_node)
     graph.add_node("feed_nomination", sftp_feed_nomination_node)
     graph.add_node("sftp_gate2", sftp_gate2_node)
-    graph.add_node("file_metadata_discovery", file_metadata_discovery_node)
+    graph.add_node("file_metadata_discovery", _visible_stage("schema", file_metadata_discovery_node))
     graph.add_node("column_profiling", sftp_column_profiling_node)
-    graph.add_node("semantic_enrichment", sftp_semantic_enrichment_node)
+    graph.add_node("semantic_enrichment", _visible_stage("enrichment", sftp_semantic_enrichment_node))
     graph.add_node("sftp_gate3", sftp_gate3_node)
     graph.add_node("source_access_readiness_check", source_access_readiness_check_node)
     graph.add_node("bronze_code_generation", sftp_bronze_code_generation_node)

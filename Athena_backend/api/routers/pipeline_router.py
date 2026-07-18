@@ -18,6 +18,15 @@ RUN_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHEN
 def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
     checkpoint = checkpoint or {}
     result_state = str(checkpoint.get("status") or status or "RUNNING")
+    if (
+        not checkpoint.get("background_stage")
+        and result_state.upper() in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
+        and (
+            str(checkpoint.get("databricks_gold_execution_status") or "").upper() == "COMPLETED"
+            or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
+        )
+    ):
+        result_state = "PIPELINE_COMPLETED"
     return {
         "run_id": run_id,
         "status": result_state,
@@ -42,10 +51,16 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "external_execution": checkpoint.get("external_execution"),
             "snowflake_bronze_execution_status": checkpoint.get("snowflake_bronze_execution_status"),
             "snowflake_bronze_execution_progress": checkpoint.get("snowflake_bronze_execution_progress"),
+            "databricks_bronze_execution_status": checkpoint.get("databricks_bronze_execution_status"),
+            "databricks_bronze_execution_progress": checkpoint.get("databricks_bronze_execution_progress"),
             "snowflake_silver_execution_status": checkpoint.get("snowflake_silver_execution_status"),
             "snowflake_silver_execution_progress": checkpoint.get("snowflake_silver_execution_progress"),
+            "databricks_silver_execution_status": checkpoint.get("databricks_silver_execution_status"),
+            "databricks_silver_execution_progress": checkpoint.get("databricks_silver_execution_progress"),
             "snowflake_gold_execution_status": checkpoint.get("snowflake_gold_execution_status"),
             "snowflake_gold_execution_progress": checkpoint.get("snowflake_gold_execution_progress"),
+            "databricks_gold_execution_status": checkpoint.get("databricks_gold_execution_status"),
+            "databricks_gold_execution_progress": checkpoint.get("databricks_gold_execution_progress"),
             "next_gate": checkpoint.get("next_gate"),
             "next_review_key": checkpoint.get("next_review_key"),
             "resume_message": checkpoint.get("resume_message"),
@@ -54,6 +69,10 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "failed_stage_label": checkpoint.get("failed_stage_label"),
             "error": checkpoint.get("error"),
             "updated_at": checkpoint.get("updated_at") or checkpoint.get("checkpoint_at"),
+            "compliance_enabled": bool(checkpoint.get("compliance_enabled")),
+            "compliance_assessment_id": checkpoint.get("compliance_assessment_id"),
+            "compliance_assessment_status": checkpoint.get("compliance_assessment_status"),
+            "compliance_review_status": checkpoint.get("compliance_review_status"),
         },
     }
 
@@ -110,6 +129,13 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest) -> None:
                 if existing.get("stage_confirmation_enabled") is not None
                 else bool(payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else False)
             ),
+            "compliance_enabled": (
+                existing.get("compliance_enabled")
+                if existing.get("compliance_enabled") is not None
+                else bool(payload.compliance_enabled if payload.compliance_enabled is not None else False)
+            ),
+            "compliance_domain": existing.get("compliance_domain") or payload.compliance_domain or "Insurance",
+            "compliance_countries": existing.get("compliance_countries") or payload.compliance_countries or ["US"],
         },
     )
 
@@ -202,7 +228,12 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
 
     run_id = str(uuid.uuid4())
 
-    logger.info("Pipeline run requested", extra={"run_id": run_id, "source": source})
+    logger.info(
+        "Pipeline run requested source=%s compliance_enabled=%s",
+        source,
+        bool(payload.compliance_enabled),
+        extra={"run_id": run_id, "source": source},
+    )
 
     try:
         _seed_run_checkpoint(run_id, payload)
