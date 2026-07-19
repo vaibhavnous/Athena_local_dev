@@ -285,12 +285,12 @@ def runs() -> List[Dict[str, Any]]:
         return results
 
     except FutureTimeoutError:
-        logger.warning("GET /runs timed out while listing runs; returning empty list")
+        logger.warning("GET /runs timed out while listing runs")
         try:
             future.cancel()
         except Exception:
             pass
-        return []
+        raise HTTPException(status_code=503, detail="Run list temporarily unavailable")
 
     except Exception:
         logger.error("Failed to fetch runs", exc_info=True)

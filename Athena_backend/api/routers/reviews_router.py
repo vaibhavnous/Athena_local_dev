@@ -353,7 +353,7 @@ def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
 # -------------------------
 @router.get("/silver-merge-key-reviews/{run_id}")
 def silver_merge_key_reviews(run_id: str) -> Dict[str, Any]:
-    from services.pipeline_runtime import load_checkpoint_state
+    from services.pipeline_runtime import _silver_merge_key_review_artifact, load_checkpoint_state
 
     try:
         run = load_checkpoint_state(run_id) or {}
@@ -366,7 +366,7 @@ def silver_merge_key_reviews(run_id: str) -> Dict[str, Any]:
         "next_gate": run.get("next_gate"),
         "next_review_key": run.get("next_review_key"),
         "resume_message": run.get("resume_message"),
-        "silver_merge_key_review_artifact": run.get("silver_merge_key_review_artifact") or {},
+        "silver_merge_key_review_artifact": _silver_merge_key_review_artifact(run),
     }
 
 

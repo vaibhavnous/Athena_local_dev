@@ -1,12 +1,11 @@
 // @ts-nocheck
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Outlet, useLocation } from 'react-router-dom'
+import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, Clock3, PlayCircle, X } from 'lucide-react'
 import Sidebar from './Sidebar'
 import Topbar from './Topbar'
 import StageGateDialog from '../pipeline/StageGateDialog'
-import HitlQueue from '../../pages/HitlQueue'
 import useAthenaStore from '../../store/useAthenaStore'
 import usePipelineSocket from '../../hooks/usePipelineSocket'
 import { abortRun, continueStage, getRun, getRuns } from '../../api/athenaApi'
@@ -47,6 +46,7 @@ function persistJsonMap(key, value) {
  * Manages the notification toast stack.
  */
 function AppShell() {
+  const navigate = useNavigate()
   const location = useLocation()
   const {
     runs,
@@ -79,7 +79,6 @@ function AppShell() {
   const [readyPausedBannerKey, setReadyPausedBannerKey] = useState<string | null>(null)
   const [verifiedPausedBannerKey, setVerifiedPausedBannerKey] = useState<string | null>(null)
   const [stageGateBusy, setStageGateBusy] = useState(false)
-  const [openReviewDialogKey, setOpenReviewDialogKey] = useState<string | null>(null)
 
   useLayoutEffect(() => {
     mainScrollRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' })
@@ -206,7 +205,6 @@ function AppShell() {
       setPausedRunDetail(null)
       setReadyPausedBannerKey(null)
       setVerifiedPausedBannerKey(null)
-      setOpenReviewDialogKey(null)
       return
     }
 
@@ -362,8 +360,9 @@ function AppShell() {
 
     const timer = window.setTimeout(() => {
       if (!isPausedBannerStillCurrent(pausedBannerKey)) return
-      setActiveRun(pausedRunDetail.id || pausedRun.id)
-      setOpenReviewDialogKey(pausedBannerKey)
+      const reviewRun = pausedRunDetail || pausedRun
+      setActiveRun(reviewRun.id || reviewRun.run_id)
+      navigate(reviewPathForPausedRun(reviewRun))
       addNotification({
         type: 'amber',
         title: `${pausedGateLabel} opened automatically`,
@@ -380,6 +379,7 @@ function AppShell() {
   }, [
     addNotification,
     isPausedBannerStillCurrent,
+    navigate,
     pausedBannerKey,
     pausedGateLabel,
     pausedResumeMessage,
@@ -445,7 +445,7 @@ function AppShell() {
   const handleResumePausedRun = () => {
     if (!pausedRun) return
     setActiveRun(pausedRun.id)
-    setOpenReviewDialogKey(pausedBannerKey)
+    navigate(reviewPathForPausedRun(pausedRun))
   }
 
   const activeRun = activeRunId ? runs.find((run) => run.id === activeRunId) : null
@@ -590,24 +590,6 @@ function AppShell() {
         busy={stageGateBusy}
       />
 
-      <AnimatePresence>
-        {openReviewDialogKey && openReviewDialogKey === pausedBannerKey && pausedRunDetail && (
-          <>
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm" />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.98, y: 12 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.98, y: 12 }}
-              className="fixed inset-0 z-[61] flex items-center justify-center p-3 sm:p-6"
-            >
-              <div className="h-full w-full max-w-[1500px] overflow-hidden rounded-2xl border border-bg-border bg-[#080e1d] shadow-2xl">
-                <HitlQueue onClose={() => setOpenReviewDialogKey(null)} />
-              </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
-
       {/* Toast notification stack */}
       <div className="pointer-events-none fixed inset-x-3 bottom-3 z-50 flex flex-col gap-2 sm:inset-x-auto sm:bottom-6 sm:right-6 sm:w-full sm:max-w-[380px]">
         <AnimatePresence initial={false}>
@@ -685,6 +667,14 @@ function isReviewPausedRun(run) {
     status !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
     reviewStatuses.includes(status)
   )
+}
+
+function reviewPathForPausedRun(run) {
+  const runId = encodeURIComponent(run.id || run.run_id)
+  if (run?.next_review_key) {
+    return `/app/hitl?runId=${runId}&review=${encodeURIComponent(run.next_review_key)}`
+  }
+  return `/app/hitl?runId=${runId}&gate=${Number(run.next_gate || 0)}`
 }
 
 /** Individual toast card */

@@ -324,9 +324,13 @@ def continue_database_pipeline(
             "background_stage": current_stage_key,
             "awaiting_stage_confirmation": False,
             "error": None,
+            "error_type": None,
+            "error_message": None,
             "failed_stage": None,
+            "failed_stage_label": None,
             "error_stage": None,
             "failed_background_stage": None,
+            "interrupted_by_backend_restart": False,
             "resume_message": f"{DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key)} is running.",
         }
         logger.info(
@@ -1600,8 +1604,11 @@ def build_pipeline_steps(
             {
                 "key": "silver_merge_key_resolution",
                 "label": "Silver Merge Key Resolution",
-                "complete": bool(checkpoint.get("bronze_review_artifact")),
-                "detail": "Merge keys resolved from Gate 4 Bronze review",
+                "complete": bool(
+                    checkpoint.get("silver_merge_key_resolution_status") == "COMPLETED"
+                    or checkpoint.get("silver_merge_key_resolution_artifact")
+                ),
+                "detail": "Merge keys resolved from certified semantic metadata",
             },
             {
                 "key": "silver_merge_key_review",
@@ -1785,8 +1792,11 @@ def build_pipeline_steps(
         {
             "key": "silver_merge_key_resolution",
             "label": "Silver Merge Key Resolution",
-            "complete": bool(checkpoint.get("bronze_review_artifact") or checkpoint.get("gate4_reviewed_merge_keys")),
-            "detail": "Merge keys resolved from Gate 4 Bronze review",
+            "complete": bool(
+                checkpoint.get("silver_merge_key_resolution_status") == "COMPLETED"
+                or checkpoint.get("silver_merge_key_resolution_artifact")
+            ),
+            "detail": "Merge keys resolved from certified semantic metadata",
         },
         {
             "key": "silver_merge_key_review",
@@ -2575,7 +2585,7 @@ def _apply_gate4_merge_keys_to_metadata(metadata: Dict[str, Any], review_artifac
         return metadata
 
     keys_by_table = {
-        str(feed.get("entity") or feed.get("table_name") or feed.get("target_table") or "").split(".")[-1].strip().lower(): {
+        str(feed.get("table") or feed.get("entity") or feed.get("table_name") or feed.get("target_table") or "").split(".")[-1].strip().lower(): {
             str(key).strip().lower()
             for key in (feed.get("primary_keys") or feed.get("merge_keys") or [])
             if str(key).strip()
@@ -2601,7 +2611,16 @@ def _apply_gate4_merge_keys_to_metadata(metadata: Dict[str, Any], review_artifac
 
 def _silver_merge_key_review_artifact(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
     artifact = checkpoint.get("silver_merge_key_review_artifact")
-    if isinstance(artifact, dict) and artifact.get("feeds"):
+    feeds = artifact.get("feeds") if isinstance(artifact, dict) else []
+    has_selected_keys = any(
+        isinstance(feed, dict) and (feed.get("merge_keys") or feed.get("primary_keys"))
+        for feed in feeds
+    )
+    has_enriched_shape = bool(feeds) and all(
+        isinstance(feed, dict) and "merge_key_source" in feed and "merge_key_candidates" in feed
+        for feed in feeds
+    )
+    if has_selected_keys or has_enriched_shape:
         return artifact
 
     from nodes.silver_merge_key_resolution import silver_merge_key_resolution_node

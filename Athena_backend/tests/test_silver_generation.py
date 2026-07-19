@@ -171,7 +171,7 @@ def test_gate4_review_clears_unselected_inferred_merge_keys():
             {"table_name": "claims", "column_name": "policy_number", "semantic_type": "ID", "is_join_key": True},
         ]
     }
-    review = {"feeds": [{"entity": "claims", "primary_keys": ["policy_number"]}]}
+    review = {"feeds": [{"table": "claims", "primary_keys": ["policy_number"]}]}
 
     reviewed = pipeline_runtime._apply_gate4_merge_keys_to_metadata(metadata, review)
     columns_by_name = {item["column_name"]: item for item in reviewed["columns"]}

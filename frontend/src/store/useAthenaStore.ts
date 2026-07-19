@@ -274,6 +274,9 @@ const useAthenaStore = create<AthenaState>((set, get) => ({
   setRuns: (runs) =>
     set((state) => {
       const backendRuns = Array.isArray(runs) ? runs : []
+      // Keep the last valid snapshot when polling temporarily returns no history.
+      if (backendRuns.length === 0 && state.runs.length > 0) return state
+
       const existingById = new Map(state.runs.map((run) => [run.id, run]))
       const activeRunId = state.activeRunId
       const activeExisting =

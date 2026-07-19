@@ -1,6 +1,12 @@
 name: Deploy Backend to Astra Data
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - Athena_backend/**
+      - .github/workflows/main_Astra-data.yml
   workflow_dispatch:
 
 concurrency:

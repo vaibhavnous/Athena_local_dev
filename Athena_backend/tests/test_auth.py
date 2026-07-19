@@ -124,3 +124,23 @@ def test_legacy_primary_admin_password_can_bootstrap(monkeypatch):
     session = service.login("admin@astra.local", "admin123")
 
     assert session.user.can_manage_accounts is True
+
+
+def test_existing_primary_admin_password_syncs_from_env(monkeypatch):
+    monkeypatch.setenv("ASTRA_AUTH_EMAIL", "admin@astra.local")
+    monkeypatch.setenv("ASTRA_AUTH_USERNAME", "Primary Admin")
+    monkeypatch.setenv("ASTRA_AUTH_PASSWORD", "NewAdminPass!234")
+    monkeypatch.setenv("ASTRA_JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
+    repository = FakeAuthRepository()
+    repository.create_user(
+        uid=str(uuid.uuid4()),
+        username="Primary Admin",
+        email="admin@astra.local",
+        password_hash=AuthService._hash_password("OldAdminPass!234"),
+        user_type="Admin",
+    )
+    service = AuthService(repository)
+
+    session = service.login("admin@astra.local", "NewAdminPass!234")
+
+    assert session.user.can_manage_accounts is True

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
@@ -610,6 +611,56 @@ def test_databricks_gold_execution_runs_dimensions_first_and_skips_blocked():
     assert scripts[0]["script_body"] == "print('dimensions')"
 
 
+def test_databricks_gold_submits_approved_scripts_as_one_batch(monkeypatch):
+    monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
+    monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_EXECUTION_MODE", raising=False)
+    monkeypatch.delenv("ATHENA_DATABRICKS_EXECUTION_MODE", raising=False)
+    monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_: None)
+    monkeypatch.setattr(databricks_runtime, "_workspace_import_notebook", lambda *_: {})
+    submitted = []
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_submit_run",
+        lambda path, **kwargs: submitted.append((path, kwargs)) or {"run_id": 42},
+    )
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_wait_for_run",
+        lambda *_: {"run_id": 42, "result_state": "SUCCESS"},
+    )
+    monkeypatch.setattr(databricks_runtime, "_task_run_id", lambda *_: 42)
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_get_run_output",
+        lambda *_: {
+            "notebook_output": {
+                "result": json.dumps({
+                    "status": "SUCCESS",
+                    "results": [
+                        {"script_name": "gold_fact_one", "status": "SUCCESS"},
+                        {"script_name": "gold_fact_two", "status": "SUCCESS"},
+                    ],
+                })
+            }
+        },
+    )
+    monkeypatch.setattr(databricks_runtime, "save_external_execution_progress", lambda state, **_: state)
+
+    result = databricks_runtime.run_databricks_gold_scripts({
+        "run_id": "run-batch-gold",
+        "target_warehouse": "databricks",
+        "gold_generation_results": [
+            {"status": "APPROVED", "script_body": "print('one')", "target_table": "gold.fact_one"},
+            {"status": "APPROVED", "script_body": "print('two')", "target_table": "gold.fact_two"},
+            {"status": "BLOCKED", "target_table": "gold.fact_blocked"},
+        ],
+    })
+
+    assert len(submitted) == 1
+    assert submitted[0][1]["run_name"] == "Athena gold batch run-batch-gold"
+    assert len(result["databricks_gold_execution_results"]) == 2
+
+
 def test_gold_measure_scoring_rejects_operational_counters_for_money_kpis():
     columns = [
         {"table_name": "payments", "column_name": "updatenum", "semantic_type": "MEASURE", "is_measure": True},
@@ -665,7 +716,7 @@ def test_databricks_gold_failure_persists_exact_script_and_stage(monkeypatch):
     assert failed_state["failed_background_stage"] == "gold_code_execution"
     assert failed_state["error"].endswith("missing gold.dim_claims")
     assert failed_progress["status"] == "FAILED"
-    assert failed_progress["current_name"] == "gold_fact_claims"
+    assert failed_progress["total_count"] == 1
 
 
 def test_databricks_gold_llm_retries_then_uses_deterministic_fallback(monkeypatch):

@@ -3489,6 +3489,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
 
 function CodeReviewSummary({ item, onMergeKeysChange }) {
   const keys = item.mergeKeys || item.primaryKeys || []
+  const candidates = (item.mergeKeyCandidates || []).filter((candidate) => !keys.includes(candidate))
   const canEditMergeKeys = item.type === 'BRONZE' || item.mergeKeysEditable
   const fields = [
     ['Target', item.target],
@@ -3506,14 +3507,19 @@ function CodeReviewSummary({ item, onMergeKeysChange }) {
             {item.type === 'BRONZE' ? 'Resolve Merge Keys' : 'Resolved Merge Keys'}
           </div>
           {canEditMergeKeys ? (
-            <input
-              value={keys.join(', ')}
-              onChange={(event) => onMergeKeysChange?.(
-                event.target.value.split(',').map((value) => value.trim()).filter(Boolean)
-              )}
-              className="h-10 w-full rounded-lg border border-[#31415f] bg-[#0a1220] px-3 font-mono text-xs text-[#d7e2f2] outline-none focus:border-[#78a9ff]"
-              placeholder="ClaimID, PaymentID"
-            />
+            <>
+              <input
+                value={keys.join(', ')}
+                onChange={(event) => onMergeKeysChange?.(
+                  event.target.value.split(',').map((value) => value.trim()).filter(Boolean)
+                )}
+                className="h-10 w-full rounded-lg border border-[#31415f] bg-[#0a1220] px-3 font-mono text-xs text-[#d7e2f2] outline-none focus:border-[#78a9ff]"
+                placeholder={candidates.length ? candidates.join(', ') : 'ClaimID, PaymentID'}
+              />
+              <div className="mt-2 text-[11px] text-[#91a4cb]">
+                Source: {item.mergeKeySource || 'manual review'}
+              </div>
+            </>
           ) : (
             <div className="flex flex-wrap gap-2">
               {keys.map((key) => (
@@ -3523,6 +3529,24 @@ function CodeReviewSummary({ item, onMergeKeysChange }) {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {candidates.length > 0 && (
+        <div className="mt-3 border-t border-[#22304b] pt-3">
+          <div className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[#9ca9bd]">Suggested candidates</div>
+          <div className="flex flex-wrap gap-2">
+            {candidates.map((candidate) => (
+              <button
+                key={`${item.key}:candidate:${candidate}`}
+                type="button"
+                onClick={() => onMergeKeysChange?.([...keys, candidate])}
+                className="rounded-md border border-[#31415f] bg-[#101827] px-2 py-1 font-mono text-[10px] text-[#aab8d0] hover:border-[#69a0ff] hover:text-white"
+              >
+                + {candidate}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -3568,6 +3592,8 @@ function buildSilverMergeKeyReviewItems(feeds) {
     fileName: `${feed.entity || feed.feed_name || `merge_key_review_${index + 1}`}.py`,
     primaryKeys: feed.primary_keys || feed.merge_keys || [],
     mergeKeys: feed.merge_keys || feed.primary_keys || [],
+    mergeKeyCandidates: feed.merge_key_candidates || [],
+    mergeKeySource: feed.merge_key_source,
     target: feed.target_table || feed.bronze_output_path,
     source: feed.landing_path || feed.source_type,
     strategy: 'Silver merge-key approval',

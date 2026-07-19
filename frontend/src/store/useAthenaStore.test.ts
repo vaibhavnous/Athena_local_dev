@@ -74,3 +74,13 @@ test('keeps detailed HITL status when history refresh returns an UNKNOWN summary
     pipeline_steps: [{ key: 'gate3', state: 'HITL_WAIT' }],
   })
 })
+
+test('keeps known runs when polling returns a transient empty snapshot', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({ id: 'run-4', status: 'RUNNING' })
+
+  useAthenaStore.getState().setRuns([])
+
+  expect(useAthenaStore.getState().runs).toEqual([{ id: 'run-4', status: 'RUNNING' }])
+  expect(useAthenaStore.getState().activeRunId).toBe('run-4')
+})

@@ -88,10 +88,10 @@ def _databricks_execution_mode(layer: str) -> str:
     raw = (
         os.getenv(f"ATHENA_DATABRICKS_{layer_name}_EXECUTION_MODE")
         or os.getenv("ATHENA_DATABRICKS_EXECUTION_MODE")
-        or ("batch" if layer_name in {"BRONZE", "SILVER"} else "per_script")
+        or "batch"
     )
     mode = str(raw or "").strip().lower()
-    return mode if mode in {"batch", "per_script"} else "per_script"
+    return mode if mode in {"batch", "per_script"} else "batch"
 
 
 def _workspace_root() -> str:

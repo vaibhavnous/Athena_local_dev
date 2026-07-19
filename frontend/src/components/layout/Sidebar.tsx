@@ -32,7 +32,7 @@ function Sidebar({ collapsed, onToggle, onNavigate, mobile = false }) {
     { to: '/app/data-discovery', icon: Sparkles, label: 'Data Discovery' },
     { to: '/app/run-history', icon: Clock3, label: 'Run History' },
     { to: '/app/data-quality', icon: Shield, label: 'Data Quality' },
-    { to: '/app/compliance-governance', icon: Shield, label: 'Compliance' },
+    { to: '/app/compliance-governance', icon: Shield, label: 'Compliance', disabled: true, badge: 'In Development' },
     { to: '/app/data-migration', icon: ArrowRightLeft, label: 'Data Migration' },
   ]
 
@@ -146,24 +146,39 @@ function NavItem({ item, collapsed, compact = false, onNavigate }) {
   const location = useLocation()
   const isActive = item.exact ? location.pathname === item.to : location.pathname.startsWith(item.to)
   const Icon = item.icon
+  const content = (
+    <>
+      <div className="flex h-[14.4px] w-[14.4px] flex-shrink-0 items-center justify-center">
+        <Icon size={14.4} strokeWidth={1.5} />
+      </div>
+      {!collapsed && <span className="truncate">{item.label}</span>}
+      {!collapsed && item.badge && (
+        <span className="ml-auto whitespace-nowrap rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[7px] font-bold uppercase tracking-wide text-amber-300">
+          {item.badge}
+        </span>
+      )}
+    </>
+  )
+
+  const className = `group flex h-[30.4px] w-full items-center gap-[9.6px] rounded-lg border px-[9.6px] text-[11.2px] font-medium transition-colors ${
+    item.disabled
+      ? 'cursor-not-allowed border-transparent text-slate-500'
+      : isActive
+        ? 'border-[#2f5fb2] bg-[#1f325d] text-[#3f82ff]'
+        : 'border-transparent text-slate-100 hover:bg-white/[0.05] hover:text-white'
+  } ${collapsed ? 'justify-center px-0' : ''}`
 
   return (
     <div className={`mb-[3.2px] ${compact ? 'px-0' : 'px-2'}`}>
-      <NavLink
-        to={item.to}
-        onClick={onNavigate}
-        title={collapsed ? item.label : undefined}
-        className={`group flex h-[30.4px] items-center gap-[9.6px] rounded-lg border px-[9.6px] text-[11.2px] font-medium transition-colors ${
-          isActive
-            ? 'border-[#2f5fb2] bg-[#1f325d] text-[#3f82ff]'
-            : 'border-transparent text-slate-100 hover:bg-white/[0.05] hover:text-white'
-        } ${collapsed ? 'justify-center px-0' : ''}`}
-      >
-        <div className="flex h-[14.4px] w-[14.4px] items-center justify-center">
-          <Icon size={14.4} strokeWidth={1.5} />
+      {item.disabled ? (
+        <div title={`${item.label} - ${item.badge}`} aria-disabled="true" className={className}>
+          {content}
         </div>
-        {!collapsed && <span className="truncate">{item.label}</span>}
-      </NavLink>
+      ) : (
+        <NavLink to={item.to} onClick={onNavigate} title={collapsed ? item.label : undefined} className={className}>
+          {content}
+        </NavLink>
+      )}
     </div>
   )
 }

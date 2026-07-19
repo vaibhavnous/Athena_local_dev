@@ -335,6 +335,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
       const newRun = {
         id: run.run_id,
         run_id: run.run_id,
+        project_id: project?.id || null,
+        project_name: project?.name || null,
         brd_filename: displayName,
         status: run.status || 'RUNNING',
         background_stage: 'ingestion',

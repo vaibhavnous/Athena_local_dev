@@ -215,7 +215,8 @@ class AuthService:
                     "Set ASTRA_AUTH_EMAIL, ASTRA_AUTH_USERNAME, and ASTRA_AUTH_PASSWORD before using authentication"
                 )
             normalized_email = self._normalize_email(email)
-            if not self.repository.find_by_email(normalized_email):
+            existing_admin = self.repository.find_by_email(normalized_email)
+            if not existing_admin:
                 try:
                     self.repository.create_user(
                         uid=str(uuid.uuid4()),
@@ -229,6 +230,30 @@ class AuthService:
                     # ponytail: tolerate two app workers racing to seed the same unique admin.
                     if not self.repository.find_by_email(normalized_email):
                         raise
+            else:
+                password_current = False
+                try:
+                    password_current = bcrypt.checkpw(
+                        password.encode("utf-8"), existing_admin["password_hash"].encode("utf-8")
+                    )
+                except ValueError:
+                    password_current = False
+
+                username = self._validate_username(username)
+                if (
+                    existing_admin["username"] != username
+                    or existing_admin["user_type"] != "Admin"
+                    or not password_current
+                ):
+                    self.repository.update_user(
+                        existing_admin["uid"],
+                        username=username,
+                        email=normalized_email,
+                        user_type="Admin",
+                        password_hash=None if password_current else self._hash_password(password),
+                    )
+                if not existing_admin["is_active"]:
+                    self.repository.set_active(existing_admin["uid"], True)
             self._jwt_secret()
             self._ready = True
 

@@ -129,16 +129,17 @@ def test_databricks_runtime_prefers_script_body_for_plan_artifacts():
     assert name == "workspace_bronze_vendor1_transactions_raw"
 
 
-def test_databricks_bronze_and_silver_default_to_batch_execution(monkeypatch):
+def test_databricks_layers_default_to_batch_execution(monkeypatch):
     from services import databricks_runtime
 
     monkeypatch.delenv("ATHENA_DATABRICKS_BRONZE_EXECUTION_MODE", raising=False)
     monkeypatch.delenv("ATHENA_DATABRICKS_SILVER_EXECUTION_MODE", raising=False)
+    monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_EXECUTION_MODE", raising=False)
     monkeypatch.delenv("ATHENA_DATABRICKS_EXECUTION_MODE", raising=False)
 
     assert databricks_runtime._databricks_execution_mode("bronze") == "batch"
     assert databricks_runtime._databricks_execution_mode("silver") == "batch"
-    assert databricks_runtime._databricks_execution_mode("gold") == "per_script"
+    assert databricks_runtime._databricks_execution_mode("gold") == "batch"
 
 
 def test_databricks_batch_driver_keeps_separate_script_targets(monkeypatch):

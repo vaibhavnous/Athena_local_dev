@@ -598,7 +598,7 @@ def test_retry_failed_stage_submits_file_resume(monkeypatch):
     assert recorded["background_fn"] == "continue_file_pipeline_job"
 
 
-def test_runs_returns_empty_list_on_timeout(monkeypatch):
+def test_runs_returns_503_on_timeout(monkeypatch):
     class StubFuture:
         def result(self, timeout):
             raise FutureTimeoutError()
@@ -611,8 +611,8 @@ def test_runs_returns_empty_list_on_timeout(monkeypatch):
 
     response = client.get("/runs")
 
-    assert response.status_code == 200
-    assert response.json() == []
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Run list temporarily unavailable"
 
 
 def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):

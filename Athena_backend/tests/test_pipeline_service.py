@@ -86,6 +86,54 @@ def test_silver_merge_key_resolution_node_builds_review_input():
     assert result["silver_merge_key_resolution_artifact"]["feeds"][0]["review_status"] == "PENDING"
 
 
+def test_silver_merge_key_resolution_derives_certified_keys_and_candidates():
+    from nodes.silver_merge_key_resolution import silver_merge_key_resolution_node
+
+    result = silver_merge_key_resolution_node({
+        "run_id": "run-derived-merge-keys",
+        "bronze_review_artifact": {
+            "feeds": [
+                {"table": "claims"},
+                {"table": "claim_lines"},
+            ],
+        },
+        "enriched_columns": [
+            {"table_name": "claims", "column_name": "ClaimID", "is_primary_key": True, "is_join_key": True},
+            {"table_name": "claims", "column_name": "PolicyID", "is_primary_key": False, "is_join_key": True},
+            {"table_name": "claim_lines", "column_name": "ClaimID", "is_primary_key": False, "is_join_key": True},
+        ],
+    })
+
+    artifact = result["silver_merge_key_resolution_artifact"]
+    claims, claim_lines = artifact["feeds"]
+    assert claims["merge_keys"] == ["ClaimID"]
+    assert claims["merge_key_candidates"] == ["ClaimID", "PolicyID"]
+    assert claims["merge_key_source"] == "semantic_enrichment_primary_key"
+    assert claim_lines["merge_keys"] == []
+    assert claim_lines["merge_key_candidates"] == ["ClaimID"]
+    assert claim_lines["merge_key_resolution_status"] == "REVIEW_REQUIRED"
+    assert artifact["resolved_count"] == 1
+    assert artifact["review_required_count"] == 1
+
+
+def test_silver_merge_key_review_rebuilds_legacy_empty_artifact():
+    from services import pipeline_runtime
+
+    artifact = pipeline_runtime._silver_merge_key_review_artifact({
+        "run_id": "run-legacy-merge-keys",
+        "bronze_review_artifact": {"feeds": [{"table": "claims"}]},
+        "silver_merge_key_review_artifact": {
+            "feeds": [{"table": "claims", "merge_keys": [], "primary_keys": []}],
+        },
+        "enriched_columns": [
+            {"table_name": "claims", "column_name": "ClaimID", "is_primary_key": True},
+        ],
+    })
+
+    assert artifact["feeds"][0]["merge_keys"] == ["ClaimID"]
+    assert artifact["feeds"][0]["merge_key_source"] == "semantic_enrichment_primary_key"
+
+
 def test_minimum_stage_runtime_uses_env(monkeypatch):
     from services import pipeline_runtime
 
@@ -511,8 +559,37 @@ def test_databricks_gate4_does_not_mark_merge_key_review_complete():
     )
 
     by_key = {step["key"]: step for step in steps}
+    assert by_key["silver_merge_key_resolution"]["state"] == "PENDING"
     assert by_key["silver_merge_key_review"]["state"] == "PENDING"
     assert by_key["silver"]["state"] == "PENDING"
+
+
+def test_merge_key_resolution_completes_only_after_resolver_artifact_exists():
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            "status": "HITL_WAIT",
+            "bronze_review_decision": "APPROVED",
+            "silver_merge_key_resolution_status": "COMPLETED",
+            "silver_merge_key_resolution_artifact": {"feeds": [{"table": "claims", "merge_keys": ["ClaimID"]}]},
+            "next_review_key": "silver_merge_key_review",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=False,
+        gold_generation_completed=False,
+    )
+    steps = pipeline_runtime.apply_waiting_stage_state(steps, "silver_merge_key_review")
+
+    by_key = {step["key"]: step for step in steps}
+    assert by_key["silver_merge_key_resolution"]["state"] == "COMPLETED"
+    assert by_key["silver_merge_key_review"]["state"] == "HITL_WAIT"
 
 
 def test_databricks_gold_generation_does_not_imply_execution_completion():
@@ -1052,14 +1129,22 @@ def test_database_continue_clears_stale_failure_when_retrying(monkeypatch):
         state={
             "run_id": "run-retry",
             "error": "old failure",
+            "error_type": "InterruptedRun",
+            "error_message": "Backend restarted",
             "failed_stage": "bronze",
+            "failed_stage_label": "Bronze Generation",
             "failed_background_stage": "bronze",
+            "interrupted_by_backend_restart": True,
         },
     )
 
     assert saved_states[0]["error"] is None
+    assert saved_states[0]["error_type"] is None
+    assert saved_states[0]["error_message"] is None
     assert saved_states[0]["failed_stage"] is None
+    assert saved_states[0]["failed_stage_label"] is None
     assert saved_states[0]["failed_background_stage"] is None
+    assert saved_states[0]["interrupted_by_backend_restart"] is False
 
 
 def test_mark_run_processing_moves_off_stale_review_gate(monkeypatch):
