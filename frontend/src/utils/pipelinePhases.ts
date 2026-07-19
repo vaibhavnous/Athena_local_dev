@@ -295,13 +295,17 @@ export function getPhaseGroups(run, stepsOverride?) {
 
 export function summarizeRunSource(run) {
   if (!run) return 'No source selected'
+  const runIds = new Set([run.id, run.run_id].filter(Boolean).map(String))
+  const runName = [run.brd_filename, run.display_name, run.project_name, run.project?.name]
+    .map((value) => String(value || '').trim())
+    .find((value) => value && !runIds.has(value))
   if (run.source === 'adls_gen2') {
-    return run.brd_filename || 'ADLS auto-discovery'
+    return runName || 'ADLS auto-discovery'
   }
   if (run.source === 'sftp') {
-    return run.brd_filename || 'SFTP file source'
+    return runName || 'SFTP file source'
   }
-  return run.brd_filename || 'BRD pipeline run'
+  return runName || 'BRD pipeline run'
 }
 
 export function statusTone(status) {

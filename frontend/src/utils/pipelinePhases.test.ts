@@ -1,4 +1,4 @@
-import { getPhaseGroups, getPipelineSteps } from './pipelinePhases'
+import { getPhaseGroups, getPipelineSteps, summarizeRunSource } from './pipelinePhases'
 
 const phaseState = (run: any, phaseId: string, stepKey: string) => {
   const phase = getPhaseGroups(run, getPipelineSteps(run)).find((item) => item.id === phaseId)
@@ -100,4 +100,14 @@ test('shows Gold execution as waiting while generated Gold code is under review'
     label: 'Gold Review & Execution',
     state: 'HITL_WAIT',
   })
+})
+
+test('uses the project name instead of rendering a run ID as the pipeline name', () => {
+  expect(summarizeRunSource({
+    id: 'run-6',
+    run_id: 'run-6',
+    brd_filename: 'run-6',
+    project_name: 'Vialto',
+    source: 'database',
+  })).toBe('Vialto')
 })

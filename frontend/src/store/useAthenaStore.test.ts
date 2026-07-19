@@ -84,3 +84,22 @@ test('keeps known runs when polling returns a transient empty snapshot', () => {
   expect(useAthenaStore.getState().runs).toEqual([{ id: 'run-4', status: 'RUNNING' }])
   expect(useAthenaStore.getState().activeRunId).toBe('run-4')
 })
+
+test('does not replace a run name with the run ID from sparse status polling', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-5',
+    run_id: 'run-5',
+    brd_filename: 'Vialto',
+    status: 'RUNNING',
+  })
+
+  useAthenaStore.getState().updateRun('run-5', {
+    id: 'run-5',
+    run_id: 'run-5',
+    brd_filename: 'run-5',
+    status: 'RUNNING',
+  })
+
+  expect(useAthenaStore.getState().runs[0].brd_filename).toBe('Vialto')
+})

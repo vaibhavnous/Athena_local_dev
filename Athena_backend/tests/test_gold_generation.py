@@ -661,6 +661,54 @@ def test_databricks_gold_submits_approved_scripts_as_one_batch(monkeypatch):
     assert len(result["databricks_gold_execution_results"]) == 2
 
 
+def test_databricks_gold_batch_success_survives_output_poll_failure(monkeypatch):
+    monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
+    monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_EXECUTION_MODE", raising=False)
+    monkeypatch.delenv("ATHENA_DATABRICKS_EXECUTION_MODE", raising=False)
+    monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_: None)
+    monkeypatch.setattr(databricks_runtime, "_workspace_import_notebook", lambda *_: {})
+    monkeypatch.setattr(databricks_runtime, "_submit_run", lambda *_args, **_kwargs: {"run_id": 42})
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_wait_for_run",
+        lambda *_: {
+            "run_id": 42,
+            "result_state": "SUCCESS",
+            "life_cycle_state": "TERMINATED",
+            "run_page_url": "https://example.databricks/run/42",
+        },
+    )
+    monkeypatch.setattr(databricks_runtime, "_task_run_id", lambda *_: 42)
+    monkeypatch.setattr(databricks_runtime, "_get_run_output", lambda *_: (_ for _ in ()).throw(RuntimeError("output unavailable")))
+    monkeypatch.setattr(databricks_runtime, "save_external_execution_progress", lambda state, **_: state)
+
+    result = databricks_runtime.run_databricks_gold_scripts(
+        {
+            "run_id": "run-batch-gold-output-warning",
+            "target_warehouse": "databricks",
+            "gold_generation_results": [
+                {"status": "APPROVED", "script_body": "print('one')", "target_table": "gold.fact_one"},
+                {"status": "APPROVED", "script_body": "print('two')", "target_table": "gold.fact_two"},
+            ],
+        }
+    )
+
+    assert result["databricks_gold_execution_status"] == "COMPLETED"
+    assert [item["status"] for item in result["databricks_gold_execution_results"]] == ["SUCCESS", "SUCCESS"]
+    assert "output unavailable" in result["databricks_gold_execution_results"][0]["warning"]
+
+
+def test_databricks_batch_notebook_fails_the_job_when_any_script_fails():
+    notebook = databricks_runtime._build_batch_driver_notebook(
+        "gold",
+        [{"status": "APPROVED", "script_body": "raise RuntimeError('boom')", "target_table": "gold.fact_one"}],
+        workspace_dir="/Workspace/athena/run",
+    )
+
+    assert 'if _SUMMARY["status"] == "FAILED":' in notebook
+    assert notebook.index('raise RuntimeError(json.dumps(_SUMMARY') < notebook.index("dbutils.notebook.exit")
+
+
 def test_gold_measure_scoring_rejects_operational_counters_for_money_kpis():
     columns = [
         {"table_name": "payments", "column_name": "updatenum", "semantic_type": "MEASURE", "is_measure": True},

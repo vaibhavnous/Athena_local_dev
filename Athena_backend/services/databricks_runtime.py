@@ -497,6 +497,9 @@ _SUMMARY = {{
     "results": _RESULTS,
 }}
 
+if _SUMMARY["status"] == "FAILED":
+    raise RuntimeError(json.dumps(_SUMMARY, default=str))
+
 dbutils.notebook.exit(json.dumps(_SUMMARY, default=str))
 '''
 
@@ -511,6 +514,33 @@ def _parse_notebook_result(output_payload: Dict[str, Any]) -> Dict[str, Any]:
     except json.JSONDecodeError:
         return {"raw_result": result}
     return parsed if isinstance(parsed, dict) else {"raw_result": parsed}
+
+
+def _successful_batch_results_from_scripts(
+    scripts: List[Dict[str, Any]],
+    *,
+    notebook_path: str,
+    run_state: Dict[str, Any],
+    warning: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    return [
+        {
+            "script_name": _script_name(script),
+            "script_path": str(script.get("script_path") or "").strip(),
+            "target_table": script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
+            "status": "SUCCESS",
+            "workspace_path": notebook_path,
+            "databricks_run_id": run_state.get("run_id"),
+            "run_page_url": run_state.get("run_page_url"),
+            "cluster_id": run_state.get("cluster_id"),
+            "compute_mode": _databricks_compute_mode(),
+            "life_cycle_state": run_state.get("life_cycle_state"),
+            "result_state": run_state.get("result_state"),
+            "state_message": run_state.get("state_message"),
+            **({"warning": warning} if warning else {}),
+        }
+        for script in scripts
+    ]
 
 
 def _run_failure_detail(run_state: Dict[str, Any]) -> str:
@@ -566,25 +596,43 @@ def _execute_databricks_stage_batch(
         )
         raise RuntimeError(failure)
 
-    output_run_id = _task_run_id(run_state)
-    output = _get_run_output(output_run_id) if output_run_id is not None else {}
-    summary = _parse_notebook_result(output)
+    output_warning = None
+    try:
+        output_run_id = _task_run_id(run_state)
+        output = _get_run_output(output_run_id) if output_run_id is not None else {}
+        summary = _parse_notebook_result(output)
+    except Exception as exc:
+        output_warning = f"Databricks run succeeded, but Athena could not read notebook output: {exc}"
+        logger.warning(
+            output_warning,
+            extra={"run_id": run_id, "node": f"{layer}_output_read_warning", "stage": f"{layer}_code_execution"},
+        )
+        summary = {}
     results = [item for item in (summary.get("results") or []) if isinstance(item, dict)]
     failed = [item for item in results if str(item.get("status") or "").upper() == "FAILED"]
-    executed_scripts = [
-        {
-            **item,
-            "workspace_path": notebook_path,
-            "databricks_run_id": run_state.get("run_id"),
-            "run_page_url": run_state.get("run_page_url"),
-            "cluster_id": run_state.get("cluster_id"),
-            "compute_mode": _databricks_compute_mode(),
-            "life_cycle_state": run_state.get("life_cycle_state"),
-            "result_state": run_state.get("result_state"),
-            "state_message": run_state.get("state_message"),
-        }
-        for item in results
-    ]
+    executed_scripts = (
+        [
+            {
+                **item,
+                "workspace_path": notebook_path,
+                "databricks_run_id": run_state.get("run_id"),
+                "run_page_url": run_state.get("run_page_url"),
+                "cluster_id": run_state.get("cluster_id"),
+                "compute_mode": _databricks_compute_mode(),
+                "life_cycle_state": run_state.get("life_cycle_state"),
+                "result_state": run_state.get("result_state"),
+                "state_message": run_state.get("state_message"),
+            }
+            for item in results
+        ]
+        if results
+        else _successful_batch_results_from_scripts(
+            scripts,
+            notebook_path=notebook_path,
+            run_state=run_state,
+            warning=output_warning or "Databricks run succeeded, but notebook output did not include per-script results.",
+        )
+    )
     if failed:
         first = failed[0]
         raise RuntimeError(

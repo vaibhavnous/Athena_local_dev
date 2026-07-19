@@ -98,6 +98,11 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
   const incomingHasDetail = hasUsefulRunDetail(incoming)
   const existingHasDetail = hasUsefulRunDetail(existing)
   const merged = { ...existing, ...incoming }
+  const incomingName = String(incoming?.brd_filename || '').trim()
+  const incomingIds = new Set([incoming?.id, incoming?.run_id].filter(Boolean).map(String))
+  if ((!incomingName || incomingIds.has(incomingName)) && existing?.brd_filename && !incomingIds.has(String(existing.brd_filename))) {
+    merged.brd_filename = existing.brd_filename
+  }
   const incomingStatus = normalizeRunStatus(incoming?.status)
   const hasIncomingStatus = incoming?.status !== undefined && incoming?.status !== null
   const incomingActive = incomingStatus === 'RUNNING'

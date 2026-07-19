@@ -10,7 +10,7 @@ import useAthenaStore from '../../store/useAthenaStore'
 import usePipelineSocket from '../../hooks/usePipelineSocket'
 import { abortRun, continueStage, getRun, getRuns } from '../../api/athenaApi'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../../utils/demoFallbacks'
-import { getGateDisplayName, getPhaseGroups, normalizeState } from '../../utils/pipelinePhases'
+import { getGateDisplayName, getPhaseGroups, normalizeState, summarizeRunSource } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
 const PAUSED_BANNER_DELAY_MS = 2500
@@ -541,7 +541,7 @@ function AppShell() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-3 text-sm">
                       <div className="truncate font-semibold text-white">
-                        {pausedRun.brd_filename || pausedRun.id}
+                        {summarizeRunSource(pausedRun)}
                       </div>
                       <span className="rounded-lg border border-amber-500/35 bg-amber-500/12 px-2.5 py-1 text-[11px] font-semibold text-amber-300">
                         {pausedRunSummary.gateLabel} Pending
