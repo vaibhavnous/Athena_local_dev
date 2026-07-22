@@ -2,10 +2,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Play, RefreshCcw, RotateCcw, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Play, RefreshCcw, RotateCcw, Square, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
-import { formatPipelineStepLabel, getGateDisplayName, getPhaseGroups, getPipelineSteps, normalizeState, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
+import { PageHeader } from '../components/shared/DashboardLayout'
+import { formatPipelineStepLabel, getPhaseGroups, getPipelineSteps, normalizeState, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { abortRun, continueStage, getRun, getRunStatus, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
@@ -239,9 +240,6 @@ function PipelineMonitor() {
 
   const monitorRun = activeRun
   const runLabel = summarizeRunSource(monitorRun)
-  const projectLabel = monitorRun?.project_name || monitorRun?.project?.name || ''
-  const projectId = monitorRun?.project_id || monitorRun?.project?.id || ''
-  const activeTone = statusTone(monitorRun?.status)
   const isFailedRun = String(monitorRun?.status || '').toUpperCase() === 'FAILED'
   const isStageConfirmationPaused =
     String(monitorRun?.status || '').toUpperCase() === 'PAUSED_FOR_STAGE_CONFIRMATION' ||
@@ -250,6 +248,7 @@ function PipelineMonitor() {
   const [autoAdvanceStages, setAutoAdvanceStages] = useState(false)
   const [stageConfirmSubmitting, setStageConfirmSubmitting] = useState(false)
   const [failureActionSubmitting, setFailureActionSubmitting] = useState('')
+  const [rerunningStepKey, setRerunningStepKey] = useState('')
   const [scriptBundles, setScriptBundles] = useState(null)
 
   useEffect(() => {
@@ -310,8 +309,6 @@ function PipelineMonitor() {
   const failureSummary = useMemo(() => buildFailureSummary(monitorRun), [monitorRun])
   const stageConfirmation = monitorRun?.stage_confirmation || null
   const stageScriptReview = useMemo(() => buildStageScriptReview(monitorRunWithScripts), [monitorRunWithScripts])
-  const currentStepSummary = useMemo(() => buildCurrentStepSummary(monitorRun), [monitorRun])
-  const activeStatusLabel = formatRunStatusLabel(monitorRun, currentStepSummary)
 
   if (!activeRun) {
     const title = pendingRun ? 'Starting pipeline run' : 'No active pipeline'
@@ -461,17 +458,44 @@ function PipelineMonitor() {
   const handleOpenGateReview = (step = null) => {
     if (!activeRun?.id) return
     setActiveRun(activeRun.id)
+    const modalNavigation = { state: { backgroundLocation: location } }
     if (step?.key === 'silver_merge_key_review') {
-      navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=silver_merge_key_review`)
+      navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=silver_merge_key_review`, modalNavigation)
       return
     }
     const stepGate = /^gate([1-5])$/.exec(String(step?.key || ''))?.[1]
     if (!stepGate && activeRun.next_review_key) {
-      navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=${encodeURIComponent(activeRun.next_review_key)}`)
+      navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=${encodeURIComponent(activeRun.next_review_key)}`, modalNavigation)
       return
     }
     const gate = Number(stepGate || activeRun.next_gate || 0)
-    navigate(gate ? `/app/hitl?runId=${encodeURIComponent(activeRun.id)}&gate=${gate}` : '/app/hitl')
+    navigate(gate ? `/app/hitl?runId=${encodeURIComponent(activeRun.id)}&gate=${gate}` : '/app/hitl', modalNavigation)
+  }
+
+  const handleRerunStep = async (step) => {
+    if (!activeRun?.id || rerunningStepKey) return
+    setRerunningStepKey(step.key)
+    try {
+      const restarted = await restartRun(activeRun.id)
+      const nextRun = await getRun(restarted.run_id)
+      addRun(nextRun)
+      setActiveRun(nextRun.id)
+      addNotification({
+        type: 'success',
+        title: 'Re-run started',
+        message: `A new run was started after selecting ${step.label}.`,
+        duration: 3500,
+      })
+    } catch (error) {
+      addNotification({
+        type: 'error',
+        title: 'Re-run failed',
+        message: error.message || `Unable to re-run ${step.label}.`,
+        duration: 4500,
+      })
+    } finally {
+      setRerunningStepKey('')
+    }
   }
 
   const handleCopyScript = async (script) => {
@@ -525,39 +549,24 @@ function PipelineMonitor() {
   }
 
   return (
-    <div className="flex h-full min-h-[calc(100vh-116px)] flex-col">
-      <div className="mb-7 flex flex-col gap-4">
-        <div className="flex min-h-[72px] items-center justify-between rounded-xl border border-[#1d2940] bg-[#09111f] px-5">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1 pr-4 text-[12px] text-[#8ea0c3]">
-            {projectId && (
-              <span className="min-w-0 truncate">
-                Project: <strong className="font-semibold text-[#c4cee0]">{projectLabel || projectId}</strong>
-              </span>
-            )}
-            <span className="min-w-0 truncate">
-              Pipeline: <strong className="font-semibold text-[#c4cee0]">{runLabel}</strong>
-            </span>
-            <span className="font-mono text-[11px] text-[#7183a4]" title={monitorRun.id}>
-              Run ID: {monitorRun.id}
-            </span>
-          </div>
-          <div className="flex flex-shrink-0 items-center gap-3">
-            <div className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-[12px] font-semibold ${
-              activeTone === 'amber'
-                ? 'border-amber-400/50 bg-amber-500/10 text-amber-300'
-                : activeTone === 'emerald'
-                ? 'border-emerald-400/35 bg-emerald-500/10 text-emerald-400'
-                : activeTone === 'blue'
-                ? 'border-[#3f82ff]/40 bg-[#3f82ff]/10 text-[#3f82ff]'
-                : activeTone === 'red'
-                ? 'border-red-400/35 bg-red-500/10 text-red-400'
-                : 'border-[#253044] bg-[#0b1120] text-slate-300'
-            }`}>
-              <span className="h-2 w-2 rounded-full bg-current" />
-              {activeStatusLabel}
-            </div>
-          </div>
-        </div>
+    <div className="flex min-h-full flex-col gap-3 md:h-full md:min-h-0">
+      <PageHeader
+        eyebrow="Data Discovery"
+        title="Live pipeline monitor."
+        description={<span>BRD: <strong className="font-semibold text-text-secondary">{monitorRun.brd_filename || runLabel}</strong>{' '}Run ID: <strong className="font-semibold text-text-secondary">{monitorRun.id}</strong></span>}
+        actions={
+          <button
+            type="button"
+            onClick={handleCancelRun}
+            disabled={stageConfirmSubmitting || ['COMPLETED', 'FAILED', 'ABORTED', 'CANCELLED', 'CANCELED'].includes(normalizeState(monitorRun.status))}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 text-xs font-semibold text-red-400 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Square size={12} />
+            {stageConfirmSubmitting ? 'Cancelling...' : 'Cancel Run'}
+          </button>
+        }
+        compact
+      />
 
         {isFailedRun && dismissedFailureBannerFor !== monitorRun.id && (
           <div className="rounded-2xl border border-red-500/35 bg-[#17111d] px-6 py-5 shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
@@ -627,32 +636,9 @@ function PipelineMonitor() {
           </div>
         )}
 
-        <div className="flex items-center justify-between">
-          <div className="text-[12px] font-semibold tracking-[0.24em] text-[#5f708f]">
-            Discovery Progress
-          </div>
-          <div className="flex items-center gap-3">
-          {runs.length > 1 && (
-            <select
-              value={activeRun.id}
-              onChange={(event) => setActiveRun(event.target.value)}
-              className="h-9 rounded-md border border-[#253044] bg-[#111827] px-3 text-xs text-slate-300 outline-none transition-colors focus:border-[#3f82ff]"
-            >
-              {runs.map((run) => (
-                <option key={run.id} value={run.id}>
-                  {run.project_name ? `${run.project_name} - ` : ''}{run.brd_filename || 'Pipeline'} - {String(run.id).slice(0, 8)}
-                </option>
-              ))}
-            </select>
-              )}
-          </div>
-        </div>
-
-      </div>
-
-      <div className="grid min-h-0 flex-1 gap-5 xl:grid-cols-[520px_minmax(0,1fr)]">
-        <section className="min-h-0 overflow-hidden rounded-lg border border-[#253044] bg-[#080e1d]">
-          <div className="divide-y divide-[#253044]">
+      <div className="flex flex-col gap-4 md:min-h-0 md:flex-1 md:flex-row">
+        <section className="flex min-h-[360px] flex-col overflow-hidden rounded-lg border border-[#253044] bg-[#080e1d] md:min-h-0 md:w-1/3 md:flex-shrink-0">
+          <div className="min-h-0 flex-1 divide-y divide-[#253044] overflow-y-auto">
             {renderedPhases.map((phase, index) => {
               const expanded = expandedPhase === phase.id
               const tone = statusTone(phase.status)
@@ -660,26 +646,26 @@ function PipelineMonitor() {
                 <div key={phase.id}>
                   <button
                     onClick={() => setExpandedPhase(expanded ? '' : phase.id)}
-                    className={`flex w-full items-center justify-between px-4 text-left transition-colors ${
+                    className={`flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors ${
                       expanded ? 'bg-[#101735]' : 'bg-[#080e1d] hover:bg-[#0f1728]'
-                    } ${expanded ? 'py-4' : 'py-3.5'}`}
+                    }`}
                   >
-                    <div className="flex min-w-0 items-center gap-4">
+                    <div className="flex min-w-0 flex-1 items-center gap-3">
                       <PhaseNumber index={index + 1} tone={tone} status={phase.status} />
                       <div className="min-w-0">
-                        <div className={`truncate text-[14px] font-semibold ${expanded ? 'text-white' : 'text-[#7d8daa]'}`}>
+                        <div className={`text-xs font-semibold leading-tight ${expanded || tone !== 'slate' ? 'text-white' : 'text-[#7d8daa]'}`}>
                           {phase.label}
                         </div>
-                        {expanded && (
-                          <div className="mt-1 text-xs text-[#8a9ab7]">
+                        {tone !== 'slate' && (
+                          <div className="mt-0.5 text-[10px] text-[#8a9ab7]">
                             {phase.completed}/{phase.total} stages complete
                           </div>
                         )}
                       </div>
                     </div>
-                    <div className="ml-4 flex items-center gap-3">
+                    <div className="ml-2 flex flex-shrink-0 items-center gap-2">
                       <StatusPill status={phase.status} tone={tone} compact={!expanded} step={phase.steps.find((step) => ['RUNNING', 'HITL_WAIT'].includes(normalizeState(step.state)))} />
-                      {expanded ? <ChevronUp size={14} className="text-[#64748b]" /> : <ChevronDown size={14} className="text-[#64748b]" />}
+                      {tone !== 'slate' && (expanded ? <ChevronUp size={13} className="text-[#64748b]" /> : <ChevronDown size={13} className="text-[#64748b]" />)}
                     </div>
                   </button>
 
@@ -693,11 +679,19 @@ function PipelineMonitor() {
                         transition={{ duration: 0.28, ease: 'easeOut' }}
                         className="overflow-hidden bg-[#080e1d]"
                       >
-                        <div className="px-6 pb-6 pt-1">
-                          <div className="ml-[18px] border-l border-[#2b3648] pl-7">
-                            <div className="space-y-5">
+                        <div className="mb-1 ml-5 mt-1 px-4 pb-1 pt-2">
+                          <div>
+                            <div>
                               {phase.steps.map((step, stepIndex) => (
-                                <StepRow key={step.key} step={step} index={stepIndex} onOpenReview={() => handleOpenGateReview(step)} />
+                                <StepRow
+                                  key={step.key}
+                                  step={step}
+                                  index={stepIndex}
+                                  isLast={stepIndex === phase.steps.length - 1}
+                                  onOpenReview={() => handleOpenGateReview(step)}
+                                  onRerun={() => handleRerunStep(step)}
+                                  rerunning={rerunningStepKey === step.key}
+                                />
                               ))}
                             </div>
                           </div>
@@ -711,35 +705,13 @@ function PipelineMonitor() {
           </div>
         </section>
 
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-[#253044] bg-[#111827]">
-          <div className="flex h-[78px] items-center justify-between border-b border-[#253044] px-5">
-            <div>
-              <div className="text-[16px] font-semibold text-white">Execution Logs</div>
-              <div className="mt-1 text-[13px] text-[#7d8daa]">Real-time pipeline execution monitoring</div>
-            </div>
-            <div className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-[13px] font-semibold ${
-              activeTone === 'amber'
-                ? 'border-amber-400/50 bg-amber-500/10 text-amber-300'
-                : activeTone === 'emerald'
-                ? 'border-emerald-400/35 bg-emerald-500/10 text-emerald-400'
-                : activeTone === 'blue'
-                ? 'border-[#3f82ff]/40 bg-[#3f82ff]/10 text-[#3f82ff]'
-                : activeTone === 'red'
-                ? 'border-red-400/35 bg-red-500/10 text-red-400'
-                : 'border-[#253044] bg-[#0b1120] text-slate-300'
-            }`}>
-              <span className="h-2 w-2 rounded-full bg-current" />
-              {activeStatusLabel}
-            </div>
-          </div>
-
-          <div className="min-h-0 flex-1">
-            <PipelineLogsPanel runId={activeRun.run_id || activeRun.id} isActive onLogsUpdated={handleLogsUpdated} />
-          </div>
+        <section className="min-h-[460px] min-w-0 flex-1 md:min-h-0">
+          <PipelineLogsPanel runId={activeRun.run_id || activeRun.id} isActive onLogsUpdated={handleLogsUpdated} />
         </section>
       </div>
 
-      {isStageConfirmationPaused && stageConfirmation?.awaiting_confirmation && (
+      {/* ponytail: AppShell owns the compact stage gate; keep the richer script-review overlay dormant until it has a distinct trigger. */}
+      {false && isStageConfirmationPaused && stageConfirmation?.awaiting_confirmation && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 px-6 backdrop-blur-sm">
           <div className="max-h-[92vh] w-full max-w-[980px] overflow-hidden rounded-[26px] border border-[#24344d] bg-[#131d2f] shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
             <div className="flex items-start gap-5 px-8 py-8">
@@ -888,92 +860,7 @@ function buildFailureSummary(run) {
   }
 }
 
-function buildCurrentStepSummary(run) {
-  if (!run) return null
-  const fromBackend = run.current_pipeline_step
-  const steps = Array.isArray(run.pipeline_steps) && run.pipeline_steps.length
-    ? run.pipeline_steps
-    : Array.isArray(run.stages)
-    ? run.stages
-    : []
-  const step =
-    fromBackend ||
-    steps.find((item) => ['RUNNING', 'HITL_WAIT'].includes(normalizeState(item?.state || item?.status))) ||
-    steps.find((item) => normalizeState(item?.state || item?.status) === 'FAILED') ||
-    null
-
-  const runStatus = normalizeState(run.status)
-  const state = normalizeState(step?.state || step?.status || run.status)
-  const label = formatPipelineStepLabel(step?.label || step?.name, step?.key) || step?.label || step?.key || ''
-  const externalMessage = String(run.external_execution?.message || '').trim()
-  const detail = externalMessage || step?.detail || run.resume_message || ''
-  const nextGate = Number(run.next_gate || 0)
-  const gateLabel = run.next_review_key === 'silver_merge_key_review'
-    ? 'Silver Merge Key Review'
-    : nextGate ? getGateDisplayName(nextGate, run.source) : label
-
-  if (runStatus === 'HITL_WAIT' || state === 'HITL_WAIT') {
-    return {
-      state: 'HITL_WAIT',
-      tone: 'amber',
-      badge: 'Waiting for Review',
-      headline: `${gateLabel || label || 'Review'} is waiting for approval`,
-      detail,
-    }
-  }
-
-  if (runStatus === 'RUNNING' || state === 'RUNNING') {
-    return {
-      state: 'RUNNING',
-      tone: 'blue',
-      badge: 'Running',
-      headline: `${label || 'Pipeline stage'} is running`,
-      detail,
-    }
-  }
-
-  if (runStatus === 'FAILED' || state === 'FAILED') {
-    return {
-      state: 'FAILED',
-      tone: 'red',
-      badge: 'Failed',
-      headline: `${label || 'Pipeline stage'} failed`,
-      detail: run.error || detail,
-    }
-  }
-
-  if (runStatus === 'COMPLETED') {
-    return {
-      state: 'COMPLETED',
-      tone: 'emerald',
-      badge: 'Complete',
-      headline: 'Pipeline completed',
-      detail: 'Generation stages are complete. Execution markers are UI-only for locally exported scripts.',
-    }
-  }
-
-  return label
-    ? {
-        state,
-        tone: statusTone(run.status),
-        badge: String(run.status || 'Pending').replace(/_/g, ' '),
-        headline: `${label} is ${String(run.status || 'pending').replace(/_/g, ' ').toLowerCase()}`,
-        detail,
-      }
-    : null
-}
-
-function formatRunStatusLabel(run, currentStepSummary) {
-  if (currentStepSummary?.badge && currentStepSummary?.headline) {
-    if (currentStepSummary.state === 'HITL_WAIT') return currentStepSummary.badge
-    if (currentStepSummary.state === 'RUNNING') return 'Running'
-    return currentStepSummary.badge
-  }
-  return String(run?.status || 'Waiting').replace(/_/g, ' ')
-}
-
-function PhaseNumber({ index, tone, status }) {
-  const running = status === 'Running'
+function PhaseNumber({ index, tone }) {
   const toneClass =
     tone === 'emerald'
       ? 'border-emerald-500/40 text-emerald-400'
@@ -986,33 +873,16 @@ function PhaseNumber({ index, tone, status }) {
       : 'border-[#253044] text-[#64748b]'
 
   return (
-    <div className="relative h-8 w-8 flex-shrink-0">
-      {running && (
-        <>
-          <span className="absolute inset-0 rounded-full border border-[#3f82ff]/35 animate-ping" />
-          <span className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#3f82ff] animate-spin" />
-        </>
-      )}
-      <div className={`relative flex h-8 w-8 items-center justify-center rounded-full border bg-[#080e1d] text-[14px] font-semibold ${toneClass}`}>
-        {index}
+    <div className="relative h-7 w-7 flex-shrink-0">
+      <div className={`relative flex h-7 w-7 items-center justify-center rounded-full border-2 bg-[#080e1d] text-[11px] font-bold ${toneClass}`}>
+        {tone === 'emerald' ? <CheckCircle2 size={13} /> : index}
       </div>
     </div>
   )
 }
 
-function StatusPill({ status, tone, compact, step }) {
-  const stepLabel = step?.label || ''
-  const label = stepLabel && ['Review', 'Running'].includes(status)
-    ? compact
-      ? stepLabel
-      : status === 'Review'
-      ? `${stepLabel} waiting`
-      : `${stepLabel} running`
-    : compact
-    ? status
-    : status === 'Waiting'
-    ? 'Review'
-    : status
+function StatusPill({ status, tone }) {
+  const label = status === 'Waiting' ? 'Review' : status
   const color =
     tone === 'emerald'
       ? 'text-emerald-400'
@@ -1025,14 +895,14 @@ function StatusPill({ status, tone, compact, step }) {
       : 'text-[#7d8daa]'
 
   return (
-    <div className={`flex items-center gap-2 text-xs font-medium ${color}`}>
+    <div className={`flex items-center gap-2 text-[10px] font-medium ${color}`}>
       <span className={`h-2 w-2 rounded-full bg-current ${status === 'Running' ? 'animate-pulse' : ''}`} />
       {label}
     </div>
   )
 }
 
-function StepRow({ step, index = 0, onOpenReview }) {
+function StepRow({ step, index = 0, isLast = false, onOpenReview, onRerun, rerunning = false }) {
   const state = normalizeState(step.state)
   const complete = state === 'COMPLETED'
   const waiting = state === 'HITL_WAIT'
@@ -1061,18 +931,12 @@ function StepRow({ step, index = 0, onOpenReview }) {
             }
           : undefined
       }
-      className={`flex min-h-[38px] items-center gap-4 ${
+      className={`group flex min-h-[38px] items-stretch ${
         canOpenReview ? 'cursor-pointer rounded-lg transition-colors hover:bg-white/[0.03]' : ''
       }`}
     >
-      <div className="relative h-7 w-7 flex-shrink-0">
-        {running && (
-          <>
-            <span className="absolute inset-0 rounded-full border border-[#3f82ff]/35 animate-ping" />
-            <span className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#3f82ff] animate-spin" />
-          </>
-        )}
-        <div className={`relative flex h-7 w-7 items-center justify-center rounded-full border ${
+      <div className="flex w-8 min-w-8 flex-col items-center">
+        <div className={`relative flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full border-2 ${
           complete
             ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400'
             : waiting
@@ -1083,13 +947,29 @@ function StepRow({ step, index = 0, onOpenReview }) {
             ? 'border-red-400 bg-red-500/10 text-red-400'
             : 'border-[#253044] bg-[#0b1120] text-[#64748b]'
         }`}>
-          {complete ? <CheckCircle2 size={14} /> : <Circle size={running ? 9 : 11} className={running ? 'animate-pulse' : ''} />}
+          {complete ? <CheckCircle2 size={12} /> : <Circle size={running ? 8 : 10} className={running ? 'animate-pulse' : ''} />}
         </div>
+        {!isLast && <div className={`mt-1 w-px flex-1 ${complete ? 'bg-emerald-500/30' : 'bg-[#253044]'}`} />}
       </div>
-      <div className="min-w-0">
-        <div className={`truncate text-[14px] font-semibold ${complete || waiting || running ? 'text-white' : 'text-[#7d8daa]'}`}>
+      <div className="ml-2 flex min-w-0 flex-1 items-start justify-between gap-2 pb-3 pt-0.5">
+        <div className={`min-w-0 truncate text-xs font-medium leading-tight ${complete || waiting || running ? 'text-[#d1d5db]' : 'text-[#6b7280]'}`}>
           {step.label}
         </div>
+        {complete && onRerun && (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation()
+              onRerun()
+            }}
+            disabled={rerunning}
+            title={`Re-run ${step.label}`}
+            className="inline-flex shrink-0 items-center gap-1 rounded border border-emerald-500/40 bg-[#0b1424] px-1.5 py-0.5 text-[9px] font-medium text-emerald-400 opacity-0 transition-opacity hover:bg-emerald-500/10 group-hover:opacity-100 focus-visible:opacity-100 disabled:cursor-wait disabled:opacity-60"
+          >
+            <RotateCcw size={8} className={rerunning ? 'animate-spin' : ''} />
+            {rerunning ? 'Starting' : 'Re-run'}
+          </button>
+        )}
       </div>
     </motion.div>
   )

@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Code2, Copy, Download, FileCode2, Pencil, RotateCcw, Save, X } from 'lucide-react'
+import { Code2, Copy, Download, FileCode2, Pencil, Play, RotateCcw, Save, X } from 'lucide-react'
 
 function codeLanguage(fileName = '') {
   const extension = String(fileName).split('.').pop()?.toLowerCase()
@@ -21,7 +21,23 @@ function downloadDraft(fileName, code) {
   URL.revokeObjectURL(url)
 }
 
-function CodeReviewEditorModal({ item, onClose, onSave }) {
+const CODE_TOKEN_PATTERN = /(\b(?:ALTER|AND|AS|BEGIN|BY|CASE|CREATE|DATABASE|ELSE|END|EXISTS|FILE|FORMAT|FROM|IF|INSERT|INTO|NOT|NULL|OR|SCHEMA|SELECT|TABLE|TYPE|UPDATE|VALUES|WHEN|WHERE)\b|'[^']*'|"[^"]*"|\b\d+(?:\.\d+)?\b)/gi
+
+function highlightedLine(line, language) {
+  if (/^\s*(--|#)/.test(line)) return <span className="italic text-[#697486]">{line || ' '}</span>
+  if (!['sql', 'python'].includes(language)) return line || ' '
+  return line.split(CODE_TOKEN_PATTERN).map((token, index) => {
+    if (!token) return null
+    if (/^(?:ALTER|AND|AS|BEGIN|BY|CASE|CREATE|DATABASE|ELSE|END|EXISTS|FILE|FORMAT|FROM|IF|INSERT|INTO|NOT|NULL|OR|SCHEMA|SELECT|TABLE|TYPE|UPDATE|VALUES|WHEN|WHERE)$/i.test(token)) {
+      return <span key={index} className="text-[#d678e8]">{token}</span>
+    }
+    if (/^['"]/.test(token)) return <span key={index} className="text-[#9dcc75]">{token}</span>
+    if (/^\d/.test(token)) return <span key={index} className="text-[#d99b62]">{token}</span>
+    return <React.Fragment key={index}>{token}</React.Fragment>
+  })
+}
+
+function CodeReviewEditorModal({ item, onClose, onSave, onSubmit = null, submitting = false, submitLabel = 'Submit & Run Stage', submitDisabled = false }) {
   const originalCode = String(item?.code || '# Generated code is not available yet.')
   const [draftCode, setDraftCode] = useState(originalCode)
   const [savedCode, setSavedCode] = useState(originalCode)
@@ -74,11 +90,11 @@ function CodeReviewEditorModal({ item, onClose, onSave }) {
 
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-3 backdrop-blur-[2px] sm:p-6" role="dialog" aria-modal="true" aria-label={`Code review ${fileName}`}>
-      <div className="flex h-[92vh] w-full max-w-[1440px] flex-col overflow-hidden rounded-[22px] border border-[#26334a] bg-[#091221] shadow-[0_35px_120px_rgba(0,0,0,0.75)]">
+      <div className="flex h-[90vh] w-full max-w-[1344px] flex-col overflow-hidden rounded-[22px] border border-[#26334a] bg-[#091221] shadow-[0_35px_120px_rgba(0,0,0,0.75)]">
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#26334a] px-5 py-4 sm:px-7">
           <div className="flex items-center gap-3">
             <Code2 size={20} className="text-[#4388ff]" />
-            <h2 className="text-lg font-extrabold text-white">Code Review - {String(item?.type || 'code').toLowerCase()}</h2>
+            <h2 className="text-lg font-extrabold text-white">Code Review — {String(item?.type || 'code').toLowerCase()}</h2>
             <span className="rounded-md bg-[#202b3d] px-2.5 py-1 font-mono text-xs text-[#9ea9bc]">1 file</span>
           </div>
           <div className="flex items-center gap-2">
@@ -108,7 +124,7 @@ function CodeReviewEditorModal({ item, onClose, onSave }) {
           </div>
         </div>
 
-        <div className="relative min-h-0 flex-1 overflow-hidden bg-[#222936]">
+        <div className="relative min-h-0 flex-1 overflow-hidden bg-[#282c34]">
           {editing ? (
             <textarea
               autoFocus
@@ -116,23 +132,36 @@ function CodeReviewEditorModal({ item, onClose, onSave }) {
               onChange={(event) => { setDraftCode(event.target.value); setSaved(false) }}
               spellCheck={false}
               aria-label={`Edit ${fileName}`}
-              className="h-full w-full resize-none overflow-auto bg-[#222936] px-7 py-6 font-mono text-[14px] leading-7 text-[#eef1f6] outline-none sm:px-10"
+              className="h-full w-full resize-none overflow-auto bg-[#282c34] px-7 py-6 font-mono text-[14px] leading-7 text-[#eef1f6] outline-none sm:px-10"
             />
           ) : (
             <div className="h-full overflow-auto py-5 font-mono text-[14px] leading-7">
               {lines.map((line, index) => (
                 <div key={index} className="grid min-w-max grid-cols-[64px_1fr] px-4 hover:bg-white/[0.025]">
                   <span className="select-none pr-5 text-right text-[#667287]">{index + 1}</span>
-                  <span className="whitespace-pre pr-8 text-[#e7eaf0]">{line || ' '}</span>
+                  <span className="whitespace-pre pr-8 text-[#abb2bf]">{highlightedLine(line, language)}</span>
                 </div>
               ))}
             </div>
           )}
         </div>
 
-        <div className="flex h-13 shrink-0 items-center justify-between border-t border-[#26334a] bg-[#08101e] px-5 py-3 text-xs sm:px-7">
+        <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#26334a] bg-[#08101e] px-5 py-3 text-xs sm:px-7">
           <div className="flex items-center gap-3 font-mono text-[#7f8ba0]"><span>{fileName}</span><span className="rounded border border-[#274c86] bg-[#102348] px-2 py-1 text-[#5797ff]">{language}</span></div>
-          <div className="flex items-center gap-4"><span className={dirty ? 'text-amber-400' : saved ? 'text-emerald-400' : 'text-[#7f8ba0]'}>{dirty ? 'Unsaved changes' : saved ? 'Draft saved' : 'No changes'}</span><span className="text-[#667287]">{lines.length} lines</span></div>
+          <div className="flex items-center gap-4">
+            <span className={dirty ? 'text-amber-400' : saved ? 'text-emerald-400' : 'text-[#7f8ba0]'}>{dirty ? 'Unsaved changes' : saved ? 'Draft saved' : 'No changes'}</span>
+            <span className="text-[#667287]">{lines.length} lines</span>
+            {onSubmit && (
+              <button
+                type="button"
+                disabled={submitting || submitDisabled || dirty}
+                onClick={onSubmit}
+                className="inline-flex h-10 items-center gap-2 rounded-lg bg-emerald-600 px-5 font-sans text-sm font-bold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Play size={15} /> {submitting ? 'Submitting...' : submitLabel}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>,

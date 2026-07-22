@@ -21,3 +21,18 @@ test('saves an edited generated-code draft', () => {
   expect(onSave).toHaveBeenCalledWith('SELECT 2;')
   expect(screen.getByText('Draft saved')).toBeInTheDocument()
 })
+
+test.each(['BRONZE', 'SILVER', 'GOLD'])('uses the shared %s code review layout', (type) => {
+  render(
+    <CodeReviewEditorModal
+      item={{ type, fileName: `${type.toLowerCase()}_transform.sql`, code: 'CREATE TABLE demo;' }}
+      onClose={jest.fn()}
+      onSave={jest.fn()}
+      onSubmit={jest.fn()}
+    />
+  )
+
+  expect(screen.getByRole('heading', { name: new RegExp(`Code Review.*${type.toLowerCase()}`) })).toBeInTheDocument()
+  expect(screen.getAllByText(`${type.toLowerCase()}_transform.sql`).length).toBeGreaterThan(0)
+  expect(screen.getByRole('button', { name: 'Submit & Run Stage' })).toBeInTheDocument()
+})

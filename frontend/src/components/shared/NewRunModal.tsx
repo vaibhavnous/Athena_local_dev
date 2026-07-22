@@ -31,7 +31,8 @@ const DEFAULT_FORM = {
   targetWarehouse: 'databricks',
   useDomainKb: false,
   complianceEnabled: false,
-  stageConfirmationEnabled: false,
+  // ponytail: confirmation is run-scoped; checking auto-advance turns it off only for that run.
+  stageConfirmationEnabled: true,
 }
 
 function buildInitialForm(settings, seedRun, project) {
@@ -415,7 +416,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
             className={pageMode ? 'relative h-full overflow-y-auto' : 'fixed inset-0 z-50 overflow-y-auto'}
           >
             <div className={pageMode
-              ? 'mx-auto flex min-h-full w-full items-start justify-center px-3 py-3 [zoom:0.82]'
+              ? 'mx-auto flex min-h-full w-full items-start justify-center px-3 py-3 sm:px-4 sm:py-4 lg:[zoom:0.82]'
               : 'mx-auto flex min-h-full w-full items-start justify-center px-6 py-12'}>
               <div className="w-full max-w-[1317px]">
                 <div className="mb-5 flex items-start justify-between">
@@ -440,7 +441,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
 
               <div className="overflow-hidden rounded-xl border border-[#223047] bg-[#111827] shadow-[0_22px_60px_rgba(0,0,0,0.32)]">
                 <form onSubmit={handleSubmit}>
-                  <div className="grid min-h-[684px] lg:grid-cols-2">
+                  <div className="grid min-h-[684px] md:grid-cols-2">
                     <div className="space-y-5 px-[21px] py-6">
                         <Field label="Project Name" required>
                           <input

@@ -16,13 +16,13 @@ function KpiReviewCard({ kpi, onApprove, onEdit, onReject, localDecision, reject
 
   const decisionConfig = {
     APPROVED: {
-      border: 'border-[#1f5d4e] bg-[#112d2b]',
+      border: 'border-[#1f6658] bg-[#103033]',
       color: 'text-[#32d29f]',
       label: 'Approved',
       icon: CheckCircle,
     },
     REJECTED: {
-      border: 'border-[#723148] bg-[#2c1823]',
+      border: 'border-[#803348] bg-[#301c29]',
       color: 'text-[#ff6b86]',
       label: 'Rejected',
       icon: X,
@@ -46,7 +46,7 @@ function KpiReviewCard({ kpi, onApprove, onEdit, onReject, localDecision, reject
         decisionUi ? `${decisionUi.border}` : 'border-[#263247] bg-[#121a2b]'
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <Database size={13} className="shrink-0 text-[#93a5c3]" />
@@ -57,7 +57,7 @@ function KpiReviewCard({ kpi, onApprove, onEdit, onReject, localDecision, reject
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 self-end sm:self-auto">
           <button
             type="button"
             onClick={() => onEdit(kpi)}
@@ -66,6 +66,12 @@ function KpiReviewCard({ kpi, onApprove, onEdit, onReject, localDecision, reject
             <Pencil size={12} />
             Edit
           </button>
+          {hasDecision && decisionUi && (
+            <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${decisionUi.color}`}>
+              <decisionUi.icon size={13} />
+              {decisionUi.label}
+            </span>
+          )}
         </div>
       </div>
 
@@ -158,11 +164,7 @@ function KpiReviewCard({ kpi, onApprove, onEdit, onReject, localDecision, reject
       )}
 
       {hasDecision && decisionUi && (
-        <div className="mt-4 flex items-center justify-between">
-          <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${decisionUi.color}`}>
-            <decisionUi.icon size={12} />
-            {decisionUi.label}
-          </span>
+        <div className="mt-4">
           <button
             type="button"
             onClick={() => {
@@ -170,7 +172,7 @@ function KpiReviewCard({ kpi, onApprove, onEdit, onReject, localDecision, reject
             }}
             className="text-xs text-[#93a5c3] transition-colors hover:text-white"
           >
-            Change decision
+            ← Change decision
           </button>
         </div>
       )}

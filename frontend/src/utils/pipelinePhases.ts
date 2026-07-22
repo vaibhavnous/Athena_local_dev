@@ -190,7 +190,7 @@ function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
   return steps.map((step) => {
     const stepIndex = indexByKey.get(step.key) ?? -1
     const state = normalizeState(step.state)
-    if (stepIndex >= 0 && stepIndex < furthestProgressIndex && ['HITL_WAIT', 'RUNNING'].includes(state)) {
+    if (stepIndex >= 0 && stepIndex < furthestProgressIndex && ['PENDING', 'HITL_WAIT', 'RUNNING'].includes(state)) {
       return {
         ...step,
         state: 'COMPLETED',

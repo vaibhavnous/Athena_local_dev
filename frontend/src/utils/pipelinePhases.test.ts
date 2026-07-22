@@ -102,6 +102,29 @@ test('shows Gold execution as waiting while generated Gold code is under review'
   })
 })
 
+test('does not leave completed Bronze and Silver phases pending after Gold fails', () => {
+  const run = {
+    status: 'FAILED',
+    pipeline_steps: [
+      { key: 'bronze', state: 'PENDING' },
+      { key: 'gate4', state: 'PENDING' },
+      { key: 'bronze_code_execution', state: 'PENDING' },
+      { key: 'silver_merge_key_resolution', state: 'PENDING' },
+      { key: 'silver_merge_key_review', state: 'PENDING' },
+      { key: 'silver', state: 'PENDING' },
+      { key: 'gate5', state: 'PENDING' },
+      { key: 'silver_code_execution', state: 'PENDING' },
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_code_execution', state: 'FAILED' },
+    ],
+  }
+
+  const phases = getPhaseGroups(run, getPipelineSteps(run))
+  expect(phases.find((phase) => phase.id === 'phase-3')?.status).toBe('Done')
+  expect(phases.find((phase) => phase.id === 'phase-4')?.status).toBe('Done')
+  expect(phases.find((phase) => phase.id === 'phase-5')?.status).toBe('Failed')
+})
+
 test('uses the project name instead of rendering a run ID as the pipeline name', () => {
   expect(summarizeRunSource({
     id: 'run-6',

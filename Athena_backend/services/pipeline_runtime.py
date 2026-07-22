@@ -2224,6 +2224,11 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         if checkpoint.get("resume_message"):
             resume_message = checkpoint.get("resume_message")
 
+    # ponytail: a real review gate always wins over a stale generic confirmation.
+    if paused_for_stage_confirmation and (next_gate or next_review_key):
+        paused_before_review_gate = True
+        stage_confirmation = None
+
     gold_execution_progress_exists = bool(
         checkpoint.get("background_stage") == "gold_code_execution"
         or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}

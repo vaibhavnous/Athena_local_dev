@@ -445,13 +445,17 @@ function AppShell() {
   const handleResumePausedRun = () => {
     if (!pausedRun) return
     setActiveRun(pausedRun.id)
-    navigate(reviewPathForPausedRun(pausedRun))
+    navigate(reviewPathForPausedRun(pausedRun), {
+      state: location.pathname === '/app/data-discovery' ? { backgroundLocation: location } : undefined,
+    })
   }
 
   const activeRun = activeRunId ? runs.find((run) => run.id === activeRunId) : null
   const stageConfirmation = activeRun?.stage_confirmation
   const stageGateOpen = Boolean(
     activeRun &&
+    location.pathname !== '/app/hitl' &&
+    !hasReviewGate(activeRun) &&
     normalizeState(activeRun.status) === 'PAUSED_FOR_STAGE_CONFIRMATION' &&
     stageConfirmation?.awaiting_confirmation
   )

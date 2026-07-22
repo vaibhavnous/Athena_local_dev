@@ -18,7 +18,7 @@ function AddKpiModal({ isOpen, submitting, onClose, onAdd }) {
 
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label="Add New KPI">
-      <div className="w-full max-w-[690px] overflow-hidden rounded-[22px] border border-[#26334a] bg-[#111a2b] shadow-[0_35px_110px_rgba(0,0,0,0.7)]">
+      <div className="w-full max-w-3xl overflow-hidden rounded-2xl border border-[#26334a] bg-[#111a2b] shadow-[0_35px_110px_rgba(0,0,0,0.7)]">
         <div className="flex items-start justify-between border-b border-[#26334a] px-7 py-6">
           <div><h2 className="text-xl font-extrabold text-white">Add New KPI</h2><p className="mt-1 text-sm text-[#9ca8bc]">Define a new KPI to include in the pipeline.</p></div>
           <button type="button" onClick={onClose} aria-label="Close add KPI" className="flex h-10 w-10 items-center justify-center rounded-lg text-[#9ca8bc] hover:bg-white/5 hover:text-white"><X size={20} /></button>

@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react'
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import AppShell from './components/layout/AppShell'
 import ProtectedRoute from './components/layout/ProtectedRoute'
 import LandingPage from './pages/LandingPage'
@@ -21,22 +21,13 @@ import ComplianceGovernance from './pages/ComplianceGovernance'
 import useThemeStore from './store/useThemeStore'
 import { AuthProvider } from './context/AuthContext'
 
-function App() {
-  const theme = useThemeStore((s) => s.theme)
-
-  useEffect(() => {
-    const root = document.documentElement
-    if (theme === 'light') {
-      root.classList.add('light')
-    } else {
-      root.classList.remove('light')
-    }
-  }, [theme])
+function AppRoutes() {
+  const location = useLocation()
+  const backgroundLocation = location.state?.backgroundLocation
 
   return (
-    <BrowserRouter>
-      <AuthProvider>
-      <Routes>
+    <>
+      <Routes location={backgroundLocation || location}>
         <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/app" element={<ProtectedRoute><AppShell /></ProtectedRoute>}>
@@ -58,6 +49,31 @@ function App() {
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      {backgroundLocation && (
+        <Routes>
+          <Route path="/app/hitl" element={<ProtectedRoute><HitlQueue /></ProtectedRoute>} />
+        </Routes>
+      )}
+    </>
+  )
+}
+
+function App() {
+  const theme = useThemeStore((s) => s.theme)
+
+  useEffect(() => {
+    const root = document.documentElement
+    if (theme === 'light') {
+      root.classList.add('light')
+    } else {
+      root.classList.remove('light')
+    }
+  }, [theme])
+
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <AppRoutes />
       </AuthProvider>
     </BrowserRouter>
   )

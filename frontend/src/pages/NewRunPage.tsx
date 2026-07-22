@@ -19,7 +19,7 @@ function NewRunPage() {
         isOpen
         pageMode
         project={project}
-        onClose={() => navigate(`/app/project/${project.id}`)}
+        onClose={() => navigate('/app/project')}
       />
     </div>
   )

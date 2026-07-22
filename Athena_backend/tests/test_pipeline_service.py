@@ -428,7 +428,7 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
     assert recorded["kwargs"]["run_id"] == "run-submit"
     assert recorded["kwargs"]["brd_filename"] == "Claims BRD"
     assert recorded["kwargs"]["source_databases"] == ["db1"]
-    assert recorded["kwargs"]["stage_confirmation_enabled"] is False
+    assert recorded["kwargs"]["stage_confirmation_enabled"] is True
     assert recorded["kwargs"]["compliance_enabled"] is True
     assert recorded["kwargs"]["compliance_domain"] == "Insurance"
     assert recorded["kwargs"]["compliance_countries"] == ["US", "AU"]
@@ -686,7 +686,7 @@ def test_build_pipeline_steps_does_not_complete_in_progress_profiling():
     assert by_key["enrichment"]["state"] == "PENDING"
 
 
-def test_run_context_preserves_stage_confirmation_status_after_bronze(monkeypatch):
+def test_run_context_prefers_bronze_review_over_stale_stage_confirmation(monkeypatch):
     from services import pipeline_runtime
 
     checkpoint = {
@@ -726,9 +726,9 @@ def test_run_context_preserves_stage_confirmation_status_after_bronze(monkeypatc
 
     context = pipeline_runtime.get_run_context("run-bronze")
 
-    assert context["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
-    assert context["stage_confirmation"]["last_completed_stage_key"] == "bronze"
-    assert context["stage_confirmation"]["next_stage_key"] == "silver"
+    assert context["status"] == "HITL_WAIT"
+    assert context["next_gate"] == 4
+    assert context["stage_confirmation"] is None
     assert context["bronze"]["scripts"][0]["script_body"] == "print('bronze')"
 
 

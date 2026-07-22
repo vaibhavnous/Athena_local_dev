@@ -103,14 +103,13 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
   if (!isActive) return null
 
   return (
-    <div className="w-full flex flex-col">
+    <div className="flex h-full min-h-0 w-full flex-col">
       {/* Panel */}
       <motion.div
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.2 }}
-        className="w-full flex flex-col bg-bg-card border border-bg-border rounded-lg overflow-hidden flex-shrink-0"
-        style={{ height: '350px', minHeight: '350px' }}
+        className="flex h-full min-h-[460px] w-full flex-col overflow-hidden rounded-lg border border-bg-border bg-bg-card lg:min-h-0"
       >
         {/* Header */}
         <div className="px-4 py-3 border-b border-bg-border flex items-center justify-between bg-gradient-to-r from-bg-card to-bg-card/50">
@@ -246,24 +245,16 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
                         onClick={() => setSelectedLog(log)}
                         className="px-4 py-2.5 hover:bg-bg-border/10 cursor-pointer transition-colors border-l-2 border-transparent hover:border-l-blue-500/50"
                       >
-                        <div className="flex items-center gap-2 text-xs">
-                          <span className="text-gray-500 font-mono flex-shrink-0">
+                        <div className="flex min-w-0 items-center gap-2 font-mono text-xs">
+                          <span className="w-[76px] flex-shrink-0 text-gray-500">
                             {formatLogTime(log.logged_at)}
                           </span>
-                          <span className={`px-2 py-0.5 rounded text-xs font-semibold flex-shrink-0 ${levelBadgeClass(log.log_level)}`}>
+                          <span className={`min-w-[54px] flex-shrink-0 rounded px-2 py-0.5 text-center font-sans text-xs font-semibold ${levelBadgeClass(log.log_level)}`}>
                             {normalizeLevel(log.log_level)}
                           </span>
-                          {eventLabel(log.event_type) && (
-                            <span className={`px-2 py-0.5 rounded text-xs font-semibold flex-shrink-0 ${eventBadgeClass(log.event_type)}`}>
-                              {eventLabel(log.event_type)}
-                            </span>
-                          )}
-                          {log.stage && <span className="text-gray-300">{formatStageLabel(log.stage)}</span>}
-                          {formatDuration(log.duration_seconds) && (
-                            <span className="text-gray-500 font-mono">{formatDuration(log.duration_seconds)}</span>
-                          )}
-                          <span className="text-gray-500">-</span>
-                          <span className="text-gray-300 truncate">{log.message || '-'}</span>
+                          {log.stage && <span className="min-w-[82px] flex-shrink-0 text-gray-300">{log.stage}</span>}
+                          <span className="flex-shrink-0 text-gray-500">-</span>
+                          <span className="min-w-0 truncate text-gray-300">{log.message || '-'}</span>
                         </div>
                       </div>
                     ))}
