@@ -134,6 +134,10 @@ def test_ui_status_uses_reconciled_context_over_stale_checkpoint_pause():
 
 def test_pipeline_status_endpoint_syncs_with_ui_service(monkeypatch):
     monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "RUNNING"},
+    )
+    monkeypatch.setattr(
         "api.services.ui_service.ui_run",
         lambda run_id: {
             "status": "SUCCESS",
@@ -153,6 +157,7 @@ def test_pipeline_status_endpoint_syncs_with_ui_service(monkeypatch):
 
 
 def test_run_detail_endpoint_returns_scripts_from_ui_layer(monkeypatch):
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"run_id": run_id})
     monkeypatch.setattr(
         "api.services.ui_service.ui_run",
         lambda run_id, include_scripts=True: {
@@ -197,6 +202,7 @@ def test_mocked_pipeline_progression_stays_in_sync(monkeypatch):
         state["resume_message"] = "Pipeline completed."
 
     monkeypatch.setattr("api.services.ui_service.ui_run", fake_ui_run)
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: state)
     monkeypatch.setattr("utilis.db.update_hitl_item", fake_update_hitl_item)
     monkeypatch.setattr("api.services.kpi_service.maybe_resume_gate1", lambda run_id: None)
 
@@ -242,7 +248,7 @@ def test_snowflake_bronze_review_submission_reports_execution_stage(monkeypatch)
     submitted = {}
     monkeypatch.setattr(
         "services.pipeline_runtime.load_checkpoint_state",
-        lambda run_id: {"run_id": run_id, "source": "database", "target_warehouse": "snowflake"},
+        lambda run_id: {"run_id": run_id, "source": "database", "target_warehouse": "snowflake", "next_gate": 4},
     )
     monkeypatch.setattr(
         "services.pipeline_runtime.submit_background",
@@ -262,7 +268,7 @@ def test_databricks_bronze_review_reports_merge_key_stage_when_execution_disable
     submitted = {}
     monkeypatch.setattr(
         "services.pipeline_runtime.load_checkpoint_state",
-        lambda run_id: {"run_id": run_id, "source": "database", "target_warehouse": "databricks"},
+        lambda run_id: {"run_id": run_id, "source": "database", "target_warehouse": "databricks", "next_gate": 4},
     )
     monkeypatch.setattr("services.databricks_runtime.databricks_bronze_execution_enabled", lambda: False)
     monkeypatch.setattr(
@@ -282,6 +288,10 @@ def test_databricks_bronze_review_reports_merge_key_stage_when_execution_disable
 def test_silver_merge_review_submission_reports_generation_stage(monkeypatch):
     submitted = {}
     monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "next_review_key": "silver_merge_key_review"},
+    )
+    monkeypatch.setattr(
         "services.pipeline_runtime.submit_background",
         lambda run_id, stage, fn, *args: submitted.update({"run_id": run_id, "stage": stage}),
     )
@@ -299,6 +309,7 @@ def test_hitl_batch_submit_returns_503_when_decision_persistence_fails(monkeypat
     def fail_update_hitl_item(*args, **kwargs):
         raise RuntimeError("pipeline database unavailable")
 
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"run_id": run_id, "next_gate": 1})
     monkeypatch.setattr("utilis.db.update_hitl_item", fail_update_hitl_item)
 
     response = client.post(
@@ -307,7 +318,7 @@ def test_hitl_batch_submit_returns_503_when_decision_persistence_fails(monkeypat
     )
 
     assert response.status_code == 503
-    assert "Failed to persist KPI decision" in response.json()["detail"]
+    assert "Failed to persist HITL decision" in response.json()["detail"]
 
 
 def test_update_hitl_item_rejects_missing_item(monkeypatch):

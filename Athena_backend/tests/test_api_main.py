@@ -266,6 +266,10 @@ def test_resume_from_failure_uses_real_resume_path(monkeypatch):
 
     monkeypatch.setattr(pipeline_router, "demo_enabled", lambda: False)
     monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "FAILED", "owner_email": "test@example.com"},
+    )
+    monkeypatch.setattr(
         pipeline_router,
         "_resume_failed_run",
         lambda run_id, action_name: {"run_id": run_id, "status": "SUBMITTED", "action": action_name},
@@ -307,7 +311,9 @@ def test_restart_creates_new_real_run(monkeypatch):
     monkeypatch.setattr(
         pipeline_router,
         "_seed_run_checkpoint",
-        lambda run_id, payload: recorded.update({"run_id": run_id, "payload": payload}),
+        lambda run_id, payload, owner_email=None: recorded.update(
+            {"run_id": run_id, "payload": payload, "owner_email": owner_email}
+        ),
     )
     monkeypatch.setattr(
         "api.services.pipeline_service.submit_pipeline_start",
@@ -371,6 +377,7 @@ def test_upload_brd_rejects_large_file(monkeypatch):
 
 
 def test_pipeline_status_returns_404_for_missing_run(monkeypatch):
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {})
     monkeypatch.setattr("api.services.ui_service.ui_run", lambda run_id: {"status": "NOT_FOUND"})
 
     response = client.get("/pipeline/run-123/status")
@@ -380,6 +387,10 @@ def test_pipeline_status_returns_404_for_missing_run(monkeypatch):
 
 
 def test_pipeline_status_shapes_running_response(monkeypatch):
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "RUNNING", "owner_email": "test@example.com"},
+    )
     monkeypatch.setattr(
         "api.services.ui_service.ui_run",
         lambda run_id: {"status": "RUNNING", "run_id": run_id},
@@ -423,13 +434,13 @@ def test_abort_run_persists_aborted_status(monkeypatch):
     assert saved["state"]["status"] == "ABORTED"
 
 
-def test_continue_stage_requires_pending_stage(monkeypatch):
+def test_continue_stage_returns_404_when_run_is_missing(monkeypatch):
     monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {})
 
     response = client.post("/pipeline/run-123/continue-stage", json={"auto_advance": False})
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "No next stage is pending confirmation for this run."
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Run not found: run-123"
 
 
 def test_continue_stage_rejects_file_source(monkeypatch):
@@ -502,7 +513,7 @@ def test_bronze_review_submit_uses_checkpoint_artifact_when_payload_empty(monkey
     checkpoint_artifact = {"feeds": [{"entity": "claims", "review_status": "APPROVED"}]}
     monkeypatch.setattr(
         "services.pipeline_runtime.load_checkpoint_state",
-        lambda run_id: {"run_id": run_id, "source": "database", "bronze_review_artifact": checkpoint_artifact},
+        lambda run_id: {"run_id": run_id, "source": "database", "next_gate": 4, "bronze_review_artifact": checkpoint_artifact},
     )
     monkeypatch.setattr("api.services.ui_service.bronze_review_from_scripts", lambda run_id, checkpoint: {})
     monkeypatch.setattr(
@@ -520,7 +531,7 @@ def test_bronze_review_submit_uses_checkpoint_artifact_when_payload_empty(monkey
 def test_bronze_review_submit_rejects_when_artifact_not_ready(monkeypatch):
     monkeypatch.setattr(
         "services.pipeline_runtime.load_checkpoint_state",
-        lambda run_id: {"run_id": run_id, "source": "database"},
+        lambda run_id: {"run_id": run_id, "source": "database", "next_gate": 4},
     )
     monkeypatch.setattr("api.services.ui_service.bronze_review_from_scripts", lambda run_id, checkpoint: {})
 
@@ -530,8 +541,34 @@ def test_bronze_review_submit_rejects_when_artifact_not_ready(monkeypatch):
     assert response.json()["detail"] == "Bronze review is not ready yet. Generated Bronze scripts are still loading."
 
 
+def test_bronze_review_submit_rejects_replay(monkeypatch):
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "source": "database",
+            "status": "HITL_WAIT",
+            "next_gate": 4,
+            "bronze_review_decision": "APPROVED",
+            "bronze_review_artifact": {"feeds": [{"entity": "claims", "review_status": "APPROVED"}]},
+        },
+    )
+
+    response = client.post(
+        "/bronze-reviews/run-123",
+        json={"action": "APPROVED", "review_artifact": {"feeds": [{"entity": "claims"}]}},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "This review has already been decided for this run."
+
+
 def test_gold_review_submit_runs_execution_in_background(monkeypatch):
     recorded = {}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "next_review_key": "gold_review"},
+    )
     monkeypatch.setattr(
         "services.pipeline_runtime.submit_background",
         lambda run_id, stage, fn, *args: recorded.update({"run_id": run_id, "stage": stage, "args": args}),
@@ -691,6 +728,25 @@ def test_run_detail_returns_fallback_on_failure(monkeypatch):
     assert payload["checkpoint"] == {"status": "RUNNING"}
 
 
+def test_run_detail_rejects_foreign_client_run(monkeypatch):
+    override = app.dependency_overrides[get_current_user]
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="client-user", username="Client User", email="client@example.com", userType="Client"
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "owner_email": "other@example.com", "status": "RUNNING"},
+    )
+
+    try:
+        response = client.get("/runs/run-foreign")
+    finally:
+        app.dependency_overrides[get_current_user] = override
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Run access denied"
+
+
 def test_settings_roundtrip():
     response = client.get("/settings")
     assert response.status_code == 200
@@ -716,3 +772,111 @@ def test_configuration_crud_endpoints():
     delete_response = client.delete(f"/configurations/{created['id']}")
     assert delete_response.status_code == 200
     assert delete_response.json() == {"id": created["id"], "deleted": True}
+
+
+def test_configuration_write_endpoints_redact_secret_fields():
+    create_response = client.post(
+        "/configurations",
+        json={
+            "name": "custom",
+            "password": "plain-text",
+            "apiKey": "api-key",
+            "nested": {"source_password": "nested-secret"},
+        },
+    )
+
+    assert create_response.status_code == 200
+    created = create_response.json()
+    assert created["password"] == ""
+    assert created["apiKey"] == ""
+    assert created["nested"]["source_password"] == ""
+
+    update_response = client.put(
+        "/configurations/config-1",
+        json={"name": "custom", "secret": "stored-secret"},
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.json()["secret"] == ""
+
+
+def test_configuration_test_endpoint_accepts_database_shape_without_arbitrary_network(monkeypatch):
+    from api.routers import config_router
+
+    monkeypatch.setattr(config_router, "_load_env_if_available", lambda: None)
+    monkeypatch.delenv("AZURE_SQL_SOURCE_USERNAME", raising=False)
+    monkeypatch.delenv("AZURE_SQL_SOURCE_PASSWORD", raising=False)
+
+    def fail_probe(address, timeout):
+        raise AssertionError("arbitrary configuration test should not probe the network")
+
+    monkeypatch.setattr(config_router.socket, "create_connection", fail_probe)
+
+    response = client.post(
+        "/configurations/test",
+        json={
+            "sourceType": "database",
+            "dbType": "azure_sql",
+            "host": "example.database.windows.net",
+            "port": "1433",
+            "databaseName": "claims",
+            "username": "db_user",
+            "password": "db-password",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert "live connection test is not enabled" in response.json()["message"]
+
+
+def test_configuration_test_endpoint_probes_configured_default_with_bounded_timeout(monkeypatch):
+    from api.routers import config_router
+
+    recorded = {}
+    monkeypatch.setattr(config_router, "_load_env_if_available", lambda: None)
+    monkeypatch.setenv("AZURE_SQL_SOURCE_HOST", "configured.database.windows.net")
+    monkeypatch.setenv("AZURE_SQL_PORT", "1433")
+    monkeypatch.setenv("AZURE_SQL_SOURCE_DATABASE", "insurance")
+    monkeypatch.setenv("AZURE_SQL_SOURCE_USERNAME", "db_user")
+    monkeypatch.setenv("AZURE_SQL_SOURCE_PASSWORD", "db-password")
+    monkeypatch.setenv("ATHENA_SQL_TCP_PROBE_TIMEOUT_SECONDS", "30")
+
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_create_connection(address, timeout):
+        recorded.update({"address": address, "timeout_seconds": timeout})
+        return FakeSocket()
+
+    monkeypatch.setattr(config_router.socket, "create_connection", fake_create_connection)
+
+    response = client.post(
+        "/configurations/test",
+        json={
+            "sourceType": "database",
+            "dbType": "azure_sql",
+            "host": "configured.database.windows.net",
+            "port": "1433",
+            "databaseName": "insurance",
+            "username": "db_user",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert recorded == {"address": ("configured.database.windows.net", 1433), "timeout_seconds": 2.0}
+
+
+def test_configuration_test_endpoint_rejects_invalid_database_payload():
+    response = client.post(
+        "/configurations/test",
+        json={"sourceType": "database", "dbType": "azure_sql", "username": "db_user"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Host is required"

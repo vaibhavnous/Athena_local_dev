@@ -168,10 +168,12 @@ def maybe_resume_gate1(run_id: str) -> None:
 # -------------------------
 # ✅ List KPIs (SAFE LIMIT ADD)
 # -------------------------
-def list_all_kpis() -> List[Dict[str, Any]]:
+def list_all_kpis(user: Any = None) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
 
-    runs = list_runs()
+    from api.auth import filter_runs_for_user
+
+    runs = filter_runs_for_user(list_runs(), user)
 
     # ✅ FIX: safety cap (prevents overload)
     for row in runs[:100]:

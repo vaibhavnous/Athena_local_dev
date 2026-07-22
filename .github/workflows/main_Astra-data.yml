@@ -13,6 +13,9 @@ concurrency:
   group: astra-data-backend-production
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   AZURE_WEBAPP_NAME: Astra-data
   AZURE_WEBAPP_URL: https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net
@@ -22,6 +25,9 @@ jobs:
     name: Build and deploy backend
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment:
+      name: production
+      url: https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net
 
     steps:
       - uses: actions/checkout@v4

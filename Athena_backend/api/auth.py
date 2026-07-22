@@ -5,7 +5,7 @@ import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Any, Literal
 
 import bcrypt
 import jwt
@@ -368,3 +368,196 @@ def get_admin(user: AuthUser = Depends(get_current_user)) -> AuthUser:
     if user.user_type != "Admin":
         raise HTTPException(status_code=403, detail="Administrator access required")
     return user
+
+
+def has_request_user(user: Any) -> bool:
+    return isinstance(user, AuthUser)
+
+
+def normalize_auth_email(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def user_can_access_project(project: dict[str, Any], user: Any) -> bool:
+    if not has_request_user(user):
+        return True
+    if user.user_type == "Admin":
+        return True
+    return normalize_auth_email(project.get("owner_email")) == normalize_auth_email(user.email)
+
+
+def load_project_for_user(project_id: str, user: Any) -> dict[str, Any]:
+    from api.repositories.project_repository import ProjectRepository
+
+    project = ProjectRepository().find(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not user_can_access_project(project, user):
+        raise HTTPException(status_code=403, detail="Project access denied")
+    return project
+
+
+def checkpoint_owner_email(checkpoint: dict[str, Any]) -> str:
+    for field in ("owner_email", "created_by_email", "submitted_by_email", "user_email"):
+        owner = normalize_auth_email(checkpoint.get(field))
+        if owner:
+            return owner
+    return ""
+
+
+def user_can_access_checkpoint(checkpoint: dict[str, Any], user: Any) -> bool:
+    if not has_request_user(user):
+        return True
+    if user.user_type == "Admin":
+        return True
+
+    project_id = str(checkpoint.get("project_id") or "").strip()
+    if project_id:
+        project = load_project_for_user(project_id, user)
+        return user_can_access_project(project, user)
+
+    owner_email = checkpoint_owner_email(checkpoint)
+    if owner_email:
+        return owner_email == normalize_auth_email(user.email)
+    return _legacy_unowned_run_access_allowed()
+
+
+def assert_run_access(
+    run_id: str,
+    user: Any,
+    *,
+    checkpoint: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not has_request_user(user):
+        return checkpoint or {}
+
+    if checkpoint is None:
+        from services.pipeline_runtime import load_checkpoint_state
+
+        try:
+            checkpoint = load_checkpoint_state(run_id) or {}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Failed to verify run access") from exc
+
+    if not checkpoint:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    try:
+        allowed = user_can_access_checkpoint(checkpoint, user)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Failed to verify run access") from exc
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Run access denied")
+    return checkpoint
+
+
+def filter_runs_for_user(rows: list[dict[str, Any]], user: Any) -> list[dict[str, Any]]:
+    if not has_request_user(user) or user.user_type == "Admin":
+        return rows
+
+    from services.pipeline_runtime import load_checkpoint_state
+
+    allowed_rows: list[dict[str, Any]] = []
+    for row in rows:
+        run_id = str(row.get("run_id") or row.get("id") or "")
+        if not run_id:
+            continue
+        checkpoint = row.get("checkpoint") if isinstance(row.get("checkpoint"), dict) else None
+        if not checkpoint:
+            try:
+                checkpoint = load_checkpoint_state(run_id) or {}
+            except Exception:
+                continue
+        try:
+            if user_can_access_checkpoint(checkpoint, user):
+                allowed_rows.append({**row, "checkpoint": checkpoint})
+        except Exception:
+            continue
+    return allowed_rows
+
+
+def hitl_gate_state_enforced() -> bool:
+    return str(os.getenv("ATHENA_ENFORCE_HITL_GATE_STATE", "true")).strip().lower() not in {"0", "false", "no"}
+
+
+def _legacy_unowned_run_access_allowed() -> bool:
+    # ponytail: legacy checkpoints have no owner; keep them admin-only unless an operator opts into migration access.
+    return str(os.getenv("ATHENA_ALLOW_LEGACY_UNOWNED_RUNS", "false")).strip().lower() in {"1", "true", "yes"}
+
+
+def _checkpoint_review_decision(
+    checkpoint: dict[str, Any],
+    *,
+    gate_number: int | None = None,
+    review_key: str | None = None,
+) -> str:
+    def nested(key: str) -> str:
+        value = checkpoint.get(key)
+        return str(value.get("decision") if isinstance(value, dict) else "").strip().upper()
+
+    if gate_number == 1:
+        return str(checkpoint.get("human_decision") or "").strip().upper()
+    if gate_number == 2:
+        return nested("gate2")
+    if gate_number == 3:
+        return str(checkpoint.get("enrichment_review_decision") or "").strip().upper() or nested("gate3")
+    if gate_number == 4:
+        return str(checkpoint.get("bronze_review_decision") or "").strip().upper() or nested("gate4")
+    if gate_number == 5:
+        return str(checkpoint.get("silver_review_decision") or "").strip().upper() or nested("gate5")
+    if review_key == "silver_merge_key_review":
+        return str(checkpoint.get("silver_merge_key_review_decision") or "").strip().upper() or nested(
+            "gate_silver_merge_key_review"
+        )
+    if review_key == "gold_review":
+        return str(checkpoint.get("gold_review_decision") or "").strip().upper()
+    return ""
+
+
+def assert_run_gate_open(
+    run_id: str,
+    user: Any,
+    *,
+    checkpoint: dict[str, Any] | None = None,
+    gate_number: int | None = None,
+    review_key: str | None = None,
+) -> dict[str, Any]:
+    checkpoint = assert_run_access(run_id, user, checkpoint=checkpoint)
+    if not has_request_user(user) or not hitl_gate_state_enforced():
+        return checkpoint
+
+    status_value = str(checkpoint.get("status") or "").upper()
+    if status_value in {"ABORTED", "COMPLETED", "FAILED", "PIPELINE_COMPLETED", "SUCCESS"}:
+        raise HTTPException(status_code=409, detail="Run is already terminal; this review cannot be submitted.")
+    if checkpoint.get("background_stage"):
+        raise HTTPException(status_code=409, detail="Run is not waiting for this review.")
+    if _checkpoint_review_decision(checkpoint, gate_number=gate_number, review_key=review_key) in {
+        "COMPLETED",
+        "APPROVED",
+        "REJECTED",
+        "REGENERATE",
+    }:
+        raise HTTPException(status_code=409, detail="This review has already been decided for this run.")
+
+    if gate_number is not None:
+        try:
+            if int(checkpoint.get("next_gate") or 0) == int(gate_number):
+                return checkpoint
+        except (TypeError, ValueError):
+            pass
+    if gate_number == 1:
+        try:
+            from utilis.db import get_pending_items
+
+            if get_pending_items(run_id, 1):
+                return checkpoint
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Failed to verify KPI review state") from exc
+    if review_key and str(checkpoint.get("next_review_key") or "") == review_key:
+        return checkpoint
+
+    expected = review_key or (f"gate {gate_number}" if gate_number is not None else "review")
+    raise HTTPException(status_code=409, detail=f"Run is not waiting for {expected}.")

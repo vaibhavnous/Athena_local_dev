@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
@@ -13,28 +14,124 @@ from utilis.logger import logger
 
 
 DEFAULT_COMPLIANCE_BACKEND_URL = "https://astra-compliance-hhgxb8hshua7ftdc.southindia-01.azurewebsites.net"
-COMPLIANCE_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("COMPLIANCE_BACKGROUND_WORKERS", "2"))))
+PRODUCTION_ENV_VALUES = {"prod", "production"}
+REDACTED_VALUE = "[redacted]"
+SECRET_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "connection_string",
+    "credential",
+    "password",
+    "private_key",
+    "secret",
+    "token",
+)
+SECRET_TEXT_PATTERN = re.compile(
+    r"([\"']?\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|connection[_-]?string)\b"
+    r"[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;}]+)",
+    re.IGNORECASE,
+)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _is_production() -> bool:
+    for name in ("ATHENA_ENV", "APP_ENV", "ENVIRONMENT", "ENV"):
+        if os.getenv(name, "").strip().lower() in PRODUCTION_ENV_VALUES:
+            return True
+    return False
+
+
+COMPLIANCE_EXECUTOR = ThreadPoolExecutor(max_workers=_env_int("COMPLIANCE_BACKGROUND_WORKERS", 2))
 
 
 def _base_url() -> str:
-    return (os.getenv("COMPLIANCE_BACKEND_URL") or DEFAULT_COMPLIANCE_BACKEND_URL).strip().rstrip("/")
+    configured_url = os.getenv("COMPLIANCE_BACKEND_URL", "").strip().rstrip("/")
+    if not configured_url:
+        if _is_production():
+            raise RuntimeError("COMPLIANCE_BACKEND_URL must be set before compliance egress is enabled in production.")
+        configured_url = DEFAULT_COMPLIANCE_BACKEND_URL
+    if _is_production() and not configured_url.lower().startswith("https://"):
+        raise RuntimeError("COMPLIANCE_BACKEND_URL must use https:// in production.")
+    return configured_url
+
+
+def _compliance_egress_enabled() -> bool:
+    return _env_bool("COMPLIANCE_EGRESS_ENABLED", True)
+
+
+def _send_sample_values() -> bool:
+    return _env_bool("COMPLIANCE_SEND_SAMPLE_VALUES", not _is_production())
+
+
+def _store_full_artifacts() -> bool:
+    return _env_bool("COMPLIANCE_STORE_FULL_ARTIFACTS", not _is_production())
 
 
 def _timeout_seconds() -> int:
-    try:
-        return max(1, int(os.getenv("COMPLIANCE_REQUEST_TIMEOUT_SECONDS", "300")))
-    except ValueError:
-        return 300
+    return _env_int("COMPLIANCE_REQUEST_TIMEOUT_SECONDS", 300)
 
 
 def _max_metadata_columns() -> int:
-    try:
-        return max(1, int(os.getenv("COMPLIANCE_MAX_METADATA_COLUMNS", "50")))
-    except ValueError:
-        return 50
+    return _env_int("COMPLIANCE_MAX_METADATA_COLUMNS", 50)
+
+
+def _redact_text(value: str) -> str:
+    return SECRET_TEXT_PATTERN.sub(lambda match: f"{match.group(1)}{REDACTED_VALUE}", value)
+
+
+def _redact_for_storage(value: Any) -> Any:
+    if _store_full_artifacts():
+        return value
+    if isinstance(value, dict):
+        redacted: Dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if key_text == "brd_text":
+                redacted[key] = f"{REDACTED_VALUE} ({len(str(item or ''))} chars)"
+            elif key_text == "sample_values":
+                redacted[key] = [REDACTED_VALUE] if item else []
+            elif any(part in key_text for part in SECRET_KEY_PARTS):
+                redacted[key] = REDACTED_VALUE
+            else:
+                redacted[key] = _redact_for_storage(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_for_storage(item) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value)
+    return value
+
+
+def _safe_remote_error_detail(detail: str) -> str:
+    detail = _redact_text(detail.strip())
+    if not detail or _is_production():
+        return ""
+    return f": {detail[:500]}"
+
+
+def _safe_error_message(exc: Exception) -> str:
+    if _is_production():
+        return exc.__class__.__name__
+    return _redact_text(str(exc))[:500]
 
 
 def _json_request(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not _compliance_egress_enabled():
+        raise RuntimeError("Compliance egress is disabled by COMPLIANCE_EGRESS_ENABLED.")
     url = f"{_base_url()}{path}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
     request = Request(
@@ -53,14 +150,18 @@ def _json_request(method: str, path: str, body: Optional[Dict[str, Any]] = None)
             return json.loads(raw) if raw else {}
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Compliance API {method} {path} failed with HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(
+            f"Compliance API {method} {path} failed with HTTP {exc.code}{_safe_remote_error_detail(detail)}"
+        ) from exc
     except URLError as exc:
-        raise RuntimeError(f"Compliance API {method} {path} failed: {exc.reason}") from exc
+        raise RuntimeError(f"Compliance API {method} {path} failed: {_redact_text(str(exc.reason))}") from exc
     except TimeoutError as exc:
         raise RuntimeError(f"Compliance API {method} {path} timed out after {_timeout_seconds()} seconds") from exc
 
 
 def _sample_values(raw_samples: Any) -> List[str]:
+    if not _send_sample_values():
+        return [REDACTED_VALUE]
     values: List[str] = []
     if isinstance(raw_samples, list):
         for item in raw_samples:
@@ -73,7 +174,7 @@ def _sample_values(raw_samples: Any) -> List[str]:
             else:
                 value = item
             if value is not None and str(value).strip():
-                values.append(str(value))
+                values.append(_redact_text(str(value)))
     return values[:10] or ["sample unavailable"]
 
 
@@ -112,7 +213,7 @@ def build_assessment_payload(state: Dict[str, Any], column_profiles: Dict[str, A
         if item is not None
     ][:_max_metadata_columns()]
     return {
-        "brd_text": str(state.get("brd_text") or "Compliance assessment for Athena pipeline run."),
+        "brd_text": _redact_text(str(state.get("brd_text") or "Compliance assessment for Athena pipeline run.")),
         "filename": state.get("brd_filename") or f"{state.get('run_id') or 'athena_run'}.txt",
         "domain": str(state.get("compliance_domain") or os.getenv("COMPLIANCE_DOMAIN") or "Insurance"),
         "countries": _countries(state.get("compliance_countries")),
@@ -141,6 +242,8 @@ def _fallback_metadata() -> Dict[str, Any]:
 
 
 def create_assessment(state: Dict[str, Any], column_profiles: Dict[str, Any]) -> Dict[str, Any]:
+    if not _compliance_egress_enabled():
+        raise RuntimeError("Compliance egress is disabled by COMPLIANCE_EGRESS_ENABLED.")
     payload = build_assessment_payload(state, column_profiles)
     response = _json_request("POST", "/api/assessments", payload)
     run_id = str(state.get("run_id") or "")
@@ -150,7 +253,7 @@ def create_assessment(state: Dict[str, Any], column_profiles: Dict[str, Any]) ->
                 run_id=run_id,
                 stage="Compliance Assessment",
                 artifact_type="COMPLIANCE_ASSESSMENT_REQUEST",
-                payload={"request": payload, "response": response},
+                payload={"request": _redact_for_storage(payload), "response": _redact_for_storage(response)},
                 schema_version="ComplianceAssessmentRequest_v1",
                 prompt_version="COMPLIANCE_API_v1",
                 faithfulness_status="NOT_APPLICABLE",
@@ -176,7 +279,7 @@ def fetch_review(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 run_id=run_id,
                 stage="Compliance Review",
                 artifact_type="COMPLIANCE_REVIEW",
-                payload=review,
+                payload=_redact_for_storage(review),
                 schema_version="ComplianceReview_v1",
                 prompt_version="COMPLIANCE_API_v1",
                 faithfulness_status="NOT_APPLICABLE",
@@ -191,6 +294,8 @@ def fetch_review(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def submit_review(state: Dict[str, Any], review_payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not _compliance_egress_enabled():
+        raise RuntimeError("Compliance egress is disabled by COMPLIANCE_EGRESS_ENABLED.")
     assessment_id = str(state.get("compliance_assessment_id") or "").strip()
     if not assessment_id:
         raise ValueError("Compliance assessment is not ready for review.")
@@ -202,7 +307,7 @@ def submit_review(state: Dict[str, Any], review_payload: Dict[str, Any]) -> Dict
                 run_id=run_id,
                 stage="Compliance Review",
                 artifact_type="COMPLIANCE_REVIEW_DECISION",
-                payload={"request": review_payload, "response": response},
+                payload={"request": _redact_for_storage(review_payload), "response": _redact_for_storage(response)},
                 schema_version="ComplianceReviewDecision_v1",
                 prompt_version="COMPLIANCE_API_v1",
                 faithfulness_status="PASSED",
@@ -228,7 +333,7 @@ def fetch_results(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 run_id=run_id,
                 stage="Compliance Results",
                 artifact_type="COMPLIANCE_RESULTS",
-                payload=results,
+                payload=_redact_for_storage(results),
                 schema_version="ComplianceResults_v1",
                 prompt_version="COMPLIANCE_API_v1",
                 faithfulness_status="PASSED",
@@ -249,6 +354,22 @@ def attach_assessment_result(state: Dict[str, Any], column_profiles: Dict[str, A
             extra={"run_id": state.get("run_id"), "node": "compliance"},
         )
         return {}
+    if not _compliance_egress_enabled():
+        return {
+            "compliance_assessment_status": "SKIPPED",
+            "compliance_assessment_message": "Compliance assessment skipped because compliance egress is disabled.",
+            "compliance_assessment_error": None,
+        }
+    try:
+        _base_url()
+    except RuntimeError as exc:
+        message = _redact_text(str(exc))[:500]
+        logger.warning("Compliance assessment skipped: %s", message, extra={"run_id": state.get("run_id"), "node": "compliance"})
+        return {
+            "compliance_assessment_status": "SKIPPED",
+            "compliance_assessment_message": "Compliance assessment skipped because compliance backend is not configured.",
+            "compliance_assessment_error": message,
+        }
     if state.get("compliance_assessment_id"):
         return {}
     if str(state.get("compliance_assessment_status") or "").upper() in {"SUBMITTED", "IN_PROGRESS", "PENDING_REVIEW"}:
@@ -290,11 +411,11 @@ def _create_assessment_background(state: Dict[str, Any], column_profiles: Dict[s
             "compliance_assessment_completed_at": time.time(),
         }
     except Exception as exc:
-        logger.warning("Compliance assessment creation failed: %s", exc, extra={"run_id": state.get("run_id"), "node": "compliance"})
-        message = str(exc)
+        message = _safe_error_message(exc)
+        logger.warning("Compliance assessment creation failed: %s", message, extra={"run_id": state.get("run_id"), "node": "compliance"})
         update = {
             "compliance_assessment_status": "TIMED_OUT" if "timed out" in message.lower() else "FAILED",
-            "compliance_assessment_error": str(exc),
+            "compliance_assessment_error": message,
             "compliance_assessment_completed_at": time.time(),
         }
     try:
@@ -320,8 +441,9 @@ def attach_review_result(state: Dict[str, Any]) -> Dict[str, Any]:
             "compliance_review_error": None,
         }
     except Exception as exc:
-        logger.warning("Compliance review fetch failed: %s", exc, extra={"run_id": state.get("run_id"), "node": "compliance"})
+        message = _safe_error_message(exc)
+        logger.warning("Compliance review fetch failed: %s", message, extra={"run_id": state.get("run_id"), "node": "compliance"})
         return {
             "compliance_review_status": "FAILED",
-            "compliance_review_error": str(exc),
+            "compliance_review_error": message,
         }

@@ -2,6 +2,8 @@
 frontend/node_modules/
 frontend/build/
 frontend/.env
+frontend/.env.*
+!frontend/.env.example
 frontend/.pnp
 frontend/.pnp.js
 frontend/coverage/
@@ -16,10 +18,15 @@ frontend/.git_disabled/
 # Backend
 Athena_backend/.venv/
 Athena_backend/.env
+Athena_backend/.env.*
+!Athena_backend/.env.example
 Athena_backend/__pycache__/
 Athena_backend/**/*.py[cod]
 Athena_backend/pipeline_logs.json
 Athena_backend/pipeline_logs.json.localbackup
+Athena_backend/fetch_tmp*.json
+Athena_backend/*_tmp.json
+Athena_backend/*.local.json
 Athena_backend/uploads/
 Athena_backend/.pytest_cache/
 Athena_backend/.pytest_tmp/
@@ -35,6 +42,14 @@ Thumbs.db
 .idea/
 
 # Misc
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
 *.bak
 paramiko_debug.log
 .local_logs/
