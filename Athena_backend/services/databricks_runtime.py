@@ -68,11 +68,11 @@ def _databricks_timeout_seconds() -> int:
 
 
 def _databricks_poll_interval_seconds() -> float:
-    raw = os.getenv("ATHENA_DATABRICKS_POLL_INTERVAL_SECONDS", "10")
+    raw = os.getenv("ATHENA_DATABRICKS_POLL_INTERVAL_SECONDS", "5")
     try:
         return max(1.0, float(raw))
     except ValueError:
-        return 10.0
+        return 5.0
 
 
 def _databricks_run_timeout_seconds() -> int:
@@ -92,6 +92,21 @@ def _databricks_execution_mode(layer: str) -> str:
     )
     mode = str(raw or "").strip().lower()
     return mode if mode in {"batch", "per_script"} else "batch"
+
+
+def _databricks_batch_max_workers(layer: str, script_count: int) -> int:
+    layer_name = str(layer or "").strip().upper()
+    default_workers = 4 if layer_name in {"BRONZE", "SILVER"} and _databricks_compute_mode() == "serverless" else 1
+    raw = (
+        os.getenv(f"ATHENA_DATABRICKS_{layer_name}_BATCH_MAX_WORKERS")
+        or os.getenv("ATHENA_DATABRICKS_BATCH_MAX_WORKERS")
+        or str(default_workers)
+    )
+    try:
+        configured = max(1, min(16, int(raw)))
+    except ValueError:
+        configured = default_workers
+    return min(configured, max(1, int(script_count or 0)))
 
 
 def _workspace_root() -> str:
@@ -449,34 +464,46 @@ def _build_batch_driver_notebook(layer: str, scripts: List[Dict[str, Any]], *, w
         f"ATHENA_DATABRICKS_{str(layer or '').upper()}_CONTINUE_ON_ERROR",
         "ATHENA_DATABRICKS_CONTINUE_ON_ERROR",
     )
+    max_workers = _databricks_batch_max_workers(layer, len(script_items))
     return f'''# Databricks notebook source
 import base64
 import json
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _SCRIPT_ITEMS = json.loads(base64.b64decode("{encoded}").decode("utf-8"))
 _CONTINUE_ON_ERROR = {str(continue_on_error)}
+_MAX_WORKERS = {max_workers}
 _RESULTS = []
 _WORKSPACE_DIR = "{workspace_dir}"
 if _WORKSPACE_DIR not in sys.path:
     sys.path.append(_WORKSPACE_DIR)
 
-for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
+def _execute_script(_index, _item):
     _started = time.time()
     _name = _item.get("script_name") or f"script_{{_index}}"
+    _namespace = {{
+        "__name__": f"athena_{{_name}}",
+        "__file__": f"<athena:{{_name}}>",
+        "__builtins__": __builtins__,
+    }}
     try:
-        exec(compile(_item.get("script_text") or "", f"<athena:{{_name}}>", "exec"), globals())
-        _RESULTS.append({{
+        exec(
+            compile(_item.get("script_text") or "", f"<athena:{{_name}}>", "exec"),
+            _namespace,
+            _namespace,
+        )
+        return _index, {{
             "script_name": _name,
             "script_path": _item.get("script_path"),
             "target_table": _item.get("target_table"),
             "status": "SUCCESS",
             "elapsed_seconds": round(time.time() - _started, 2),
-        }})
+        }}
     except Exception as _exc:
-        _RESULTS.append({{
+        return _index, {{
             "script_name": _name,
             "script_path": _item.get("script_path"),
             "target_table": _item.get("target_table"),
@@ -484,9 +511,25 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
             "error": str(_exc),
             "traceback": traceback.format_exc()[-12000:],
             "elapsed_seconds": round(time.time() - _started, 2),
-        }})
-        if not _CONTINUE_ON_ERROR:
+        }}
+
+if _MAX_WORKERS == 1:
+    for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
+        _, _result = _execute_script(_index, _item)
+        _RESULTS.append(_result)
+        if _result.get("status") == "FAILED" and not _CONTINUE_ON_ERROR:
             break
+else:
+    _indexed_results = {{}}
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as _executor:
+        _futures = [
+            _executor.submit(_execute_script, _index, _item)
+            for _index, _item in enumerate(_SCRIPT_ITEMS, start=1)
+        ]
+        for _future in as_completed(_futures):
+            _index, _result = _future.result()
+            _indexed_results[_index] = _result
+    _RESULTS = [_indexed_results[_index] for _index in sorted(_indexed_results)]
 
 _SUMMARY = {{
     "status": "FAILED" if any(_r.get("status") == "FAILED" for _r in _RESULTS) else "SUCCESS",

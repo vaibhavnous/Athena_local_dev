@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from api.auth import AuthUser, get_current_user
 from api.models import ProjectRequest
@@ -64,11 +64,12 @@ def update_project(project_id: str, request: ProjectRequest, user: AuthUser = De
     return project
 
 
-@router.delete("/{project_id}", status_code=204)
-def delete_project(project_id: str, user: AuthUser = Depends(get_current_user)) -> None:
+@router.delete("/{project_id}", status_code=204, response_class=Response)
+def delete_project(project_id: str, user: AuthUser = Depends(get_current_user)) -> Response:
     _owned_project(project_id, user)
     if not repository.delete(project_id):
         raise HTTPException(status_code=404, detail="Project not found")
+    return Response(status_code=204)
 
 
 @router.get("/{project_id}/runs")

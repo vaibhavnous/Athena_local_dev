@@ -28,14 +28,15 @@ export const normalizeDecision = (value) => {
 }
 
 function ComplianceGovernance() {
-  const { runs, activeRunId, setActiveRun, updateRun, addNotification } = useAthenaStore()
+  const requestedRunId = new URLSearchParams(window.location.search).get('runId') || ''
+  const { runs, activeRunId, setActiveRun, addRun, updateRun, addNotification } = useAthenaStore()
   const complianceRuns = useMemo(
     () => runs.filter((run) => run.compliance_enabled || run.compliance_assessment_id || run.compliance_review_status),
     [runs]
   )
-  const selectedRunId = activeRunId && complianceRuns.some((run) => run.id === activeRunId)
+  const selectedRunId = requestedRunId || (activeRunId && complianceRuns.some((run) => run.id === activeRunId)
     ? activeRunId
-    : complianceRuns[0]?.id
+    : complianceRuns[0]?.id)
   const selectedRun = runs.find((run) => run.id === selectedRunId) || null
   const [reviewPayload, setReviewPayload] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -57,6 +58,31 @@ function ComplianceGovernance() {
   )
   const results = reviewPayload?.results || selectedRun?.compliance_results || {}
   const evidencePack = results?.compliance_evidence || {}
+
+  useEffect(() => {
+    if (!requestedRunId) return
+    setActiveRun(requestedRunId)
+    if (runs.some((run) => run.id === requestedRunId)) return
+
+    let cancelled = false
+    getRun(requestedRunId)
+      .then((run) => {
+        if (!cancelled && run?.id) addRun(run)
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          addNotification({
+            type: 'error',
+            title: 'Compliance Run Unavailable',
+            message: error?.message || 'Unable to load the selected compliance run.',
+            duration: 5000,
+          })
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [addNotification, addRun, requestedRunId, runs, setActiveRun])
 
   useEffect(() => {
     if (!evidence.length) return
@@ -165,6 +191,7 @@ function ComplianceGovernance() {
         table_name: item.table_name,
         column_name: item.column_name,
         status: decisionFor(item),
+        security_control: item.security_control || null,
         reviewer_comments: comments[decisionKey(item)] || item.reviewer_comments || null,
       }))
       await submitComplianceReview(
@@ -192,6 +219,10 @@ function ComplianceGovernance() {
   }
 
   const assessmentStatus = reviewPayload?.assessment_status || selectedRun?.compliance_assessment_status || 'Waiting'
+  const assessmentError = reviewPayload?.assessment_error || selectedRun?.compliance_assessment_error || reviewPayload?.review_error || selectedRun?.compliance_review_error || ''
+  const assessmentSubmittedAt = Number(reviewPayload?.assessment_submitted_at || selectedRun?.compliance_assessment_submitted_at || 0)
+  const waitingMinutes = assessmentSubmittedAt ? Math.floor((Date.now() / 1000 - assessmentSubmittedAt) / 60) : 0
+  const waitingTooLong = waitingMinutes >= 5 || ['FAILED', 'TIMED_OUT'].includes(String(assessmentStatus || '').toUpperCase())
   const isWaiting = !evidence.length && selectedRun?.compliance_enabled
 
   return (
@@ -265,10 +296,29 @@ function ComplianceGovernance() {
         </section>
 
         {isWaiting && (
-          <section className="rounded-xl border border-blue-400/20 bg-blue-400/[0.06] px-6 py-10 text-center">
-            <Loader2 size={28} className="mx-auto animate-spin text-blue-400" />
-            <h2 className="mt-4 font-semibold text-white">Compliance assessment is still running</h2>
-            <p className="mt-2 text-sm text-[#8797ae]">Athena submitted the profiled columns. This page refreshes automatically every 8 seconds.</p>
+          <section className={`overflow-hidden rounded-xl border ${waitingTooLong ? 'border-amber-300/25 bg-amber-300/[0.07]' : 'border-blue-400/20 bg-blue-400/[0.06]'}`}>
+            <div className="flex flex-col gap-5 px-6 py-7 lg:flex-row lg:items-start lg:justify-between">
+              <div className="max-w-3xl">
+                <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-black uppercase tracking-wide ${waitingTooLong ? 'border-amber-300/25 bg-amber-300/10 text-amber-200' : 'border-blue-300/25 bg-blue-300/10 text-blue-200'}`}>
+                  <Loader2 size={14} className="animate-spin" /> {waitingTooLong ? 'Still preparing' : 'Loading compliance review'}
+                </div>
+                <h2 className="mt-4 text-xl font-bold text-white">
+                  {waitingTooLong ? 'Compliance is taking longer than expected' : 'Preparing your compliance review'}
+                </h2>
+                <p className="mt-2 text-sm leading-6 text-[#9cafc8]">
+                  {waitingTooLong
+                    ? `This usually finishes in a few minutes for about 50 columns. Current status: ${assessmentStatus || 'Waiting'}${waitingMinutes ? ` after ${waitingMinutes} minutes` : ''}.`
+                    : 'Athena is checking which columns may contain sensitive data, matching them to relevant rules, and preparing recommended controls.'}
+                </p>
+                {assessmentError && <p className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 font-mono text-xs text-amber-100">{assessmentError}</p>}
+                <p className="mt-3 text-sm leading-6 text-[#9cafc8]">The pipeline will wait here until you review and submit the compliance decisions.</p>
+              </div>
+              <div className="grid gap-3 text-left sm:grid-cols-3 lg:w-[620px]">
+                <LoadingBrief title="Rules" text="Finding which privacy and data-handling rules may apply to the columns." />
+                <LoadingBrief title="Review" text="Preparing clear evidence so you can approve or reject each recommendation." />
+                <LoadingBrief title="Controls" text="Choosing protections such as masking, hashing, redaction, or anonymization." />
+              </div>
+            </div>
           </section>
         )}
 
@@ -328,6 +378,15 @@ function Stat({ label, value, tone }) {
 
 function Summary({ title, text }) {
   return <div className="bg-[#0e141d] p-5"><div className="text-xs font-black uppercase tracking-wider text-[#6f85aa]">{title}</div><p className="mt-2 text-sm leading-6 text-[#a9b5c7]">{text || 'No summary returned yet.'}</p></div>
+}
+
+function LoadingBrief({ title, text }) {
+  return (
+    <div className="rounded-lg border border-[#26364d] bg-[#0b121c] p-4">
+      <div className="text-xs font-black uppercase tracking-wider text-blue-200">{title}</div>
+      <p className="mt-2 text-sm leading-5 text-[#9cafc8]">{text}</p>
+    </div>
+  )
 }
 
 function Filter({ label, value, onChange, options }) {

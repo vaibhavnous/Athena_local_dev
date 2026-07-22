@@ -8,12 +8,15 @@ that bronze tables exist.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
 import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, TypedDict
 
 from state import Stage01State
@@ -253,6 +256,44 @@ def _validate_generated_silver_code(
                     + ", ".join(invalid_source_columns[:10])
                 )
     else:
+        tree = ast.parse(code, filename="<silver_generated>")
+        constants: Dict[str, Any] = {}
+        for node in tree.body:
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            if node.targets[0].id not in {"EXPECTED_COLUMNS", "COLUMN_ALIASES"}:
+                continue
+            try:
+                constants[node.targets[0].id] = ast.literal_eval(node.value)
+            except (TypeError, ValueError):
+                continue
+
+        expected_columns = {
+            str(column).strip().casefold()
+            for column in constants.get("EXPECTED_COLUMNS", [])
+            if str(column).strip()
+        }
+        canonical_columns = {
+            _normalized_column_name(column).casefold()
+            for column in enriched_columns
+            if _normalized_column_name(column)
+        }
+        missing_expected_columns = sorted(canonical_columns - expected_columns)
+        if missing_expected_columns:
+            raise ValueError(
+                "LLM Silver EXPECTED_COLUMNS dropped canonical columns: "
+                + ", ".join(missing_expected_columns[:10])
+            )
+        aliases = constants.get("COLUMN_ALIASES", {})
+        if isinstance(aliases, dict):
+            for old_name, new_name in aliases.items():
+                old_key = str(old_name).strip().casefold()
+                new_key = str(new_name).strip().casefold()
+                if old_key != new_key and (old_key in expected_columns or new_key not in expected_columns):
+                    raise ValueError(
+                        "LLM Silver code must select corrected alias destinations in EXPECTED_COLUMNS: "
+                        f"{old_name} -> {new_name}"
+                    )
         _validate_python(code)
 
 
@@ -451,6 +492,70 @@ def _normalized_column_name(column: Dict[str, Any]) -> str:
     return COLUMN_NAME_CORRECTIONS.get(normalized, normalized)
 
 
+def _normalize_policy_column_name(column_name: str) -> str:
+    normalized = str(column_name or "").strip().lower()
+    return COLUMN_NAME_CORRECTIONS.get(normalized, normalized)
+
+
+def _security_assessment_id(state: Stage01State) -> str | None:
+    for key in ("compliance_assessment_id", "assessment_id"):
+        value = str(state.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _security_policies_for_table(
+    state: Stage01State,
+    *,
+    database_name: str,
+    schema_name: str,
+    table_name: str,
+) -> Dict[str, str]:
+    raw = (
+        state.get("security_policies")
+        or state.get("policies")
+        or state.get("column_security_policies")
+        or {}
+    )
+    if not isinstance(raw, dict) or not raw:
+        return {}
+
+    candidate_keys = {
+        table_name.casefold(),
+        f"{database_name}.{schema_name}.{table_name}".casefold(),
+    }
+    table_specific = next(
+        (
+            value
+            for key, value in raw.items()
+            if isinstance(key, str) and key.casefold() in candidate_keys and isinstance(value, dict)
+        ),
+        None,
+    )
+    has_table_groups = any(isinstance(value, dict) for value in raw.values())
+    if table_specific is None and has_table_groups:
+        return {}
+    selected = table_specific if table_specific is not None else raw
+    if not isinstance(selected, dict):
+        return {}
+
+    normalized: Dict[str, str] = {}
+    for column_name, control in selected.items():
+        clean_column = _normalize_policy_column_name(column_name)
+        clean_control = str(control or "").strip()
+        if clean_column and clean_control:
+            normalized[clean_column] = clean_control
+    return normalized
+
+
+def copy_security_control_module(output_dir: str) -> str:
+    source_path = Path(__file__).with_name("securitycontrol.py")
+    destination_path = Path(output_dir) / "security_control.py"
+    shutil.copy2(source_path, destination_path)
+    return str(destination_path)
+
+
 def _source_column_name(column: Dict[str, Any]) -> str:
     source_name = str(column.get("source_column_name") or column.get("source") or "").strip().lower()
     if source_name:
@@ -460,6 +565,8 @@ def _source_column_name(column: Dict[str, Any]) -> str:
 
 def generate_silver_script(
     *,
+    assessment_id: str | None = None,
+    policies: Dict[str, str] | None = None,
     table_ref: SilverTableRef,
     enriched_columns: List[Dict[str, Any]],
     run_id: str,
@@ -493,6 +600,35 @@ def generate_silver_script(
         for bad_name, good_name in COLUMN_NAME_CORRECTIONS.items()
         if bad_name in {str(column.get("column_name") or "").strip().lower() for column in enriched_columns}
     }
+    assessment_id = str(assessment_id or "").strip()
+    policies = {
+        _normalize_policy_column_name(column_name): str(control).strip()
+        for column_name, control in (policies or {}).items()
+        if _normalize_policy_column_name(column_name) and str(control or "").strip()
+    }
+    security_enabled = bool(assessment_id and policies)
+    security_setup = ""
+    security_apply = ""
+    if security_enabled:
+        security_setup = f"""
+SECURITY_ASSESSMENT_ID = {assessment_id!r}
+SECURITY_POLICIES = {repr(policies)}
+from security_control import apply_security_controls, SecurityControlType
+SECURITY_POLICIES = {{
+    column_name: (
+        control if isinstance(control, SecurityControlType) else SecurityControlType(str(control))
+    )
+    for column_name, control in SECURITY_POLICIES.items()
+}}
+"""
+        security_apply = f"""
+df = apply_security_controls(
+    assessment_id=SECURITY_ASSESSMENT_ID,
+    table_name={table_name!r},
+    dataframe=df,
+    policies=SECURITY_POLICIES,
+)
+"""
 
     return f'''
 """
@@ -514,6 +650,7 @@ from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, e
 from pyspark.sql.window import Window
 
 spark = SparkSession.builder.getOrCreate()
+{security_setup}
 
 try:
     spark.sql("CREATE SCHEMA IF NOT EXISTS {silver_schema}")
@@ -545,9 +682,12 @@ if df.limit(1).count() == 0:
     raise ValueError(f"Bronze source table has no rows: {{SOURCE_TABLE}}")
 
 available_columns = set(df.columns)
+available_columns_by_case = {{name.casefold(): name for name in df.columns}}
 for old_name, new_name in COLUMN_ALIASES.items():
-    if old_name in available_columns and new_name not in available_columns:
-        df = df.withColumnRenamed(old_name, new_name)
+    actual_old_name = available_columns_by_case.get(str(old_name).casefold())
+    actual_new_name = available_columns_by_case.get(str(new_name).casefold())
+    if actual_old_name and not actual_new_name:
+        df = df.withColumnRenamed(actual_old_name, new_name)
 
 available_columns = set(df.columns)
 metadata_columns = [
@@ -612,6 +752,7 @@ for column_name, target_type in CAST_RULES.items():
 for column_name in PII_COLUMNS:
     if column_name in df.columns:
         df = df.withColumn(column_name, col(column_name).cast("string"))
+{security_apply}
 
 dedup_keys = [column_name for column_name in KEY_COLUMNS if column_name in df.columns]
 business_columns = [
@@ -898,6 +1039,8 @@ VALUES (
 def _generate_one_table(
     table_ref: SilverTableRef,
     *,
+    assessment_id: str | None = None,
+    policies: Dict[str, str] | None = None,
     enriched_metadata: Dict[str, Any],
     run_id: str,
     silver_catalog: str,
@@ -909,6 +1052,12 @@ def _generate_one_table(
     if not enriched_columns and str(target_warehouse or "").lower() == "snowflake":
         enriched_columns = table_ref.get("source_columns") or []
     merge_keys = _key_columns(enriched_columns)
+    normalized_policies = {
+        _normalize_policy_column_name(column_name): str(control).strip()
+        for column_name, control in (policies or {}).items()
+        if _normalize_policy_column_name(column_name) and str(control or "").strip()
+    }
+    security_enabled = bool(assessment_id and normalized_policies) and str(target_warehouse or "").lower() == "databricks"
 
     if str(target_warehouse or "").lower() == "snowflake":
         code = generate_snowflake_silver_script(
@@ -923,6 +1072,8 @@ def _generate_one_table(
         merge_strategy = "Snowflake MERGE on silver_upsert_key built from reviewed merge keys"
     else:
         code = generate_silver_script(
+            assessment_id=assessment_id,
+            policies=normalized_policies,
             table_ref=table_ref,
             enriched_columns=enriched_columns,
             run_id=run_id,
@@ -956,6 +1107,8 @@ def _generate_one_table(
                 enriched_columns=enriched_columns,
                 target_warehouse=target_warehouse,
             )
+            if security_enabled and "apply_security_controls(" not in repaired_candidate:
+                raise ValueError("Silver LLM output removed required security controls")
             code = repaired_candidate
             generation_mode = "LLM_REPAIRED" if repaired_candidate != candidate else "LLM"
         except Exception as first_exc:
@@ -980,6 +1133,8 @@ def _generate_one_table(
                     enriched_columns=enriched_columns,
                     target_warehouse=target_warehouse,
                 )
+                if security_enabled and "apply_security_controls(" not in repaired_retry:
+                    raise ValueError("Silver LLM retry output removed required security controls")
                 code = repaired_retry
                 generation_mode = "LLM_RETRY_REPAIRED" if repaired_retry != retry_candidate else "LLM_RETRY"
             except Exception as retry_exc:
@@ -1009,6 +1164,9 @@ def _generate_one_table(
         "script_language": script_language,
         "generation_mode": generation_mode,
         "llm_enabled": _llm_enabled_for_silver(),
+        "security_enabled": security_enabled,
+        "assessment_id": assessment_id,
+        "security_policy_columns": sorted(normalized_policies.keys()),
         "target_warehouse": str(target_warehouse or "databricks").lower(),
         "status": "APPROVED",
         "script_path": script_path,
@@ -1872,11 +2030,20 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
         silver_schema = _snowflake_silver_schema()
 
     results: List[Dict[str, object]] = []
+    assessment_id = _security_assessment_id(state)
+    should_copy_security_module = False
     with ThreadPoolExecutor(max_workers=SILVER_MAX_WORKERS) as executor:
         futures = [
             executor.submit(
                 _generate_one_table,
                 table_ref,
+                assessment_id=assessment_id,
+                policies=_security_policies_for_table(
+                    state,
+                    database_name=table_ref["database_name"],
+                    schema_name=table_ref["schema_name"],
+                    table_name=table_ref["table_name"],
+                ),
                 enriched_metadata=enriched_metadata,
                 run_id=run_id,
                 silver_catalog=silver_catalog,
@@ -1886,7 +2053,9 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
             for table_ref in table_refs
         ]
         for future in as_completed(futures):
-            results.append(future.result())
+            result = future.result()
+            results.append(result)
+            should_copy_security_module = should_copy_security_module or bool(result.get("security_enabled"))
 
     generated_at = datetime.utcnow().isoformat()
     bundle = {
@@ -1900,6 +2069,8 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
 
     output_dir = _silver_output_dir_for(target_warehouse)
     os.makedirs(output_dir, exist_ok=True)
+    if should_copy_security_module:
+        copy_security_control_module(output_dir)
     bundle_path = os.path.join(output_dir, f"{_run_slug(run_id)}_silver_scripts.json")
     latest_bundle_path = os.path.join(output_dir, "silver_scripts.json")
     with open(bundle_path, "w", encoding="utf-8") as f:

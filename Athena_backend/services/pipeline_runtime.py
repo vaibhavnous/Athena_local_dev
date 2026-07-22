@@ -276,6 +276,11 @@ def _run_database_silver_stage(state: Dict[str, Any]) -> Dict[str, Any]:
             **result,
             "status": "HITL_WAIT",
             "next_gate": 5,
+            "silver_review_artifact": {},
+            "silver_review_decision": None,
+            "gate5": None,
+            "databricks_silver_execution_status": None,
+            "databricks_silver_execution_results": [],
             "resume_message": "Silver Review is pending. Review generated Silver scripts before Gold generation.",
         }
     return result
@@ -374,6 +379,42 @@ def continue_database_pipeline(
             return working_state
         if str(working_state.get("status") or "").upper() in {"HITL_WAIT", "PAUSED_FOR_HITL"}:
             return working_state
+
+        if (
+            current_stage_key == "gate3"
+            and working_state.get("compliance_enabled")
+            and working_state.get("next_stage_key") == "bronze"
+            and not working_state.get("compliance_review_decision")
+        ):
+            from services.compliance_client import ensure_review_result
+
+            enriched = _checkpoint_enriched_payload(working_state)
+            column_profiles = {
+                "column_profiles": (
+                    enriched.get("column_profiles")
+                    or enriched.get("columns")
+                    or working_state.get("column_profiles")
+                    or []
+                )
+            }
+
+            working_state.update(ensure_review_result(working_state, column_profiles))
+
+            paused = {
+                **working_state,
+                "status": "HITL_WAIT",
+                "background_stage": None,
+                "next_gate": None,
+                "next_stage_key": "bronze",
+                "next_stage_label": DATABASE_STAGE_LABELS.get("bronze"),
+                "next_review_key": "compliance_review",
+                "resume_message": (
+                    "Compliance Review is pending. Review regulatory controls "
+                    "and governance evidence before Bronze generation."
+                ),
+            }
+            save_checkpoint_state_timed(run_id, paused, context="compliance_review:wait")
+            return paused
 
         wait_for_minimum_stage_runtime(current_stage_key, stage_started_at, working_state)
 
@@ -2528,7 +2569,7 @@ def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]
 
 def submit_gate3_review(run_id: str, approve: bool, enriched_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from nodes.hitl import build_hitl_enrichment_review_node
-    from services.compliance_client import attach_review_result
+    from services.compliance_client import ensure_review_result
 
     checkpoint_state = load_checkpoint_state(run_id) or {}
     metadata = enriched_metadata or fetch_json_artifact(run_id, "ENRICHED_METADATA") or _checkpoint_enriched_payload(checkpoint_state)
@@ -2572,11 +2613,38 @@ def submit_gate3_review(run_id: str, approve: bool, enriched_metadata: Optional[
         "silver_schema": os.getenv("SILVER_SCHEMA", "silver"),
         "gold_schema": os.getenv("GOLD_SCHEMA", "gold"),
     }
-    bronze_state.update(attach_review_result(bronze_state))
     if str(bronze_state.get("target_warehouse") or "").lower() == "snowflake":
         bronze_state["gold_catalog"] = os.getenv("SNOWFLAKE_GOLD_CATALOG") or os.getenv("SNOWFLAKE_SILVER_CATALOG") or "ATHENA_DB"
         bronze_state["gold_schema"] = os.getenv("SNOWFLAKE_GOLD_SCHEMA", "GOLD")
+    if bronze_state.get("compliance_enabled"):
+        column_profiles = {
+            "column_profiles": (
+                metadata.get("column_profiles")
+                or metadata.get("columns")
+                or checkpoint_state.get("column_profiles")
+                or []
+            )
+        }
+        bronze_state.update(ensure_review_result(bronze_state, column_profiles))
+        paused = {
+            **bronze_state,
+            "status": "HITL_WAIT",
+            "background_stage": None,
+            "next_gate": None,
+            "next_stage_key": "bronze",
+            "next_stage_label": DATABASE_STAGE_LABELS.get("bronze"),
+            "next_review_key": "compliance_review",
+            "resume_message": (
+                "Compliance Review is pending. Review regulatory controls and governance evidence before Bronze generation."
+            ),
+        }
+        save_checkpoint_state(run_id, paused)
+        return paused
     return continue_database_pipeline(run_id, start_stage_key="bronze", state=bronze_state)
+
+
+def resume_after_compliance_review(run_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    return continue_database_pipeline(run_id, start_stage_key="bronze", state=state)
 
 
 def _apply_gate4_merge_keys_to_metadata(metadata: Dict[str, Any], review_artifact: Dict[str, Any]) -> Dict[str, Any]:
@@ -3037,6 +3105,11 @@ def submit_silver_generation(run_id: str) -> Dict[str, Any]:
             {
                 "status": "HITL_WAIT",
                 "next_gate": 5,
+                "silver_review_artifact": {},
+                "silver_review_decision": None,
+                "gate5": None,
+                "databricks_silver_execution_status": None,
+                "databricks_silver_execution_results": [],
                 "resume_message": "Silver Review is pending. Review generated Silver scripts before Gold generation.",
             }
         )

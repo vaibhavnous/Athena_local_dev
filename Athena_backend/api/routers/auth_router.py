@@ -65,7 +65,7 @@ def update_user_status(
     return UserResponse(user=service.set_user_active(uid, request.is_active, admin))
 
 
-@router.delete("/users/{uid}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/users/{uid}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_user(
     uid: str,
     admin: AuthUser = Depends(get_primary_admin),

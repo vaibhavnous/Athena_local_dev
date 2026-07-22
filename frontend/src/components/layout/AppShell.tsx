@@ -311,6 +311,8 @@ function AppShell() {
       reviewKey,
       gateLabel: reviewKey === 'silver_merge_key_review'
         ? 'Silver Merge Key Review'
+        : reviewKey === 'compliance_review'
+          ? 'Compliance Review'
         : reviewKey === 'gold_review'
           ? 'Gold Code Review'
           : getGateDisplayName(gate, bannerRun.source),
@@ -671,6 +673,9 @@ function isReviewPausedRun(run) {
 
 function reviewPathForPausedRun(run) {
   const runId = encodeURIComponent(run.id || run.run_id)
+  if (run?.next_review_key === 'compliance_review') {
+    return `/app/compliance-governance?runId=${runId}`
+  }
   if (run?.next_review_key) {
     return `/app/hitl?runId=${runId}&review=${encodeURIComponent(run.next_review_key)}`
   }

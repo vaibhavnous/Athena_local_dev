@@ -257,6 +257,91 @@ def test_databricks_gold_script_uses_sanitized_join_paths(monkeypatch):
     assert "'right_table': 'claim_payment_expenses'" not in body
 
 
+def test_databricks_gold_script_can_embed_security_controls():
+    script = gold_gen.generate_gold_script(
+        mapping={
+            "kpi_name": "Claim Count By Email",
+            "source_silver_table": "silver.silver_claims",
+            "measure": {"table": "claims", "column": "claimid", "aggregation": "COUNT"},
+            "grouping_dimensions": [
+                {"table": "claims", "column": "email", "semantic_type": "DIMENSION"},
+            ],
+            "time": {},
+            "filters": [],
+            "join_paths": [],
+            "readiness": "READY",
+        },
+        run_id="run-gold-security",
+        gold_schema="gold",
+        assessment_id="assessment-1",
+        policies={"Email": "Mask"},
+    )
+
+    assert "from security_control import apply_security_controls, SecurityControlType" in script
+    assert "SECURITY_ASSESSMENT_ID = 'assessment-1'" in script
+    assert "'email': 'Mask'" in script
+    assert "result = apply_security_controls(" in script
+    assert script.index("result = apply_security_controls(") < script.index("grain_columns =")
+
+
+def test_databricks_gold_generation_copies_security_helper_when_enabled(monkeypatch):
+    monkeypatch.setenv("ATHENA_GOLD_USE_LLM", "false")
+    monkeypatch.setattr(gold_gen, "ai_store_db_writer", lambda **_: None)
+    workdir = Path.cwd() / ".tmp-tests" / f"gold_security_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+    copied = []
+
+    monkeypatch.setattr(
+        gold_gen,
+        "copy_security_control_module",
+        lambda output_dir: copied.append(output_dir) or str(Path(output_dir) / "security_control.py"),
+    )
+
+    state = {
+        "run_id": "run-gold-security",
+        "target_warehouse": "databricks",
+        "gold_schema": "gold",
+        "compliance_assessment_id": "assessment-1",
+        "security_policies": {
+            "claims": {
+                "email": "Mask",
+            }
+        },
+        "gold_generation_contract": {
+            "run_id": "run-gold-security",
+            "status": "READY",
+            "silver_tables": [
+                {"table": "claims", "target_table": "silver.silver_claims"},
+            ],
+            "kpi_mappings": [
+                {
+                    "kpi_name": "Claim Count By Email",
+                    "source_silver_table": "silver.silver_claims",
+                    "measure": {"table": "claims", "column": "claimid", "aggregation": "COUNT"},
+                    "grouping_dimensions": [
+                        {"table": "claims", "column": "email", "semantic_type": "DIMENSION"},
+                    ],
+                    "time": {},
+                    "filters": [],
+                    "join_paths": [],
+                    "readiness": "READY",
+                }
+            ],
+        },
+    }
+
+    result = gold_gen.gold_code_generation_node(state)
+    script = result["gold_generation_results"][0]
+    body = Path(script["script_path"]).read_text(encoding="utf-8")
+
+    assert copied
+    assert script["security_enabled"] is True
+    assert script["assessment_id"] == "assessment-1"
+    assert script["security_policy_columns"] == ["email"]
+    assert "result = apply_security_controls(" in body
+
+
 def test_gold_contract_includes_dimensions_from_certified_join_tables():
     results = [
         {

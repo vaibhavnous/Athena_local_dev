@@ -9,6 +9,7 @@ import {
   FileText,
   Loader2,
   Play,
+  ShieldCheck,
   Upload,
 } from 'lucide-react'
 import * as mammoth from 'mammoth'
@@ -677,6 +678,32 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                 </div>
                               </div>
                             )}
+
+                            <label className={`flex cursor-pointer items-start gap-3 rounded-[10px] border px-4 py-4 transition-colors ${
+                              form.complianceEnabled
+                                ? 'border-[#3f82ff] bg-[#102144]'
+                                : 'border-[#26344b] bg-[#070d1a] hover:border-[#3f82ff]/60'
+                            }`}>
+                              <input
+                                type="checkbox"
+                                checked={form.complianceEnabled}
+                                onChange={(event) =>
+                                  setForm((current) => ({ ...current, complianceEnabled: event.target.checked }))
+                                }
+                                className="mt-1 h-5 w-5 rounded border-[#4b5d78] bg-[#0b1220] text-[#3f82ff] accent-[#3f82ff]"
+                              />
+                              <span className="flex min-w-0 flex-1 gap-3">
+                                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[9px] border border-[#31415f] bg-[#0b1220] text-[#9fc0ff]">
+                                  <ShieldCheck size={18} />
+                                </span>
+                                <span className="min-w-0">
+                                  <span className="block text-[16px] font-semibold text-white">Compliance Review</span>
+                                  <span className="mt-1 block text-[13px] leading-5 text-[#9fb1ca]">
+                                    Pause after Semantic Review to prepare governance evidence and approve security controls before Bronze starts.
+                                  </span>
+                                </span>
+                              </span>
+                            </label>
                           </div>
                         </div>
 

@@ -11,6 +11,7 @@ import ast
 import json
 import os
 import re
+import shutil
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
@@ -66,6 +67,103 @@ def _ui_path(target_warehouse: str = "databricks") -> str:
 
 def _validate_python(code: str) -> None:
     compile(code, "<gold_generated>", "exec")
+
+
+def _normalize_policy_column_name(column_name: Any) -> str:
+    normalized = str(column_name or "").strip().lower()
+    return SILVER_COLUMN_NAME_CORRECTIONS.get(normalized, normalized)
+
+
+def _security_assessment_id(state: Stage01State) -> str | None:
+    for key in ("compliance_assessment_id", "assessment_id"):
+        value = str(state.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def copy_security_control_module(output_dir: str) -> str:
+    source_path = os.path.join(os.path.dirname(__file__), "securitycontrol.py")
+    destination_path = os.path.join(output_dir, "security_control.py")
+    shutil.copy2(source_path, destination_path)
+    return destination_path
+
+
+def _security_policy_source_names(mapping: Dict[str, Any]) -> set[str]:
+    names = {_logical_table_from_silver(mapping.get("source_silver_table"))}
+    measure = mapping.get("measure") or {}
+    if isinstance(measure, dict):
+        names.add(str(measure.get("table") or "").strip().lower())
+    for item in mapping.get("grouping_dimensions") or []:
+        if isinstance(item, dict):
+            names.add(str(item.get("table") or "").strip().lower())
+    time_info = mapping.get("time") or {}
+    time_column = time_info.get("column") if isinstance(time_info, dict) else {}
+    if isinstance(time_column, dict):
+        names.add(str(time_column.get("table") or "").strip().lower())
+    for path in mapping.get("join_paths") or []:
+        if isinstance(path, dict):
+            names.add(str(path.get("left_table") or "").strip().lower())
+            names.add(str(path.get("right_table") or "").strip().lower())
+    return {name for name in names if name}
+
+
+def _security_policies_for_mapping(state: Stage01State, mapping: Dict[str, Any]) -> Dict[str, str]:
+    raw = (
+        state.get("security_policies")
+        or state.get("policies")
+        or state.get("column_security_policies")
+        or {}
+    )
+    if not isinstance(raw, dict) or not raw:
+        return {}
+
+    source_names = _security_policy_source_names(mapping)
+    has_table_groups = any(isinstance(value, dict) for value in raw.values())
+    if not has_table_groups:
+        return {
+            _normalize_policy_column_name(column_name): str(control).strip()
+            for column_name, control in raw.items()
+            if _normalize_policy_column_name(column_name) and str(control or "").strip()
+        }
+
+    normalized: Dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        policy_table = key.strip().casefold().split(".")[-1]
+        if policy_table.startswith("silver_"):
+            policy_table = policy_table.removeprefix("silver_")
+        if policy_table not in source_names:
+            continue
+        for column_name, control in value.items():
+            clean_column = _normalize_policy_column_name(column_name)
+            clean_control = str(control or "").strip()
+            if clean_column and clean_control:
+                normalized[clean_column] = clean_control
+    return normalized
+
+
+def _security_setup_snippet(assessment_id: str | None, policies: Dict[str, str] | None) -> str:
+    assessment_id = str(assessment_id or "").strip()
+    policies = {
+        _normalize_policy_column_name(column_name): str(control).strip()
+        for column_name, control in (policies or {}).items()
+        if _normalize_policy_column_name(column_name) and str(control or "").strip()
+    }
+    if not assessment_id or not policies:
+        return ""
+    return f"""
+SECURITY_ASSESSMENT_ID = {assessment_id!r}
+SECURITY_POLICIES = {repr(policies)}
+from security_control import apply_security_controls, SecurityControlType
+SECURITY_POLICIES = {{
+    column_name: (
+        control if isinstance(control, SecurityControlType) else SecurityControlType(str(control))
+    )
+    for column_name, control in SECURITY_POLICIES.items()
+}}
+"""
 
 
 def _databricks_contract_columns(mapping: Dict[str, Any], dimension_contract: List[Dict[str, Any]]) -> set[str]:
@@ -1036,11 +1134,28 @@ def _sanitize_gold_mapping(mapping: Dict[str, Any]) -> Tuple[Dict[str, Any], Dic
     }, guard
 
 
-def generate_dimension_script(mapping: Dict[str, Any], gold_schema: str) -> str:
+def generate_dimension_script(
+    mapping: Dict[str, Any],
+    gold_schema: str,
+    *,
+    assessment_id: str | None = None,
+    policies: Dict[str, str] | None = None,
+) -> str:
     kpi_name = str(mapping.get("kpi_name") or "KPI")
     source_table = str(mapping.get("source_silver_table") or "")
     specs = _dimension_specs(mapping)
     silver_schema = _silver_schema_from_source(source_table)
+    security_setup = _security_setup_snippet(assessment_id, policies)
+    security_apply = ""
+    if security_setup:
+        security_apply = """
+    staged = apply_security_controls(
+        assessment_id=SECURITY_ASSESSMENT_ID,
+        table_name=target_table,
+        dataframe=staged,
+        policies=SECURITY_POLICIES,
+    )
+"""
 
     return f'''
 """
@@ -1058,6 +1173,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, lit, sha2, to_timestamp
 
 spark = SparkSession.builder.getOrCreate()
+{security_setup}
 
 try:
     spark.sql("CREATE SCHEMA IF NOT EXISTS {gold_schema}")
@@ -1101,6 +1217,7 @@ for dim in DIMENSIONS:
         continue
 
     staged = src.select(*[col(name) for name in natural_columns]).dropDuplicates()
+{security_apply}
     source_count = src.count()
     dimension_count = staged.count()
     if source_count and dimension_count >= source_count:
@@ -1157,6 +1274,8 @@ def generate_gold_script(
     mapping: Dict[str, Any],
     run_id: str,
     gold_schema: str,
+    assessment_id: str | None = None,
+    policies: Dict[str, str] | None = None,
 ) -> str:
     kpi_name = str(mapping.get("kpi_name") or "KPI")
     kpi_id = _safe_identifier(kpi_name, "kpi")
@@ -1182,6 +1301,17 @@ def generate_gold_script(
     dq_max_dimension_cardinality = _env_int("ATHENA_GOLD_MAX_DIMENSION_CARDINALITY", 1_000_000, 1)
     dq_max_source_age_days = _env_int("ATHENA_GOLD_MAX_SOURCE_AGE_DAYS", 0)
     dq_max_join_multiplier = _env_float("ATHENA_GOLD_MAX_JOIN_MULTIPLIER", 1.05, 1.0)
+    security_setup = _security_setup_snippet(assessment_id, policies)
+    security_apply = ""
+    if security_setup:
+        security_apply = """
+result = apply_security_controls(
+    assessment_id=SECURITY_ASSESSMENT_ID,
+    table_name=TARGET_TABLE,
+    dataframe=result,
+    policies=SECURITY_POLICIES,
+)
+"""
 
     dimension_columns = []
     seen_dimensions = set()
@@ -1210,6 +1340,7 @@ from pyspark.sql.functions import approx_count_distinct, avg, coalesce, col, con
 from pyspark.sql.types import DateType, NumericType, TimestampType
 
 spark = SparkSession.builder.getOrCreate()
+{security_setup}
 
 try:
     spark.sql("CREATE SCHEMA IF NOT EXISTS {gold_schema}")
@@ -1423,6 +1554,7 @@ result = (
     .withColumn("gold_run_id", lit(RUN_ID))
     .withColumn("gold_processed_timestamp", current_timestamp())
 )
+{security_apply}
 
 grain_columns = [
     name for name in result.columns
@@ -1870,6 +2002,8 @@ WHEN NOT MATCHED THEN INSERT (
 def _generate_one_mapping(
     mapping: Dict[str, Any],
     *,
+    assessment_id: str | None = None,
+    policies: Dict[str, str] | None = None,
     run_id: str,
     gold_schema: str,
     target_warehouse: str,
@@ -1883,6 +2017,12 @@ def _generate_one_mapping(
     kpi_name = str(mapping.get("kpi_name") or "KPI")
     kpi_id = _safe_identifier(kpi_name, "kpi")
     is_snowflake = str(target_warehouse or "").lower() == "snowflake"
+    normalized_policies = {
+        _normalize_policy_column_name(column_name): str(control).strip()
+        for column_name, control in (policies or {}).items()
+        if _normalize_policy_column_name(column_name) and str(control or "").strip()
+    }
+    security_enabled = bool(assessment_id and normalized_policies) and not is_snowflake
     target_table = (
         _snowflake_target_fact_table(gold_catalog, gold_schema, kpi_id)
         if is_snowflake
@@ -1919,6 +2059,9 @@ def _generate_one_mapping(
             "dimension_script_path": None,
             "script_language": "sql" if is_snowflake else "python",
             "target_warehouse": str(target_warehouse or "databricks").lower(),
+            "security_enabled": False,
+            "assessment_id": assessment_id,
+            "security_policy_columns": [],
             "source_table_guard": source_table_guard,
             "domain_knowledge_base": {
                 "enabled": use_domain_kb,
@@ -2002,7 +2145,13 @@ def _generate_one_mapping(
                 generation_mode = "LLM_RETRY"
             except Exception as retry_exc:
                 fallback_reason = f"Databricks Gold LLM generation failed: {first_exc}; retry failed: {retry_exc}"
-                code = generate_gold_script(mapping=mapping, run_id=run_id, gold_schema=gold_schema)
+                code = generate_gold_script(
+                    mapping=mapping,
+                    run_id=run_id,
+                    gold_schema=gold_schema,
+                    assessment_id=assessment_id,
+                    policies=normalized_policies,
+                )
                 generation_mode = "DETERMINISTIC_FALLBACK"
                 logger.warning(
                     "Gold Databricks LLM generation and validation-feedback retry failed; deterministic fallback will be used: %s",
@@ -2010,7 +2159,26 @@ def _generate_one_mapping(
                     extra={"run_id": run_id, "node": "gold_generation", "kpi_name": kpi_name},
                 )
     else:
-        code = generate_gold_script(mapping=mapping, run_id=run_id, gold_schema=gold_schema)
+        code = generate_gold_script(
+            mapping=mapping,
+            run_id=run_id,
+            gold_schema=gold_schema,
+            assessment_id=assessment_id,
+            policies=normalized_policies,
+        )
+    if security_enabled and "apply_security_controls(" not in code:
+        if llm_requested:
+            fallback_reason = fallback_reason or "Gold LLM output removed required security controls."
+            code = generate_gold_script(
+                mapping=mapping,
+                run_id=run_id,
+                gold_schema=gold_schema,
+                assessment_id=assessment_id,
+                policies=normalized_policies,
+            )
+            generation_mode = "DETERMINISTIC_FALLBACK"
+        else:
+            raise ValueError("Gold script generation omitted required security controls")
     if not is_snowflake:
         _validate_python(code)
 
@@ -2023,7 +2191,12 @@ def _generate_one_mapping(
                 gold_schema=gold_schema,
             )
         else:
-            dimension_code = generate_dimension_script(mapping=mapping, gold_schema=gold_schema)
+            dimension_code = generate_dimension_script(
+                mapping=mapping,
+                gold_schema=gold_schema,
+                assessment_id=assessment_id,
+                policies=normalized_policies,
+            )
     else:
         dimension_code = ""
     if dimension_code:
@@ -2053,6 +2226,9 @@ def _generate_one_mapping(
         "dimension_script_path": dimension_script_path,
         "script_language": "sql" if is_snowflake else "python",
         "target_warehouse": str(target_warehouse or "databricks").lower(),
+        "security_enabled": security_enabled,
+        "assessment_id": assessment_id,
+        "security_policy_columns": sorted(normalized_policies.keys()),
         "generation_mode": generation_mode,
         "fallback_reason": fallback_reason,
         "time_grain": (mapping.get("time") or {}).get("grain"),
@@ -2276,10 +2452,13 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
     databricks_dimension_contract = (
         _dimension_specs(shared_dimension_mapping) if target_warehouse == "databricks" else []
     )
+    assessment_id = _security_assessment_id(state)
 
     results = [
         _generate_one_mapping(
             mapping,
+            assessment_id=assessment_id,
+            policies=_security_policies_for_mapping(state, mapping),
             run_id=run_id,
             gold_schema=gold_schema,
             gold_catalog=gold_catalog,
@@ -2303,6 +2482,7 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         enriched_metadata = enriched_metadata.get("enrichment_artifact") or {}
     source_table_grain_specs = _source_table_grain_specs(contract, mappings, enriched_metadata)
     shared_dimension_code = ""
+    shared_dimension_security_policies = _security_policies_for_mapping(state, shared_dimension_mapping)
     if target_warehouse == "snowflake" and source_table_grain_specs:
         shared_dimension_code = generate_snowflake_source_table_mart_script(
             specs=source_table_grain_specs,
@@ -2319,13 +2499,20 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
                 gold_schema=gold_schema,
             )
         else:
-            shared_dimension_code = generate_dimension_script(shared_dimension_mapping, gold_schema)
+            shared_dimension_code = generate_dimension_script(
+                shared_dimension_mapping,
+                gold_schema,
+                assessment_id=assessment_id,
+                policies=shared_dimension_security_policies,
+            )
             _validate_python(shared_dimension_code)
 
     shared_dimension_path = None
     if shared_dimension_code:
         output_dir = _gold_output_dir_for(target_warehouse)
         os.makedirs(output_dir, exist_ok=True)
+        if target_warehouse == "databricks" and assessment_id and shared_dimension_security_policies:
+            copy_security_control_module(output_dir)
         dimension_extension = "sql" if target_warehouse == "snowflake" else "py"
         shared_dimension_path = os.path.join(
             output_dir, f"gold_dimensions_{_run_slug(run_id)}.{dimension_extension}"
@@ -2361,6 +2548,8 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         contract=contract,
         target_warehouse=target_warehouse,
     )
+    if target_warehouse == "databricks" and any(item.get("security_enabled") for item in results):
+        copy_security_control_module(_gold_output_dir_for(target_warehouse))
     readme_path = _write_readme(generated_at=generated_at, results=results, target_warehouse=target_warehouse)
     ui_path = _write_ui(generated_at=generated_at, results=results, target_warehouse=target_warehouse)
 

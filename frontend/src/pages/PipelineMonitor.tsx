@@ -461,6 +461,10 @@ function PipelineMonitor() {
   const handleOpenGateReview = (step = null) => {
     if (!activeRun?.id) return
     setActiveRun(activeRun.id)
+    if (step?.key === 'compliance_review' || activeRun.next_review_key === 'compliance_review') {
+      navigate(`/app/compliance-governance?runId=${encodeURIComponent(activeRun.id)}`)
+      return
+    }
     if (step?.key === 'silver_merge_key_review') {
       navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=silver_merge_key_review`)
       return

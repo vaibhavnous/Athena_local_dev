@@ -377,6 +377,195 @@ def test_databricks_silver_skips_duplicate_expected_output_columns():
     assert "selected_output_columns.add(expected_name)" in script
 
 
+def test_databricks_silver_alias_corrections_are_case_insensitive():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "estimates",
+        "bronze_table": "workspace.bronze.bronze_estimates",
+        "silver_table": "workspace.silver.silver_estimates",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+
+    script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=[{"column_name": "RERERENCE_ID", "data_type": "bigint"}],
+        run_id="run-alias-case",
+    )
+
+    assert "available_columns_by_case = {name.casefold(): name for name in df.columns}" in script
+    assert "actual_old_name = available_columns_by_case.get(str(old_name).casefold())" in script
+    assert "df = df.withColumnRenamed(actual_old_name, new_name)" in script
+
+
+def test_databricks_silver_llm_rejects_uncorrected_alias_output():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "estimates",
+        "bronze_table": "workspace.bronze.bronze_estimates",
+        "silver_table": "workspace.silver.silver_estimates",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+    script = '''
+SOURCE_TABLE = "workspace.bronze.bronze_estimates"
+TARGET_TABLE = "workspace.silver.silver_estimates"
+EXPECTED_COLUMNS = ["RERERENCE_ID"]
+COLUMN_ALIASES = {"RERERENCE_ID": "reference_id"}
+REQUIRED_AUDIT_COLUMNS = (
+    "run_id", "ingestion_timestamp", "source_system", "source_table",
+    "silver_upsert_key", "silver_run_id", "silver_processed_timestamp",
+)
+'''
+
+    with pytest.raises(ValueError, match="EXPECTED_COLUMNS dropped canonical columns: reference_id"):
+        silver_gen._validate_generated_silver_code(
+            script,
+            table_ref=table_ref,
+            enriched_columns=[{"column_name": "RERERENCE_ID"}],
+            target_warehouse="databricks",
+        )
+
+
+def test_databricks_silver_llm_rejects_typo_hidden_by_comment():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "estimates",
+        "bronze_table": "workspace.bronze.bronze_estimates",
+        "silver_table": "workspace.silver.silver_estimates",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+    script = '''
+SOURCE_TABLE = "workspace.bronze.bronze_estimates"
+TARGET_TABLE = "workspace.silver.silver_estimates"
+# This comment claims reference_id is preserved, but the output remains misspelled.
+EXPECTED_COLUMNS = ["RERERENCE_ID"]
+REQUIRED_AUDIT_COLUMNS = (
+    "run_id", "ingestion_timestamp", "source_system", "source_table",
+    "silver_upsert_key", "silver_run_id", "silver_processed_timestamp",
+)
+'''
+
+    with pytest.raises(ValueError, match="EXPECTED_COLUMNS dropped canonical columns: reference_id"):
+        silver_gen._validate_generated_silver_code(
+            script,
+            table_ref=table_ref,
+            enriched_columns=[{"column_name": "RERERENCE_ID"}],
+            target_warehouse="databricks",
+        )
+
+
+def test_databricks_silver_script_can_embed_security_controls():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claims",
+        "bronze_table": "workspace.bronze.bronze_claims",
+        "silver_table": "workspace.silver.silver_claims",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+
+    script = silver_gen.generate_silver_script(
+        assessment_id="assessment-1",
+        policies={"ClaimID": "Hash", "Email": "Mask"},
+        table_ref=table_ref,
+        enriched_columns=[
+            {"column_name": "claimid", "data_type": "int", "is_join_key": True},
+            {"column_name": "email", "data_type": "varchar", "is_pii": True},
+        ],
+        run_id="run-security",
+    )
+
+    assert "from security_control import apply_security_controls, SecurityControlType" in script
+    assert "SECURITY_ASSESSMENT_ID = 'assessment-1'" in script
+    assert "'claimid': 'Hash'" in script
+    assert "'email': 'Mask'" in script
+    assert "df = apply_security_controls(" in script
+    assert script.index("df = apply_security_controls(") < script.index("dedup_keys =")
+
+
+def test_databricks_silver_generation_copies_security_helper_when_enabled(monkeypatch):
+    monkeypatch.setenv("ATHENA_SILVER_USE_LLM", "false")
+    workdir = Path.cwd() / ".tmp-tests" / f"silver_security_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+    copied = []
+
+    monkeypatch.setattr(
+        silver_gen,
+        "copy_security_control_module",
+        lambda output_dir: copied.append(output_dir) or str(Path(output_dir) / "security_control.py"),
+    )
+
+    state = {
+        "run_id": "run-security",
+        "target_warehouse": "databricks",
+        "bronze_catalog": "workspace",
+        "bronze_schema": "bronze",
+        "silver_catalog": "workspace",
+        "silver_schema": "silver",
+        "compliance_assessment_id": "assessment-1",
+        "security_policies": {
+            "claims": {
+                "claimid": "Hash",
+                "email": "Mask",
+            }
+        },
+        "bronze_generation_results": [
+            {
+                "run_id": "run-security",
+                "table": "claims",
+                "database_name": "insurance",
+                "schema_name": "dbo",
+                "target_table": "workspace.bronze.bronze_claims",
+            }
+        ],
+        "enriched_metadata": {
+            "columns": [
+                {"table_name": "claims", "column_name": "claimid", "data_type": "int", "is_join_key": True},
+                {"table_name": "claims", "column_name": "email", "data_type": "varchar", "is_pii": True},
+            ]
+        },
+    }
+
+    result = silver_gen.silver_code_generation_node(state)
+    script_path = Path(result["silver_generation_results"][0]["script_path"])
+    script = script_path.read_text(encoding="utf-8")
+
+    assert copied
+    assert result["silver_generation_results"][0]["security_enabled"] is True
+    assert result["silver_generation_results"][0]["assessment_id"] == "assessment-1"
+    assert result["silver_generation_results"][0]["security_policy_columns"] == ["claimid", "email"]
+    assert "apply_security_controls(" in script
+
+
+def test_silver_security_policies_do_not_leak_between_tables():
+    state = {
+        "security_policies": {
+            "Claims": {"Email": "Mask"},
+            "Payments": {"AccountNumber": "Hash"},
+        }
+    }
+
+    assert silver_gen._security_policies_for_table(
+        state,
+        database_name="insurance",
+        schema_name="dbo",
+        table_name="Customers",
+    ) == {}
+    assert silver_gen._security_policies_for_table(
+        state,
+        database_name="insurance",
+        schema_name="dbo",
+        table_name="claims",
+    ) == {"email": "Mask"}
+
+
 def test_load_silver_scripts_prefers_snowflake_bundle_for_snowflake_run(monkeypatch):
     monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
     monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")

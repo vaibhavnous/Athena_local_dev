@@ -29,13 +29,77 @@ def _compliance_api_findings(findings: list[Dict[str, Any]]) -> list[Dict[str, A
         "excluded": "Excluded",
         "rejected": "Excluded",
     }
-    return [
-        {
-            **item,
+    translated: list[Dict[str, Any]] = []
+    for item in findings:
+        api_item = {
+            "table_name": item.get("table_name"),
+            "column_name": item.get("column_name"),
             "status": status_map.get(str(item.get("status") or "").strip().lower(), "Approved"),
         }
-        for item in findings
-    ]
+        if "reviewer_comments" in item:
+            api_item["reviewer_comments"] = item.get("reviewer_comments")
+        translated.append(api_item)
+    return translated
+
+
+SECURITY_CONTROL_VALUES = {
+    "encrypt": "Encrypt",
+    "hash": "Hash",
+    "mask": "Mask",
+    "redact": "Redact",
+    "tokenize": "Tokenize",
+    "pseudonymize": "Pseudonymize",
+    "anonymize": "Anonymize",
+    "no_additional_control": "",
+    "no additional control": "",
+    "none": "",
+    "": "",
+}
+
+
+def _normalize_security_control(value: Any) -> str:
+    normalized = str(value or "").strip()
+    key = normalized.replace("-", "_").replace(" ", "_").casefold()
+    return SECURITY_CONTROL_VALUES.get(key, normalized if normalized in set(SECURITY_CONTROL_VALUES.values()) else "")
+
+
+def _review_security_lookup(review: Dict[str, Any]) -> Dict[tuple[str, str], str]:
+    lookup: Dict[tuple[str, str], str] = {}
+    for item in review.get("column_evidence", []) if isinstance(review, dict) else []:
+        table_name = str(item.get("table_name") or "").strip().casefold()
+        column_name = str(item.get("column_name") or "").strip().casefold()
+        control = _normalize_security_control(item.get("security_control"))
+        if table_name and column_name and control:
+            lookup[(table_name, column_name)] = control
+    return lookup
+
+
+def _findings_with_security_controls(findings: list[Dict[str, Any]], review: Dict[str, Any]) -> list[Dict[str, Any]]:
+    lookup = _review_security_lookup(review)
+    enriched: list[Dict[str, Any]] = []
+    for item in findings:
+        table_name = str(item.get("table_name") or "").strip()
+        column_name = str(item.get("column_name") or "").strip()
+        control = _normalize_security_control(item.get("security_control"))
+        if not control:
+            control = lookup.get((table_name.casefold(), column_name.casefold()), "")
+        enriched.append({**item, "security_control": control})
+    return enriched
+
+
+def _security_policies_from_findings(findings: list[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+    policies: Dict[str, Dict[str, str]] = {}
+    for item in findings:
+        status = str(item.get("status") or "").strip().casefold()
+        if status in {"rejected", "excluded"}:
+            continue
+        table_name = str(item.get("table_name") or "").strip()
+        column_name = str(item.get("column_name") or "").strip().lower()
+        control = _normalize_security_control(item.get("security_control"))
+        if not table_name or not column_name or not control:
+            continue
+        policies.setdefault(table_name, {})[column_name] = control
+    return policies
 
 
 @router.get("/compliance-reviews/{run_id}")
@@ -47,14 +111,22 @@ def compliance_reviews(run_id: str) -> Dict[str, Any]:
         checkpoint = load_checkpoint_state(run_id) or {}
         review = checkpoint.get("compliance_review")
         if checkpoint.get("compliance_enabled") and checkpoint.get("compliance_assessment_id") and not review:
-            review = fetch_review({**checkpoint, "run_id": run_id})
-            checkpoint.update(
-                {
-                    "compliance_review_status": "READY",
-                    "compliance_review": review,
-                    "compliance_review_error": None,
-                }
-            )
+            try:
+                review = fetch_review({**checkpoint, "run_id": run_id})
+                checkpoint.update(
+                    {
+                        "compliance_review_status": "READY",
+                        "compliance_review": review,
+                        "compliance_review_error": None,
+                    }
+                )
+            except Exception as exc:
+                checkpoint.update(
+                    {
+                        "compliance_review_status": "PENDING",
+                        "compliance_review_error": str(exc),
+                    }
+                )
             save_checkpoint_state(run_id, checkpoint)
     except Exception:
         logger.error("Failed to fetch compliance review", exc_info=True, extra={"run_id": run_id})
@@ -65,7 +137,10 @@ def compliance_reviews(run_id: str) -> Dict[str, Any]:
         "compliance_enabled": bool(checkpoint.get("compliance_enabled")),
         "assessment_id": checkpoint.get("compliance_assessment_id"),
         "assessment_status": checkpoint.get("compliance_assessment_status"),
+        "assessment_message": checkpoint.get("compliance_assessment_message"),
         "assessment_error": checkpoint.get("compliance_assessment_error"),
+        "assessment_submitted_at": checkpoint.get("compliance_assessment_submitted_at"),
+        "assessment_completed_at": checkpoint.get("compliance_assessment_completed_at"),
         "review_status": checkpoint.get("compliance_review_status"),
         "review_error": checkpoint.get("compliance_review_error"),
         "review": checkpoint.get("compliance_review") or {},
@@ -75,8 +150,7 @@ def compliance_reviews(run_id: str) -> Dict[str, Any]:
 
 @router.post("/compliance-reviews/{run_id}")
 def submit_compliance_reviews(run_id: str, payload: ComplianceReviewPayload) -> Dict[str, Any]:
-    from services.compliance_client import fetch_results, submit_review
-    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+    from services.pipeline_runtime import load_checkpoint_state, resume_after_compliance_review, save_checkpoint_state, submit_background
 
     checkpoint = load_checkpoint_state(run_id) or {}
     if not checkpoint.get("compliance_enabled"):
@@ -85,13 +159,14 @@ def submit_compliance_reviews(run_id: str, payload: ComplianceReviewPayload) -> 
         raise HTTPException(status_code=409, detail="Compliance assessment is not ready yet.")
 
     findings = [item.model_dump() for item in payload.findings]
+    review = checkpoint.get("compliance_review") or {}
     if not findings:
-        review = checkpoint.get("compliance_review") or {}
         findings = [
             {
                 "table_name": item.get("table_name"),
                 "column_name": item.get("column_name"),
                 "status": "Approved",
+                "security_control": item.get("security_control"),
                 "reviewer_comments": None,
             }
             for item in review.get("column_evidence", [])
@@ -101,27 +176,46 @@ def submit_compliance_reviews(run_id: str, payload: ComplianceReviewPayload) -> 
         raise HTTPException(status_code=400, detail="No compliance findings are available to review.")
 
     try:
-        decision = submit_review(
-            {**checkpoint, "run_id": run_id},
-            {"findings": _compliance_api_findings(findings), "overall_comments": payload.overall_comments},
-        )
+        findings = _findings_with_security_controls(findings, review)
+        security_policies = _security_policies_from_findings(findings)
+        review_decision_payload = {
+            "findings": _compliance_api_findings(findings),
+            "overall_comments": payload.overall_comments,
+        }
         review_decision = _compliance_review_decision(findings)
+        decision = {
+            "assessment_id": checkpoint.get("compliance_assessment_id"),
+            "status": "completed",
+            "message": "Compliance review stored in Athena.",
+        }
+        compliance_results = {
+            "assessment_id": checkpoint.get("compliance_assessment_id"),
+            "status": "completed",
+            "column_evidence": findings,
+            "compliance_evidence": (checkpoint.get("compliance_results") or {}).get("compliance_evidence")
+            or (review.get("compliance_evidence") if isinstance(review, dict) else None)
+            or {},
+        }
         updated = {
             **checkpoint,
             "compliance_review_decision": review_decision,
             "compliance_review_decision_response": decision,
+            "compliance_review_findings": findings,
+            "compliance_review_submit_payload": review_decision_payload,
             "compliance_assessment_status": decision.get("status") or checkpoint.get("compliance_assessment_status"),
             "compliance_review_error": None,
+            "compliance_results": compliance_results,
+            "compliance_results_status": "completed",
+            "compliance_results_error": None,
+            "security_policies": security_policies,
+            "column_security_policies": security_policies,
+            "security_policy_source": "compliance_review",
         }
-        try:
-            results = fetch_results({**updated, "run_id": run_id})
-            if results:
-                updated["compliance_results"] = results
-                updated["compliance_results_status"] = results.get("status") or "completed"
-        except Exception as exc:
-            updated["compliance_results_status"] = "PENDING"
-            updated["compliance_results_error"] = str(exc)
+        updated["next_review_key"] = None
+        updated["next_gate"] = None
+        updated["resume_message"] = "Compliance Review submitted. Bronze generation is starting."
         save_checkpoint_state(run_id, updated)
+        submit_background(run_id, "compliance_review", resume_after_compliance_review, run_id, updated)
     except HTTPException:
         raise
     except Exception:
@@ -133,6 +227,8 @@ def submit_compliance_reviews(run_id: str, payload: ComplianceReviewPayload) -> 
         "status": updated.get("compliance_assessment_status"),
         "decision": updated.get("compliance_review_decision"),
         "results_status": updated.get("compliance_results_status"),
+        "resume_status": "SUBMITTED",
+        "security_policy_count": sum(len(columns) for columns in (updated.get("security_policies") or {}).values()),
     }
 
 
@@ -400,8 +496,14 @@ def silver_reviews(run_id: str) -> Dict[str, Any]:
 
     silver_artifact = checkpoint.get("silver_review_artifact") or run.get("silver_review_artifact") or {}
 
-    if not (silver_artifact.get("items") or []):
-        silver_artifact = silver_review_from_scripts(run_id, checkpoint)
+    generated_artifact = silver_review_from_scripts(run_id, checkpoint)
+    if int(run.get("next_gate") or checkpoint.get("next_gate") or 0) == 5 and generated_artifact.get("items"):
+        # A failed execution retry regenerates files before Gate 5. The generated
+        # bundle is authoritative while review is pending; a checkpoint artifact
+        # can still contain scripts from the previous attempt.
+        silver_artifact = generated_artifact
+    elif not (silver_artifact.get("items") or []):
+        silver_artifact = generated_artifact
 
     return {
         "run_id": run_id,

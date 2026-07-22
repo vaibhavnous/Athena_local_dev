@@ -140,20 +140,21 @@ def _security_policies_for_table(
     if not isinstance(raw, dict) or not raw:
         return {}
 
-    candidate_keys = (
-        table_name,
+    candidate_keys = {
         table_name.casefold(),
-        f"{database_name}.{schema_name}.{table_name}",
         f"{database_name}.{schema_name}.{table_name}".casefold(),
-    )
+    }
     table_specific = next(
         (
             value
             for key, value in raw.items()
-            if isinstance(key, str) and key in candidate_keys and isinstance(value, dict)
+            if isinstance(key, str) and key.casefold() in candidate_keys and isinstance(value, dict)
         ),
         None,
     )
+    has_table_groups = any(isinstance(value, dict) for value in raw.values())
+    if table_specific is None and has_table_groups:
+        return {}
     selected = table_specific if table_specific is not None else raw
     if not isinstance(selected, dict):
         return {}

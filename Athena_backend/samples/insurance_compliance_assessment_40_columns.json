@@ -1,0 +1,712 @@
+{
+  "brd_text": "Insurance claims and policy analytics platform for policy performance, claims lifecycle visibility, payment governance, reserve monitoring, and regulatory compliance reporting. The assessment covers operational insurance data used for customer, policy, claim, premium, coverage, payment, and reserve analysis.",
+  "filename": "insurance_compliance_assessment_40_columns.json",
+  "domain": "Insurance",
+  "countries": [
+    "US"
+  ],
+  "metadata": [
+    {
+      "table_name": "policy_transactions",
+      "column_name": "RERERENCE_ID",
+      "data_type": "NUMBER",
+      "description": "Reference identifier linking policy transactions to claims, payments, coverages, and reserve records.",
+      "sample_values": [
+        "1000001",
+        "1000002",
+        "1000003"
+      ],
+      "tags": [
+        "ID",
+        "Join Key",
+        "Insurance Reference"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "POLICY_NUMBER",
+      "data_type": "VARCHAR",
+      "description": "Unique policy number used to identify customer insurance contracts and policy lifecycle records.",
+      "sample_values": [
+        "POL-2026-0001",
+        "POL-2026-0002",
+        "POL-2026-0003"
+      ],
+      "tags": [
+        "Policy",
+        "Identifier",
+        "Customer Linkage"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "POLICY_TRANSACTION_TYPE",
+      "data_type": "VARCHAR",
+      "description": "Business transaction type describing policy issuance, endorsement, renewal, cancellation, or adjustment activity.",
+      "sample_values": [
+        "New Business",
+        "Renewal",
+        "Endorsement"
+      ],
+      "tags": [
+        "Policy",
+        "Lifecycle",
+        "Transaction"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "BEGIN_DATE",
+      "data_type": "DATE",
+      "description": "Policy coverage begin date used to determine active coverage periods and reporting eligibility.",
+      "sample_values": [
+        "2026-01-01",
+        "2026-02-15",
+        "2026-03-10"
+      ],
+      "tags": [
+        "Date",
+        "Coverage",
+        "Policy"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "END_DATE",
+      "data_type": "DATE",
+      "description": "Policy coverage end date used to identify expired, active, and cancelled insurance coverage periods.",
+      "sample_values": [
+        "2026-12-31",
+        "2027-02-14",
+        "2027-03-09"
+      ],
+      "tags": [
+        "Date",
+        "Coverage",
+        "Policy"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "POLICY_ISSUED_DATE",
+      "data_type": "DATE",
+      "description": "Policy issue date used for operational reporting, audit traceability, and policy origination analysis.",
+      "sample_values": [
+        "2025-12-20",
+        "2026-01-28",
+        "2026-03-01"
+      ],
+      "tags": [
+        "Date",
+        "Policy",
+        "Audit"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "PRODUCT_NAME",
+      "data_type": "VARCHAR",
+      "description": "Insurance product name used for portfolio segmentation and policy performance analysis.",
+      "sample_values": [
+        "Motor Comprehensive",
+        "Home Shield",
+        "Health Secure"
+      ],
+      "tags": [
+        "Product",
+        "Dimension",
+        "Portfolio"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "PRODUCT_GROUP_NAME",
+      "data_type": "VARCHAR",
+      "description": "Insurance product group used to summarize product families across policy and premium reporting.",
+      "sample_values": [
+        "Motor",
+        "Property",
+        "Health"
+      ],
+      "tags": [
+        "Product",
+        "Dimension",
+        "Portfolio"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "SEGMENT_NAME",
+      "data_type": "VARCHAR",
+      "description": "Customer or portfolio segment name used for insurance profitability and retention analysis.",
+      "sample_values": [
+        "Retail",
+        "SME",
+        "Corporate"
+      ],
+      "tags": [
+        "Customer Segment",
+        "Dimension",
+        "Analytics"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "AGENT_NAME",
+      "data_type": "VARCHAR",
+      "description": "Insurance agent name associated with policy sales and distribution channel performance reporting.",
+      "sample_values": [
+        "Astra Brokers LLC",
+        "North Star Agency",
+        "Metro Insurance Desk"
+      ],
+      "tags": [
+        "Agent",
+        "Distribution",
+        "Possible Personal Data"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "CHANNEL_NAME",
+      "data_type": "VARCHAR",
+      "description": "Distribution channel name used to compare policy acquisition and premium performance by source.",
+      "sample_values": [
+        "Agency",
+        "Bancassurance",
+        "Digital"
+      ],
+      "tags": [
+        "Channel",
+        "Distribution",
+        "Dimension"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "CUSTOMER_IDENTIFIER",
+      "data_type": "VARCHAR",
+      "description": "Customer identifier used to link policy transactions to customer-level insurance records and reporting.",
+      "sample_values": [
+        "CUST-10001",
+        "CUST-10002",
+        "CUST-10003"
+      ],
+      "tags": [
+        "Customer",
+        "Identifier",
+        "PII Candidate"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "TOTAL_RISK_SUM_INSURED_AMOUNT",
+      "data_type": "DECIMAL",
+      "description": "Total sum insured amount representing policy risk exposure for underwriting and portfolio analysis.",
+      "sample_values": [
+        "250000.00",
+        "500000.00",
+        "125000.00"
+      ],
+      "tags": [
+        "Measure",
+        "Risk Exposure",
+        "Financial"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "WRITTEN_PREMIUM_AMOUNT",
+      "data_type": "DECIMAL",
+      "description": "Written premium amount used for revenue, profitability, and policy performance reporting.",
+      "sample_values": [
+        "1250.00",
+        "2400.50",
+        "875.25"
+      ],
+      "tags": [
+        "Measure",
+        "Premium",
+        "Financial"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "NET_PREMIUM_AMOUNT",
+      "data_type": "DECIMAL",
+      "description": "Net premium amount after adjustments used for financial reporting and insurance margin analysis.",
+      "sample_values": [
+        "1180.00",
+        "2315.75",
+        "820.10"
+      ],
+      "tags": [
+        "Measure",
+        "Premium",
+        "Financial"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "COMMISSION_AMOUNT",
+      "data_type": "DECIMAL",
+      "description": "Commission amount paid for policy distribution used for channel profitability reporting.",
+      "sample_values": [
+        "150.00",
+        "210.75",
+        "95.25"
+      ],
+      "tags": [
+        "Measure",
+        "Commission",
+        "Financial"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "POLICY_STATUS",
+      "data_type": "VARCHAR",
+      "description": "Policy status indicating whether insurance coverage is active, expired, cancelled, or pending.",
+      "sample_values": [
+        "Active",
+        "Expired",
+        "Cancelled"
+      ],
+      "tags": [
+        "Policy",
+        "Status",
+        "Dimension"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "INSURED_AGE_BAND",
+      "data_type": "VARCHAR",
+      "description": "Age band of insured party used for aggregated risk segmentation without direct date of birth exposure.",
+      "sample_values": [
+        "25-34",
+        "35-44",
+        "45-54"
+      ],
+      "tags": [
+        "Customer",
+        "Demographic",
+        "Sensitive Attribute"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "POLICY_POSTAL_REGION",
+      "data_type": "VARCHAR",
+      "description": "Postal region associated with the policy used for geographical portfolio and exposure analysis.",
+      "sample_values": [
+        "CA-940",
+        "NY-100",
+        "TX-750"
+      ],
+      "tags": [
+        "Location",
+        "Region",
+        "PII Candidate"
+      ]
+    },
+    {
+      "table_name": "policy_transactions",
+      "column_name": "LOAD_TIMESTAMP",
+      "data_type": "TIMESTAMP",
+      "description": "System load timestamp used for data lineage, ingestion audit, and operational traceability.",
+      "sample_values": [
+        "2026-07-16T05:00:00Z",
+        "2026-07-16T06:00:00Z"
+      ],
+      "tags": [
+        "Audit",
+        "Lineage",
+        "Timestamp"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "CLAIM_NUMBER",
+      "data_type": "VARCHAR",
+      "description": "Unique claim number used to identify insurance claims throughout the claim lifecycle.",
+      "sample_values": [
+        "CLM-2026-0001",
+        "CLM-2026-0002",
+        "CLM-2026-0003"
+      ],
+      "tags": [
+        "Claim",
+        "Identifier",
+        "Customer Linkage"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "CLAIM_STATUS",
+      "data_type": "VARCHAR",
+      "description": "Claim status used to monitor claim progress from registration through settlement or closure.",
+      "sample_values": [
+        "Registered",
+        "In Review",
+        "Closed"
+      ],
+      "tags": [
+        "Claim",
+        "Status",
+        "Lifecycle"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "CLAIM_REGISTERED_DATE",
+      "data_type": "DATE",
+      "description": "Claim registration date used for claim aging, operational service levels, and regulatory timelines.",
+      "sample_values": [
+        "2026-04-01",
+        "2026-04-11",
+        "2026-05-03"
+      ],
+      "tags": [
+        "Claim",
+        "Date",
+        "Lifecycle"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "CLAIM_CLOSED_DATE",
+      "data_type": "DATE",
+      "description": "Claim closure date used to calculate processing duration and claim settlement performance.",
+      "sample_values": [
+        "2026-04-25",
+        "2026-05-19",
+        "2026-06-10"
+      ],
+      "tags": [
+        "Claim",
+        "Date",
+        "Lifecycle"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "LOSS_DATE",
+      "data_type": "DATE",
+      "description": "Date of loss event used for insurance claim validation, exposure analysis, and coverage checks.",
+      "sample_values": [
+        "2026-03-28",
+        "2026-04-08",
+        "2026-04-30"
+      ],
+      "tags": [
+        "Claim",
+        "Date",
+        "Loss Event"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "CLAIM_TYPE",
+      "data_type": "VARCHAR",
+      "description": "Claim type used to categorize insurance loss events and support claim severity analysis.",
+      "sample_values": [
+        "Collision",
+        "Theft",
+        "Property Damage"
+      ],
+      "tags": [
+        "Claim",
+        "Category",
+        "Dimension"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "CLAIM_CAUSE",
+      "data_type": "VARCHAR",
+      "description": "Cause of claim used for risk pattern analysis, underwriting feedback, and portfolio monitoring.",
+      "sample_values": [
+        "Accident",
+        "Weather",
+        "Fire"
+      ],
+      "tags": [
+        "Claim",
+        "Cause",
+        "Risk"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "CUSTOMER_IDENTIFIER",
+      "data_type": "VARCHAR",
+      "description": "Customer identifier associated with a claim and used to link claim records to policy holders.",
+      "sample_values": [
+        "CUST-10001",
+        "CUST-10007",
+        "CUST-10012"
+      ],
+      "tags": [
+        "Customer",
+        "Identifier",
+        "PII Candidate"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "CLAIM_HANDLER",
+      "data_type": "VARCHAR",
+      "description": "Claim handler name or queue owner responsible for processing and adjudicating the claim.",
+      "sample_values": [
+        "A. Sharma",
+        "Claims Team West",
+        "J. Miller"
+      ],
+      "tags": [
+        "Employee",
+        "Operations",
+        "Possible Personal Data"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "CLAIM_REGION",
+      "data_type": "VARCHAR",
+      "description": "Geographic claim region used for operational workload, loss concentration, and portfolio analysis.",
+      "sample_values": [
+        "West",
+        "Northeast",
+        "South"
+      ],
+      "tags": [
+        "Location",
+        "Claim",
+        "Dimension"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "CLAIM_SEVERITY",
+      "data_type": "VARCHAR",
+      "description": "Claim severity classification used to prioritize claim handling and estimate operational risk.",
+      "sample_values": [
+        "Low",
+        "Medium",
+        "High"
+      ],
+      "tags": [
+        "Claim",
+        "Risk",
+        "Severity"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "FRAUD_SUSPECTED_FLAG",
+      "data_type": "BOOLEAN",
+      "description": "Fraud suspected indicator used for investigation routing and sensitive operational decisioning.",
+      "sample_values": [
+        "false",
+        "true"
+      ],
+      "tags": [
+        "Claim",
+        "Fraud",
+        "Sensitive Decision"
+      ]
+    },
+    {
+      "table_name": "claim_information",
+      "column_name": "LOSS_LOCATION_STATE",
+      "data_type": "VARCHAR",
+      "description": "State where the insured loss occurred, used for claim exposure and geographic risk analysis.",
+      "sample_values": [
+        "CA",
+        "TX",
+        "NY"
+      ],
+      "tags": [
+        "Location",
+        "Claim",
+        "PII Candidate"
+      ]
+    },
+    {
+      "table_name": "claim_payment_indemnity",
+      "column_name": "PAYMENT_DATE",
+      "data_type": "DATE",
+      "description": "Indemnity payment date used for cash flow reporting and claim settlement timeline analysis.",
+      "sample_values": [
+        "2026-05-01",
+        "2026-05-21",
+        "2026-06-05"
+      ],
+      "tags": [
+        "Payment",
+        "Date",
+        "Claim"
+      ]
+    },
+    {
+      "table_name": "claim_payment_indemnity",
+      "column_name": "PAID_AMOUNT",
+      "data_type": "DECIMAL",
+      "description": "Indemnity paid amount used to calculate claim severity, loss ratio, and settlement performance.",
+      "sample_values": [
+        "1250.00",
+        "5500.75",
+        "975.40"
+      ],
+      "tags": [
+        "Payment",
+        "Measure",
+        "Financial"
+      ]
+    },
+    {
+      "table_name": "claim_payment_indemnity",
+      "column_name": "PAYEE_TYPE",
+      "data_type": "VARCHAR",
+      "description": "Payee type for indemnity payment used to distinguish insured parties, vendors, and service providers.",
+      "sample_values": [
+        "Insured",
+        "Repair Vendor",
+        "Medical Provider"
+      ],
+      "tags": [
+        "Payment",
+        "Payee",
+        "PII Candidate"
+      ]
+    },
+    {
+      "table_name": "claim_payment_expenses",
+      "column_name": "EXPENSE_AMOUNT",
+      "data_type": "DECIMAL",
+      "description": "Claim expense amount used to analyze adjustment costs, vendor spend, and claim handling efficiency.",
+      "sample_values": [
+        "150.00",
+        "325.75",
+        "980.20"
+      ],
+      "tags": [
+        "Expense",
+        "Measure",
+        "Financial"
+      ]
+    },
+    {
+      "table_name": "claim_payment_expenses",
+      "column_name": "VENDOR_NAME",
+      "data_type": "VARCHAR",
+      "description": "Vendor name associated with claim expenses and used for supplier governance and spend analysis.",
+      "sample_values": [
+        "Metro Repair Services",
+        "Apex Adjusters",
+        "Northside Clinic"
+      ],
+      "tags": [
+        "Vendor",
+        "Expense",
+        "Third Party"
+      ]
+    },
+    {
+      "table_name": "policy_cover_level_transactions",
+      "column_name": "COVER_NAME",
+      "data_type": "VARCHAR",
+      "description": "Coverage name describing the insurance cover applied to policy risk and premium calculations.",
+      "sample_values": [
+        "Collision",
+        "Liability",
+        "Comprehensive"
+      ],
+      "tags": [
+        "Coverage",
+        "Policy",
+        "Dimension"
+      ]
+    },
+    {
+      "table_name": "policy_cover_level_transactions",
+      "column_name": "PREMIUM_AMOUNT",
+      "data_type": "DECIMAL",
+      "description": "Coverage-level premium amount used for profitability, cover performance, and premium allocation reporting.",
+      "sample_values": [
+        "250.00",
+        "410.50",
+        "125.75"
+      ],
+      "tags": [
+        "Coverage",
+        "Premium",
+        "Financial"
+      ]
+    },
+    {
+      "table_name": "policy_cover_level_transactions",
+      "column_name": "SUM_INSURED_AMOUNT",
+      "data_type": "DECIMAL",
+      "description": "Coverage sum insured amount representing insured exposure for a specific coverage component.",
+      "sample_values": [
+        "50000.00",
+        "100000.00",
+        "250000.00"
+      ],
+      "tags": [
+        "Coverage",
+        "Risk Exposure",
+        "Financial"
+      ]
+    },
+    {
+      "table_name": "policy_cover_level_transactions",
+      "column_name": "GEOG_STATE_NAME",
+      "data_type": "VARCHAR",
+      "description": "Geographic state name associated with policy coverage and used for risk concentration analysis.",
+      "sample_values": [
+        "California",
+        "Texas",
+        "New York"
+      ],
+      "tags": [
+        "Location",
+        "Coverage",
+        "PII Candidate"
+      ]
+    },
+    {
+      "table_name": "expenses_outstanding_estimates",
+      "column_name": "OUTSTANDING_AMOUNT",
+      "data_type": "DECIMAL",
+      "description": "Outstanding expense reserve amount used for reserve adequacy and claim liability monitoring.",
+      "sample_values": [
+        "750.00",
+        "1200.00",
+        "300.50"
+      ],
+      "tags": [
+        "Reserve",
+        "Expense",
+        "Financial"
+      ]
+    },
+    {
+      "table_name": "indemnity_outstanding_estimates",
+      "column_name": "RESERVE_AMOUNT",
+      "data_type": "DECIMAL",
+      "description": "Outstanding indemnity reserve amount used to estimate claim liabilities and settlement exposure.",
+      "sample_values": [
+        "5000.00",
+        "12500.75",
+        "3200.20"
+      ],
+      "tags": [
+        "Reserve",
+        "Indemnity",
+        "Financial"
+      ]
+    }
+  ]
+}

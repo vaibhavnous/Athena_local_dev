@@ -538,6 +538,12 @@ function HitlQueue({ onClose = null }) {
   const isReviewableRun = isReviewGateAccessible(currentRun) || (Boolean(selectedRunId) && (gateToReview > 0 || Boolean(reviewKeyToReview)))
   const isSilverMergeKeyReview = reviewKeyToReview === 'silver_merge_key_review'
   const isGoldReview = reviewKeyToReview === 'gold_review'
+
+  useEffect(() => {
+    if (requestedReviewKey !== 'compliance_review' || !selectedRunId) return
+    setActiveRun(selectedRunId)
+    navigate(`/app/compliance-governance?runId=${encodeURIComponent(selectedRunId)}`, { replace: true })
+  }, [navigate, requestedReviewKey, selectedRunId, setActiveRun])
   const isGate1 = gateToReview === 1
   const isGate2 = gateToReview === 2
   const isGate3 = gateToReview === 3
@@ -1468,8 +1474,12 @@ function HitlQueue({ onClose = null }) {
             status: 'RUNNING',
             next_gate: 0,
             stage_confirmation: null,
-            background_stage: 'bronze',
-          resume_message: `${gate3Name} submitted. Bronze generation is starting.`,
+            background_stage: hasRejectedSemanticItem ? undefined : ((currentRun?.compliance_enabled || selectedRunDetail?.compliance_enabled) ? 'compliance_review' : 'bronze'),
+          resume_message: hasRejectedSemanticItem
+            ? 'Enrichment review was rejected and the run remains paused for rework.'
+            : (currentRun?.compliance_enabled || selectedRunDetail?.compliance_enabled)
+              ? `${gate3Name} submitted. Loading Compliance Review before Bronze generation.`
+              : `${gate3Name} submitted. Bronze generation is starting.`,
         })
         setEnrichmentReview(null)
         setSemanticDecisions({})
@@ -1480,7 +1490,9 @@ function HitlQueue({ onClose = null }) {
           type: 'success',
           title: `${gate3Name} Submitted`,
           message: !hasRejectedSemanticItem
-            ? `${gate3Name} approved. Bronze generation is running in the background.`
+            ? ((currentRun?.compliance_enabled || selectedRunDetail?.compliance_enabled)
+              ? `${gate3Name} approved. Compliance governance review is loading before Bronze generation.`
+              : `${gate3Name} approved. Bronze generation is running in the background.`)
             : 'Enrichment review was rejected and the run remains paused for rework.',
           duration: 5000
         })

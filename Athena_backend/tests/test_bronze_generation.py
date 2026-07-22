@@ -142,6 +142,29 @@ def test_databricks_layers_default_to_batch_execution(monkeypatch):
     assert databricks_runtime._databricks_execution_mode("gold") == "batch"
 
 
+def test_databricks_serverless_parallelizes_only_independent_layers(monkeypatch):
+    from services import databricks_runtime
+
+    monkeypatch.setenv("ATHENA_DATABRICKS_COMPUTE_MODE", "serverless")
+    monkeypatch.delenv("ATHENA_DATABRICKS_BATCH_MAX_WORKERS", raising=False)
+    monkeypatch.delenv("ATHENA_DATABRICKS_BRONZE_BATCH_MAX_WORKERS", raising=False)
+    monkeypatch.delenv("ATHENA_DATABRICKS_SILVER_BATCH_MAX_WORKERS", raising=False)
+    monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_BATCH_MAX_WORKERS", raising=False)
+
+    assert databricks_runtime._databricks_batch_max_workers("bronze", 10) == 4
+    assert databricks_runtime._databricks_batch_max_workers("silver", 3) == 3
+    assert databricks_runtime._databricks_batch_max_workers("gold", 10) == 1
+
+
+def test_databricks_batch_worker_override_is_bounded(monkeypatch):
+    from services import databricks_runtime
+
+    monkeypatch.setenv("ATHENA_DATABRICKS_BATCH_MAX_WORKERS", "20")
+
+    assert databricks_runtime._databricks_batch_max_workers("bronze", 30) == 16
+    assert databricks_runtime._databricks_batch_max_workers("silver", 2) == 2
+
+
 def test_databricks_batch_driver_keeps_separate_script_targets(monkeypatch):
     from services import databricks_runtime
 
@@ -169,7 +192,11 @@ def test_databricks_batch_driver_keeps_separate_script_targets(monkeypatch):
         "workspace.bronze.orders_raw",
     ]
     assert "dbutils.notebook.exit" in notebook
-    assert "exec(compile" in notebook
+    assert "exec(" in notebook
+    assert "compile(" in notebook
+    assert "ThreadPoolExecutor" in notebook
+    assert "_MAX_WORKERS = 2" in notebook
+    assert "_namespace" in notebook
 
 
 def test_databricks_task_run_id_expands_parent_submit_run(monkeypatch):
@@ -295,6 +322,28 @@ def test_bronze_generation_copies_security_helper_when_enabled(monkeypatch):
     assert result["bronze_generation_results"][0]["assessment_id"] == "assessment-1"
     assert result["bronze_generation_results"][0]["security_policy_columns"] == ["claimid", "email"]
     assert "apply_security_controls(" in script
+
+
+def test_bronze_security_policies_do_not_leak_between_tables():
+    state = {
+        "security_policies": {
+            "Claims": {"Email": "Mask"},
+            "Payments": {"AccountNumber": "Hash"},
+        }
+    }
+
+    assert bronze_gen._security_policies_for_table(
+        state,
+        database_name="insurance",
+        schema_name="dbo",
+        table_name="Customers",
+    ) == {}
+    assert bronze_gen._security_policies_for_table(
+        state,
+        database_name="insurance",
+        schema_name="dbo",
+        table_name="claims",
+    ) == {"email": "Mask"}
 
 
 def test_bronze_generation_uses_adls_landing_path_without_jdbc(monkeypatch):

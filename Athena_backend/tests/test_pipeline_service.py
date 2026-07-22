@@ -32,6 +32,36 @@ def test_next_status_derives_database_and_file_source_defaults():
     assert pipeline_service._next_status("done", pending_gate1=False, file_source=True) == "done"
 
 
+def test_silver_regeneration_clears_stale_review_and_execution(monkeypatch):
+    monkeypatch.setattr(
+        "nodes.silver_gen.silver_code_generation_node",
+        lambda state: {
+            **state,
+            "silver_generation_status": "COMPLETED",
+            "silver_generation_results": [{"table": "claims", "script_path": "new.py"}],
+        },
+    )
+
+    result = pipeline_runtime._run_database_silver_stage(
+        {
+            "run_id": "run-silver-retry",
+            "silver_review_artifact": {"items": [{"generated_silver_script": "stale"}]},
+            "silver_review_decision": "APPROVED",
+            "gate5": {"status": "COMPLETED", "decision": "APPROVED"},
+            "databricks_silver_execution_status": "FAILED",
+            "databricks_silver_execution_results": [{"status": "FAILED"}],
+        }
+    )
+
+    assert result["status"] == "HITL_WAIT"
+    assert result["next_gate"] == 5
+    assert result["silver_review_artifact"] == {}
+    assert result["silver_review_decision"] is None
+    assert result["gate5"] is None
+    assert result["databricks_silver_execution_status"] is None
+    assert result["databricks_silver_execution_results"] == []
+
+
 def test_gate2_scope_keeps_lookup_and_fk_dimension_tables():
     tables = [
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "claim_information", "nomination_reason": "Dual Match (Keyword + Semantic)"},
@@ -47,6 +77,73 @@ def test_gate2_scope_keeps_lookup_and_fk_dimension_tables():
         "dim_policy",
         "policy_type",
     ]
+
+
+def test_gate3_pauses_for_compliance_before_bronze(monkeypatch):
+    saved = []
+
+    monkeypatch.setattr(
+        "nodes.hitl.build_hitl_enrichment_review_node",
+        lambda: lambda state: {"enrichment_review_status": "COMPLETED", "gate3_approved": True},
+    )
+    monkeypatch.setattr(
+        "services.compliance_client.attach_review_result",
+        lambda state: {"compliance_review_status": "READY", "compliance_review": {"column_evidence": []}},
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "compliance_enabled": True,
+            "compliance_assessment_id": "assessment-1",
+            "target_warehouse": "databricks",
+        },
+    )
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved.append(state.copy()))
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "fetch_json_artifact",
+        lambda run_id, artifact_type: (
+            {"certified_tables": [{"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"}]}
+            if artifact_type == "GATE2_CERTIFIED_TABLES"
+            else {}
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "continue_database_pipeline",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Bronze should wait for compliance review")),
+    )
+
+    result = pipeline_runtime.submit_gate3_review(
+        "run-compliance",
+        True,
+        {
+            "fingerprint": "fp",
+            "columns": [{"table_name": "claims", "column_name": "email"}],
+            "certified_tables": [{"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"}],
+        },
+    )
+
+    assert result["status"] == "HITL_WAIT"
+    assert result["next_review_key"] == "compliance_review"
+    assert "Compliance Review is pending" in result["resume_message"]
+    assert saved[-1]["next_review_key"] == "compliance_review"
+
+
+def test_resume_after_compliance_starts_bronze(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "continue_database_pipeline",
+        lambda run_id, *, start_stage_key, state: calls.append((run_id, start_stage_key, state)) or {"status": "RUNNING"},
+    )
+
+    result = pipeline_runtime.resume_after_compliance_review("run-compliance", {"run_id": "run-compliance"})
+
+    assert result["status"] == "RUNNING"
+    assert calls[0][1] == "bronze"
 
 
 def test_failed_kpi_artifact_does_not_open_empty_gate1():

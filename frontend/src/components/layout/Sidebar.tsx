@@ -32,7 +32,7 @@ function Sidebar({ collapsed, onToggle, onNavigate, mobile = false }) {
     { to: '/app/data-discovery', icon: Sparkles, label: 'Data Discovery' },
     { to: '/app/run-history', icon: Clock3, label: 'Run History' },
     { to: '/app/data-quality', icon: Shield, label: 'Data Quality' },
-    { to: '/app/compliance-governance', icon: Shield, label: 'Compliance', disabled: true, badge: 'In Development' },
+    { to: '/app/compliance-governance', icon: Shield, label: 'Compliance' },
     { to: '/app/data-migration', icon: ArrowRightLeft, label: 'Data Migration' },
   ]
 

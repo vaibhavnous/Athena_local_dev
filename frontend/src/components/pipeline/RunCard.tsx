@@ -181,6 +181,9 @@ function getReviewGate(run) {
 
 function reviewPathForRun(run) {
   const runId = encodeURIComponent(run.id)
+  if (run?.next_review_key === 'compliance_review') {
+    return `/app/compliance-governance?runId=${runId}`
+  }
   if (run?.next_review_key) {
     return `/app/hitl?runId=${runId}&review=${encodeURIComponent(run.next_review_key)}`
   }

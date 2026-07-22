@@ -145,7 +145,7 @@ export const submitEnrichmentReview = (runId: string, approve: boolean, enriched
 export const getComplianceReview = (runId: string) => api.get(`/compliance-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 export const submitComplianceReview = (
   runId: string,
-  findings: Array<{ table_name: string; column_name: string; status: string; reviewer_comments?: string | null }> = [],
+  findings: Array<{ table_name: string; column_name: string; status: string; security_control?: string | null; reviewer_comments?: string | null }> = [],
   overall_comments?: string | null
 ) => api.post(`/compliance-reviews/${runId}`, { findings, overall_comments }, { timeout: WRITE_TIMEOUT })
 

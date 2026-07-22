@@ -81,7 +81,7 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     checkpoint = row.get("checkpoint")
     if isinstance(checkpoint, str):
         checkpoint = json.loads(checkpoint)
-    if not isinstance(checkpoint, dict):
+    if not isinstance(checkpoint, dict) or not checkpoint:
         checkpoint = load_checkpoint_state(run_id) or {}
     return {
         **_fallback_run_summary(row),

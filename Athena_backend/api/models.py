@@ -77,6 +77,7 @@ class ComplianceReviewFinding(BaseModel):
     table_name: str
     column_name: str
     status: str = "Approved"
+    security_control: Optional[str] = None
     reviewer_comments: Optional[str] = None
 
 

@@ -15,6 +15,14 @@ router = APIRouter()
 RUN_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_STATUS_WORKERS", "2"))))
 
 
+def _regeneration_stage_for_retry(failed_stage_key: str) -> str:
+    return {
+        "bronze_code_execution": "bronze",
+        "silver_code_execution": "silver",
+        "gold_code_execution": "gold",
+    }.get(failed_stage_key, failed_stage_key)
+
+
 def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
     checkpoint = checkpoint or {}
     result_state = str(checkpoint.get("status") or status or "RUNNING")
@@ -172,12 +180,13 @@ def _resume_failed_run(run_id: str, action_name: str) -> Dict[str, Any]:
     if not failed_stage_key:
         raise HTTPException(status_code=400, detail="No failed stage identified.")
 
+    retry_stage_key = _regeneration_stage_for_retry(failed_stage_key)
     submit_background(
         run_id,
-        failed_stage_key,
+        retry_stage_key,
         continue_database_pipeline_job,
         run_id,
-        failed_stage_key,
+        retry_stage_key,
         resumed_state,
     )
 
@@ -187,7 +196,7 @@ def _resume_failed_run(run_id: str, action_name: str) -> Dict[str, Any]:
         "run_id": run_id,
         "status": "SUBMITTED",
         "action": action_name,
-        "start_stage_key": failed_stage_key,
+        "start_stage_key": retry_stage_key,
     }
 
 
@@ -469,22 +478,26 @@ def retry_failed_stage(run_id: str) -> Dict[str, Any]:
     resumed_state = clean_checkpoint_for_resume(checkpoint)
     save_checkpoint_state(run_id, resumed_state)
 
+    retry_stage_key = _regeneration_stage_for_retry(failed_stage_key)
     submit_background(
         run_id,
-        failed_stage_key,
+        retry_stage_key,
         continue_database_pipeline_job,
         run_id,
-        failed_stage_key,
+        retry_stage_key,
         resumed_state,
     )
 
-    logger.info("Retrying failed stage", extra={"run_id": run_id, "stage": failed_stage_key})
+    logger.info(
+        "Retrying failed stage",
+        extra={"run_id": run_id, "stage": retry_stage_key, "failed_stage": failed_stage_key},
+    )
 
     return {
         "run_id": run_id,
         "status": "SUBMITTED",
         "action": "retry_failed_stage",
-        "start_stage_key": failed_stage_key,
+        "start_stage_key": retry_stage_key,
     }
 
 
