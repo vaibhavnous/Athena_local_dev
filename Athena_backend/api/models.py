@@ -69,7 +69,7 @@ class Gate3DecisionPayload(BaseModel):
 
 
 class GenericGateDecisionPayload(BaseModel):
-    action: str = "APPROVED"
+    action: str = Field(..., min_length=1, max_length=32)
     review_artifact: Optional[Dict[str, Any]] = None
 
 

@@ -1,8 +1,9 @@
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from api import utils as api_utils
+from api.auth import AuthUser, assert_run_access, assert_run_gate_open, get_current_user, has_request_user
 from api.demo import (
     demo_action,
     demo_bronze_review,
@@ -15,6 +16,31 @@ from api.models import ComplianceReviewPayload, Gate2DecisionPayload, Gate3Decis
 from utilis.logger import logger
 
 router = APIRouter()
+VALID_REVIEW_ACTIONS = {"APPROVED", "REJECTED", "REGENERATE"}
+
+
+def _checkpoint_for_user(run_id: str, user: Any, checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    return assert_run_access(run_id, user, checkpoint=checkpoint) if has_request_user(user) else (checkpoint or {})
+
+
+def _checkpoint_for_open_gate(
+    run_id: str,
+    user: Any,
+    checkpoint: Dict[str, Any] | None = None,
+    *,
+    gate_number: int | None = None,
+    review_key: str | None = None,
+) -> Dict[str, Any]:
+    if not has_request_user(user):
+        return checkpoint or {}
+    return assert_run_gate_open(run_id, user, checkpoint=checkpoint, gate_number=gate_number, review_key=review_key)
+
+
+def _review_action(action: str) -> str:
+    normalized = str(action or "").strip().upper()
+    if normalized not in VALID_REVIEW_ACTIONS:
+        raise HTTPException(status_code=400, detail="Review action must be APPROVED, REJECTED, or REGENERATE.")
+    return normalized
 
 
 def _compliance_review_decision(findings: list[Dict[str, Any]]) -> str:
@@ -39,12 +65,13 @@ def _compliance_api_findings(findings: list[Dict[str, Any]]) -> list[Dict[str, A
 
 
 @router.get("/compliance-reviews/{run_id}")
-def compliance_reviews(run_id: str) -> Dict[str, Any]:
+def compliance_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     from services.compliance_client import fetch_review
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
 
     try:
         checkpoint = load_checkpoint_state(run_id) or {}
+        checkpoint = _checkpoint_for_user(run_id, user, checkpoint)
         review = checkpoint.get("compliance_review")
         if checkpoint.get("compliance_enabled") and checkpoint.get("compliance_assessment_id") and not review:
             review = fetch_review({**checkpoint, "run_id": run_id})
@@ -56,6 +83,8 @@ def compliance_reviews(run_id: str) -> Dict[str, Any]:
                 }
             )
             save_checkpoint_state(run_id, checkpoint)
+    except HTTPException:
+        raise
     except Exception:
         logger.error("Failed to fetch compliance review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load compliance review")
@@ -74,15 +103,21 @@ def compliance_reviews(run_id: str) -> Dict[str, Any]:
 
 
 @router.post("/compliance-reviews/{run_id}")
-def submit_compliance_reviews(run_id: str, payload: ComplianceReviewPayload) -> Dict[str, Any]:
+def submit_compliance_reviews(
+    run_id: str,
+    payload: ComplianceReviewPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
     from services.compliance_client import fetch_results, submit_review
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
 
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = _checkpoint_for_user(run_id, user, load_checkpoint_state(run_id) or {})
     if not checkpoint.get("compliance_enabled"):
         raise HTTPException(status_code=400, detail="Compliance is not enabled for this run.")
     if not checkpoint.get("compliance_assessment_id"):
         raise HTTPException(status_code=409, detail="Compliance assessment is not ready yet.")
+    if checkpoint.get("compliance_review_decision"):
+        raise HTTPException(status_code=409, detail="Compliance review has already been submitted for this run.")
 
     findings = [item.model_dump() for item in payload.findings]
     if not findings:
@@ -140,7 +175,7 @@ def submit_compliance_reviews(run_id: str, payload: ComplianceReviewPayload) -> 
 # ✅ TABLE REVIEWS (GET)
 # -------------------------
 @router.get("/table-reviews/{run_id}")
-def table_reviews(run_id: str) -> Dict[str, Any]:
+def table_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_table_reviews(run_id)
 
@@ -149,14 +184,15 @@ def table_reviews(run_id: str) -> Dict[str, Any]:
 
     try:
         checkpoint = load_checkpoint_state(run_id) or {}
+        checkpoint = _checkpoint_for_user(run_id, user, checkpoint)
         run = checkpoint
         if not (checkpoint.get("nominated_tables") or checkpoint.get("candidate_feed") or checkpoint.get("candidate_feeds")):
             run = ui_run(run_id)
+    except HTTPException:
+        raise
     except Exception:
         logger.error("Failed to fetch table review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load table review")
-
-    checkpoint = load_checkpoint_state(run_id) or {}
 
     return {
         "run_id": run_id,
@@ -178,7 +214,11 @@ def table_reviews(run_id: str) -> Dict[str, Any]:
 # ✅ TABLE REVIEWS (POST)
 # -------------------------
 @router.post("/table-reviews/{run_id}")
-def submit_table_reviews(run_id: str, payload: Gate2DecisionPayload) -> Dict[str, Any]:
+def submit_table_reviews(
+    run_id: str,
+    payload: Gate2DecisionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, segment="table", approved_tables=payload.approved_tables)
 
@@ -189,7 +229,7 @@ def submit_table_reviews(run_id: str, payload: Gate2DecisionPayload) -> Dict[str
     )
     from sftp_nodes.hitl import submit_sftp_gate2_review
 
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = _checkpoint_for_open_gate(run_id, user, load_checkpoint_state(run_id) or {}, gate_number=2)
 
     logger.info("Submitting table review", extra={"run_id": run_id})
 
@@ -211,7 +251,7 @@ def submit_table_reviews(run_id: str, payload: Gate2DecisionPayload) -> Dict[str
 # ✅ ENRICHMENT REVIEWS (GET)
 # -------------------------
 @router.get("/enrichment-reviews/{run_id}")
-def enrichment_reviews(run_id: str) -> Dict[str, Any]:
+def enrichment_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_enrichment_reviews(run_id)
 
@@ -220,8 +260,11 @@ def enrichment_reviews(run_id: str) -> Dict[str, Any]:
 
     try:
         run = load_checkpoint_state(run_id) or {}
+        run = _checkpoint_for_user(run_id, user, run)
         if not run.get("enriched_metadata") and not run.get("enriched_columns"):
             run = ui_run(run_id)
+    except HTTPException:
+        raise
     except Exception:
         logger.error("Failed to fetch enrichment review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load enrichment review")
@@ -246,7 +289,11 @@ def enrichment_reviews(run_id: str) -> Dict[str, Any]:
 # ✅ ENRICHMENT REVIEWS (POST)
 # -------------------------
 @router.post("/enrichment-reviews/{run_id}")
-def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict[str, Any]:
+def submit_enrichment_review(
+    run_id: str,
+    payload: Gate3DecisionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, segment="enrichment" if payload.approve else None, approve=payload.approve)
 
@@ -257,7 +304,7 @@ def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict
     )
     from sftp_nodes.hitl import submit_sftp_gate3_review
 
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = _checkpoint_for_open_gate(run_id, user, load_checkpoint_state(run_id) or {}, gate_number=3)
 
     logger.info("Submitting enrichment review", extra={"run_id": run_id})
 
@@ -274,7 +321,7 @@ def submit_enrichment_review(run_id: str, payload: Gate3DecisionPayload) -> Dict
 # ✅ BRONZE REVIEWS (GET)
 # -------------------------
 @router.get("/bronze-reviews/{run_id}")
-def bronze_reviews(run_id: str) -> Dict[str, Any]:
+def bronze_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_bronze_review(run_id)
 
@@ -283,9 +330,12 @@ def bronze_reviews(run_id: str) -> Dict[str, Any]:
 
     try:
         checkpoint = load_checkpoint_state(run_id) or {}
+        checkpoint = _checkpoint_for_user(run_id, user, checkpoint)
         run = checkpoint
         if not (checkpoint.get("bronze_review_artifact") or checkpoint.get("bronze_generation_results")):
             run = ui_run(run_id)
+    except HTTPException:
+        raise
     except Exception:
         logger.error("Failed to fetch bronze review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load bronze review")
@@ -308,7 +358,11 @@ def bronze_reviews(run_id: str) -> Dict[str, Any]:
 # ✅ BRONZE REVIEWS (POST)
 # -------------------------
 @router.post("/bronze-reviews/{run_id}")
-def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
+def submit_bronze_reviews(
+    run_id: str,
+    payload: GenericGateDecisionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, segment="bronze" if payload.action == "APPROVED" else None, action=payload.action)
 
@@ -317,22 +371,23 @@ def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
     from sftp_nodes.hitl import submit_sftp_gate4_review
     from services.databricks_runtime import databricks_bronze_execution_enabled
 
-    logger.info("Submitting bronze review", extra={"run_id": run_id, "action": payload.action})
+    action = _review_action(payload.action)
+    logger.info("Submitting bronze review", extra={"run_id": run_id, "action": action})
 
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = _checkpoint_for_open_gate(run_id, user, load_checkpoint_state(run_id) or {}, gate_number=4)
     review_artifact = payload.review_artifact or {}
     if not (review_artifact.get("feeds") or []):
         review_artifact = checkpoint.get("bronze_review_artifact") or bronze_review_from_scripts(run_id, checkpoint) or {}
-    if str(payload.action or "APPROVED").upper() == "APPROVED" and not (review_artifact.get("feeds") or []):
+    if action == "APPROVED" and not (review_artifact.get("feeds") or []):
         raise HTTPException(status_code=409, detail="Bronze review is not ready yet. Generated Bronze scripts are still loading.")
 
     if api_utils.is_file_source(checkpoint.get("source")):
-        stage = "bronze_code_execution" if str(payload.action).upper() == "APPROVED" else "gate4"
-        submit_background(run_id, stage, submit_sftp_gate4_review, run_id, payload.action, review_artifact)
+        stage = "bronze_code_execution" if action == "APPROVED" else "gate4"
+        submit_background(run_id, stage, submit_sftp_gate4_review, run_id, action, review_artifact)
     else:
         stage = (
             "bronze_code_execution"
-            if str(payload.action).upper() == "APPROVED"
+            if action == "APPROVED"
             and (
                 str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
                 or (
@@ -340,23 +395,26 @@ def submit_bronze_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
                     and databricks_bronze_execution_enabled()
                 )
             )
-            else "silver_merge_key_review" if str(payload.action).upper() == "APPROVED"
+            else "silver_merge_key_review" if action == "APPROVED"
             else "gate4"
         )
-        submit_background(run_id, stage, submit_gate4_review, run_id, payload.action, review_artifact, checkpoint)
+        submit_background(run_id, stage, submit_gate4_review, run_id, action, review_artifact, checkpoint)
 
-    return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
+    return {"run_id": run_id, "status": "SUBMITTED", "action": action}
 
 
 # -------------------------
 # ✅ SILVER REVIEWS (GET)
 # -------------------------
 @router.get("/silver-merge-key-reviews/{run_id}")
-def silver_merge_key_reviews(run_id: str) -> Dict[str, Any]:
+def silver_merge_key_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     from services.pipeline_runtime import _silver_merge_key_review_artifact, load_checkpoint_state
 
     try:
         run = load_checkpoint_state(run_id) or {}
+        run = _checkpoint_for_user(run_id, user, run)
+    except HTTPException:
+        raise
     except Exception:
         logger.error("Failed to fetch Silver merge-key review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load Silver merge-key review")
@@ -371,18 +429,24 @@ def silver_merge_key_reviews(run_id: str) -> Dict[str, Any]:
 
 
 @router.post("/silver-merge-key-reviews/{run_id}")
-def submit_silver_merge_key_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
-    from services.pipeline_runtime import submit_background, submit_silver_merge_key_review
+def submit_silver_merge_key_reviews(
+    run_id: str,
+    payload: GenericGateDecisionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_silver_merge_key_review
 
-    logger.info("Submitting Silver merge-key review", extra={"run_id": run_id, "action": payload.action})
-    stage = "silver" if str(payload.action).upper() == "APPROVED" else "silver_merge_key_review"
-    submit_background(run_id, stage, submit_silver_merge_key_review, run_id, payload.action, payload.review_artifact)
+    action = _review_action(payload.action)
+    logger.info("Submitting Silver merge-key review", extra={"run_id": run_id, "action": action})
+    _checkpoint_for_open_gate(run_id, user, load_checkpoint_state(run_id) or {}, review_key="silver_merge_key_review")
+    stage = "silver" if action == "APPROVED" else "silver_merge_key_review"
+    submit_background(run_id, stage, submit_silver_merge_key_review, run_id, action, payload.review_artifact)
 
-    return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
+    return {"run_id": run_id, "status": "SUBMITTED", "action": action}
 
 
 @router.get("/silver-reviews/{run_id}")
-def silver_reviews(run_id: str) -> Dict[str, Any]:
+def silver_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_silver_review(run_id)
 
@@ -391,9 +455,12 @@ def silver_reviews(run_id: str) -> Dict[str, Any]:
 
     try:
         checkpoint = load_checkpoint_state(run_id) or {}
+        checkpoint = _checkpoint_for_user(run_id, user, checkpoint)
         run = checkpoint
         if not (checkpoint.get("silver_review_artifact") or checkpoint.get("silver_generation_results")):
             run = ui_run(run_id)
+    except HTTPException:
+        raise
     except Exception:
         logger.error("Failed to fetch silver review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load silver review")
@@ -415,7 +482,11 @@ def silver_reviews(run_id: str) -> Dict[str, Any]:
 # ✅ SILVER REVIEWS (POST)
 # -------------------------
 @router.post("/silver-reviews/{run_id}")
-def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
+def submit_silver_reviews(
+    run_id: str,
+    payload: GenericGateDecisionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, segment="silver" if payload.action == "APPROVED" else None, action=payload.action)
 
@@ -423,12 +494,13 @@ def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
     from sftp_nodes.hitl import submit_sftp_gate5_review
     from services.databricks_runtime import databricks_silver_execution_enabled
 
-    logger.info("Submitting silver review", extra={"run_id": run_id, "action": payload.action})
+    action = _review_action(payload.action)
+    logger.info("Submitting silver review", extra={"run_id": run_id, "action": action})
 
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = _checkpoint_for_open_gate(run_id, user, load_checkpoint_state(run_id) or {}, gate_number=5)
     stage = (
         "silver_code_execution"
-        if str(payload.action).upper() == "APPROVED"
+        if action == "APPROVED"
         and (
             str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
             or (
@@ -436,22 +508,23 @@ def submit_silver_reviews(run_id: str, payload: GenericGateDecisionPayload) -> D
                 and databricks_silver_execution_enabled()
             )
         )
-        else "gold" if str(payload.action).upper() == "APPROVED"
+        else "gold" if action == "APPROVED"
         else "gate5"
     )
     if api_utils.is_file_source(checkpoint.get("source")):
-        submit_background(run_id, stage, submit_sftp_gate5_review, run_id, payload.action, payload.review_artifact)
+        submit_background(run_id, stage, submit_sftp_gate5_review, run_id, action, payload.review_artifact)
     else:
-        submit_background(run_id, stage, submit_gate5_review, run_id, payload.action, payload.review_artifact)
+        submit_background(run_id, stage, submit_gate5_review, run_id, action, payload.review_artifact)
 
-    return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
+    return {"run_id": run_id, "status": "SUBMITTED", "action": action}
 
 
 @router.get("/gold-reviews/{run_id}")
-def gold_reviews(run_id: str) -> Dict[str, Any]:
+def gold_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state
 
     run = load_checkpoint_state(run_id) or {}
+    run = _checkpoint_for_user(run_id, user, run)
     artifact = run.get("gold_review_artifact") or {
         "items": [item for item in run.get("gold_generation_results") or [] if isinstance(item, dict)]
     }
@@ -464,9 +537,15 @@ def gold_reviews(run_id: str) -> Dict[str, Any]:
 
 
 @router.post("/gold-reviews/{run_id}")
-def submit_gold_reviews(run_id: str, payload: GenericGateDecisionPayload) -> Dict[str, Any]:
-    from services.pipeline_runtime import submit_background, submit_gold_review
+def submit_gold_reviews(
+    run_id: str,
+    payload: GenericGateDecisionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gold_review
 
-    logger.info("Submitting Gold review", extra={"run_id": run_id, "action": payload.action})
-    submit_background(run_id, "gold_code_execution", submit_gold_review, run_id, payload.action, payload.review_artifact)
-    return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
+    action = _review_action(payload.action)
+    logger.info("Submitting Gold review", extra={"run_id": run_id, "action": action})
+    _checkpoint_for_open_gate(run_id, user, load_checkpoint_state(run_id) or {}, review_key="gold_review")
+    submit_background(run_id, "gold_code_execution", submit_gold_review, run_id, action, payload.review_artifact)
+    return {"run_id": run_id, "status": "SUBMITTED", "action": action}

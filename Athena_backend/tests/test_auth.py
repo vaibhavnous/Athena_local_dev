@@ -5,7 +5,7 @@ import uuid
 import pytest
 from fastapi import HTTPException
 
-from api.auth import AuthService, AuthUser, CreateUserRequest
+from api.auth import AuthService, AuthUser, CreateUserRequest, assert_run_access, assert_run_gate_open
 
 
 class FakeAuthRepository:
@@ -144,3 +144,56 @@ def test_existing_primary_admin_password_syncs_from_env(monkeypatch):
     session = service.login("admin@astra.local", "NewAdminPass!234")
 
     assert session.user.can_manage_accounts is True
+
+
+def test_client_cannot_access_another_users_run():
+    client = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Client",
+        email="client@example.com",
+        userType="Client",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        assert_run_access("run-1", client, checkpoint={"run_id": "run-1", "owner_email": "other@example.com"})
+
+    assert exc.value.status_code == 403
+
+
+def test_unowned_legacy_run_is_not_client_accessible_by_default(monkeypatch):
+    monkeypatch.delenv("ATHENA_ALLOW_LEGACY_UNOWNED_RUNS", raising=False)
+    client = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Client",
+        email="client@example.com",
+        userType="Client",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        assert_run_access("run-legacy", client, checkpoint={"run_id": "run-legacy"})
+
+    assert exc.value.status_code == 403
+
+
+def test_review_gate_replay_is_rejected():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        assert_run_gate_open(
+            "run-1",
+            admin,
+            checkpoint={
+                "run_id": "run-1",
+                "status": "HITL_WAIT",
+                "next_gate": 4,
+                "bronze_review_decision": "APPROVED",
+            },
+            gate_number=4,
+        )
+
+    assert exc.value.status_code == 409

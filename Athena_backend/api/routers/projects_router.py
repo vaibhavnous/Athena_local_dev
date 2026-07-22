@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from api.auth import AuthUser, get_current_user
+from api.auth import AuthUser, get_current_user, load_project_for_user, user_can_access_project
 from api.models import ProjectRequest
 from api.repositories.project_repository import ProjectRepository
 
@@ -35,14 +35,16 @@ def _owned_project(project_id: str, user: AuthUser) -> dict[str, Any]:
     project = repository.find(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    if user.user_type != "Admin" and project["owner_email"].lower() != user.email.lower():
+    if not user_can_access_project(project, user):
         raise HTTPException(status_code=403, detail="Project access denied")
     return project
 
 
 @router.get("")
-def list_projects(_: AuthUser = Depends(get_current_user)) -> list[dict[str, Any]]:
-    return repository.list_projects()
+def list_projects(user: AuthUser = Depends(get_current_user)) -> list[dict[str, Any]]:
+    if user.user_type == "Admin":
+        return repository.list_projects()
+    return repository.list_projects(owner_email=user.email)
 
 
 @router.get("/{project_id}")
@@ -73,7 +75,7 @@ def delete_project(project_id: str, user: AuthUser = Depends(get_current_user)) 
 
 @router.get("/{project_id}/runs")
 def project_runs(project_id: str, user: AuthUser = Depends(get_current_user)) -> list[dict[str, Any]]:
-    _owned_project(project_id, user)
+    load_project_for_user(project_id, user)
     from services.pipeline_runtime import list_runs, load_checkpoint_state
 
     matches = []

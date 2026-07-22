@@ -19,7 +19,6 @@ from services.pipeline_runtime import (
     start_pipeline,
     submit_background,
 )
-from services.sftp_runtime import start_sftp_pipeline
 from utilis.db import get_pending_items
 from utilis.logger import logger
 
@@ -29,6 +28,12 @@ from api.models import PipelineRunRequest
 TERMINAL_STATUSES = {"ABORTED", "COMPLETED", "FAILED", "PIPELINE_COMPLETED", "SUCCESS"}
 PAUSED_STATUSES = {"HITL_WAIT", "PAUSED_FOR_HITL", "PAUSED_FOR_STAGE_CONFIRMATION"}
 ACTIVE_STATUSES = {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
+
+
+def start_sftp_pipeline(**kwargs):
+    from services.sftp_runtime import start_sftp_pipeline as _start_sftp_pipeline
+
+    return _start_sftp_pipeline(**kwargs)
 
 
 @lru_cache(maxsize=1)
@@ -205,6 +210,7 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
     source_databases = normalized_source_databases(checkpoint)
     database_name = source_databases[0] if source_databases else checkpoint.get("database_name")
     return PipelineRunRequest(
+        project_id=checkpoint.get("project_id"),
         brd_text=str(checkpoint.get("brd_text") or ""),
         brd_filename=checkpoint.get("brd_filename"),
         source=str(checkpoint.get("source") or "database"),

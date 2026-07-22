@@ -17,6 +17,7 @@ variables:
   artifactZip: 'backend-app.zip'
   azureServiceConnection: 'azure-devops-service-connection'
   webAppName: 'astra-data-eecthacqb5eherhk'
+  backendHealthUrl: 'https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net/health'
 
 stages:
   - stage: Build
@@ -37,9 +38,8 @@ stages:
 
           - script: |
               cd $(backendFolder)
-              python -m pytest tests/ -v --junitxml=junit/test-results.xml || true
-            displayName: 'Run tests'
-            continueOnError: true
+              python -m pytest tests/ -v --junitxml=junit/test-results.xml
+            displayName: 'Run backend tests'
 
           - task: PublishTestResults@2
             condition: succeededOrFailed()
@@ -73,7 +73,7 @@ stages:
   - stage: Deploy
     displayName: 'Deploy Backend'
     dependsOn: Build
-    condition: succeeded()
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
       - deployment: DeployBackend
         displayName: 'Deploy to Azure App Service'
@@ -98,3 +98,19 @@ stages:
                     package: '$(Pipeline.Workspace)/$(artifactName)/$(artifactZip)'
                     startUpCommand: 'bash startup.sh'
                   displayName: 'Deploy backend app'
+
+                - script: |
+                    set -euo pipefail
+                    for attempt in {1..10}; do
+                      status="$(curl -sS -o health-body.txt -w '%{http_code}' \
+                        --connect-timeout 5 --max-time 15 \
+                        "$(backendHealthUrl)" || true)"
+                      echo "Health attempt ${attempt}/10 returned HTTP ${status}"
+                      if [ "${status}" = "200" ]; then
+                        exit 0
+                      fi
+                      sleep 6
+                    done
+                    cat health-body.txt || true
+                    exit 1
+                  displayName: 'Verify backend health'

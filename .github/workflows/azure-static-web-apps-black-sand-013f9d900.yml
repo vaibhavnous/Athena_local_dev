@@ -25,6 +25,8 @@ jobs:
     name: Build and deploy frontend
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment:
+      name: production
 
     steps:
       - uses: actions/checkout@v4

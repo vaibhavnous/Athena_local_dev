@@ -4,8 +4,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from api.auth import AuthUser, assert_run_access, filter_runs_for_user, get_current_user
 from api.demo import (
     demo_enabled,
     demo_lineage,
@@ -110,6 +111,16 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _redacted_checkpoint(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    blocked_names = {"brd_text", "source_jdbc_url", "source_password", "password"}
+    blocked_terms = ("password", "secret", "token", "api_key", "apikey")
+    redacted: Dict[str, Any] = {}
+    for key, value in checkpoint.items():
+        lowered = str(key).lower()
+        redacted[key] = "[REDACTED]" if lowered in blocked_names or any(term in lowered for term in blocked_terms) else value
+    return redacted
+
+
 def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
     checkpoint = checkpoint or {}
     from services.pipeline_runtime import build_pipeline_steps
@@ -192,7 +203,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
                 "source_columns": checkpoint.get("source_columns"),
             }
         ),
-        "checkpoint": checkpoint,
+        "checkpoint": _redacted_checkpoint(checkpoint),
         "stage_confirmation": checkpoint.get("stage_confirmation"),
         "next_gate": next_gate,
         "next_review_key": next_review_key,
@@ -223,7 +234,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
 # ✅ Runs List
 # -------------------------
 @router.get("/runs")
-def runs() -> List[Dict[str, Any]]:
+def runs(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
     if demo_enabled():
         return demo_runs()
 
@@ -239,7 +250,7 @@ def runs() -> List[Dict[str, Any]]:
         logger.debug("Fetching runs list", extra={"timeout_seconds": timeout_seconds, "limit": run_limit})
 
         future = RUN_LIST_EXECUTOR.submit(list_runs, run_limit)
-        rows = future.result(timeout=timeout_seconds)
+        rows = filter_runs_for_user(future.result(timeout=timeout_seconds), user)
 
         results: List[Dict[str, Any]] = []
 
@@ -301,7 +312,7 @@ def runs() -> List[Dict[str, Any]]:
 # ✅ Run Detail
 # -------------------------
 @router.get("/runs/{run_id}")
-def run_detail(run_id: str) -> Dict[str, Any]:
+def run_detail(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_run(run_id, include_scripts=True)
 
@@ -309,15 +320,14 @@ def run_detail(run_id: str) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state
 
     try:
+        checkpoint = assert_run_access(run_id, user)
         timeout_seconds = max(1, int(os.getenv("ATHENA_RUN_DETAIL_TIMEOUT_SECONDS", "8")))
         future = RUN_DETAIL_EXECUTOR.submit(ui_run, run_id, include_scripts=True)
         return future.result(timeout=timeout_seconds)
+    except HTTPException:
+        raise
     except FutureTimeoutError:
         logger.warning("GET /runs/{run_id} detail timed out; returning fallback detail", extra={"run_id": run_id})
-        try:
-            checkpoint = load_checkpoint_state(run_id) or {}
-        except Exception:
-            checkpoint = {}
         return _fallback_run_detail(run_id, checkpoint)
     except Exception:
         logger.error(
@@ -326,14 +336,16 @@ def run_detail(run_id: str) -> Dict[str, Any]:
             extra={"run_id": run_id},
         )
         try:
-            checkpoint = load_checkpoint_state(run_id) or {}
+            checkpoint = assert_run_access(run_id, user, checkpoint=load_checkpoint_state(run_id) or {})
+        except HTTPException:
+            raise
         except Exception:
             checkpoint = {}
         return _fallback_run_detail(run_id, checkpoint)
 
 
 @router.get("/run-scripts/{run_id}")
-def run_scripts(run_id: str) -> Dict[str, Any]:
+def run_scripts(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return {"run_id": run_id, **demo_scripts(run_id)}
 
@@ -345,13 +357,16 @@ def run_scripts(run_id: str) -> Dict[str, Any]:
     )
 
     try:
-        checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+        checkpoint = load_checkpoint_state(run_id) or {}
+        checkpoint = assert_run_access(run_id, user, checkpoint=checkpoint)
         return {
             "run_id": run_id,
             "bronze": load_bronze_scripts(run_id, checkpoint),
             "silver": load_silver_scripts(run_id, checkpoint),
             "gold": load_gold_scripts(run_id, checkpoint),
         }
+    except HTTPException:
+        raise
     except Exception:
         logger.error(
             "Failed to fetch run scripts",
@@ -362,15 +377,18 @@ def run_scripts(run_id: str) -> Dict[str, Any]:
 
 
 @router.get("/run-lineage/{run_id}")
-def run_lineage(run_id: str) -> Dict[str, Any]:
+def run_lineage(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_lineage(run_id)
 
     from services.pipeline_runtime import build_run_lineage, load_checkpoint_state
 
     try:
-        checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+        checkpoint = load_checkpoint_state(run_id) or {}
+        checkpoint = assert_run_access(run_id, user, checkpoint=checkpoint)
         return build_run_lineage(run_id, checkpoint)
+    except HTTPException:
+        raise
     except Exception:
         logger.error(
             "Failed to build run lineage",
