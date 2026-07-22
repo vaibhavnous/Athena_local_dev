@@ -528,8 +528,8 @@ def test_gold_stage_executes_databricks_gold_after_review(monkeypatch):
             "gold_generation_results": [{"kpi_name": "Total Claims", "script_body": _gold_sql()}],
         }
 
-    def fake_gold_execution(state):
-        calls.append(state.copy())
+    def fake_gold_execution(state, **kwargs):
+        calls.append({"state": state.copy(), "kwargs": kwargs})
         return {
             **state,
             "databricks_gold_execution_status": "COMPLETED",
@@ -552,7 +552,9 @@ def test_gold_stage_executes_databricks_gold_after_review(monkeypatch):
     completed = pipeline_runtime.submit_gold_review("run-gold", "APPROVED", result["gold_review_artifact"])
 
     assert calls
-    assert calls[0]["background_stage"] == "gold_code_execution"
+    assert calls[0]["state"]["background_stage"] == "gold_code_execution"
+    assert calls[0]["kwargs"]["approved_only"] is True
+    assert calls[0]["kwargs"]["review_artifact"] == result["gold_review_artifact"]
     assert completed["status"] == "PIPELINE_COMPLETED"
     assert completed["databricks_gold_execution_status"] == "COMPLETED"
     assert any(state.get("background_stage") == "gold_code_execution" for state in saved_states)
