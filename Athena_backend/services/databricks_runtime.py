@@ -299,7 +299,7 @@ def _script_name(script: Dict[str, Any]) -> str:
 
 def _script_keys(script: Dict[str, Any]) -> set[str]:
     keys: set[str] = set()
-    for field in ("table", "table_name", "entity", "target_table", "source_table", "silver_table", "bronze_table"):
+    for field in ("table", "table_name", "entity", "target_table", "source_table", "silver_table", "bronze_table", "kpi_name", "script_name"):
         value = str(script.get(field) or "").strip()
         if not value:
             continue
@@ -311,17 +311,26 @@ def _script_keys(script: Dict[str, Any]) -> set[str]:
             for prefix in ("bronze_", "silver_", "gold_"):
                 if simple.startswith(prefix):
                     keys.add(simple[len(prefix):])
+    script_path = str(script.get("script_path") or "").strip()
+    if script_path:
+        keys.add(script_path.casefold())
+        stem = Path(script_path).stem.casefold()
+        if stem:
+            keys.add(stem)
     return keys
 
 
 def _review_item_keys(item: Dict[str, Any]) -> set[str]:
     keys: set[str] = set()
-    for field in ("table", "table_name", "entity", "target_table", "source_table", "bronze_table", "silver_table"):
+    for field in ("table", "table_name", "entity", "target_table", "source_table", "bronze_table", "silver_table", "kpi_name", "script_name", "script_path"):
         value = str(item.get(field) or "").strip()
         if not value:
             continue
         keys.add(value.casefold())
         keys.add(value.split(".")[-1].strip('"').casefold())
+        stem = Path(value).stem.casefold()
+        if stem:
+            keys.add(stem)
     return keys
 
 
@@ -341,9 +350,24 @@ def _filtered_scripts(scripts: List[Dict[str, Any]], review_artifact: Optional[D
     def matches(script: Dict[str, Any], item: Dict[str, Any]) -> bool:
         return bool(_script_keys(script) & _review_item_keys(item))
 
+    def reviewed(script: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        item = next((candidate for candidate in candidates if matches(script, candidate)), None)
+        return {**script, **item} if item else script
+
     if approved_items:
-        return [script for script in scripts if any(matches(script, item) for item in approved_items)]
-    return [script for script in scripts if not any(matches(script, item) for item in rejected_items)]
+        filtered = []
+        for script in scripts:
+            approved_item = next((item for item in approved_items if matches(script, item)), None)
+            if approved_item:
+                filtered.append({**script, **approved_item})
+        return filtered
+    if rejected_items:
+        return [
+            reviewed(script, review_items)
+            for script in scripts
+            if not any(matches(script, item) for item in rejected_items)
+        ]
+    return [reviewed(script, review_items) for script in scripts]
 
 
 def _scripts_for_layer(state: Dict[str, Any], layer: str, review_artifact: Optional[Dict[str, Any]], approved_only: bool) -> List[Dict[str, Any]]:
@@ -451,6 +475,7 @@ def _build_batch_driver_notebook(layer: str, scripts: List[Dict[str, Any]], *, w
     )
     return f'''# Databricks notebook source
 import base64
+import builtins
 import json
 import sys
 import time
@@ -467,7 +492,10 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
     _started = time.time()
     _name = _item.get("script_name") or f"script_{{_index}}"
     try:
-        exec(compile(_item.get("script_text") or "", f"<athena:{{_name}}>", "exec"), globals())
+        _script_globals = dict(globals())
+        _script_globals["__name__"] = f"__athena_{{_name}}"
+        _script_globals["__file__"] = _item.get("script_path") or f"<athena:{{_name}}>"
+        exec(compile(_item.get("script_text") or "", f"<athena:{{_name}}>", "exec"), _script_globals)
         _RESULTS.append({{
             "script_name": _name,
             "script_path": _item.get("script_path"),
@@ -489,11 +517,11 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
             break
 
 _SUMMARY = {{
-    "status": "FAILED" if any(_r.get("status") == "FAILED" for _r in _RESULTS) else "SUCCESS",
-    "scripts_total": len(_SCRIPT_ITEMS),
-    "scripts_executed": len(_RESULTS),
-    "scripts_ok": sum(1 for _r in _RESULTS if _r.get("status") == "SUCCESS"),
-    "scripts_failed": sum(1 for _r in _RESULTS if _r.get("status") == "FAILED"),
+    "status": "FAILED" if builtins.any(_r.get("status") == "FAILED" for _r in _RESULTS) else "SUCCESS",
+    "scripts_total": builtins.len(_SCRIPT_ITEMS),
+    "scripts_executed": builtins.len(_RESULTS),
+    "scripts_ok": builtins.sum(1 for _r in _RESULTS if _r.get("status") == "SUCCESS"),
+    "scripts_failed": builtins.sum(1 for _r in _RESULTS if _r.get("status") == "FAILED"),
     "results": _RESULTS,
 }}
 
@@ -514,6 +542,43 @@ def _parse_notebook_result(output_payload: Dict[str, Any]) -> Dict[str, Any]:
     except json.JSONDecodeError:
         return {"raw_result": result}
     return parsed if isinstance(parsed, dict) else {"raw_result": parsed}
+
+
+def _parse_batch_summary_from_error(value: Any) -> Dict[str, Any]:
+    text = str(value or "")
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
+            return parsed
+    return {}
+
+
+def _annotate_batch_results(
+    results: List[Dict[str, Any]],
+    *,
+    notebook_path: str,
+    run_state: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    return [
+        {
+            **item,
+            "workspace_path": notebook_path,
+            "databricks_run_id": run_state.get("run_id"),
+            "run_page_url": run_state.get("run_page_url"),
+            "cluster_id": run_state.get("cluster_id"),
+            "compute_mode": _databricks_compute_mode(),
+            "life_cycle_state": run_state.get("life_cycle_state"),
+            "result_state": run_state.get("result_state"),
+            "state_message": run_state.get("state_message"),
+        }
+        for item in results
+    ]
 
 
 def _successful_batch_results_from_scripts(
@@ -582,16 +647,40 @@ def _execute_databricks_stage_batch(
     run_state = _wait_for_run(int(run_payload.get("run_id")))
     elapsed_seconds = round(time.monotonic() - started_at, 2)
     if str(run_state.get("result_state") or "").upper() not in {"SUCCESS", "COMPLETED"}:
-        failure = f"Databricks {layer} batch execution failed: {_run_failure_detail(run_state)}"
+        detail = _run_failure_detail(run_state)
+        summary = _parse_batch_summary_from_error(detail)
+        partial_results = _annotate_batch_results(
+            [item for item in (summary.get("results") or []) if isinstance(item, dict)],
+            notebook_path=notebook_path,
+            run_state=run_state,
+        )
+        failed_results = [item for item in partial_results if str(item.get("status") or "").upper() == "FAILED"]
+        first_failed = failed_results[0] if failed_results else {}
+        completed_count = sum(1 for item in partial_results if str(item.get("status") or "").upper() == "SUCCESS")
+        failure = (
+            f"Databricks {layer} batch execution failed for {first_failed.get('script_name')}: "
+            f"{first_failed.get('error') or 'unknown error'}"
+            if first_failed
+            else f"Databricks {layer} batch execution failed: {detail}"
+        )
         save_external_execution_progress(
-            {**state, "status": "FAILED", "failed_background_stage": f"{layer}_code_execution", "error": failure},
+            {
+                **state,
+                "status": "FAILED",
+                "failed_background_stage": f"{layer}_code_execution",
+                "error": failure,
+                f"databricks_{layer}_execution_results": partial_results,
+            },
             run_id=run_id,
             platform="databricks",
             layer=layer,
             stage_key=f"{layer}_code_execution",
             status="FAILED",
             total_count=len(scripts),
-            completed_count=0,
+            completed_count=completed_count,
+            current_index=len(partial_results) or None,
+            current_name=first_failed.get("script_name"),
+            current_target=first_failed.get("target_table"),
             message=failure,
         )
         raise RuntimeError(failure)
@@ -611,20 +700,7 @@ def _execute_databricks_stage_batch(
     results = [item for item in (summary.get("results") or []) if isinstance(item, dict)]
     failed = [item for item in results if str(item.get("status") or "").upper() == "FAILED"]
     executed_scripts = (
-        [
-            {
-                **item,
-                "workspace_path": notebook_path,
-                "databricks_run_id": run_state.get("run_id"),
-                "run_page_url": run_state.get("run_page_url"),
-                "cluster_id": run_state.get("cluster_id"),
-                "compute_mode": _databricks_compute_mode(),
-                "life_cycle_state": run_state.get("life_cycle_state"),
-                "result_state": run_state.get("result_state"),
-                "state_message": run_state.get("state_message"),
-            }
-            for item in results
-        ]
+        _annotate_batch_results(results, notebook_path=notebook_path, run_state=run_state)
         if results
         else _successful_batch_results_from_scripts(
             scripts,
@@ -823,5 +899,8 @@ def run_databricks_silver_scripts(
 
 def run_databricks_gold_scripts(
     state: Dict[str, Any],
+    *,
+    review_artifact: Dict[str, Any] | None = None,
+    approved_only: bool = False,
 ) -> Dict[str, Any]:
-    return _execute_databricks_stage(state, layer="gold", review_artifact=None, approved_only=False)
+    return _execute_databricks_stage(state, layer="gold", review_artifact=review_artifact, approved_only=approved_only)
