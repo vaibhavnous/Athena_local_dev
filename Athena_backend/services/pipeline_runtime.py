@@ -3247,7 +3247,11 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
             }
             save_checkpoint_state(run_id, execution_state)
             try:
-                final_state = run_databricks_gold_scripts(execution_state)
+                final_state = run_databricks_gold_scripts(
+                    execution_state,
+                    review_artifact=execution_state["gold_review_artifact"],
+                    approved_only=True,
+                )
             except Exception as exc:
                 failed_state = {
                     **execution_state,

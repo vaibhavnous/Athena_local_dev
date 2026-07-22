@@ -611,6 +611,48 @@ def test_databricks_gold_execution_runs_dimensions_first_and_skips_blocked():
     assert scripts[0]["script_body"] == "print('dimensions')"
 
 
+def test_databricks_gold_review_filters_and_uses_reviewed_script_body():
+    scripts = databricks_runtime._scripts_for_layer(
+        {
+            "run_id": "run-reviewed-gold",
+            "target_warehouse": "databricks",
+            "gold_generation_results": [
+                {
+                    "status": "APPROVED",
+                    "script_path": "fact_one.py",
+                    "script_body": "print('original one')",
+                    "target_table": "gold.fact_one",
+                },
+                {
+                    "status": "APPROVED",
+                    "script_path": "fact_two.py",
+                    "script_body": "print('original two')",
+                    "target_table": "gold.fact_two",
+                },
+            ],
+        },
+        "gold",
+        {
+            "items": [
+                {
+                    "review_status": "PENDING",
+                    "target_table": "gold.fact_one",
+                    "script_body": "print('reviewed one')",
+                },
+                {
+                    "review_status": "REJECTED",
+                    "target_table": "gold.fact_two",
+                    "script_body": "print('rejected two')",
+                },
+            ]
+        },
+        True,
+    )
+
+    assert [script["target_table"] for script in scripts] == ["gold.fact_one"]
+    assert scripts[0]["script_body"] == "print('reviewed one')"
+
+
 def test_databricks_gold_submits_approved_scripts_as_one_batch(monkeypatch):
     monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
     monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_EXECUTION_MODE", raising=False)
@@ -706,6 +748,8 @@ def test_databricks_batch_notebook_fails_the_job_when_any_script_fails():
     )
 
     assert 'if _SUMMARY["status"] == "FAILED":' in notebook
+    assert 'exec(compile(_item.get("script_text") or "", f"<athena:{_name}>", "exec"), _script_globals)' in notebook
+    assert '"scripts_ok": builtins.sum(' in notebook
     assert notebook.index('raise RuntimeError(json.dumps(_SUMMARY') < notebook.index("dbutils.notebook.exit")
 
 
@@ -765,6 +809,67 @@ def test_databricks_gold_failure_persists_exact_script_and_stage(monkeypatch):
     assert failed_state["error"].endswith("missing gold.dim_claims")
     assert failed_progress["status"] == "FAILED"
     assert failed_progress["total_count"] == 1
+
+
+def test_databricks_gold_batch_failure_persists_partial_results(monkeypatch):
+    monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
+    monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_EXECUTION_MODE", raising=False)
+    monkeypatch.delenv("ATHENA_DATABRICKS_EXECUTION_MODE", raising=False)
+    monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_: None)
+    monkeypatch.setattr(databricks_runtime, "_workspace_import_notebook", lambda *_: {})
+    monkeypatch.setattr(databricks_runtime, "_submit_run", lambda *_args, **_kwargs: {"run_id": 42})
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_wait_for_run",
+        lambda *_: {"run_id": 42, "result_state": "FAILED", "state_message": "workload failed"},
+    )
+    summary = {
+        "status": "FAILED",
+        "scripts_total": 2,
+        "scripts_executed": 2,
+        "scripts_ok": 1,
+        "scripts_failed": 1,
+        "results": [
+            {"script_name": "gold_fact_one", "target_table": "gold.fact_one", "status": "SUCCESS"},
+            {
+                "script_name": "gold_fact_two",
+                "target_table": "gold.fact_two",
+                "status": "FAILED",
+                "error": "missing gold.dim_claims",
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_run_failure_detail",
+        lambda *_: f"RuntimeError: {json.dumps(summary)}",
+    )
+    saved = []
+
+    def capture_progress(state, **kwargs):
+        saved.append((state, kwargs))
+        return state
+
+    monkeypatch.setattr(databricks_runtime, "save_external_execution_progress", capture_progress)
+
+    with pytest.raises(RuntimeError, match="gold_fact_two"):
+        databricks_runtime.run_databricks_gold_scripts(
+            {
+                "run_id": "run-failed-gold-batch",
+                "target_warehouse": "databricks",
+                "gold_generation_results": [
+                    {"status": "APPROVED", "script_body": "print('one')", "target_table": "gold.fact_one"},
+                    {"status": "APPROVED", "script_body": "print('two')", "target_table": "gold.fact_two"},
+                ],
+            }
+        )
+
+    failed_state, failed_progress = saved[-1]
+    results = failed_state["databricks_gold_execution_results"]
+    assert [item["status"] for item in results] == ["SUCCESS", "FAILED"]
+    assert failed_progress["completed_count"] == 1
+    assert failed_progress["current_name"] == "gold_fact_two"
+    assert failed_state["error"].endswith("missing gold.dim_claims")
 
 
 def test_databricks_gold_llm_retries_then_uses_deterministic_fallback(monkeypatch):
