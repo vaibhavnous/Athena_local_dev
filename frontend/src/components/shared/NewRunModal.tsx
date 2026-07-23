@@ -4,9 +4,9 @@ import { useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowLeft,
-  BookOpenCheck,
   ChevronDown,
   FileText,
+  Folder,
   Loader2,
   Play,
   Upload,
@@ -30,6 +30,8 @@ const DEFAULT_FORM = {
   databaseName: 'insurance',
   targetWarehouse: 'databricks',
   useDomainKb: false,
+  domainProfile: '',
+  knowledgeBaseId: '',
   complianceEnabled: false,
   stageConfirmationEnabled: false,
 }
@@ -53,6 +55,8 @@ function buildInitialForm(settings, seedRun, project) {
           databaseName: seedRun.database_name || DEFAULT_FORM.databaseName,
           targetWarehouse: seedRun.target_warehouse || DEFAULT_FORM.targetWarehouse,
           useDomainKb: !!seedRun.use_domain_kb,
+          domainProfile: seedRun.domain_profile || '',
+          knowledgeBaseId: seedRun.knowledge_base_id || '',
           complianceEnabled: !!seedRun.compliance_enabled,
         }
       : {}),
@@ -64,34 +68,10 @@ function buildInitialForm(settings, seedRun, project) {
       databaseName: project.databaseName || DEFAULT_FORM.databaseName,
       targetWarehouse: String(project.target || 'Databricks').toLowerCase(),
       useDomainKb: !!project.useDomainKB,
+      domainProfile: project.domainProfile || '',
+      knowledgeBaseId: project.knowledgeBaseId || '',
     } : {}),
   }
-}
-
-const SOURCE_OPTIONS = [
-  { id: 'database', label: 'Database' },
-  { id: 'data_lake', label: 'Data Lake' },
-]
-
-const DATA_LAKE_OPTIONS = [
-  { id: 'adls_gen2', label: 'ADLS' },
-]
-
-const TARGET_WAREHOUSE_OPTIONS = [
-  { id: 'databricks', label: 'Databricks' },
-  { id: 'snowflake', label: 'Snowflake' },
-]
-
-const DATABASE_OPTIONS = {
-  azure_sql: [
-    { id: 'insurance', name: 'insurance' },
-    { id: 'AdventureWorksDW2019', name: 'AdventureWorksDW2019' },
-    { id: 'AdventureWorks2019', name: 'AdventureWorks2019' },
-  ],
-  postgresql: [
-    { id: 'postgres', name: 'postgres' },
-    { id: 'insurance', name: 'insurance' },
-  ],
 }
 
 function buildSftpRunLabel(entity) {
@@ -130,7 +110,6 @@ function connectionTypeFromSource(source) {
 function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false, project = null }) {
   const navigate = useNavigate()
   const fileInputRef = useRef(null)
-  const sourceSectionRef = useRef(null)
   const addRun = useAthenaStore((s) => s.addRun)
   const setActiveRun = useAthenaStore((s) => s.setActiveRun)
   const addNotification = useAthenaStore((s) => s.addNotification)
@@ -141,7 +120,6 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
-  const [openSourceSelect, setOpenSourceSelect] = useState(null)
 
   const resetState = () => {
     setForm(buildInitialForm(settings, initialSeedRun, project))
@@ -150,60 +128,13 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
     setIsDragging(false)
   }
 
-  const handleConnectionTypeChange = (connectionType) => {
-    setOpenSourceSelect(null)
-    setForm((current) => {
-      const source = connectionType === 'data_lake' ? 'adls_gen2' : 'database'
-      return {
-        ...current,
-        source,
-        sftpEntity: normalizeFileEntity(source, current.sftpEntity),
-        useDomainKb: source === 'database' ? current.useDomainKb : false,
-      }
-    })
-  }
-
-  const handleDataLakeTypeChange = (source) => {
-    setOpenSourceSelect(null)
-    setForm((current) => ({
-      ...current,
-      source,
-      sftpEntity: normalizeFileEntity(source, current.sftpEntity),
-      useDomainKb: false,
-    }))
-  }
-
   useEffect(() => {
     if (!isOpen) return
     setForm(buildInitialForm(settings, initialSeedRun, project))
     setUploadedFile(null)
     setError(null)
     setIsDragging(false)
-    setOpenSourceSelect(null)
   }, [initialSeedRun, isOpen, project, settings])
-
-  useEffect(() => {
-    if (!openSourceSelect) return
-
-    const handlePointerDown = (event) => {
-      if (!sourceSectionRef.current?.contains(event.target)) {
-        setOpenSourceSelect(null)
-      }
-    }
-
-    const handleEscape = (event) => {
-      if (event.key === 'Escape') {
-        setOpenSourceSelect(null)
-      }
-    }
-
-    document.addEventListener('mousedown', handlePointerDown)
-    document.addEventListener('keydown', handleEscape)
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown)
-      document.removeEventListener('keydown', handleEscape)
-    }
-  }, [openSourceSelect])
 
   const handleClose = () => {
     if (loading) return
@@ -408,64 +339,67 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
           )}
 
           <motion.div
-            initial={{ opacity: 0, y: 20, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 16, scale: 0.98 }}
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
             transition={{ type: 'spring', stiffness: 280, damping: 28 }}
             className={pageMode ? 'relative h-full overflow-y-auto' : 'fixed inset-0 z-50 overflow-y-auto'}
           >
             <div className={pageMode
-              ? 'mx-auto flex min-h-full w-full items-start justify-center px-3 py-3 [zoom:0.82]'
-              : 'mx-auto flex min-h-full w-full items-start justify-center px-6 py-12'}>
-              <div className="w-full max-w-[1317px]">
-                <div className="mb-5 flex items-start justify-between">
-                  <div className="flex items-start gap-4">
+              ? 'mx-auto flex min-h-full w-full items-start justify-center px-4 pb-4 pt-2 sm:px-6'
+              : 'mx-auto flex min-h-full w-full items-start justify-center px-6 py-10'}>
+              <div className="w-full max-w-5xl">
+                <div className="mb-3 flex items-start justify-between">
+                  <div className="flex items-center gap-3">
                     <button
                       type="button"
                       onClick={handleClose}
-                      className="mt-0.5 flex h-11 w-11 items-center justify-center rounded-[10px] border border-[#233047] bg-[#111a2b] text-slate-300 transition-colors hover:bg-[#172131] hover:text-white"
+                      className="flex h-9 w-9 items-center justify-center rounded-lg border border-bg-border bg-bg-card text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary"
                     >
-                      <ArrowLeft size={20} />
+                      <ArrowLeft size={16} />
                     </button>
                     <div>
-                      <h2 className="text-[28px] font-semibold leading-tight text-white">New Pipeline Run</h2>
-                      <p className="mt-1 text-[15px] text-[#b5c3da]">
-                        {isFileSource(form.source)
-                          ? 'Upload or paste a BRD, then configure the file source.'
-                          : 'Upload or paste a BRD to extract KPIs.'}
-                      </p>
+                      <h2 className="text-xl font-bold text-text-primary">New Pipeline Run</h2>
+                      <p className="mt-0.5 text-xs text-text-tertiary">Select a project and upload a BRD to extract KPIs</p>
                     </div>
                   </div>
                 </div>
 
-              <div className="overflow-hidden rounded-xl border border-[#223047] bg-[#111827] shadow-[0_22px_60px_rgba(0,0,0,0.32)]">
+              <div className="overflow-hidden rounded-xl border border-bg-border bg-bg-card shadow-sm">
                 <form onSubmit={handleSubmit}>
-                  <div className="grid min-h-[684px] lg:grid-cols-2">
-                    <div className="space-y-5 px-[21px] py-6">
-                        <Field label="Project Name" required>
-                          <input
-                            value={form.projectName}
-                            onChange={(event) => setForm((current) => ({ ...current, projectName: event.target.value }))}
-                            placeholder="Enter project name..."
-                            className="modal-input h-[60px] rounded-[10px] border-[#26344b] bg-[#070d1a] px-4 text-[18px] text-white placeholder:text-[#b8c5db]"
-                            readOnly={!!project}
-                          />
+                  <div className="grid border-b border-bg-border lg:grid-cols-2">
+                    <div className="space-y-3 border-b border-bg-border p-4 lg:border-b-0 lg:border-r">
+                        <Field label={project ? 'Project' : 'Project Name'} required>
+                          <div className="relative">
+                            <input
+                              value={form.projectName}
+                              onChange={(event) => setForm((current) => ({ ...current, projectName: event.target.value }))}
+                              placeholder="Enter project name..."
+                              className="input-field h-11 pr-10"
+                              readOnly={!!project}
+                            />
+                            {project && <ChevronDown size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-text-tertiary" />}
+                          </div>
                         </Field>
 
-                        <Field label="Project Description" required>
-                          <textarea
-                            value={form.projectDescription}
-                            onChange={(event) => setForm((current) => ({ ...current, projectDescription: event.target.value }))}
-                            placeholder="Briefly describe the project..."
-                            className="modal-input min-h-[107px] resize-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-4 py-4 text-[18px] text-white placeholder:text-[#b8c5db]"
-                            readOnly={!!project}
-                          />
-                        </Field>
+                        {project && (
+                          <div className="rounded-lg border border-bg-border bg-bg-base p-3">
+                            <div className="mb-1 flex items-center gap-2">
+                              <Folder size={13} className="text-accent-blue" />
+                              <span className="text-sm font-semibold text-text-primary">{project.name}</span>
+                            </div>
+                            <p className="text-xs leading-relaxed text-text-secondary">{project.description || 'No description'}</p>
+                            <div className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-card px-2.5 py-1.5">
+                              <span className="text-[10px] font-semibold uppercase text-text-tertiary">Target:</span>
+                              <span className="text-xs font-medium text-text-secondary">{project.target || form.targetWarehouse}</span>
+                            </div>
+                          </div>
+                        )}
 
                         <>
                           <div>
-                            <label className="mb-2 block text-[16px] font-semibold leading-tight text-slate-100">
-                              BRD Document <span className="text-[#ff5c57]">*</span>
+                            <label className="mb-1 block text-xs font-medium text-text-secondary">
+                              BRD Document <span className="text-accent-red">*</span>
                             </label>
                             <div
                               onDragOver={(event) => {
@@ -475,7 +409,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                               onDragLeave={() => setIsDragging(false)}
                               onDrop={handleDrop}
                               onClick={() => fileInputRef.current?.click()}
-                              className={`mt-2 flex min-h-[108px] cursor-pointer items-center rounded-[14px] border border-dashed px-[17px] py-4 transition-all ${
+                              className={`flex h-20 cursor-pointer items-center rounded-xl border-2 border-dashed p-3 transition-all ${
                                 isDragging
                                   ? 'border-[#4f89f2] bg-[#12203a]'
                                   : form.fileName
@@ -491,39 +425,37 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                 onChange={handleFileInput}
                               />
                               {form.fileName ? (
-                                <div className="flex items-center gap-4 text-emerald-300">
-                                  <span className="flex h-12 w-12 items-center justify-center rounded-[10px] border border-emerald-400/20 bg-emerald-400/10">
-                                    <FileText size={22} />
+                                <div className="flex min-w-0 items-center gap-3 text-accent-green">
+                                  <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-bg-border bg-bg-base">
+                                    <FileText size={18} />
                                   </span>
-                                  <span className="text-[18px] font-semibold">{form.fileName}</span>
+                                  <span className="min-w-0">
+                                    <span className="block truncate text-sm font-medium">{form.fileName}</span>
+                                    <span className="block text-xs text-text-tertiary">Click to replace - .txt or .docx - Max 5 MB</span>
+                                  </span>
                                 </div>
                               ) : (
-                                <div className="flex items-center gap-4">
-                                  <span className="flex h-12 w-12 items-center justify-center rounded-[10px] border border-[#26344b] bg-[#0b1220] text-slate-300">
-                                    <Upload size={24} />
+                                <div className="flex items-center gap-3">
+                                  <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-bg-border bg-bg-base text-text-tertiary">
+                                    <Upload size={18} />
                                   </span>
                                   <div>
-                                  <p className="text-[20px] font-semibold leading-tight text-white">
-                                    Drop .txt or .docx here, or <span className="text-[#3f82ff]">browse</span>
+                                  <p className="text-sm font-medium text-text-primary">
+                                    Drop .txt or .docx here, or <span className="text-accent-blue">browse</span>
                                   </p>
-                                  <p className="mt-1 text-[16px] text-[#b5c3da]">Max 5 MB</p>
+                                  <p className="text-xs text-text-tertiary">Max 5 MB</p>
                                   </div>
                                 </div>
                               )}
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-3">
-                            <div className="h-px flex-1 bg-[#26344b]" />
-                            <span className="text-[15px] font-semibold text-[#9fb1ca]">or paste text</span>
-                            <div className="h-px flex-1 bg-[#26344b]" />
-                          </div>
-
-                          <Field label="BRD Text" required>
+                          <Field label="BRD Content" required>
                             <textarea
-                              className="modal-input min-h-[162px] resize-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-4 py-4 text-[18px] text-white placeholder:text-[#b8c5db]"
-                              placeholder="Paste your Business Requirements Document here..."
+                              className="input-field min-h-[180px] resize-none overflow-y-auto"
+                              placeholder="Uploaded BRD content will appear here..."
                               value={form.brdText}
+                              readOnly={!!project}
                               onChange={(event) =>
                                 setForm((current) => ({ ...current, brdText: event.target.value }))
                               }
@@ -532,175 +464,97 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                         </>
                     </div>
 
-                    <div ref={sourceSectionRef} className="border-t border-[#223047] px-[22px] py-6 lg:border-l lg:border-t-0">
-                      <div className="space-y-6">
+                    <div className="p-4">
+                      <div className="space-y-4">
                         <div>
-                          <h3 className="text-[24px] font-semibold leading-tight text-white">Run Configuration</h3>
-                          <p className="mt-1 text-[15px] text-[#b5c3da]">Select the source and AI settings for this run.</p>
+                          <h3 className="text-base font-semibold text-text-primary">Project Source Configuration</h3>
+                          <p className="mt-0.5 text-xs text-text-tertiary">Read-only configuration loaded from the selected project.</p>
                         </div>
 
-                        <div className="space-y-4">
-                          <Field label="Target Warehouse" required compact>
-                            <ModalSelect
-                              id="targetWarehouse"
-                              value={form.targetWarehouse}
-                              options={TARGET_WAREHOUSE_OPTIONS}
-                              openSelect={openSourceSelect}
-                              setOpenSelect={setOpenSourceSelect}
-                              onChange={(targetWarehouse) =>
-                                setForm((current) => ({ ...current, targetWarehouse }))
-                              }
-                              activeBorder
-                              disabled={!!project}
-                            />
-                          </Field>
-
-                          <div className="text-[16px] font-semibold text-white">Source Connection</div>
-
-                            <Field label="Connection Type" required compact>
-                              <ModalSelect
-                                id="connectionType"
-                                value={connectionTypeFromSource(form.source)}
-                                options={SOURCE_OPTIONS}
-                                openSelect={openSourceSelect}
-                                setOpenSelect={setOpenSourceSelect}
-                                onChange={handleConnectionTypeChange}
-                                activeBorder
-                                disabled={!!project}
-                              />
+                        <div>
+                          <div className="mb-2 text-xs font-medium text-text-secondary">Source Configuration</div>
+                          <div className="space-y-3">
+                            <Field label="Source Type" compact>
+                              <div className="relative">
+                                <input
+                                  className="input-field h-11 cursor-not-allowed pr-10 opacity-80"
+                                  value={connectionTypeFromSource(form.source) === 'database' ? 'Database' : 'Data Lake'}
+                                  readOnly
+                                />
+                                <ChevronDown size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-text-tertiary" />
+                              </div>
                             </Field>
 
-                            {form.source === 'database' && (
+                            {form.source === 'database' ? (
                               <>
-                                <Field label="Database Type" required compact>
-                                  <div className="relative">
-                                    <select
-                                      className="modal-input h-[60px] w-full appearance-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-5 pr-12 text-[18px] text-white"
-                                      value={form.databaseType}
-                                      disabled={!!project}
-                                      onChange={(event) => {
-                                        const databaseType = event.target.value
-                                        setForm((current) => ({
-                                          ...current,
-                                          databaseType,
-                                          databaseName: DATABASE_OPTIONS[databaseType]?.[0]?.id || '',
-                                        }))
-                                      }}
-                                    >
-                                      <option value="" disabled>Select type...</option>
-                                      <option value="azure_sql">Azure SQL DB</option>
-                                      <option value="postgresql">PostgreSQL</option>
-                                    </select>
-                                    <ChevronDown size={21} className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white" />
-                                  </div>
+                                <Field label="Database Type" compact>
+                                  <input
+                                    className="input-field h-11 cursor-not-allowed opacity-80"
+                                    value={form.databaseType === 'azure_sql' ? 'Azure SQL DB' : form.databaseType === 'postgresql' ? 'PostgreSQL' : form.databaseType || '-'}
+                                    readOnly
+                                  />
                                 </Field>
                                 <Field label="Database Name" compact>
-                                  <div className="relative">
-                                    <select
-                                      className="modal-input h-[60px] w-full appearance-none rounded-[10px] border-[#26344b] bg-[#070d1a] px-5 pr-12 text-[18px] text-white"
-                                      value={form.databaseName}
-                                      disabled={!!project}
-                                      onChange={(event) =>
-                                        setForm((current) => ({ ...current, databaseName: event.target.value }))
-                                      }
-                                    >
-                                      {DATABASE_OPTIONS[form.databaseType]?.map((database) => (
-                                        <option key={database.id} value={database.id}>
-                                          {database.name}
-                                        </option>
-                                      ))}
-                                    </select>
-                                    <ChevronDown size={21} className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white" />
-                                  </div>
+                                  <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.databaseName || '-'} readOnly />
                                 </Field>
-                                <label className={`flex cursor-pointer items-start gap-3 rounded-[10px] border px-4 py-4 transition-colors ${
-                                  form.useDomainKb
-                                    ? 'border-[#3f82ff] bg-[#102144]'
-                                    : 'border-[#26344b] bg-[#070d1a] hover:border-[#3f82ff]/60'
-                                }`}>
-                                  <input
-                                    type="checkbox"
-                                    checked={form.useDomainKb}
-                                    onChange={(event) =>
-                                      setForm((current) => ({ ...current, useDomainKb: event.target.checked }))
-                                    }
-                                    className="mt-1 h-5 w-5 rounded border-[#4b5d78] bg-[#0b1220] text-[#3f82ff] accent-[#3f82ff]"
-                                  />
-                                  <span className="flex min-w-0 flex-1 gap-3">
-                                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[9px] border border-[#31415f] bg-[#0b1220] text-[#9fc0ff]">
-                                      <BookOpenCheck size={18} />
+                                <div className="rounded-lg border border-bg-border bg-bg-base p-3">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-xs font-medium text-text-secondary">Domain Knowledge Base</span>
+                                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                                      form.useDomainKb
+                                        ? 'border-accent-blue/20 bg-accent-blue/10 text-accent-blue'
+                                        : 'border-bg-border bg-bg-card text-text-tertiary'
+                                    }`}>
+                                      {form.useDomainKb ? 'Enabled' : 'Disabled'}
                                     </span>
-                                    <span className="min-w-0">
-                                      <span className="block text-[16px] font-semibold text-white">Domain Knowledge Check</span>
-                                    </span>
-                                  </span>
-                                </label>
-                              </>
-                            )}
-
-                            {connectionTypeFromSource(form.source) === 'data_lake' && (
-                              <div className="space-y-3">
-                                <Field label="Data Lake Type" required compact>
-                                  <ModalSelect
-                                    id="dataLakeType"
-                                    value={form.source === 'adls_gen2' ? 'adls_gen2' : ''}
-                                    options={DATA_LAKE_OPTIONS}
-                                    placeholder="Select type..."
-                                    openSelect={openSourceSelect}
-                                    setOpenSelect={setOpenSourceSelect}
-                                    onChange={handleDataLakeTypeChange}
-                                  />
-                                </Field>
-
-                                <div className="rounded-[10px] border border-[#26344b] bg-[#070d1a] px-4 py-4">
-                                  <div className="text-[16px] font-semibold text-white">ADLS Source</div>
-                                  <div className="mt-3 grid gap-2 text-[13px] text-[#9fb1ca]">
-                                    <div className="rounded border border-[#1e2a3d] bg-[#101827] px-3 py-2.5">
-                                      <div className="text-[#6f84a4]">Account</div>
-                                      <div className="mt-1 break-all font-mono text-white">https://atheastorage.dfs.core.windows.net</div>
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-2">
-                                      <div className="rounded border border-[#1e2a3d] bg-[#101827] px-3 py-2.5">
-                                        <div className="text-[#6f84a4]">File system</div>
-                                        <div className="mt-1 font-mono text-white">ADLS_FILE_SYSTEM</div>
-                                      </div>
-                                      <div className="rounded border border-[#1e2a3d] bg-[#101827] px-3 py-2.5">
-                                        <div className="text-[#6f84a4]">Root</div>
-                                        <div className="mt-1 font-mono text-white">ADLS_SOURCE_ROOT</div>
-                                      </div>
-                                    </div>
-                                    <div className="rounded border border-[#1e2a3d] bg-[#101827] px-3 py-2.5">
-                                      <div className="text-[#6f84a4]">Mode</div>
-                                      <div className="mt-1 text-white">Auto-discover folders and files</div>
-                                    </div>
                                   </div>
+                                  {form.useDomainKb && (
+                                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                                      <Field label="Domain Profile" compact>
+                                        <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.domainProfile || '-'} readOnly />
+                                      </Field>
+                                      <Field label="Knowledge Base ID" compact>
+                                        <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.knowledgeBaseId || '-'} readOnly />
+                                      </Field>
+                                    </div>
+                                  )}
                                 </div>
-                              </div>
+                              </>
+                            ) : (
+                              <>
+                                <Field label="Data Lake Type" compact>
+                                  <input className="input-field h-11 cursor-not-allowed opacity-80" value="ADLS" readOnly />
+                                </Field>
+                                <Field label="Data Entity" compact>
+                                  <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.sftpEntity || '-'} readOnly />
+                                </Field>
+                              </>
                             )}
                           </div>
                         </div>
 
                         {error && (
-                          <div className="rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                          <div className="rounded-md border border-accent-red/30 bg-red-500/10 px-3 py-2 text-xs text-accent-red">
                             {error}
                           </div>
                         )}
                       </div>
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-4 border-t border-[#223047] px-[21px] py-4">
+                  <div className="flex items-center gap-3 border-t border-bg-border px-4 py-3">
                     <button
                       type="button"
                       onClick={handleClose}
                       disabled={loading}
-                      className="inline-flex h-[59px] flex-1 items-center justify-center rounded-[10px] bg-[#202b3a] px-4 text-[17px] font-semibold text-slate-100 transition-colors hover:bg-[#263142] hover:text-white disabled:opacity-50"
+                      className="btn-secondary inline-flex h-11 flex-1 items-center justify-center disabled:opacity-50"
                     >
                       Cancel
                     </button>
                     <button
                       type="submit"
                       disabled={loading || !form.brdText.trim()}
-                      className="inline-flex h-[59px] flex-1 items-center justify-center gap-3 rounded-[10px] bg-[#315da8] px-4 text-[17px] font-semibold text-white transition-colors hover:bg-[#3f72cc] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="btn-primary inline-flex h-11 flex-1 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {loading ? (
                         <>
@@ -729,76 +583,10 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
 function Field({ label, required = false, compact = false, children }) {
   return (
     <div>
-      <label className={`mb-2 block text-[16px] font-semibold leading-tight text-slate-100 ${compact ? '' : ''}`}>
-        {label} {required ? <span className="text-[#ff5c57]">*</span> : null}
+      <label className={`mb-1 block text-xs font-medium text-text-secondary ${compact ? '' : ''}`}>
+        {label} {required ? <span className="text-accent-red">*</span> : null}
       </label>
       {children}
-    </div>
-  )
-}
-
-function ModalSelect({
-  id,
-  value,
-  options,
-  placeholder = 'Select type...',
-  openSelect,
-  setOpenSelect,
-  onChange,
-  activeBorder = false,
-  disabled = false,
-}) {
-  const open = openSelect === id
-  const selected = options.find((option) => option.id === value)
-
-  return (
-    <div className="relative">
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => !disabled && setOpenSelect(open ? null : id)}
-        className={`flex h-[60px] w-full items-center justify-between rounded-[12px] border bg-[#070d1a] px-5 text-left text-[18px] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-[border-color,box-shadow,background-color] duration-150 ${
-          open ? 'border-[#4585f5] shadow-[0_0_0_1px_rgba(69,133,245,0.55),0_10px_26px_rgba(9,17,31,0.22)]' : activeBorder ? 'border-[#26344b] hover:border-[#4585f5]/70' : 'border-[#26344b] hover:border-[#4585f5]/70'
-        }`}
-      >
-        <span className={selected ? 'text-white' : 'text-[#b8c5db]'}>
-          {selected?.label || placeholder}
-        </span>
-        <ChevronDown size={21} className={`text-white transition-transform duration-150 ${open ? 'rotate-180' : ''}`} />
-      </button>
-
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            initial={{ opacity: 0, y: -4, scale: 0.985 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -4, scale: 0.985 }}
-            transition={{ duration: 0.14, ease: [0.2, 0.8, 0.2, 1] }}
-            className="absolute left-0 right-0 top-[calc(100%+5px)] z-[80] origin-top overflow-hidden rounded-[12px] border border-[#335fba] bg-[#081020] p-1 shadow-[0_18px_44px_rgba(0,0,0,0.48)]"
-          >
-            <div className="px-4 py-2 text-left text-[13px] font-semibold text-[#7185a6]">
-              {placeholder}
-            </div>
-            <div className="space-y-1">
-              {options.map((option) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  onClick={() => {
-                    onChange(option.id)
-                    setOpenSelect(null)
-                  }}
-                  className={`flex h-10 w-full items-center rounded-[8px] px-4 text-left text-[15px] font-semibold transition-[background-color,color] duration-120 ${
-                    option.id === value ? 'bg-[#1b2a45] text-white' : 'text-[#dbe5f5] hover:bg-[#121d31] hover:text-white'
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   )
 }

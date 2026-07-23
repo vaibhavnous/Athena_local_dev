@@ -2224,6 +2224,11 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         if checkpoint.get("resume_message"):
             resume_message = checkpoint.get("resume_message")
 
+    # ponytail: a real review gate always wins over a stale generic confirmation.
+    if paused_for_stage_confirmation and (next_gate or next_review_key):
+        paused_before_review_gate = True
+        stage_confirmation = None
+
     gold_execution_progress_exists = bool(
         checkpoint.get("background_stage") == "gold_code_execution"
         or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
@@ -2659,15 +2664,27 @@ def _pause_for_silver_merge_key_review(run_id: str, state: Dict[str, Any]) -> Di
             "duration_seconds": round(time.monotonic() - started_at, 3),
         },
     )
+    enriched = resolved_state.get("enrichment_review_artifact") or resolved_state.get("enriched_metadata") or {}
+    if isinstance(enriched, dict) and "enrichment_artifact" in enriched:
+        enriched = enriched.get("enrichment_artifact") or {}
+    reviewed_metadata = _apply_gate4_merge_keys_to_metadata(enriched, artifact)
     return {
         **resolved_state,
         "run_id": run_id,
-        "status": "HITL_WAIT",
+        "status": "RUNNING",
         "background_stage": None,
         "next_gate": None,
-        "next_review_key": "silver_merge_key_review",
+        "next_review_key": None,
+        "silver_merge_key_review_decision": "APPROVED",
         "silver_merge_key_review_artifact": artifact,
-        "resume_message": "Silver Merge Key Review is pending. Review merge keys before Silver generation.",
+        "gate_silver_merge_key_review": {
+            "gate": "silver_merge_key_review",
+            "status": "COMPLETED",
+            "decision": "APPROVED",
+        },
+        "enriched_metadata": reviewed_metadata,
+        "enrichment_review_artifact": reviewed_metadata,
+        "resume_message": "Merge keys generated and applied automatically. Silver generation is starting.",
     }
 
 

@@ -31,6 +31,7 @@ import {
 import { MOCK_KPIS_LIST } from '../data/mockData'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { getGateDisplayName } from '../utils/pipelinePhases'
+import { expandMergedCodeReviewItems, mergeCodeReviewItems } from '../utils/codeReviewArtifacts'
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const REVIEW_HYDRATION_ATTEMPTS = 20
@@ -490,6 +491,9 @@ function HitlQueue({ onClose = null }) {
   const [hydrating, setHydrating] = useState(false)
   const [tableReview, setTableReview] = useState(null)
   const [tableReviewDecisions, setTableReviewDecisions] = useState({})
+  const [tableReviewRejectionReasons, setTableReviewRejectionReasons] = useState({})
+  const [rejectingTableKey, setRejectingTableKey] = useState('')
+  const [tableRejectText, setTableRejectText] = useState('')
   const [selectedTables, setSelectedTables] = useState({})
   const [enrichmentReview, setEnrichmentReview] = useState(null)
   const [semanticDecisions, setSemanticDecisions] = useState({})
@@ -1076,7 +1080,7 @@ function HitlQueue({ onClose = null }) {
     [silverMergeKeyReview]
   )
   const bronzeCodeReviewItems = useMemo(
-    () => buildBronzeCodeReviewItems(bronzeReviewFeeds),
+    () => mergeCodeReviewItems(buildBronzeCodeReviewItems(bronzeReviewFeeds), 'bronze'),
     [bronzeReviewFeeds]
   )
   const silverMergeKeyReviewItems = useMemo(
@@ -1084,11 +1088,11 @@ function HitlQueue({ onClose = null }) {
     [silverMergeKeyReviewFeeds]
   )
   const silverCodeReviewItems = useMemo(
-    () => buildSilverCodeReviewItems(silverReviewItems),
+    () => mergeCodeReviewItems(buildSilverCodeReviewItems(silverReviewItems), 'silver'),
     [silverReviewItems]
   )
   const goldCodeReviewItems = useMemo(
-    () => buildGoldCodeReviewItems(goldReviewItems),
+    () => mergeCodeReviewItems(buildGoldCodeReviewItems(goldReviewItems), 'gold'),
     [goldReviewItems]
   )
   const activeCodeReviewItems = isGate4 ? bronzeCodeReviewItems : isSilverMergeKeyReview ? silverMergeKeyReviewItems : isGate5 ? silverCodeReviewItems : isGoldReview ? goldCodeReviewItems : []
@@ -1290,6 +1294,20 @@ function HitlQueue({ onClose = null }) {
     setSemanticDecisions((prev) => ({ ...prev, [id]: 'REJECTED' }))
   }
 
+  const handleClearSemanticDecision = (id) => {
+    setSemanticValidationError('')
+    setSemanticDecisions((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setSemanticRejectionReasons((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+  }
+
   const handleAutoApproveSemanticItems = () => {
     const next = {}
     semanticReviewItems.forEach((item) => {
@@ -1376,9 +1394,12 @@ function HitlQueue({ onClose = null }) {
     setSelectedTables((prev) => ({ ...prev, [key]: true }))
   }
 
-  const handleRejectTableReview = (table) => {
+  const handleRejectTableReview = (table, reason) => {
     const key = tableReviewKey(table)
     setTableReviewDecisions((prev) => ({ ...prev, [key]: 'REJECTED' }))
+    setTableReviewRejectionReasons((prev) => ({ ...prev, [key]: reason }))
+    setRejectingTableKey('')
+    setTableRejectText('')
     setSelectedTables((prev) => {
       const next = { ...prev }
       delete next[key]
@@ -1731,10 +1752,10 @@ function HitlQueue({ onClose = null }) {
   if (selectedRunId && isReviewableRun && isGate1) {
     return (
       <>
-      <div className="flex h-full min-h-0 flex-col gap-4">
-        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto rounded-[28px] bg-[linear-gradient(180deg,#0a1020_0%,#070c16_100%)] px-5 py-6">
-          <div className="flex w-full max-w-6xl flex-col overflow-hidden rounded-[24px] border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
-            <div className="flex flex-col gap-4 border-b border-[#1d2940] px-5 py-5 md:flex-row md:items-center md:justify-between">
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm sm:p-6">
+        <div className="flex h-[85vh] w-full max-w-5xl items-stretch justify-center">
+          <div className="flex h-full w-full flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
+            <div className="flex flex-col gap-4 border-b border-[#1d2940] bg-[#101726] px-5 py-5 md:flex-row md:items-center md:justify-between lg:px-6">
               <div className="flex min-w-0 items-center gap-4">
                 <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-[10px] border border-[#5a3d13] bg-[#3a2a16] text-[#f4a912]">
                   <Shield size={20} strokeWidth={2.2} />
@@ -1767,7 +1788,7 @@ function HitlQueue({ onClose = null }) {
               </div>
             </div>
 
-            <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-[#0d1524] px-5 py-5 lg:px-6">
               {filteredQueue.length === 0 ? (
                 <div className="flex min-h-[220px] items-center justify-center rounded-[18px] border border-dashed border-[#263247] bg-[#0d1524] text-center">
                   <div>
@@ -1791,7 +1812,7 @@ function HitlQueue({ onClose = null }) {
               )}
             </div>
 
-            <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#1d2940] bg-[#101726] px-5 py-4">
+            <div className="flex shrink-0 flex-col gap-4 border-t border-[#1d2940] bg-[#101726] px-5 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-6">
               <p className="text-sm text-[#c6d2e8]">
                 <span className="font-semibold text-white">{kpiCounts.approved + kpiCounts.edited + kpiCounts.rejected}</span> / {kpiCounts.total} KPIs reviewed
               </p>
@@ -1819,50 +1840,27 @@ function HitlQueue({ onClose = null }) {
 
   if (selectedRunId && isReviewableRun && isGate3) {
     return (
-      <div className="flex h-full min-h-0 flex-col gap-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-semibold text-white">Enrichment Review</p>
-            <p className="text-xs text-[#8fa0bf]">Astra Data semantic enrichment approval for the active run.</p>
-          </div>
-          {reviewRuns.length > 0 && (
-            <select
-              value={selectedRunId || ''}
-              onChange={(event) => selectReviewRun(event.target.value)}
-              className="h-10 rounded-xl border border-[#253044] bg-[#0a1220] px-3 text-xs text-[#c6d2e8] outline-none"
-            >
-              {reviewRuns.map((run) => (
-                <option key={run.id} value={run.id}>
-                  {run.id.slice(0, 14)} - {run.brd_filename} (Gate {run.next_gate})
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-
-        <div className="flex min-h-0 flex-1 items-stretch justify-center overflow-y-auto rounded-[28px] bg-[radial-gradient(circle_at_top,_rgba(44,87,150,0.2),_transparent_42%),linear-gradient(180deg,#09101c_0%,#060b14_100%)] px-3 py-4 sm:px-5 sm:py-6">
-          <div className="flex min-h-0 w-full max-w-[940px] flex-1 flex-col overflow-hidden rounded-[18px] border border-[#1d2940] bg-[#0d1729] shadow-[0_30px_90px_rgba(0,0,0,0.46)]">
-            <div className="flex flex-col gap-4 border-b border-[#1d2940] bg-[#10192c] px-6 py-5 md:flex-row md:items-center md:justify-between">
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm sm:p-6">
+        <div className="flex h-[85vh] w-full max-w-5xl items-stretch justify-center">
+          <div className="flex h-full w-full flex-col overflow-hidden rounded-xl border border-bg-border bg-bg-card shadow-2xl">
+            <div className="flex shrink-0 flex-col gap-4 border-b border-bg-border bg-bg-base/50 p-6 md:flex-row md:items-center md:justify-between">
               <div className="flex min-w-0 items-center gap-3">
-                <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-[14px] border border-[#29496f] bg-[#11213a]">
-                  <Database size={22} className="text-[#78a9ff]" />
+                <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-accent-blue/15">
+                  <Database size={20} className="text-accent-blue" />
                 </div>
                 <div className="min-w-0">
-                  <h2 className="text-xl font-bold text-white">Enrichment Review</h2>
-                  <p className="mt-1 text-sm text-[#a9b6cc]">
+                  <h2 className="text-xl font-bold text-text-primary">Enrichment Review</h2>
+                  <p className="text-sm text-text-secondary">
                     Review semantic enrichment for {semanticReviewItems.length} table{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
                   </p>
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-3">
-                <div className="rounded-[12px] border border-[#22304b] bg-[#0b1424] px-4 py-2 text-xs text-[#c6d2e8]">
-                  {selectedRunId?.slice(0, 14)} - {currentRun?.brd_filename || 'Active run'}
-                </div>
                 <button
                   type="button"
                   onClick={handleAutoApproveSemanticItems}
-                  className="inline-flex h-11 items-center gap-2 rounded-[12px] border border-[#2e845c] bg-[#112d21] px-4 text-sm font-semibold text-[#65d69e] transition-colors hover:bg-[#153925]"
+                  className="btn-secondary inline-flex items-center gap-2 text-sm"
                 >
                   <CheckCircle size={15} />
                   Auto-Approve Pending
@@ -1870,7 +1868,7 @@ function HitlQueue({ onClose = null }) {
               </div>
             </div>
 
-            <div className="flex-1 space-y-4 overflow-y-auto bg-[#0b1220] p-3 sm:p-4">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-bg-base/20 p-6">
               {semanticReviewItems.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center gap-4 py-16 text-center">
                   <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#131d30]">
@@ -1894,6 +1892,7 @@ function HitlQueue({ onClose = null }) {
                       rejectionReason={semanticRejectionReasons[key]}
                       onApprove={handleApproveSemanticItem}
                       onReject={handleRejectSemanticItem}
+                      onClearDecision={handleClearSemanticDecision}
                       onDraftChange={handleSemanticDraftChange}
                     />
                   )
@@ -1901,7 +1900,7 @@ function HitlQueue({ onClose = null }) {
               )}
             </div>
 
-            <div className="flex shrink-0 flex-col gap-3 border-t border-[#1d2940] bg-[#10192c] px-6 pb-5 pt-4">
+            <div className="flex shrink-0 flex-col gap-3 border-t border-bg-border bg-bg-base/50 px-6 pb-5 pt-4">
               {semanticValidationError && (
                 <div className="flex items-center gap-2 rounded-lg border border-accent-red/30 bg-accent-red/10 px-3 py-2 text-sm text-accent-red">
                   <AlertTriangle size={14} />
@@ -1921,7 +1920,7 @@ function HitlQueue({ onClose = null }) {
                   </button>
                   <button
                     onClick={handleSubmit}
-                    disabled={submitting}
+                    disabled={submitting || !allSemanticReviewed}
                     className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {submitting ? 'Saving...' : 'Submit Decisions & Resume'}
@@ -1937,10 +1936,10 @@ function HitlQueue({ onClose = null }) {
 
   if (selectedRunId && isReviewableRun && isGate2 && !isSftpRun) {
     return (
-      <div className="flex h-full min-h-0 flex-col gap-4">
-        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto rounded-[28px] bg-[linear-gradient(180deg,#0a1020_0%,#070c16_100%)] px-5 py-6">
-          <div className="flex w-full max-w-6xl flex-col overflow-hidden rounded-[24px] border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
-            <div className="flex flex-col gap-4 border-b border-[#1d2940] px-5 py-5 md:flex-row md:items-center md:justify-between">
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm sm:p-6">
+        <div className="flex h-[85vh] w-full max-w-5xl items-stretch justify-center">
+          <div className="flex h-full w-full flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
+            <div className="flex flex-col gap-4 border-b border-[#1d2940] bg-[#101726] px-5 py-5 md:flex-row md:items-center md:justify-between lg:px-6">
               <div className="flex min-w-0 items-center gap-4">
                 <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-[10px] border border-[#244a93] bg-[#142952] text-[#69a0ff]">
                   <Table2 size={20} strokeWidth={2.2} />
@@ -1972,7 +1971,7 @@ function HitlQueue({ onClose = null }) {
               </div>
             </div>
 
-            <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-[#0d1524] px-5 py-5 lg:px-6">
               {availableTableReviews.length === 0 ? (
                 <div className="flex min-h-[220px] items-center justify-center rounded-[18px] border border-dashed border-[#263247] bg-[#0d1524] text-center">
                   <div>
@@ -1992,9 +1991,9 @@ function HitlQueue({ onClose = null }) {
                       key={key}
                       className={`rounded-[16px] border px-5 py-5 transition-colors ${
                         decision === 'APPROVED'
-                          ? 'border-[#1f5d4e] bg-[#112d2b]'
+                          ? 'border-[#1f6658] bg-[#103033]'
                           : decision === 'REJECTED'
-                          ? 'border-[#723148] bg-[#2c1823]'
+                          ? 'border-[#803348] bg-[#301c29]'
                           : 'border-[#263247] bg-[#121a2b]'
                       }`}
                     >
@@ -2016,6 +2015,12 @@ function HitlQueue({ onClose = null }) {
                             </span>
                           </div>
                         </div>
+                        {decision && (
+                          <span className={`inline-flex shrink-0 items-center gap-1.5 text-xs font-semibold ${decision === 'APPROVED' ? 'text-[#31d49f]' : 'text-[#ff647f]'}`}>
+                            {decision === 'APPROVED' ? <CheckCircle size={13} /> : <XCircle size={13} />}
+                            {decision === 'APPROVED' ? 'Approved' : 'Rejected'}
+                          </span>
+                        )}
                       </div>
 
                       <div className="mt-4">
@@ -2045,29 +2050,67 @@ function HitlQueue({ onClose = null }) {
                         </div>
                       )}
 
-                      <div className="mt-4 flex gap-2">
+                      {!decision && rejectingTableKey !== key ? (
+                        <div className="mt-4 flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleApproveTableReview(table)}
+                            className="flex-1 rounded-[10px] border border-[#14856d] bg-[#103533] px-4 py-2.5 text-sm font-semibold text-[#31d49f] transition-colors hover:bg-[#15413d]"
+                          >
+                            <span className="inline-flex items-center gap-1.5"><CheckCircle size={14} />Approve</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setRejectingTableKey(key); setTableRejectText('') }}
+                            className="flex-1 rounded-[10px] border border-[#8a3148] bg-[#2a1823] px-4 py-2.5 text-sm font-semibold text-[#ff647f] transition-colors hover:bg-[#351d29]"
+                          >
+                            <span className="inline-flex items-center gap-1.5"><XCircle size={14} />Reject</span>
+                          </button>
+                        </div>
+                      ) : !decision ? (
+                        <div className="mt-4 space-y-3">
+                          <label className="block text-xs font-semibold text-[#ff647f]">Rejection Reason *</label>
+                          <textarea autoFocus rows={2} value={tableRejectText} onChange={(event) => setTableRejectText(event.target.value)} className="w-full resize-none rounded-[10px] border border-[#ff445f] bg-[#0d1524] px-4 py-3 text-sm text-white outline-none" />
+                          <div className="grid grid-cols-2 gap-3">
+                            <button type="button" onClick={() => { setRejectingTableKey(''); setTableRejectText('') }} className="btn-secondary">Cancel</button>
+                            <button type="button" disabled={!tableRejectText.trim()} onClick={() => handleRejectTableReview(table, tableRejectText.trim())} className="rounded-[10px] border border-[#8a3148] bg-[#3a1928] px-4 py-3 text-sm font-semibold text-[#ff647f] disabled:cursor-not-allowed disabled:opacity-40">Confirm Reject</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                        {decision === 'REJECTED' && tableReviewRejectionReasons[key] && <p className="mt-4 text-xs italic text-[#ff647f]">&quot;{tableReviewRejectionReasons[key]}&quot;</p>}
                         <button
                           type="button"
-                          onClick={() => handleApproveTableReview(table)}
-                          className="flex-1 rounded-[10px] border border-[#14856d] bg-[#103533] px-4 py-2.5 text-sm font-semibold text-[#31d49f] transition-colors hover:bg-[#15413d]"
+                          onClick={() => {
+                            setTableReviewDecisions((prev) => {
+                              const next = { ...prev }
+                              delete next[key]
+                              return next
+                            })
+                            setSelectedTables((prev) => {
+                              const next = { ...prev }
+                              delete next[key]
+                              return next
+                            })
+                            setTableReviewRejectionReasons((prev) => {
+                              const next = { ...prev }
+                              delete next[key]
+                              return next
+                            })
+                          }}
+                          className="mt-4 text-xs text-[#93a5c3] transition-colors hover:text-white"
                         >
-                          Approve
+                          <span className="inline-flex items-center gap-1"><ChevronRight size={12} className="rotate-180" />Change decision</span>
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => handleRejectTableReview(table)}
-                          className="flex-1 rounded-[10px] border border-[#8a3148] bg-[#2a1823] px-4 py-2.5 text-sm font-semibold text-[#ff647f] transition-colors hover:bg-[#351d29]"
-                        >
-                          Reject
-                        </button>
-                      </div>
+                        </>
+                      )}
                     </div>
                   )
                 })
               )}
             </div>
 
-            <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#1d2940] bg-[#101726] px-5 py-4">
+            <div className="flex shrink-0 flex-col gap-4 border-t border-[#1d2940] bg-[#101726] px-5 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-6">
               <p className="text-sm text-[#c6d2e8]">
                 <span className="font-semibold text-white">{reviewedTableCount}</span> / {availableTableReviews.length} tables reviewed
               </p>
@@ -2077,7 +2120,7 @@ function HitlQueue({ onClose = null }) {
                 </button>
                 <button
                   onClick={handleSubmit}
-                  disabled={submitting}
+                  disabled={submitting || availableTableReviews.length === 0 || reviewedTableCount !== availableTableReviews.length}
                   className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {submitting ? 'Submitting...' : 'Submit Decisions & Resume'}
@@ -2091,18 +2134,19 @@ function HitlQueue({ onClose = null }) {
   }
 
   return (
-    <div className="flex flex-col h-full gap-4">
-      <div className="overflow-hidden rounded-[16px] border border-[#1d2940] bg-[#0f1829] shadow-[0_20px_80px_rgba(0,0,0,0.28)]">
-        <div className="flex flex-col gap-4 px-8 py-9 md:flex-row md:items-center md:justify-between">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm sm:p-6">
+      <div className="relative flex h-[85vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
+      <div className={`${isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview ? 'hidden' : 'shrink-0'} overflow-hidden border-b border-[#1d2940] bg-[#101726]`}>
+        <div className="flex flex-col gap-4 px-5 py-5 md:flex-row md:items-center md:justify-between lg:px-6">
           <div className="flex min-w-0 items-center gap-4">
-            <div className="flex h-[52px] w-[52px] flex-shrink-0 items-center justify-center rounded-[10px] border border-[#5a3d13] bg-[#3a2a16] text-[#f4a912]">
-              <Shield size={25} strokeWidth={2.2} />
+            <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-[10px] border border-[#5a3d13] bg-[#3a2a16] text-[#f4a912]">
+              <Shield size={20} strokeWidth={2.2} />
             </div>
             <div className="min-w-0">
-              <h1 className="text-[26px] font-extrabold leading-tight text-white">
+              <h1 className="text-[18px] font-extrabold leading-tight text-white">
                 Action Required: {activeReviewName}
               </h1>
-              <p className="mt-1 text-[18px] font-medium leading-snug text-[#b9c1cf]">
+              <p className="mt-1 text-sm font-medium leading-snug text-[#b9c1cf]">
                 {isGate5
                   ? (silverReview?.resume_message || 'Stage 05 completed. Review generated Silver scripts before the pipeline continues.')
                   : isSilverMergeKeyReview
@@ -2123,7 +2167,7 @@ function HitlQueue({ onClose = null }) {
             <button
               type="button"
               onClick={() => setAddingKpi(true)}
-              className="inline-flex h-12 items-center gap-2 rounded-[10px] bg-[#202b3a] px-5 text-[17px] font-bold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
+              className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
               >
                 <PlusCircle size={18} className="text-[#12b886]" />
                 Add KPI
@@ -2132,7 +2176,7 @@ function HitlQueue({ onClose = null }) {
 
             <button
               onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isSilverMergeKeyReview || isGate5) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
-              className="inline-flex h-12 items-center gap-2 rounded-[10px] bg-[#202b3a] px-5 text-[17px] font-bold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
+              className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
             >
               <CheckCircle size={18} className="text-[#12b886]" />
               {isGate2 ? 'Auto-Select Pending' : 'Auto-Approve Pending'}
@@ -2141,7 +2185,7 @@ function HitlQueue({ onClose = null }) {
         </div>
 
         {(reviewRuns.length > 0 || (!isGate2 && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5)) && (
-          <div className="flex flex-wrap items-center gap-3 border-t border-[#1d2940] px-8 py-4">
+          <div className="flex flex-wrap items-center gap-3 border-t border-[#1d2940] px-5 py-3 lg:px-6">
           {reviewRuns.length > 0 && (
             <select
               value={selectedRunId || ''}
@@ -2173,8 +2217,8 @@ function HitlQueue({ onClose = null }) {
         )}
       </div>
 
-      <div className="flex gap-4 flex-1 min-h-0">
-        <div className="flex-1 overflow-y-auto pr-1 space-y-4 pb-20">
+      <div className={`flex min-h-0 flex-1 flex-col overflow-hidden xl:flex-row ${isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview ? 'gap-0 p-0' : 'gap-4 p-4'}`}>
+        <div className={`${isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview ? 'h-full min-h-0' : 'space-y-4 pb-8 xl:overflow-y-auto xl:pr-1 xl:pb-20'} xl:min-h-0 xl:flex-1`}>
           {selectedRunId && isReviewableRun ? (
             isSilverMergeKeyReview ? (
             <CodeReviewPanel
@@ -2203,7 +2247,7 @@ function HitlQueue({ onClose = null }) {
             ) : isGoldReview ? (
             <CodeReviewPanel
               title="Gold Code Review"
-              description={`Review ${goldReviewItems.length} generated Gold script${goldReviewItems.length !== 1 ? 's' : ''} before final execution.`}
+              description={`Review ${goldReviewItems.length} generated Gold script${goldReviewItems.length !== 1 ? 's' : ''} in one merged file before final execution.`}
               lineageLabel="View Source -> Bronze -> Silver -> Gold Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
               emptyMessage="Gold scripts are not loaded yet. Keep the monitor open while Gold Code Review is prepared."
@@ -2227,7 +2271,7 @@ function HitlQueue({ onClose = null }) {
             ) : isGate5 ? (
             <CodeReviewPanel
               title="Silver Code Review"
-              description={`Review ${silverReviewItems.length} generated script${silverReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.`}
+              description={`Review ${silverReviewItems.length} generated script${silverReviewItems.length !== 1 ? 's' : ''} in one merged file before the pipeline continues.`}
               lineageLabel="View Source -> Bronze -> Silver Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
               emptyMessage={`Silver scripts are not loaded yet. Keep the monitor open while ${gate5Name} is prepared.`}
@@ -2251,7 +2295,7 @@ function HitlQueue({ onClose = null }) {
             ) : isGate4 ? (
             <CodeReviewPanel
               title="Bronze Code Review"
-              description={`Review ${bronzeReviewFeeds.length} generated script${bronzeReviewFeeds.length !== 1 ? 's' : ''} before the pipeline continues.`}
+              description={`Review ${bronzeReviewFeeds.length} generated script${bronzeReviewFeeds.length !== 1 ? 's' : ''} in one merged file before the pipeline continues.`}
               lineageLabel="View Source -> Bronze Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
               emptyMessage={`Bronze scripts are not loaded yet. Keep the monitor open while ${gate4Name} is prepared.`}
@@ -2273,7 +2317,7 @@ function HitlQueue({ onClose = null }) {
               submitLabel="Submit & Generate Silver"
             />
             ) : isGate3 ? (
-            <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }} className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-bg-border bg-bg-card shadow-2xl">
+            <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }} className="flex min-h-[560px] flex-col overflow-hidden rounded-xl border border-bg-border bg-bg-card shadow-2xl lg:h-[calc(100dvh-240px)] lg:min-h-[620px]">
               <div className="flex shrink-0 flex-col gap-4 border-b border-bg-border bg-bg-base/50 p-6 md:flex-row md:items-center md:justify-between">
                 <div className="flex items-center gap-3">
                   <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent-blue/15">
@@ -2325,6 +2369,7 @@ function HitlQueue({ onClose = null }) {
                         rejectionReason={semanticRejectionReasons[key]}
                         onApprove={handleApproveSemanticItem}
                         onReject={handleRejectSemanticItem}
+                        onClearDecision={handleClearSemanticDecision}
                         onDraftChange={handleSemanticDraftChange}
                       />
                     )
@@ -2449,7 +2494,7 @@ function HitlQueue({ onClose = null }) {
           )}
         </div>
 
-        <div className="w-72 flex-shrink-0 flex flex-col gap-3">
+        <div className={`${isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview ? 'hidden' : 'flex'} w-full flex-shrink-0 flex-col gap-3 xl:w-72`}>
           <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-4">
             <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-3">Review Progress</h3>
             <div className="space-y-2">
@@ -2563,7 +2608,7 @@ function HitlQueue({ onClose = null }) {
           initial={{ y: 80, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
           exit={{ y: 80, opacity: 0 }}
-          className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-between px-6 py-4 bg-bg-card border-t border-bg-border shadow-2xl"
+          className="absolute bottom-0 left-0 right-0 z-30 flex items-center justify-between px-6 py-4 bg-bg-card border-t border-bg-border shadow-2xl"
           style={{ background: 'rgba(17,24,39,0.95)', backdropFilter: 'blur(10px)' }}
         >
           <div className="flex items-center gap-4 text-sm">
@@ -2628,6 +2673,7 @@ function HitlQueue({ onClose = null }) {
         onClose={() => setAddingKpi(false)}
         onAdd={handleAddKpi}
       />
+      </div>
     </div>
   )
 }
@@ -3190,6 +3236,24 @@ function CodeReviewPanel({
     })
   }
 
+  const mergedCodeItem = draftItems.length === 1 && draftItems[0]?.type !== 'MERGE_KEY'
+    ? draftItems[0]
+    : null
+
+  if (mergedCodeItem) {
+    return (
+      <CodeReviewEditorModal
+        item={mergedCodeItem}
+        onClose={onPause}
+        onSave={(code) => updateItemCode(mergedCodeItem.key, code)}
+        onSubmit={onSubmit}
+        submitting={submitting}
+        submitDisabled={disabled}
+        submitLabel="Submit & Run Stage"
+      />
+    )
+  }
+
   const updateItemFields = (key, fields) => {
     setDraftItems((current) => {
       const next = current.map((item) => (
@@ -3212,7 +3276,7 @@ function CodeReviewPanel({
     'border-amber-500/35 bg-amber-500/10 text-amber-300'
 
   return (
-    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }} className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#0f1829] shadow-2xl">
+    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }} className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#0f1829] shadow-2xl">
       <div className="flex shrink-0 flex-col gap-4 border-b border-[#1d2940] bg-[#101726] p-6 md:flex-row md:items-center md:justify-between">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#163b74] text-[#4fa3ff]">
@@ -3269,13 +3333,18 @@ function CodeReviewPanel({
               onApprove={() => onSetItemDecision(item.key, 'APPROVED')}
               onReject={() => onSetItemDecision(item.key, 'REJECTED')}
               onRegenerate={() => onSetItemDecision(item.key, 'REGENERATE')}
+              onClear={() => onSetItemDecision(item.key, '')}
               decision={decisions[item.key] || ''}
+              onSubmit={onSubmit}
+              submitting={submitting}
+              submitDisabled={disabled}
+              submitLabel={submitLabel}
             />
           ))
         )}
       </div>
 
-      <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#1d2940] bg-[#101726] px-6 py-4">
+      <div className="flex shrink-0 flex-col gap-4 border-t border-[#1d2940] bg-[#101726] px-6 py-4 lg:flex-row lg:items-center lg:justify-between">
         <p className="text-sm text-[#c6d2e8]">
           <span className="font-semibold text-white">{reviewedCount}</span> / {totalCount} items reviewed
         </p>
@@ -3345,21 +3414,23 @@ function CodeReviewPanel({
   )
 }
 
-function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysChange, onApprove, onReject, onRegenerate, decision }) {
+function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysChange, onApprove, onReject, onRegenerate, onClear, decision, onSubmit, submitting, submitDisabled, submitLabel }) {
   const approved = decision === 'APPROVED'
   const rejected = decision === 'REJECTED'
   const regenerate = decision === 'REGENERATE'
   const isMergeKeyReview = item.type === 'MERGE_KEY'
+  const [showRejectInput, setShowRejectInput] = useState(false)
+  const [rejectionReason, setRejectionReason] = useState('')
 
   return (
-    <div className={`rounded-xl border bg-[#101827] p-5 transition-colors ${
+    <div className={`rounded-xl border p-5 transition-colors ${
       approved
-        ? 'border-emerald-500/40'
+        ? 'border-[#1f6658] bg-[#103033]'
         : rejected
-        ? 'border-red-500/40'
+        ? 'border-[#803348] bg-[#301c29]'
         : regenerate
-        ? 'border-[#3f82ff]/45'
-        : 'border-[#22304b]'
+        ? 'border-[#3f82ff]/45 bg-[#14233a]'
+        : 'border-[#22304b] bg-[#101827]'
     }`}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
@@ -3377,6 +3448,8 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
           </div>
           <div className="mt-3 text-xs text-[#91a4cb]">Queued: {item.queuedAt || 'Pending review'}</div>
         </div>
+        <div className="flex items-center gap-3">
+        {decision && <span className={`text-xs font-semibold ${approved ? 'text-[#31d49f]' : rejected ? 'text-[#ff647f]' : 'text-[#78a9ff]'}`}>{approved ? '✓ Approved' : rejected ? '× Rejected' : 'Regenerate'}</span>}
         <button
           type="button"
           onClick={onToggle}
@@ -3387,6 +3460,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
             : <Copy size={14} />}
           {isMergeKeyReview ? (expanded ? 'Collapse' : 'Edit keys') : 'Review Code'}
         </button>
+        </div>
       </div>
 
       <CodeReviewSummary item={item} onMergeKeysChange={onMergeKeysChange} />
@@ -3433,10 +3507,18 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
       )}
 
       {expanded && !isMergeKeyReview && (
-        <CodeReviewEditorModal item={item} onClose={onToggle} onSave={onCodeChange} />
+        <CodeReviewEditorModal
+          item={item}
+          onClose={onToggle}
+          onSave={onCodeChange}
+          onSubmit={onSubmit}
+          submitting={submitting}
+          submitDisabled={submitDisabled}
+          submitLabel="Submit & Run Stage"
+        />
       )}
 
-      <div className="mt-4 grid gap-2 md:grid-cols-3">
+      {!decision && !showRejectInput && <div className="mt-4 grid gap-2 md:grid-cols-3">
         <button
           type="button"
           onClick={(event) => {
@@ -3456,7 +3538,8 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
           type="button"
           onClick={(event) => {
             event.stopPropagation()
-            onReject()
+            setShowRejectInput(true)
+            setRejectionReason('')
           }}
           aria-pressed={rejected}
           className={`inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2 text-sm font-bold transition-colors ${
@@ -3482,7 +3565,21 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
         >
           Regenerate
         </button>
-      </div>
+      </div>}
+
+      {!decision && showRejectInput && (
+        <div className="mt-4 space-y-3">
+          <label className="block text-xs font-semibold text-[#ff647f]">Rejection Reason *</label>
+          <textarea autoFocus rows={2} value={rejectionReason} onChange={(event) => setRejectionReason(event.target.value)} className="w-full resize-none rounded-lg border border-[#ff445f] bg-[#09111f] px-4 py-3 text-sm text-white outline-none" />
+          <div className="grid grid-cols-2 gap-3">
+            <button type="button" onClick={() => { setShowRejectInput(false); setRejectionReason('') }} className="btn-secondary">Cancel</button>
+            <button type="button" disabled={!rejectionReason.trim()} onClick={() => { onReject(); setShowRejectInput(false) }} className="rounded-lg border border-[#8a3148] bg-[#3a1928] px-4 py-3 text-sm font-semibold text-[#ff647f] disabled:cursor-not-allowed disabled:opacity-40">Confirm Reject</button>
+          </div>
+        </div>
+      )}
+
+      {rejected && rejectionReason && <p className="mt-4 text-xs italic text-[#ff647f]">&quot;{rejectionReason}&quot;</p>}
+      {decision && <button type="button" onClick={() => { setShowRejectInput(false); setRejectionReason(''); onClear() }} className="mt-4 text-xs text-[#93a5c3] hover:text-white">← Change decision</button>}
     </div>
   )
 }
@@ -3571,7 +3668,7 @@ function buildBronzeCodeReviewItems(feeds) {
     type: 'BRONZE',
     queuedAt: formatReviewTimestamp(feed.queued_at || feed.created_at || feed.updated_at),
     code: feed.generated_bronze_script || feed.script_body || JSON.stringify(stripEmptyReviewFields(feed), null, 2),
-    fileName: `${feed.entity || feed.feed_name || `bronze_script_${index + 1}`}.py`,
+    fileName: feed.file_name || feed.filename || `${feed.entity || feed.feed_name || `bronze_script_${index + 1}`}.py`,
     primaryKeys: feed.primary_keys || feed.merge_keys || [],
     target: feed.target_table || feed.bronze_output_path,
     source: feed.landing_path || feed.source_type,
@@ -3611,7 +3708,7 @@ function buildSilverCodeReviewItems(items) {
       type: 'SILVER',
       queuedAt: formatReviewTimestamp(item.queued_at || item.created_at || item.updated_at),
       code: item.generated_silver_script || item.script_body || JSON.stringify(stripEmptyReviewFields(item), null, 2),
-      fileName: `${title}.py`,
+      fileName: item.file_name || item.filename || `${title}.py`,
       primaryKeys: item.primary_keys || item.merge_keys || [],
       mergeKeys: item.merge_keys || item.primary_keys || [],
       mergeKeySource: item.merge_key_source,
@@ -3643,7 +3740,7 @@ function buildGoldCodeReviewItems(items) {
 }
 
 function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
-  const items = Array.isArray(draftItems) ? draftItems : []
+  const items = expandMergedCodeReviewItems(Array.isArray(draftItems) ? draftItems : [])
   if (layer === 'bronze') {
     return {
       ...(review?.bronze_review_artifact || {}),
@@ -3653,7 +3750,7 @@ function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
         script_body: item.code,
         primary_keys: item.primaryKeys || item.mergeKeys || [],
         merge_keys: item.mergeKeys || item.primaryKeys || [],
-        review_status: decisions[item.key] || item.reviewStatus || 'PENDING',
+        review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || 'PENDING',
       })),
     }
   }
@@ -3667,7 +3764,7 @@ function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
         script_body: item.code,
         primary_keys: item.primaryKeys || item.mergeKeys || [],
         merge_keys: item.mergeKeys || item.primaryKeys || [],
-        review_status: decisions[item.key] || item.reviewStatus || 'PENDING',
+        review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || 'PENDING',
         review_type: 'silver_merge_key',
       })),
     }
@@ -3680,7 +3777,7 @@ function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
         ...(item.reviewPayload || {}),
         generated_gold_script: item.code,
         script_body: item.code,
-        review_status: decisions[item.key] || item.reviewStatus || 'PENDING',
+        review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || 'PENDING',
       })),
     }
   }
@@ -3694,7 +3791,7 @@ function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
       primary_keys: item.primaryKeys || item.mergeKeys || [],
       merge_keys: item.mergeKeys || item.primaryKeys || [],
       merge_key_source: item.mergeKeySource || item.reviewPayload?.merge_key_source || 'reviewed_gate4',
-      review_status: decisions[item.key] || item.reviewStatus || 'PENDING',
+      review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || 'PENDING',
     })),
   }
 }

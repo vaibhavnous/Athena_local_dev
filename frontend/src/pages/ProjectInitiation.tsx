@@ -3,7 +3,7 @@ import React, { useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, BookOpen, Edit2, Folder, Loader2, Play, Plus, Save, Search, Trash2, X } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { PageFrame, PageHeader } from '../components/shared/DashboardLayout'
+import { PageHeader } from '../components/shared/DashboardLayout'
 import { useDbConfigurations } from '../hooks/useDbConfig'
 import { useCreateProject, useDeleteProject, useProjects, useUpdateProject } from '../hooks/useProjects'
 
@@ -40,42 +40,48 @@ export default function ProjectInitiation() {
   }
 
   return (
-    <PageFrame className="min-h-full">
+    <div className="flex h-full min-h-0 flex-col gap-5 bg-bg-base">
       <PageHeader eyebrow="Projects" title="Projects." description={`${projects.length} project${projects.length === 1 ? '' : 's'} configured for governed pipeline execution.`} icon={Folder}
         actions={<button type="button" className="btn-primary flex h-10 items-center justify-center gap-2 whitespace-nowrap" onClick={() => openForm()}><Plus size={15}/>New Project</button>} />
       {(error || create.error || update.error || remove.error) && <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-950/20 p-3 text-xs text-red-400"><AlertTriangle size={14}/>{String((error || create.error || update.error || remove.error)?.message)}</div>}
-      <div className="relative mt-3 w-full max-w-2xl"><Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-text-tertiary"/><input aria-label="Search projects" className="input-field h-12 pl-11 text-sm" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search projects..."/></div>
+      <div className="relative w-full max-w-md"><Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"/><input aria-label="Search projects" className="input-field h-10 pl-9 text-sm" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search projects..."/></div>
       {isLoading ? <div className="card flex items-center justify-center gap-2 p-12 text-sm text-text-tertiary"><Loader2 className="animate-spin" size={18}/>Loading projects...</div>
       : filtered.length === 0 && search ? <div className="card flex flex-col items-center gap-3 p-12"><Search size={28} className="text-text-tertiary"/><p className="text-sm text-text-secondary">No matching projects</p></div>
-      : <div className="mt-2 grid items-stretch gap-5 md:grid-cols-2 lg:grid-cols-3">{filtered.map(project => <ProjectCard key={project.id} project={project} onOpen={() => navigate(`/app/project/${project.id}`)} onStart={() => navigate(`/app/project/${project.id}/new-run`)} onEdit={() => openForm(project)} onDelete={() => remove.mutate(project.id)}/>)}<NewProjectCard onClick={() => openForm()}/></div>}
+      : <div className="grid grid-cols-1 items-stretch gap-4 sm:grid-cols-2 lg:grid-cols-3">{filtered.map(project => <ProjectCard key={project.id} project={project} onOpen={() => navigate(`/app/project/${project.id}`)} onStart={() => navigate(`/app/project/${project.id}/new-run`)} onEdit={() => openForm(project)} onDelete={() => remove.mutate(project.id)} deleting={remove.isPending}/>)}<NewProjectCard onClick={() => openForm()}/></div>}
       <AnimatePresence>{formOpen && <ProjectForm initial={editing} connections={connections} connectionsLoading={connectionsLoading} busy={create.isPending || update.isPending} onClose={() => setFormOpen(false)} onSave={save}/>}</AnimatePresence>
-    </PageFrame>
+    </div>
   )
 }
 
-function ProjectCard({ project, onOpen, onStart, onEdit, onDelete }) {
+function ProjectCard({ project, onOpen, onStart, onEdit, onDelete, deleting }) {
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const archived = project.status === 'ARCHIVED'
   const dbType = project.dbType === 'azure_sql' ? 'Azure SQL DB' : project.dbType
   const source = project.connectionType === 'database' ? `Database${dbType ? ` / ${dbType}` : ''}` : `Data Lake${project.integrationType ? ` / ${project.integrationType}` : ''}`
   const updated = project.updatedAt && !Number.isNaN(new Date(project.updatedAt).getTime()) ? new Intl.DateTimeFormat('en-GB').format(new Date(project.updatedAt)) : '--'
-  return <article onClick={onOpen} className="card group flex h-full min-h-[415px] cursor-pointer flex-col overflow-hidden p-5 transition hover:border-accent-blue/40 hover:shadow-card">
-    <div className="flex items-start justify-between"><span className="flex h-12 w-12 items-center justify-center rounded-lg border border-accent-blue/25 bg-accent-blue/10 text-accent-blue"><Folder size={22}/></span><span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-400">{project.status === 'ACTIVE' ? 'Active' : 'Archived'}</span></div>
-    <h2 className="mt-5 truncate text-lg font-semibold text-text-primary">{project.name}</h2>
-    <p className="mt-1 line-clamp-2 min-h-10 text-sm leading-5 text-text-secondary">{project.description || 'NA'}</p>
-    <dl className="mt-auto space-y-2 rounded-lg border border-bg-border bg-bg-base p-3 text-xs">
-      <div className="flex items-center justify-between gap-4"><dt className="text-text-tertiary">Target</dt><dd className="truncate font-semibold text-text-secondary">{project.target || '--'}</dd></div>
-      <div className="flex items-center justify-between gap-4"><dt className="text-text-tertiary">Source</dt><dd className="truncate font-semibold text-text-secondary">{source}</dd></div>
-      <div className="flex items-center justify-between gap-4"><dt className="text-text-tertiary">Owner</dt><dd className="truncate font-semibold text-text-secondary">{project.ownerEmail || '--'}</dd></div>
-    </dl>
-    <p className="mt-4 border-b border-bg-border pb-3 text-xs text-text-tertiary">Updated {updated}</p>
-    <div className="flex gap-2 pt-3"><button type="button" onClick={e => {e.stopPropagation(); onStart()}} className="btn-primary flex flex-1 items-center justify-center gap-2"><Play size={13}/>Start Run</button><button type="button" onClick={e => {e.stopPropagation(); onEdit()}} className="flex h-10 w-12 items-center justify-center rounded-lg border border-bg-border bg-bg-base text-text-secondary transition hover:border-accent-blue/40 hover:text-white" aria-label={`Edit ${project.name}`}><Edit2 size={15}/></button><button type="button" onClick={e => {e.stopPropagation(); if(window.confirm(`Delete ${project.name}?`)) onDelete()}} className="flex h-10 w-12 items-center justify-center rounded-lg border border-bg-border bg-bg-base text-text-secondary transition hover:border-red-400/40 hover:text-red-400" aria-label={`Delete ${project.name}`}><Trash2 size={15}/></button></div>
-  </article>
+  const owner = project.owner || project.ownerEmail
+  return <div role="button" tabIndex={0} onClick={onOpen} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen() } }} className="group relative h-full cursor-pointer rounded-xl pt-3 outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/60">
+    <span className="pointer-events-none absolute left-0 top-0 h-5 w-24 rounded-t-lg border border-b-0 border-bg-border bg-bg-card transition-colors group-hover:border-accent-blue/40"/>
+    <article className="card relative flex h-full min-h-[250px] flex-col rounded-tl-none p-4 transition-[border-color,background-color,transform,box-shadow] duration-200 group-hover:-translate-y-0.5 group-hover:border-accent-blue/40 group-hover:bg-bg-hover/30 group-hover:shadow-card">
+      <div className="mb-3 flex items-start justify-between gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-accent-blue/20 bg-accent-blue/10"><Folder size={19} className="fill-accent-blue/10 text-accent-blue"/></span><span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${archived ? 'border-bg-border bg-bg-base text-text-tertiary' : 'border-accent-green/20 bg-accent-green/10 text-accent-green'}`}>{archived ? 'Archived' : 'Active'}</span></div>
+      <div className="min-w-0"><h2 className="truncate text-base font-semibold text-text-primary" title={project.name}>{project.name}</h2><p className="mt-1 line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-text-secondary">{project.description || 'No project description'}</p></div>
+      <dl className="mt-3 space-y-1.5 rounded-lg border border-bg-border bg-bg-base p-2.5 text-[11px] text-text-tertiary">
+        <div className="flex items-center justify-between gap-3"><dt className="text-text-muted">Target</dt><dd className="truncate font-medium text-text-secondary">{project.target || '--'}</dd></div>
+        <div className="flex items-center justify-between gap-3"><dt className="text-text-muted">Source</dt><dd className="truncate font-medium text-text-secondary">{source}</dd></div>
+        {owner && <div className="flex items-center justify-between gap-3"><dt className="text-text-muted">Owner</dt><dd className="truncate font-medium text-text-secondary" title={owner}>{owner}</dd></div>}
+      </dl>
+      <div className="mt-auto pt-3"><p className="mb-2 text-[10px] text-text-muted">Updated {updated}</p><div className="flex items-center gap-2 border-t border-bg-border pt-3">
+        <button type="button" disabled={archived} onClick={event => { event.stopPropagation(); onStart() }} className="btn-primary flex h-9 flex-1 items-center justify-center gap-2 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"><Play size={12}/>Start Run</button>
+        {confirmDelete ? <><button type="button" disabled={deleting} onClick={event => { event.stopPropagation(); onDelete() }} className="inline-flex h-9 items-center justify-center rounded-lg border border-accent-red/30 bg-accent-red/10 px-2.5 text-xs font-semibold text-accent-red disabled:opacity-50">Yes</button><button type="button" onClick={event => { event.stopPropagation(); setConfirmDelete(false) }} className="inline-flex h-9 items-center justify-center rounded-lg border border-bg-border bg-bg-base px-2.5 text-xs font-semibold text-text-secondary">No</button></> : <><button type="button" onClick={event => { event.stopPropagation(); onEdit() }} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-bg-border bg-bg-base text-text-secondary hover:border-accent-blue/40 hover:text-accent-blue" aria-label={`Edit ${project.name}`}><Edit2 size={13}/></button><button type="button" onClick={event => { event.stopPropagation(); setConfirmDelete(true) }} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-bg-border bg-bg-base text-text-secondary hover:border-accent-red/40 hover:text-accent-red" aria-label={`Delete ${project.name}`}><Trash2 size={13}/></button></>}
+      </div></div>
+    </article>
+  </div>
 }
 
 function NewProjectCard({ onClick }) {
-  return <button type="button" onClick={onClick} className="flex h-full min-h-[415px] flex-col items-center justify-center overflow-hidden rounded-xl border border-dashed border-bg-border bg-bg-card/70 p-8 text-center transition hover:border-accent-blue/50 hover:bg-bg-card">
-    <span className="flex h-16 w-16 items-center justify-center rounded-xl border border-accent-blue/30 bg-accent-blue/10 text-accent-blue"><Plus size={28}/></span>
-    <span className="mt-6 text-lg font-semibold text-text-primary">New Project</span>
-    <span className="mt-2 max-w-56 text-sm leading-6 text-text-tertiary">Create another governed pipeline project.</span>
+  return <button type="button" onClick={onClick} className="group relative h-full min-h-[250px] cursor-pointer rounded-xl pt-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/60">
+    <span className="pointer-events-none absolute left-0 top-0 h-5 w-24 rounded-t-lg border border-b-0 border-dashed border-bg-border bg-bg-card transition-colors group-hover:border-accent-blue/60"/>
+    <span className="card relative flex h-full min-h-[250px] flex-col items-center justify-center rounded-tl-none border-dashed p-6 text-center transition-[border-color,background-color,transform,box-shadow] duration-200 group-hover:-translate-y-0.5 group-hover:border-accent-blue/60 group-hover:bg-bg-hover/30 group-hover:shadow-card"><span className="flex h-14 w-14 items-center justify-center rounded-xl border border-accent-blue/25 bg-accent-blue/10 text-accent-blue transition-transform duration-200 group-hover:scale-105"><Plus size={24}/></span><span className="mt-4 text-base font-semibold text-text-primary">New Project</span><span className="mt-1 max-w-[210px] text-xs leading-5 text-text-tertiary">Create another governed pipeline project.</span></span>
   </button>
 }
 

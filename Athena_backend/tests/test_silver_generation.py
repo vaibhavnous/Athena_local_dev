@@ -377,6 +377,34 @@ def test_databricks_silver_skips_duplicate_expected_output_columns():
     assert "selected_output_columns.add(expected_name)" in script
 
 
+def test_databricks_silver_merges_only_columns_shared_with_existing_target():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "expenses_outstanding_estimates",
+        "bronze_table": "workspace.bronze.bronze_expenses_outstanding_estimates",
+        "silver_table": "workspace.silver.silver_expenses_outstanding_estimates",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+
+    script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=[
+            {"column_name": "claimid", "data_type": "bigint", "is_join_key": True},
+            {"column_name": "rererence_id", "data_type": "bigint"},
+        ],
+        run_id="run-target-schema-drift",
+    )
+
+    assert "common_columns = [" in script
+    assert "if name in source_columns" in script
+    assert "whenMatchedUpdate(set=update_assignments)" in script
+    assert "whenNotMatchedInsert(values=insert_assignments)" in script
+    assert "whenMatchedUpdateAll" not in script
+    assert "whenNotMatchedInsertAll" not in script
+
+
 def test_load_silver_scripts_prefers_snowflake_bundle_for_snowflake_run(monkeypatch):
     monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
     monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")

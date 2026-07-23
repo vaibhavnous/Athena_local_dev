@@ -52,8 +52,8 @@ function EditKpiModal({ kpi, isOpen, onClose, onSave }) {
         }}
       >
         <div
-          style={{ pointerEvents: 'auto', width: '100%', maxWidth: '32rem' }}
-          className="overflow-hidden rounded-[24px] border border-[#24344d] bg-[#141d2d] shadow-[0_28px_90px_rgba(0,0,0,0.46)]"
+          style={{ pointerEvents: 'auto', width: '100%', maxWidth: '48rem' }}
+          className="overflow-hidden rounded-2xl border border-[#24344d] bg-[#141d2d] shadow-[0_28px_90px_rgba(0,0,0,0.46)]"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
@@ -77,7 +77,7 @@ function EditKpiModal({ kpi, isOpen, onClose, onSave }) {
               <input
                 autoFocus
                 type="text"
-                className="h-11 w-full rounded-[10px] border border-[#24344d] bg-[#0b1322] px-4 text-base text-white outline-none transition-colors placeholder:text-[#73829f] focus:border-[#4a81e8]"
+                className="h-14 w-full rounded-[10px] border-2 border-[#4388ff] bg-[#0b1322] px-4 text-base text-white outline-none transition-colors placeholder:text-[#73829f] focus:border-[#4a81e8]"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="KPI name..."

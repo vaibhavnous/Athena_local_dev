@@ -676,17 +676,46 @@ target_columns = set(spark.table(TARGET_TABLE).columns)
 if "silver_upsert_key" not in target_columns:
     spark.sql(f"ALTER TABLE {{TARGET_TABLE}} ADD COLUMNS (silver_upsert_key STRING)")
 
+target_column_names = spark.table(TARGET_TABLE).columns
+source_columns = set(df.columns)
+common_columns = [
+    name
+    for name in target_column_names
+    if name in source_columns
+]
+update_columns = [
+    name
+    for name in common_columns
+    if name != "silver_upsert_key"
+]
+
+def _source_assignment(column_name):
+    escaped_name = column_name.replace("`", "``")
+    return f"source.`{{escaped_name}}`"
+
+update_assignments = {{
+    name: _source_assignment(name)
+    for name in update_columns
+}}
+insert_assignments = {{
+    name: _source_assignment(name)
+    for name in common_columns
+}}
+
+if not insert_assignments:
+    raise ValueError(f"No common columns available to merge into {{TARGET_TABLE}}")
+
 delta_target = DeltaTable.forName(spark, TARGET_TABLE)
-(
+merge_builder = (
     delta_target.alias("target")
     .merge(
         df.alias("source"),
         "target.silver_upsert_key = source.silver_upsert_key",
     )
-    .whenMatchedUpdateAll()
-    .whenNotMatchedInsertAll()
-    .execute()
 )
+if update_assignments:
+    merge_builder = merge_builder.whenMatchedUpdate(set=update_assignments)
+merge_builder.whenNotMatchedInsert(values=insert_assignments).execute()
 
 print(f"SUCCESS: Silver upsert completed for {{TARGET_TABLE}}")
 '''
