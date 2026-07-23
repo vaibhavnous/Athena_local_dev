@@ -196,7 +196,7 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
   }
 
   return (
-    <article className={`relative rounded-xl border p-5 transition-colors ${decision === 'APPROVED' ? 'border-[#1f6658] bg-[#103033]' : decision === 'REJECTED' ? 'border-[#803348] bg-[#301c29]' : 'border-[#2d64c3] bg-[#14233a]'}`}>
+    <article className={`relative rounded-xl border p-5 transition-colors ${decision === 'APPROVED' ? 'border-[#1f6658] bg-[#103033]' : decision === 'REJECTED' ? 'border-[#803348] bg-[#301c29]' : 'border-bg-border bg-bg-card'}`}>
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-2.5">

@@ -209,7 +209,7 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
               </div>
 
               {/* Logs list */}
-              <div className="flex-1 overflow-y-auto">
+              <div className="flex-1 overflow-auto">
                 {isLoadingLogs && (
                   <div className="flex items-center gap-2 px-4 py-3 bg-blue-500/10 border-b border-blue-500/20">
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
@@ -238,14 +238,14 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
                 )}
 
                 {filteredLogs.length > 0 && (
-                  <div className="divide-y divide-bg-border/30">
+                  <div className="w-max min-w-full divide-y divide-bg-border/30">
                     {filteredLogs.map((log, idx) => (
                       <div
                         key={log.log_id || idx}
                         onClick={() => setSelectedLog(log)}
                         className="px-4 py-2.5 hover:bg-bg-border/10 cursor-pointer transition-colors border-l-2 border-transparent hover:border-l-blue-500/50"
                       >
-                        <div className="flex min-w-0 items-center gap-2 font-mono text-xs">
+                        <div className="flex items-center gap-2 whitespace-nowrap font-mono text-xs">
                           <span className="w-[76px] flex-shrink-0 text-gray-500">
                             {formatLogTime(log.logged_at)}
                           </span>
@@ -254,7 +254,7 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
                           </span>
                           {log.stage && <span className="min-w-[82px] flex-shrink-0 text-gray-300">{log.stage}</span>}
                           <span className="flex-shrink-0 text-gray-500">-</span>
-                          <span className="min-w-0 truncate text-gray-300">{log.message || '-'}</span>
+                          <span className="text-gray-300">{log.message || '-'}</span>
                         </div>
                       </div>
                     ))}

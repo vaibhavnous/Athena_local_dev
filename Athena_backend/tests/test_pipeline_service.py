@@ -428,7 +428,7 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
     assert recorded["kwargs"]["run_id"] == "run-submit"
     assert recorded["kwargs"]["brd_filename"] == "Claims BRD"
     assert recorded["kwargs"]["source_databases"] == ["db1"]
-    assert recorded["kwargs"]["stage_confirmation_enabled"] is True
+    assert recorded["kwargs"]["stage_confirmation_enabled"] is False
     assert recorded["kwargs"]["compliance_enabled"] is True
     assert recorded["kwargs"]["compliance_domain"] == "Insurance"
     assert recorded["kwargs"]["compliance_countries"] == ["US", "AU"]
@@ -590,6 +590,37 @@ def test_merge_key_resolution_completes_only_after_resolver_artifact_exists():
     by_key = {step["key"]: step for step in steps}
     assert by_key["silver_merge_key_resolution"]["state"] == "COMPLETED"
     assert by_key["silver_merge_key_review"]["state"] == "HITL_WAIT"
+
+
+def test_merge_key_resolution_auto_approves_and_continues_without_hitl(monkeypatch):
+    from nodes import silver_merge_key_resolution
+
+    monkeypatch.setattr(
+        silver_merge_key_resolution,
+        "silver_merge_key_resolution_node",
+        lambda state: {
+            **state,
+            "silver_merge_key_resolution_status": "COMPLETED",
+            "silver_merge_key_resolution_artifact": {
+                "feeds": [{"table": "claims", "merge_keys": ["claim_id"]}],
+            },
+        },
+    )
+
+    result = pipeline_runtime._pause_for_silver_merge_key_review(
+        "run-auto-merge-keys",
+        {
+            "enriched_metadata": {
+                "columns": [{"table_name": "claims", "column_name": "claim_id"}],
+            },
+        },
+    )
+
+    assert result["status"] == "RUNNING"
+    assert result["next_review_key"] is None
+    assert result["silver_merge_key_review_decision"] == "APPROVED"
+    assert result["gate_silver_merge_key_review"]["status"] == "COMPLETED"
+    assert result["enriched_metadata"]["columns"][0]["is_join_key"] is True
 
 
 def test_databricks_gold_generation_does_not_imply_execution_completion():
@@ -1226,7 +1257,7 @@ def test_gate4_review_filters_rejected_bronze_results_before_silver():
     assert [item["table"] for item in filtered] == ["claim_information"]
 
 
-def test_databricks_gate4_always_pauses_for_merge_key_review_when_execution_disabled(monkeypatch):
+def test_databricks_gate4_continues_to_silver_after_automatic_merge_key_resolution(monkeypatch):
     from services import databricks_runtime
 
     saved = []
@@ -1243,14 +1274,14 @@ def test_databricks_gate4_always_pauses_for_merge_key_review_when_execution_disa
     monkeypatch.setattr(
         pipeline_runtime,
         "_pause_for_silver_merge_key_review",
-        lambda run_id, state: {**state, "status": "HITL_WAIT", "next_review_key": "silver_merge_key_review"},
+        lambda run_id, state: {**state, "status": "RUNNING", "next_review_key": None},
     )
     monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda run_id, state, **_: saved.append(dict(state)))
     monkeypatch.setattr(pipeline_runtime, "ai_store_db_writer", lambda **_: None)
     monkeypatch.setattr(
         pipeline_runtime,
         "continue_database_pipeline",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Silver must wait for merge-key approval")),
+        lambda run_id, start_stage_key, state: {**state, "continued_to": start_stage_key},
     )
 
     result = pipeline_runtime.submit_gate4_review(
@@ -1259,9 +1290,9 @@ def test_databricks_gate4_always_pauses_for_merge_key_review_when_execution_disa
         review_artifact={"feeds": [{"table": "claims", "merge_keys": ["claim_id"]}]},
     )
 
-    assert result["status"] == "HITL_WAIT"
-    assert result["next_review_key"] == "silver_merge_key_review"
-    assert saved[-1]["next_review_key"] == "silver_merge_key_review"
+    assert result["continued_to"] == "silver"
+    assert result["next_review_key"] is None
+    assert saved[-1]["next_review_key"] is None
 
 
 def test_gate4_review_uses_provided_checkpoint_snapshot(monkeypatch):
@@ -1281,11 +1312,16 @@ def test_gate4_review_uses_provided_checkpoint_snapshot(monkeypatch):
     monkeypatch.setattr(
         pipeline_runtime,
         "_pause_for_silver_merge_key_review",
-        lambda run_id, state: {**state, "status": "HITL_WAIT", "next_review_key": "silver_merge_key_review"},
+        lambda run_id, state: {**state, "status": "RUNNING", "next_review_key": None},
     )
     monkeypatch.setattr(databricks_runtime, "databricks_bronze_execution_enabled", lambda: False)
     monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline_runtime, "ai_store_db_writer", lambda **_: None)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "continue_database_pipeline",
+        lambda run_id, start_stage_key, state: {**state, "continued_to": start_stage_key},
+    )
 
     result = pipeline_runtime.submit_gate4_review(
         "run-gate4-snapshot",
@@ -1294,8 +1330,8 @@ def test_gate4_review_uses_provided_checkpoint_snapshot(monkeypatch):
         checkpoint_state=checkpoint,
     )
 
-    assert result["status"] == "HITL_WAIT"
-    assert result["next_review_key"] == "silver_merge_key_review"
+    assert result["continued_to"] == "silver"
+    assert result["next_review_key"] is None
 
 
 def test_gate4_review_uses_selected_bronze_subset_before_silver():

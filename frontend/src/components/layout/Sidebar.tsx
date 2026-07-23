@@ -46,9 +46,9 @@ function Sidebar({ collapsed, onToggle, onNavigate, mobile = false }) {
       role={mobile ? 'dialog' : undefined}
       aria-modal={mobile || undefined}
       aria-label={mobile ? 'Navigation' : undefined}
-      className={`relative flex h-full flex-shrink-0 flex-col overflow-hidden border-r border-[#253044] bg-[#131c2c] transition-[width] duration-300 ${mobile ? 'w-[min(86vw,300px)] shadow-2xl' : collapsed ? 'w-16' : 'w-[240px]'}`}
+      className={`relative flex h-full flex-shrink-0 flex-col overflow-hidden border-r border-bg-border bg-bg-card transition-[width] duration-300 ${mobile ? 'w-[min(86vw,300px)] shadow-2xl' : collapsed ? 'w-16' : 'w-[240px]'}`}
     >
-      <div className="flex h-[51.2px] flex-shrink-0 items-center justify-between border-b border-[#253044] px-[9.6px]">
+      <div className="flex h-[51.2px] flex-shrink-0 items-center justify-between border-b border-bg-border px-[9.6px]">
         {collapsed ? (
           <button
             onClick={onToggle}

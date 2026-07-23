@@ -89,38 +89,38 @@ function CodeReviewEditorModal({ item, onClose, onSave, onSubmit = null, submitt
   }
 
   return createPortal(
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-3 backdrop-blur-[2px] sm:p-6" role="dialog" aria-modal="true" aria-label={`Code review ${fileName}`}>
-      <div className="flex h-[90vh] w-full max-w-[1344px] flex-col overflow-hidden rounded-[22px] border border-[#26334a] bg-[#091221] shadow-[0_35px_120px_rgba(0,0,0,0.75)]">
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#26334a] px-5 py-4 sm:px-7">
-          <div className="flex items-center gap-3">
-            <Code2 size={20} className="text-[#4388ff]" />
-            <h2 className="text-lg font-extrabold text-white">Code Review — {String(item?.type || 'code').toLowerCase()}</h2>
-            <span className="rounded-md bg-[#202b3d] px-2.5 py-1 font-mono text-xs text-[#9ea9bc]">1 file</span>
+    <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={`Code review ${fileName}`}>
+      <div className="absolute inset-x-4 bottom-[5%] top-[5%] mx-auto flex max-w-4xl flex-col overflow-hidden rounded-2xl border border-[#26334a] bg-[#091221] shadow-2xl">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#26334a] bg-[#08101e] px-5 py-3">
+          <div className="flex items-center gap-2.5">
+            <Code2 size={15} className="text-[#4388ff]" />
+            <h2 className="text-sm font-semibold tracking-tight text-white">Code Review — {String(item?.type || 'code').toLowerCase()}</h2>
+            <span className="rounded bg-[#202b3d] px-1.5 py-0.5 font-mono text-[10px] text-[#9ea9bc]">1 file</span>
           </div>
           <div className="flex items-center gap-2">
             {editing || dirty ? (
               <>
-                <button type="button" onClick={() => { setDraftCode(savedCode); setSaved(false) }} className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#26334a] bg-[#111b2d] px-4 text-sm font-semibold text-[#b5bfd0] hover:bg-[#182438] hover:text-white">
-                  <RotateCcw size={15} /> Revert
+                <button type="button" onClick={() => { setDraftCode(savedCode); setSaved(false) }} className="inline-flex items-center gap-1.5 rounded-md border border-[#26334a] bg-[#111b2d] px-2.5 py-1 text-xs text-[#b5bfd0] hover:border-gray-500 hover:text-white">
+                  <RotateCcw size={12} /> Revert
                 </button>
-                <button type="button" onClick={saveDraft} className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#3567b9] bg-[#132a51] px-4 text-sm font-semibold text-white hover:bg-[#193665]">
-                  <Save size={15} /> Save
+                <button type="button" onClick={saveDraft} className="inline-flex items-center gap-1.5 rounded-md border border-[#3567b9] bg-[#132a51] px-2.5 py-1 text-xs font-medium text-white hover:bg-[#193665]">
+                  <Save size={12} /> Save
                 </button>
               </>
             ) : (
-              <button type="button" onClick={() => setEditing(true)} className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#26334a] bg-[#111b2d] px-4 text-sm font-semibold text-[#b5bfd0] hover:bg-[#182438] hover:text-white">
-                <Pencil size={15} /> Edit
+              <button type="button" onClick={() => setEditing(true)} className="inline-flex items-center gap-1.5 rounded-md border border-[#26334a] bg-[#111b2d] px-2.5 py-1 text-xs text-[#b5bfd0] hover:border-gray-500 hover:text-white">
+                <Pencil size={12} /> Edit
               </button>
             )}
-            <button type="button" onClick={copyDraft} className="hidden h-10 items-center gap-2 rounded-lg border border-[#26334a] bg-[#111b2d] px-4 text-sm font-semibold text-[#b5bfd0] hover:bg-[#182438] hover:text-white sm:inline-flex"><Copy size={15} /> Copy</button>
-            <button type="button" onClick={() => downloadDraft(fileName, draftCode)} className="hidden h-10 items-center gap-2 rounded-lg border border-[#26334a] bg-[#111b2d] px-4 text-sm font-semibold text-[#b5bfd0] hover:bg-[#182438] hover:text-white md:inline-flex"><Download size={15} /> Download</button>
-            <button type="button" onClick={onClose} aria-label="Close code review" className="flex h-10 w-10 items-center justify-center rounded-lg text-[#9ea9bc] hover:bg-white/5 hover:text-white"><X size={20} /></button>
+            <button type="button" onClick={copyDraft} className="hidden items-center gap-1.5 rounded-md border border-[#26334a] bg-[#111b2d] px-2.5 py-1 text-xs text-[#b5bfd0] hover:border-gray-500 hover:text-white sm:inline-flex"><Copy size={12} /> Copy</button>
+            <button type="button" onClick={() => downloadDraft(fileName, draftCode)} className="hidden items-center gap-1.5 rounded-md border border-[#26334a] bg-[#111b2d] px-2.5 py-1 text-xs text-[#b5bfd0] hover:border-gray-500 hover:text-white md:inline-flex"><Download size={12} /> Download</button>
+            <button type="button" onClick={onClose} aria-label="Close code review" className="rounded-md p-1.5 text-[#9ea9bc] hover:bg-white/5 hover:text-white"><X size={15} /></button>
           </div>
         </div>
 
-        <div className="flex h-12 shrink-0 items-end border-b border-[#26334a] bg-[#08101e] px-5">
-          <div className="flex h-12 items-center gap-2 border-b-2 border-[#4388ff] px-3 font-mono text-sm font-semibold text-white">
-            <FileCode2 size={16} className="text-[#4388ff]" /> {fileName}
+        <div className="flex shrink-0 items-end overflow-x-auto border-b border-[#26334a] bg-[#08101e]">
+          <div className="flex items-center gap-1.5 whitespace-nowrap border-b-2 border-[#4388ff] border-r border-r-[#26334a] px-4 py-2.5 font-mono text-xs font-semibold text-white">
+            <FileCode2 size={12} className="text-[#4388ff]" /> {fileName}
           </div>
         </div>
 
@@ -132,23 +132,23 @@ function CodeReviewEditorModal({ item, onClose, onSave, onSubmit = null, submitt
               onChange={(event) => { setDraftCode(event.target.value); setSaved(false) }}
               spellCheck={false}
               aria-label={`Edit ${fileName}`}
-              className="h-full w-full resize-none overflow-auto bg-[#282c34] px-7 py-6 font-mono text-[14px] leading-7 text-[#eef1f6] outline-none sm:px-10"
+              className="h-full w-full resize-none overflow-auto bg-[#282c34] p-5 font-mono text-[0.8125rem] leading-relaxed text-[#eef1f6] outline-none"
             />
           ) : (
-            <div className="h-full overflow-auto py-5 font-mono text-[14px] leading-7">
+            <div className="h-full overflow-auto py-5 font-mono text-[0.8125rem] leading-[1.6]">
               {lines.map((line, index) => (
-                <div key={index} className="grid min-w-max grid-cols-[64px_1fr] px-4 hover:bg-white/[0.025]">
-                  <span className="select-none pr-5 text-right text-[#667287]">{index + 1}</span>
-                  <span className="whitespace-pre pr-8 text-[#abb2bf]">{highlightedLine(line, language)}</span>
+                <div key={index} className="grid min-w-max grid-cols-[52px_1fr] px-3 hover:bg-white/[0.025]">
+                  <span className="select-none pr-4 text-right text-[#667287]">{index + 1}</span>
+                  <span className="whitespace-pre pr-6 text-[#abb2bf]">{highlightedLine(line, language)}</span>
                 </div>
               ))}
             </div>
           )}
         </div>
 
-        <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#26334a] bg-[#08101e] px-5 py-3 text-xs sm:px-7">
-          <div className="flex items-center gap-3 font-mono text-[#7f8ba0]"><span>{fileName}</span><span className="rounded border border-[#274c86] bg-[#102348] px-2 py-1 text-[#5797ff]">{language}</span></div>
-          <div className="flex items-center gap-4">
+        <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#26334a] bg-[#08101e] px-5 py-2 text-[11px]">
+          <div className="flex items-center gap-3 font-mono text-[#667287]"><span>{fileName}</span><span className="rounded border border-[#274c86] bg-[#102348] px-1.5 py-0.5 text-[#5797ff]">{language}</span></div>
+          <div className="flex items-center gap-3">
             <span className={dirty ? 'text-amber-400' : saved ? 'text-emerald-400' : 'text-[#7f8ba0]'}>{dirty ? 'Unsaved changes' : saved ? 'Draft saved' : 'No changes'}</span>
             <span className="text-[#667287]">{lines.length} lines</span>
             {onSubmit && (
@@ -156,9 +156,9 @@ function CodeReviewEditorModal({ item, onClose, onSave, onSubmit = null, submitt
                 type="button"
                 disabled={submitting || submitDisabled || dirty}
                 onClick={onSubmit}
-                className="inline-flex h-10 items-center gap-2 rounded-lg bg-emerald-600 px-5 font-sans text-sm font-bold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-600 px-3 py-1.5 font-sans text-xs font-semibold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <Play size={15} /> {submitting ? 'Submitting...' : submitLabel}
+                <Play size={12} /> {submitting ? 'Submitting...' : submitLabel}
               </button>
             )}
           </div>

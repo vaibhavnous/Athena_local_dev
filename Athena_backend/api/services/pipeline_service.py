@@ -179,7 +179,7 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             sftp_entity=sftp_entity,
             use_domain_kb=use_domain_kb,
             stage_confirmation_enabled=bool(
-                payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else True
+                payload.stage_confirmation_enabled if payload.stage_confirmation_enabled is not None else False
             ),
             compliance_enabled=bool(payload.compliance_enabled if payload.compliance_enabled is not None else False),
             compliance_domain=str(payload.compliance_domain or "Insurance"),

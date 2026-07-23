@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Clock,
+  Code2,
   FileText,
   History,
   Info,
@@ -15,6 +16,7 @@ import {
 import useAthenaStore from '../store/useAthenaStore'
 import { getRun, getRuns } from '../api/athenaApi'
 import { PageHeader } from '../components/shared/DashboardLayout'
+import PythonCodeDialog from '../components/shared/PythonCodeDialog'
 import { getPhaseGroups, normalizeState, statusTone } from '../utils/pipelinePhases'
 
 const FILTERS = ['All', 'Running', 'Pending', 'Hitl wait', 'Paused for hitl', 'Pending review', 'Completed', 'Failed', 'Cancelled']
@@ -46,6 +48,7 @@ function RunHistoryPage() {
   const [filter, setFilter] = useState('All')
   const [detailRun, setDetailRun] = useState(null)
   const [runInfoOpen, setRunInfoOpen] = useState(false)
+  const [codeDialogStage, setCodeDialogStage] = useState('')
   const runsRequestInFlightRef = useRef(false)
   const detailRequestInFlightRef = useRef<string | null>(null)
 
@@ -62,6 +65,7 @@ function RunHistoryPage() {
 
   useEffect(() => {
     setRunInfoOpen(false)
+    setCodeDialogStage('')
   }, [selectedRunId])
 
   useEffect(() => {
@@ -278,7 +282,12 @@ function RunHistoryPage() {
                 <div className="mb-3 text-xs font-semibold text-[#c4cee0]">Stages by Phase</div>
                 <div className="overflow-hidden rounded-lg border border-[#253044] bg-[#0d1525]">
                   {phases.map((phase, index) => (
-                    <PhaseRow key={phase.id} phase={phase} index={index + 1} />
+                    <PhaseRow
+                      key={phase.id}
+                      phase={phase}
+                      index={index + 1}
+                      onViewCode={setCodeDialogStage}
+                    />
                   ))}
                 </div>
               </div>
@@ -293,6 +302,13 @@ function RunHistoryPage() {
           )}
         </section>
       </div>
+      <PythonCodeDialog
+        isOpen={Boolean(codeDialogStage)}
+        onClose={() => setCodeDialogStage('')}
+        stageName={codeDialogStage}
+        runId={selectedRunId || ''}
+        title={`Generated Code — ${codeDialogStage}`}
+      />
     </div>
   )
 }
@@ -309,7 +325,7 @@ function InfoRow({ icon: Icon, label, value }) {
   )
 }
 
-function PhaseRow({ phase, index }) {
+function PhaseRow({ phase, index, onViewCode }) {
   const [expanded, setExpanded] = useState(false)
   const displaySteps = getHistoryDisplaySteps(phase)
   const completed = displaySteps.filter((step) => isCompletedStep(step.state)).length
@@ -366,7 +382,7 @@ function PhaseRow({ phase, index }) {
         <div className="bg-[#080e1d]/50 px-3 pb-2">
           <div>
             {displaySteps.map((step) => (
-              <StageTreeRow key={step.key} step={step} />
+              <StageTreeRow key={step.key} step={step} onViewCode={onViewCode} />
             ))}
           </div>
         </div>
@@ -375,12 +391,17 @@ function PhaseRow({ phase, index }) {
   )
 }
 
-function StageTreeRow({ step }) {
+function StageTreeRow({ step, onViewCode }) {
   const state = normalizeState(step.state)
   const done = isCompletedStep(state)
   const running = state === 'RUNNING'
   const review = state === 'HITL_WAIT' || step.key.includes('review') || step.key.startsWith('gate')
   const failed = state === 'FAILED'
+  const codeLayer = {
+    bronze: 'bronze',
+    silver: 'silver',
+    gold: 'gold',
+  }[step.key]
   const toneClass = failed
     ? 'border-red-400 text-red-400'
     : done
@@ -395,9 +416,23 @@ function StageTreeRow({ step }) {
     <div className="flex min-h-[30px] items-center gap-2 rounded px-2 py-1.5 transition-colors hover:bg-white/[0.03]">
       <span className={`flex h-2 w-2 flex-shrink-0 items-center justify-center rounded-full bg-current ${toneClass} ${running ? 'animate-pulse' : ''}`}>
       </span>
-      <div className={`text-xs ${done || running || review ? 'text-[#c4cee0]' : 'text-[#7f91b4]'}`}>
+      <div className={`min-w-0 flex-1 text-xs ${done || running || review ? 'text-[#c4cee0]' : 'text-[#7f91b4]'}`}>
         {step.label}
       </div>
+      {done && codeLayer && (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation()
+            onViewCode(codeLayer)
+          }}
+          className="flex flex-shrink-0 items-center gap-1 rounded border border-[#3f82ff]/30 bg-[#3f82ff]/10 px-2 py-0.5 text-[10px] font-medium text-[#3f82ff] transition-colors hover:bg-[#3f82ff]/20"
+          title={`View generated ${codeLayer} code`}
+        >
+          <Code2 size={10} />
+          View Code
+        </button>
+      )}
     </div>
   )
 }

@@ -19,7 +19,7 @@ class PipelineRunRequest(BaseModel):
     target_warehouse: Optional[str] = "databricks"
     source_databases: Optional[List[str]] = None
     sftp_entity: Optional[str] = "transactions"
-    stage_confirmation_enabled: Optional[bool] = True
+    stage_confirmation_enabled: Optional[bool] = False
     compliance_enabled: Optional[bool] = False
     compliance_domain: Optional[str] = "Insurance"
     compliance_countries: Optional[List[str]] = Field(default_factory=lambda: ["US"])

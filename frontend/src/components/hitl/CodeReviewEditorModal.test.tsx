@@ -36,3 +36,16 @@ test.each(['BRONZE', 'SILVER', 'GOLD'])('uses the shared %s code review layout',
   expect(screen.getAllByText(`${type.toLowerCase()}_transform.sql`).length).toBeGreaterThan(0)
   expect(screen.getByRole('button', { name: 'Submit & Run Stage' })).toBeInTheDocument()
 })
+
+test('keeps the Athena desktop modal width instead of expanding across the viewport', () => {
+  render(
+    <CodeReviewEditorModal
+      item={{ type: 'SILVER', fileName: 'silver_transform.py', code: 'print("ready")' }}
+      onClose={jest.fn()}
+      onSave={jest.fn()}
+    />
+  )
+
+  expect(screen.getByRole('dialog').firstElementChild).toHaveClass('max-w-4xl')
+  expect(screen.getByRole('dialog').firstElementChild).not.toHaveClass('max-w-[1344px]')
+})
