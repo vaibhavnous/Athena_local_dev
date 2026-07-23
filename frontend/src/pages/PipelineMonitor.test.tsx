@@ -10,7 +10,7 @@ jest.mock('../api/athenaApi', () => ({
   getRun: jest.fn(),
   getRunStatus: jest.fn(),
   getRuns: jest.fn().mockResolvedValue([]),
-  getRunScripts: jest.fn(),
+  getRunScripts: jest.fn(() => new Promise(() => {})),
   restartRun: jest.fn(),
   resumeFromFailure: jest.fn(),
 }))
@@ -22,7 +22,12 @@ jest.mock('react-router-dom', () => ({
 jest.mock('../store/useAthenaStore', () => ({
   __esModule: true,
   default: () => ({
-    runs: [{ id: 'run-1', run_id: 'run-1', status: 'RUNNING', stages: [] }],
+    runs: [{
+      id: 'run-1',
+      run_id: 'run-1',
+      status: 'RUNNING',
+      stages: [{ key: 'discovery', name: 'Metadata Discovery', status: 'RUNNING' }],
+    }],
     activeRunId: 'run-1',
     setActiveRun: jest.fn(),
     setRuns: jest.fn(),
@@ -54,5 +59,14 @@ test('hydrates detailed stages for the active run', async () => {
     'run-1',
     expect.objectContaining({ status: 'HITL_WAIT', stages: expect.any(Array) }),
   ))
+  view.unmount()
+})
+
+test('shows rotating markers for the active phase and stage', () => {
+  ;(getRun as jest.Mock).mockImplementation(() => new Promise(() => {}))
+
+  const view = render(<PipelineMonitor />)
+
+  expect(view.container.querySelectorAll('[data-running-indicator="rotation"]')).toHaveLength(2)
   view.unmount()
 })

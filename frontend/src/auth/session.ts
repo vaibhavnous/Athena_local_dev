@@ -12,6 +12,7 @@ export interface AuthUser {
 export interface AuthSession {
   accessToken: string
   user: AuthUser
+  expiresAt?: number
 }
 
 const SESSION_KEY = 'astra.auth.session'

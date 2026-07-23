@@ -28,6 +28,14 @@ def me(user: AuthUser = Depends(get_current_user)) -> AuthUser:
     return user
 
 
+@router.post("/refresh", response_model=LoginResponse)
+def refresh(
+    user: AuthUser = Depends(get_current_user),
+    service: AuthService = Depends(get_auth_service),
+) -> LoginResponse:
+    return service.refresh(user)
+
+
 @router.get("/users", response_model=UsersResponse)
 def users(
     admin: AuthUser = Depends(get_primary_admin),

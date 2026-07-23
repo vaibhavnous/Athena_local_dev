@@ -80,6 +80,17 @@ def test_login_issues_token_that_resolves_current_user(auth):
     assert session.expires_in == 3600
 
 
+def test_active_session_can_be_renewed(auth):
+    service, _ = auth
+    session = service.login("admin@astra.local", "AdminPass!234")
+    current_user = service.authenticate_token(session.access_token)
+
+    renewed = service.refresh(current_user)
+
+    assert renewed.expires_in == 3600
+    assert service.authenticate_token(renewed.access_token) == current_user
+
+
 def test_disabling_account_immediately_invalidates_existing_token(auth):
     service, repository = auth
     session = service.login("admin@astra.local", "AdminPass!234")

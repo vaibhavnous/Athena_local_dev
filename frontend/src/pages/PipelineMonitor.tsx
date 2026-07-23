@@ -860,7 +860,18 @@ function buildFailureSummary(run) {
   }
 }
 
-function PhaseNumber({ index, tone }) {
+function RunningRing() {
+  return (
+    <span
+      aria-hidden="true"
+      data-running-indicator="rotation"
+      className="pointer-events-none absolute -inset-1 rounded-full border-2 border-transparent border-t-[#3f82ff] animate-spin motion-reduce:animate-none"
+    />
+  )
+}
+
+function PhaseNumber({ index, tone, status }) {
+  const running = String(status || '').toLowerCase() === 'running'
   const toneClass =
     tone === 'emerald'
       ? 'border-emerald-500/40 text-emerald-400'
@@ -874,6 +885,7 @@ function PhaseNumber({ index, tone }) {
 
   return (
     <div className="relative h-7 w-7 flex-shrink-0">
+      {running && <RunningRing />}
       <div className={`relative flex h-7 w-7 items-center justify-center rounded-full border-2 bg-[#080e1d] text-[11px] font-bold ${toneClass}`}>
         {tone === 'emerald' ? <CheckCircle2 size={13} /> : index}
       </div>
@@ -947,6 +959,7 @@ function StepRow({ step, index = 0, isLast = false, onOpenReview, onRerun, rerun
             ? 'border-red-400 bg-red-500/10 text-red-400'
             : 'border-[#253044] bg-[#0b1120] text-[#64748b]'
         }`}>
+          {running && <RunningRing />}
           {complete ? <CheckCircle2 size={12} /> : <Circle size={running ? 8 : 10} className={running ? 'animate-pulse' : ''} />}
         </div>
         {!isLast && <div className={`mt-1 w-px flex-1 ${complete ? 'bg-emerald-500/30' : 'bg-[#253044]'}`} />}

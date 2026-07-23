@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, CheckCircle, CheckCircle2, ChevronDown, ChevronRight, Copy, Database, Download, Inbox, KeyRound, Loader2, PlusCircle, RotateCcw, Send, Shield, Table2, Timer, XCircle } from 'lucide-react'
@@ -575,7 +575,7 @@ function HitlQueue({ onClose = null }) {
     navigate('/app/data-discovery', { replace: true })
   }, [navigate, setActiveRun, setSearchParams, shouldSuppressRequestedInitialReview])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (shouldSuppressRequestedInitialReview) return
     if (!requestedRunId || requestedRunId === selectedRunId) return
     setSelectedRunId(requestedRunId)
@@ -704,7 +704,7 @@ function HitlQueue({ onClose = null }) {
     })
   }, [addNotification, currentRun, navigate, requestedGate, requestedReviewKey, selectedRunId, setActiveRun])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (requestedRunId) return
     if (activeRunId && selectedRunId !== activeRunId) {
       setSelectedRunId(activeRunId)
@@ -741,11 +741,12 @@ function HitlQueue({ onClose = null }) {
     }
   }, [runs, selectedRunId, currentRun, isReviewableRun, activeRunId, selectedRunDetail?.id, requestedRunId])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const nextSessionKey = `${selectedRunId || 'none'}:${gateToReview || 0}:${reviewKeyToReview || 'none'}`
     if (reviewSessionKeyRef.current === nextSessionKey) return
 
     reviewSessionKeyRef.current = nextSessionKey
+    setHydrating(Boolean(selectedRunId))
     setTableReview(null)
     setEnrichmentReview(null)
     setSemanticDecisions({})
