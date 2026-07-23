@@ -73,6 +73,9 @@ export const login = (payload: { email: string; password: string }) =>
 export const getCurrentUser = () =>
   api.get('/auth/me') as unknown as Promise<AuthUser>
 
+export const refreshAuthSession = () =>
+  api.post('/auth/refresh') as unknown as Promise<LoginResponse>
+
 export const getAuthUsers = () =>
   api.get('/auth/users') as unknown as Promise<{ users: AuthUser[] }>
 

@@ -96,6 +96,16 @@ class AuthService:
         if not user["is_active"]:
             raise HTTPException(status_code=401, detail="Account is disabled")
 
+        return self._issue_session(user)
+
+    def refresh(self, current_user: AuthUser) -> LoginResponse:
+        self._ensure_ready()
+        user = self.repository.find_by_uid(current_user.uid)
+        if not user or not user["is_active"]:
+            raise HTTPException(status_code=401, detail="Invalid or expired session")
+        return self._issue_session(user)
+
+    def _issue_session(self, user: dict) -> LoginResponse:
         expires_in = self._token_ttl_seconds()
         now = datetime.now(timezone.utc)
         payload = {
