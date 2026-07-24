@@ -39,7 +39,7 @@ const REVIEW_HYDRATION_DELAY_MS = 1000
 const REVIEW_RUN_POLL_DELAY_MS = 1500
 const ENABLE_DEMO_REVIEW_FALLBACKS = ENABLE_DEMO_FALLBACKS
 
-function hasRenderableReviewData(review, gate, isFileSource) {
+export function hasRenderableReviewData(review, gate, isFileSource) {
   if (!review) return false
 
   if (gate === 1) {
@@ -47,9 +47,7 @@ function hasRenderableReviewData(review, gate, isFileSource) {
     return Boolean((review?.kpis || []).length)
   }
   if (gate === 2) {
-    return isFileSource
-      ? Boolean(review?.candidate_feed) || Boolean((review?.candidate_feeds || []).length) || Number(review?.next_gate || 0) === 2
-      : Boolean((review?.nominated_tables || []).length) || Number(review?.next_gate || 0) === 2
+    return hasGate2ReviewItems(review, isFileSource) || Number(review?.next_gate || 0) === 2
   }
   if (gate === 3) {
     return Boolean(
@@ -70,6 +68,12 @@ function hasRenderableReviewData(review, gate, isFileSource) {
   if (gate === 'gold_review') return Boolean((review?.gold_review_artifact?.items || []).length)
   if (gate === 5) return Boolean((review?.silver_review_artifact?.items || []).length)
   return false
+}
+
+export function hasGate2ReviewItems(review, isFileSource) {
+  return isFileSource
+    ? getSftpFeeds(review).length > 0
+    : Boolean((review?.nominated_tables || []).length)
 }
 
 async function waitForRenderableReview(fetcher, gate, isFileSource = false, attempts = REVIEW_HYDRATION_ATTEMPTS) {
@@ -1064,6 +1068,7 @@ function HitlQueue({ onClose = null }) {
   const reviewedTableCount = availableTableReviews.filter((table) => tableReviewDecisions[tableReviewKey(table)]).length
   const selectedFeedCount = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length
   const totalFeedCount = availableSftpFeeds.length
+  const gate2ContentReady = hasGate2ReviewItems(tableReview, isSftpRun)
   const bronzeReviewFeeds = useMemo(
     () => bronzeReview?.bronze_review_artifact?.feeds || [],
     [bronzeReview]
@@ -2157,7 +2162,9 @@ function HitlQueue({ onClose = null }) {
                   : isGate3
                   ? (semanticReviewSource?.resume_message || 'Stage 03 completed. Review semantic enrichment before the pipeline continues.')
                   : isGate2
-                  ? (tableReview?.resume_message || (isSftpRun ? 'Stage 02 completed. Review discovered feeds before the pipeline continues.' : 'Stage 02 completed. Review nominated tables before the pipeline continues.'))
+                  ? (isSftpRun
+                    ? `Review ${totalFeedCount || 'the'} discovered feed${totalFeedCount === 1 ? '' : 's'} before metadata extraction continues.`
+                    : 'Review the nominated tables before metadata extraction continues.')
                   : 'Stage 04 completed. Review KPIs before the pipeline continues.'}
               </p>
             </div>
@@ -2408,9 +2415,9 @@ function HitlQueue({ onClose = null }) {
               </div>
             </motion.div>
             ) : isGate2 ? (
-            hydrating ? (
+            hydrating && !gate2ContentReady ? (
               <div className="flex min-h-[180px] items-center justify-center rounded-2xl border border-[#22304b] bg-[#0b1424] p-6 text-sm text-[#9fb0ca]">
-                <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin text-[#4fa3ff]" /> Loading table review artifacts…</span>
+                <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin text-[#4fa3ff]" /> Loading {isSftpRun ? 'feed' : 'table'} review artifacts...</span>
               </div>
             ) : (isSftpRun
               ? (availableSftpFeeds.length === 0)
@@ -2569,7 +2576,7 @@ function HitlQueue({ onClose = null }) {
               <Timer size={14} className="text-accent-amber" />
               <span className="text-xs font-medium text-gray-300">Review State</span>
             </div>
-            <p className="text-2xl font-mono font-bold text-accent-amber">{hydrating ? 'SYNC' : 'READY'}</p>
+            <p className="text-2xl font-mono font-bold text-accent-amber">{hydrating && !(isGate2 && gate2ContentReady) ? 'SYNC' : 'READY'}</p>
             <p className="text-[10px] text-gray-600 mt-1">Pipeline is paused</p>
           </div>
 
