@@ -82,15 +82,29 @@ function runProgressIndex(run: any, sourceHint?: string): number {
   const steps = Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length
     ? run.pipeline_steps
     : Array.isArray(run?.stages) ? run.stages : []
-  let furthest = -1
-
-  for (const step of steps) {
-    const state = normalizeRunStatus(step?.state ?? step?.status)
-    if (state !== 'PENDING') furthest = Math.max(furthest, order.get(String(step?.key || '')) ?? -1)
-  }
-
   const backgroundStage = String(run?.external_execution?.stage_key || run?.background_stage || '').trim()
-  return Math.max(furthest, order.get(backgroundStage) ?? -1)
+  const reviewStage = String(
+    run?.next_review_key ||
+    (Number(run?.next_gate || 0) ? `gate${Number(run.next_gate)}` : '')
+  ).trim()
+  const explicitFrontiers = [
+    order.get(backgroundStage) ?? -1,
+    order.get(reviewStage) ?? -1,
+    ...steps
+      .filter((step) => ['RUNNING', 'HITL_WAIT', 'FAILED'].includes(normalizeRunStatus(step?.state ?? step?.status)))
+      .map((step) => order.get(String(step?.key || '')) ?? -1),
+  ]
+  const explicitFrontier = Math.max(...explicitFrontiers)
+
+  // ponytail: this monitor is a linear pipeline; an explicit running/review
+  // frontier outranks downstream artifacts left by a previous or partial run.
+  if (explicitFrontier >= 0) return explicitFrontier
+
+  return steps.reduce((furthest, step) => (
+    normalizeRunStatus(step?.state ?? step?.status) === 'COMPLETED'
+      ? Math.max(furthest, order.get(String(step?.key || '')) ?? -1)
+      : furthest
+  ), -1)
 }
 
 function preserveProgressFields(existing: any, merged: any) {
