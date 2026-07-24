@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { fileVisibleStepKey } from '../utils/pipelinePhases'
 
 let notificationIdCounter = 0
 const HITL_SOURCE_RUN_IDS_KEY = 'athena.hitlSourceRunIds'
@@ -64,21 +65,23 @@ const DATABASE_PROGRESS_ORDER = [
 
 const FILE_PROGRESS_ORDER = [
   'ingestion', 'memory', 'requirements', 'kpis', 'gate1',
-  'discovery', 'nomination', 'gate2', 'schema', 'profiling', 'enrichment', 'gate3',
-  'pre_bronze_bootstrap_metadata', 'plan_seal', 'plan_freshness',
-  'pre_bronze_metadata_codegen', 'pre_bronze_metadata_codegen_review', 'bronze', 'gate4',
-  'runtime_bundle_handoff', 'pre_bronze_runtime_config', 'pre_bronze_validate_source',
-  'pre_bronze_discover_source_objects', 'pre_bronze_stage_to_landing',
-  'bronze_code_execution', 'bronze_runtime_validation',
-  'silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5',
-  'silver_code_execution', 'silver_runtime_validation',
-  'gold', 'gold_review', 'gold_code_execution', 'gold_runtime_validation', 'final_publish', 'finalize',
+  'feed_discovery', 'feed_nomination', 'gate2', 'column_extraction', 'freshness_check',
+  'column_profiling', 'semantic_enrichment', 'gate3', 'plan_seal',
+  'metadata_bootstrap', 'metadata_codegen', 'gate4_metadata', 'runtime_config',
+  'validate_source', 'discover_source_objects', 'stage_to_landing',
+  'bronze_autoloader', 'bronze_dq',
+  'bronze_to_silver', 'silver_dq',
+  'silver_to_gold', 'gold_dq', 'gate5_publish', 'finalize',
 ]
 
 function runProgressIndex(run: any, sourceHint?: string): number {
   const source = String(run?.source || sourceHint || '').toLowerCase()
-  const progressOrder = ['sftp', 'adls_gen2'].includes(source) ? FILE_PROGRESS_ORDER : DATABASE_PROGRESS_ORDER
+  const fileSource = ['sftp', 'adls_gen2'].includes(source)
+  const progressOrder = fileSource ? FILE_PROGRESS_ORDER : DATABASE_PROGRESS_ORDER
   const order = new Map(progressOrder.map((key, index) => [key, index]))
+  const progressKey = (value: any) => fileSource
+    ? fileVisibleStepKey(String(value || ''))
+    : String(value || '')
   const steps = Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length
     ? run.pipeline_steps
     : Array.isArray(run?.stages) ? run.stages : []
@@ -88,11 +91,11 @@ function runProgressIndex(run: any, sourceHint?: string): number {
     (Number(run?.next_gate || 0) ? `gate${Number(run.next_gate)}` : '')
   ).trim()
   const explicitFrontiers = [
-    order.get(backgroundStage) ?? -1,
-    order.get(reviewStage) ?? -1,
+    order.get(progressKey(backgroundStage)) ?? -1,
+    order.get(progressKey(reviewStage)) ?? -1,
     ...steps
       .filter((step) => ['RUNNING', 'HITL_WAIT', 'FAILED'].includes(normalizeRunStatus(step?.state ?? step?.status)))
-      .map((step) => order.get(String(step?.key || '')) ?? -1),
+      .map((step) => order.get(progressKey(step?.key)) ?? -1),
   ]
   const explicitFrontier = Math.max(...explicitFrontiers)
 
@@ -102,7 +105,7 @@ function runProgressIndex(run: any, sourceHint?: string): number {
 
   return steps.reduce((furthest, step) => (
     normalizeRunStatus(step?.state ?? step?.status) === 'COMPLETED'
-      ? Math.max(furthest, order.get(String(step?.key || '')) ?? -1)
+      ? Math.max(furthest, order.get(progressKey(step?.key)) ?? -1)
       : furthest
   ), -1)
 }

@@ -4,9 +4,9 @@ from sftp_nodes import design_governance
 from sftp_nodes import memory_check
 
 
-def test_canonical_sftp_stage_registry_matches_approved_thirty_stage_flow():
-    assert len(SFTP_STAGE_SPECS) == 30
-    assert len(set(SFTP_STAGE_KEYS)) == 30
+def test_canonical_sftp_stage_registry_groups_thirty_operations_by_ui_nodes():
+    assert len(SFTP_STAGE_SPECS) == 29
+    assert len(set(SFTP_STAGE_KEYS)) == 29
     assert SFTP_STAGE_KEYS == (
         "brd_ingestion",
         "memory_check",
@@ -16,16 +16,15 @@ def test_canonical_sftp_stage_registry_matches_approved_thirty_stage_flow():
         "feed_discovery",
         "feed_nomination",
         "gate2",
-        "metadata_discovery",
+        "column_extraction",
+        "freshness_check",
         "column_profiling",
         "semantic_enrichment",
         "gate3",
-        "metadata_bootstrap",
         "plan_seal",
-        "freshness_check",
+        "metadata_bootstrap",
         "metadata_codegen",
         "gate4_metadata",
-        "dab_bundle",
         "runtime_config",
         "validate_source",
         "discover_source_objects",
@@ -39,6 +38,9 @@ def test_canonical_sftp_stage_registry_matches_approved_thirty_stage_flow():
         "gate5_publish",
         "finalize",
     )
+    operations = [operation for stage in SFTP_STAGE_SPECS for operation in stage.operations]
+    assert len(operations) == 30
+    assert len(set(operations)) == 30
 
 
 def test_every_stage_has_one_status_handoff_and_phase():
@@ -51,7 +53,27 @@ def test_every_stage_has_one_status_handoff_and_phase():
         "phase-5",
         "phase-6",
     ]
-    assert sum(len(phase["keys"]) for phase in phase_templates()) == 30
+    assert sum(len(phase["keys"]) for phase in phase_templates()) == 29
+    assert next(phase["keys"] for phase in phase_templates() if phase["id"] == "phase-2") == (
+        "feed_discovery",
+        "feed_nomination",
+        "gate2",
+        "column_extraction",
+        "freshness_check",
+        "column_profiling",
+        "semantic_enrichment",
+        "gate3",
+        "plan_seal",
+    )
+    assert next(phase["keys"] for phase in phase_templates() if phase["id"] == "phase-3") == (
+        "metadata_bootstrap",
+        "metadata_codegen",
+        "gate4_metadata",
+        "runtime_config",
+        "validate_source",
+        "discover_source_objects",
+        "stage_to_landing",
+    )
     assert stage_spec("gate4_metadata").artifact_type == "SFTP_GATE4_METADATA_DECISION"
     assert stage_spec("plan_seal").checkpoint_policy == "none"
     assert stage_spec("bronze_autoloader").checkpoint_policy == "before_after"
@@ -196,14 +218,14 @@ def test_stage_execution_refuses_to_complete_without_named_handoff(monkeypatch):
 
     result = execute_sftp_stage(
         {"run_id": "run-contract", "source": "sftp"},
-        "plan_seal",
+        "metadata_bootstrap",
         lambda state: {**state, "some_other_status": "COMPLETED"},
     )
 
     assert result["status"] == "FAILED"
-    assert result["stage_statuses"]["plan_seal"] == "FAILED"
-    assert "plan_seal_status=COMPLETED" in result["error"]
-    assert [context for context, _ in saved] == ["plan_seal:failed"]
+    assert result["stage_statuses"]["metadata_bootstrap"] == "FAILED"
+    assert "metadata_bootstrap_status=COMPLETED" in result["error"]
+    assert [context for context, _ in saved] == ["metadata_bootstrap:failed"]
 
 
 def test_checkpoint_policy_skips_pure_nodes_and_bounds_external_side_effects(monkeypatch):

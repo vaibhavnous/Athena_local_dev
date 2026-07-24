@@ -79,56 +79,123 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-2',
       label: 'Feed & Metadata Intelligence',
-      keys: ['discovery', 'nomination', 'gate2', 'schema', 'profiling', 'enrichment', 'gate3'],
+      keys: [
+        'feed_discovery',
+        'feed_nomination',
+        'gate2',
+        'column_extraction',
+        'freshness_check',
+        'column_profiling',
+        'semantic_enrichment',
+        'gate3',
+        'plan_seal',
+      ],
     },
     {
       id: 'phase-3',
       label: 'Metadata Bootstrap & Source Validation',
       keys: [
-        'pre_bronze_bootstrap_metadata',
-        'plan_seal',
-        'plan_freshness',
-        'pre_bronze_metadata_codegen',
-        'pre_bronze_metadata_codegen_review',
-        'bronze',
-        'gate4',
+        'metadata_bootstrap',
+        'metadata_codegen',
+        'gate4_metadata',
+        'runtime_config',
+        'validate_source',
+        'discover_source_objects',
+        'stage_to_landing',
       ],
     },
     {
       id: 'phase-4',
       label: 'Bronze Layer (Ingestion & DQ)',
-      keys: [
-        'runtime_bundle_handoff',
-        'pre_bronze_runtime_config',
-        'pre_bronze_validate_source',
-        'pre_bronze_discover_source_objects',
-        'pre_bronze_stage_to_landing',
-        'bronze_code_execution',
-        'bronze_runtime_validation',
-      ],
+      keys: ['bronze_autoloader', 'bronze_dq'],
     },
     {
       id: 'phase-5',
       label: 'Silver Layer (Transformation & DQ)',
-      keys: [
-        'silver_merge_key_resolution',
-        'silver_merge_key_review',
-        'silver',
-        'gate5',
-        'silver_code_execution',
-        'silver_runtime_validation',
-      ],
+      keys: ['bronze_to_silver', 'silver_dq'],
     },
     {
       id: 'phase-6',
       label: 'Gold Layer & Deployment',
-      keys: ['gold', 'gold_review', 'gold_code_execution', 'gold_runtime_validation', 'final_publish', 'finalize'],
+      keys: ['silver_to_gold', 'gold_dq', 'gate5_publish', 'finalize'],
     },
   ],
 }
 
 export function isFileSource(run) {
   return run?.source === 'sftp' || run?.source === 'adls_gen2'
+}
+
+const FILE_VISIBLE_STEP_GROUPS = [
+  { key: 'feed_discovery', label: 'Feed Discovery', components: ['feed_discovery', 'discovery'] },
+  { key: 'feed_nomination', label: 'Feed Nomination', components: ['feed_nomination', 'nomination'] },
+  { key: 'gate2', label: 'Feed Review', components: ['gate2'] },
+  { key: 'column_extraction', label: 'Column Extraction', components: ['column_extraction', 'schema'] },
+  { key: 'freshness_check', label: 'Freshness Check', components: ['freshness_check', 'plan_freshness'] },
+  { key: 'column_profiling', label: 'Column Profiling', components: ['column_profiling', 'profiling'] },
+  { key: 'semantic_enrichment', label: 'Semantic Enrichment', components: ['semantic_enrichment', 'enrichment'] },
+  { key: 'gate3', label: 'Semantic Review', components: ['gate3'] },
+  { key: 'plan_seal', label: 'Plan Seal Check', components: ['plan_seal'] },
+  { key: 'metadata_bootstrap', label: 'Bootstrap Metadata', components: ['metadata_bootstrap', 'pre_bronze_bootstrap_metadata'] },
+  { key: 'metadata_codegen', label: 'Metadata Codegen', components: ['metadata_codegen', 'pre_bronze_metadata_codegen', 'bronze'] },
+  { key: 'gate4_metadata', label: 'Metadata Codegen Review', components: ['gate4_metadata', 'pre_bronze_metadata_codegen_review', 'gate4', 'runtime_bundle_handoff'] },
+  { key: 'runtime_config', label: 'Load Runtime Config', components: ['runtime_config', 'pre_bronze_runtime_config'] },
+  { key: 'validate_source', label: 'Validate Source', components: ['validate_source', 'pre_bronze_validate_source'] },
+  { key: 'discover_source_objects', label: 'Discover Source Objects', components: ['discover_source_objects', 'pre_bronze_discover_source_objects'] },
+  { key: 'stage_to_landing', label: 'Stage To Landing', components: ['stage_to_landing', 'pre_bronze_stage_to_landing'] },
+  { key: 'bronze_autoloader', label: 'Bronze Ingestion', components: ['bronze_autoloader', 'bronze_code_execution'] },
+  { key: 'bronze_dq', label: 'Bronze Data Quality', components: ['bronze_dq', 'bronze_runtime_validation'] },
+  { key: 'bronze_to_silver', label: 'Silver Transformation', components: ['bronze_to_silver', 'silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'silver_code_execution'] },
+  { key: 'silver_dq', label: 'Silver Data Quality', components: ['silver_dq', 'silver_runtime_validation'] },
+  { key: 'silver_to_gold', label: 'Gold Model Build', components: ['silver_to_gold', 'gold', 'gold_code_execution'] },
+  { key: 'gold_dq', label: 'Gold Data Quality', components: ['gold_dq', 'gold_runtime_validation'] },
+  { key: 'gate5_publish', label: 'Final Publish Review', components: ['gate5_publish', 'gate5', 'gold_review'] },
+  { key: 'finalize', label: 'Finalize Run', components: ['finalize', 'final_publish'] },
+]
+
+function groupedFileStep(group, steps: PipelineStep[]): PipelineStep {
+  const members = group.components
+    .map((key) => steps.find((step) => step.key === key))
+    .filter(Boolean)
+  const direct = members.find((step) => step.key === group.key)
+  if (direct) return { ...direct, label: group.label }
+  const states = members.map((step) => normalizeState(step.state))
+  const state =
+    states.includes('FAILED') ? 'FAILED' :
+    states.includes('HITL_WAIT') ? 'HITL_WAIT' :
+    states.includes('RUNNING') ? 'RUNNING' :
+    members.length > 0 && states.every((item) => item === 'COMPLETED') ? 'COMPLETED' :
+    'PENDING'
+  const active = members.find((step) => ['FAILED', 'HITL_WAIT', 'RUNNING'].includes(normalizeState(step.state)))
+    || members[members.length - 1]
+  return {
+    key: group.key,
+    label: group.label,
+    detail: active?.detail || '',
+    state,
+    complete: state === 'COMPLETED',
+  }
+}
+
+function collapseFileSteps(steps: PipelineStep[]): PipelineStep[] {
+  const groupedComponentKeys = new Set(FILE_VISIBLE_STEP_GROUPS.flatMap((group) => group.components))
+  const phaseOne = steps.filter((step) => !groupedComponentKeys.has(step.key))
+  return [
+    ...phaseOne,
+    ...FILE_VISIBLE_STEP_GROUPS.map((group) => groupedFileStep(group, steps)),
+  ]
+}
+
+export function fileVisibleStepKey(key: string): string {
+  return FILE_VISIBLE_STEP_GROUPS.find((group) => group.components.includes(key))?.key || key
+}
+
+function resolvePipelineSteps(run, steps: PipelineStep[]): PipelineStep[] {
+  const visibleSteps = isFileSource(run) ? collapseFileSteps(steps) : steps
+  return withPendingReviewGate(
+    run,
+    clearStaleWaitingSteps(run, applyExternalExecutionState(run, visibleSteps)),
+  )
 }
 
 export function getPipelineSteps(run) {
@@ -139,7 +206,7 @@ export function getPipelineSteps(run) {
       detail: step.detail || buildStepDetail(run, step.key, normalizeState(step.state), step.detail),
       state: normalizeState(step.state),
     })) as PipelineStep[]
-    return withPendingReviewGate(run, clearStaleWaitingSteps(run, applyExternalExecutionState(run, steps)))
+    return resolvePipelineSteps(run, steps)
   }
   if (Array.isArray(run?.stages) && run.stages.length) {
     const steps = run.stages.map((stage) => ({
@@ -149,9 +216,9 @@ export function getPipelineSteps(run) {
       state: normalizeState(stage.status),
       complete: normalizeState(stage.status) === 'COMPLETED',
     })) as PipelineStep[]
-    return withPendingReviewGate(run, clearStaleWaitingSteps(run, applyExternalExecutionState(run, steps)))
+    return resolvePipelineSteps(run, steps)
   }
-  return withPendingReviewGate(run, applyExternalExecutionState(run, [] as PipelineStep[]))
+  return resolvePipelineSteps(run, [] as PipelineStep[])
 }
 
 function applyExternalExecutionState(run, steps: PipelineStep[]) {
@@ -159,7 +226,8 @@ function applyExternalExecutionState(run, steps: PipelineStep[]) {
   const progress = run?.external_execution && typeof run.external_execution === 'object' ? run.external_execution : {}
   const rawProgressState = String(progress.status || '').trim()
   const progressState = rawProgressState ? normalizeState(rawProgressState) : ''
-  const stageKey = String(progress.stage_key || run?.background_stage || '').trim()
+  const rawStageKey = String(progress.stage_key || run?.background_stage || '').trim()
+  const stageKey = isFileSource(run) ? fileVisibleStepKey(rawStageKey) : rawStageKey
   if (!stageKey || runState !== 'RUNNING' || (progressState && progressState !== 'RUNNING')) return steps
 
   const sourceType = isFileSource(run) ? 'file' : 'database'
@@ -208,7 +276,14 @@ function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
   const sourceType = isFileSource(run) ? 'file' : 'database'
   const orderedKeys = PIPELINE_PHASE_TEMPLATES[sourceType].flatMap((phase) => phase.keys)
   const indexByKey = new Map(orderedKeys.map((key, index) => [key, index]))
-  const executionKeys = new Set(['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'])
+  const executionKeys = new Set([
+    'bronze_code_execution',
+    'silver_code_execution',
+    'gold_code_execution',
+    'bronze_autoloader',
+    'bronze_to_silver',
+    'silver_to_gold',
+  ])
   const progressedStates = new Set(['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'])
   const progressedIndexes = steps
     .map((step) => indexByKey.get(step.key) ?? -1)
@@ -241,6 +316,20 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
   const status = normalizeState(run?.status)
   const reviewReady = status === 'HITL_WAIT'
   if (!reviewReady) return steps
+
+  if (isFileSource(run)) {
+    const visibleReviewKey =
+      run?.next_review_key === 'silver_merge_key_review' ? 'bronze_to_silver' :
+      run?.next_review_key === 'gold_review' ? 'gate5_publish' :
+      gate === 4 ? 'gate4_metadata' :
+      gate === 5 ? 'gate5_publish' :
+      gate >= 1 && gate <= 3 ? `gate${gate}` :
+      ''
+    if (!visibleReviewKey) return steps
+    return steps.map((step) => step.key === visibleReviewKey
+      ? { ...step, state: 'HITL_WAIT', complete: false }
+      : step)
+  }
 
   if (run?.next_review_key === 'silver_merge_key_review') {
     if (steps.some((step) => step.key === 'silver_merge_key_review')) {

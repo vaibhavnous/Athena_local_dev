@@ -167,27 +167,36 @@ test('uses the six-phase SFTP and ADLS workflow without changing database phases
     'Silver Layer (Transformation & DQ)',
     'Gold Layer & Deployment',
   ])
-  expect(phases.find((phase) => phase.id === 'phase-3')?.steps.map((step) => step.key)).toEqual([
-    'pre_bronze_bootstrap_metadata',
+  expect(phases.find((phase) => phase.id === 'phase-2')?.steps.map((step) => step.key)).toEqual([
+    'feed_discovery',
+    'feed_nomination',
+    'gate2',
+    'column_extraction',
+    'freshness_check',
+    'column_profiling',
+    'semantic_enrichment',
+    'gate3',
     'plan_seal',
-    'plan_freshness',
-    'pre_bronze_metadata_codegen',
-    'pre_bronze_metadata_codegen_review',
-    'bronze',
-    'gate4',
   ])
-  expect(phaseState(run, 'phase-4', 'bronze_code_execution')).toBe('RUNNING')
+  expect(phases.find((phase) => phase.id === 'phase-3')?.steps.map((step) => step.key)).toEqual([
+    'metadata_bootstrap',
+    'metadata_codegen',
+    'gate4_metadata',
+    'runtime_config',
+    'validate_source',
+    'discover_source_objects',
+    'stage_to_landing',
+  ])
+  expect(phaseState(run, 'phase-4', 'bronze_autoloader')).toBe('RUNNING')
   expect(phases.find((phase) => phase.id === 'phase-6')?.steps.map((step) => step.key)).toEqual([
-    'gold',
-    'gold_review',
-    'gold_code_execution',
-    'gold_runtime_validation',
-    'final_publish',
+    'silver_to_gold',
+    'gold_dq',
+    'gate5_publish',
     'finalize',
   ])
 })
 
-test('keeps the SFTP Gold review separate from Gold execution', () => {
+test('maps the legacy SFTP Gold review onto the visible final publish review', () => {
   const run = {
     source: 'sftp',
     status: 'HITL_WAIT',
@@ -199,8 +208,8 @@ test('keeps the SFTP Gold review separate from Gold execution', () => {
     ],
   }
 
-  expect(phaseState(run, 'phase-6', 'gold_review')).toBe('HITL_WAIT')
-  expect(phaseState(run, 'phase-6', 'gold_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-6', 'gate5_publish')).toBe('HITL_WAIT')
+  expect(phaseState(run, 'phase-6', 'silver_to_gold')).toBe('PENDING')
 })
 
 test('shows only the furthest SFTP phase as running for legacy partial snapshots', () => {
