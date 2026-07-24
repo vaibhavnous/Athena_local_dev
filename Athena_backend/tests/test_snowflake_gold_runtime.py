@@ -517,6 +517,41 @@ def test_gold_stage_waits_for_review_before_snowflake_execution(monkeypatch):
     assert any(state.get("background_stage") == "gold_code_execution" for state in saved_states)
 
 
+def test_gold_review_runs_optional_snowflake_dbt_after_gold_execution(monkeypatch):
+    saved_states = []
+    gold_calls = []
+    dbt_calls = []
+    checkpoint = {
+        "run_id": "run-gold",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "dbt_deployment_mode": "generate_only",
+        "next_review_key": "gold_review",
+        "gold_generation_results": [{"target_table": "ATHENA_DB.GOLD.fact_claims"}],
+    }
+
+    def fake_gold_execution(state):
+        gold_calls.append(state.copy())
+        return {**state, "snowflake_gold_execution_status": "COMPLETED"}
+
+    def fake_dbt_execution(state):
+        dbt_calls.append(state.copy())
+        return {**state, "snowflake_dbt_deploy_status": "SKIPPED_GENERATE_ONLY"}
+
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: checkpoint)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved_states.append(state.copy()))
+    monkeypatch.setattr("services.snowflake_gold_runtime.run_snowflake_gold_scripts", fake_gold_execution)
+    monkeypatch.setattr("services.dbt_snowflake_runtime.run_snowflake_dbt", fake_dbt_execution)
+
+    completed = pipeline_runtime.submit_gold_review("run-gold", "APPROVED", {"items": []})
+
+    assert gold_calls and dbt_calls
+    assert dbt_calls[0]["background_stage"] == "snowflake_dbt_deploy"
+    assert completed["status"] == "PIPELINE_COMPLETED"
+    assert completed["snowflake_dbt_deploy_status"] == "SKIPPED_GENERATE_ONLY"
+    assert any(state.get("background_stage") == "snowflake_dbt_deploy" for state in saved_states)
+
+
 def test_gold_stage_executes_databricks_gold_after_review(monkeypatch):
     saved_states = []
     calls = []

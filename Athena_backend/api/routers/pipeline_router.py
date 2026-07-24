@@ -61,6 +61,9 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "databricks_silver_execution_progress": checkpoint.get("databricks_silver_execution_progress"),
             "snowflake_gold_execution_status": checkpoint.get("snowflake_gold_execution_status"),
             "snowflake_gold_execution_progress": checkpoint.get("snowflake_gold_execution_progress"),
+            "snowflake_dbt_deploy_status": checkpoint.get("snowflake_dbt_deploy_status"),
+            "snowflake_dbt_deploy_progress": checkpoint.get("snowflake_dbt_deploy_progress"),
+            "snowflake_dbt_artifact_path": checkpoint.get("snowflake_dbt_artifact_path"),
             "databricks_gold_execution_status": checkpoint.get("databricks_gold_execution_status"),
             "databricks_gold_execution_progress": checkpoint.get("databricks_gold_execution_progress"),
             "next_gate": checkpoint.get("next_gate"),
@@ -75,6 +78,8 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "compliance_assessment_id": checkpoint.get("compliance_assessment_id"),
             "compliance_assessment_status": checkpoint.get("compliance_assessment_status"),
             "compliance_review_status": checkpoint.get("compliance_review_status"),
+            "execution_engine": checkpoint.get("execution_engine") or "native",
+            "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or "generate_only",
         },
     }
 
@@ -117,6 +122,16 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest, owner_email: 
         "provider": existing.get("provider") or payload.provider,
         "deployment": existing.get("deployment") or payload.deployment,
         "target_warehouse": existing.get("target_warehouse") or payload.target_warehouse or "databricks",
+        "execution_engine": existing.get("execution_engine") or payload.execution_engine or "native",
+        "dbt_deployment_mode": existing.get("dbt_deployment_mode") or payload.dbt_deployment_mode or "generate_only",
+        "dbt_target_name": existing.get("dbt_target_name") or payload.dbt_target_name,
+        "dbt_threads": existing.get("dbt_threads") or payload.dbt_threads,
+        "dbt_command_timeout_secs": existing.get("dbt_command_timeout_secs") or payload.dbt_command_timeout_secs,
+        "force_dbt_deploy": (
+            existing.get("force_dbt_deploy")
+            if existing.get("force_dbt_deploy") is not None
+            else bool(payload.force_dbt_deploy)
+        ),
         "source_databases": existing.get("source_databases")
         or payload.source_databases
         or ([payload.database_name] if payload.database_name else None),

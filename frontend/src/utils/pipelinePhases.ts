@@ -66,7 +66,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-5',
       label: 'Gold Layer (Analytics)',
-      keys: ['gold', 'gold_code_execution'],
+      keys: ['gold', 'gold_code_execution', 'snowflake_dbt_deploy'],
     },
   ],
   file: [
@@ -93,7 +93,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-5',
       label: 'Gold Layer (Analytics)',
-      keys: ['gold', 'gold_code_execution'],
+      keys: ['gold', 'gold_code_execution', 'snowflake_dbt_deploy'],
     },
   ],
 }
@@ -134,7 +134,7 @@ function applyExternalExecutionState(run, steps: PipelineStep[]) {
   if (!stageKey || runState !== 'RUNNING' || (progressState && progressState !== 'RUNNING')) return steps
 
   const sourceType = isFileSource(run) ? 'file' : 'database'
-  const orderedKeys = PIPELINE_PHASE_TEMPLATES[sourceType].flatMap((phase) => phase.keys)
+  const orderedKeys = phaseKeysForRun(run, PIPELINE_PHASE_TEMPLATES[sourceType])
   const targetIndex = orderedKeys.indexOf(stageKey)
   if (targetIndex < 0) return steps
 
@@ -175,9 +175,25 @@ function applyExternalExecutionState(run, steps: PipelineStep[]) {
   ]
 }
 
+function snowflakeDbtEnabled(run: any, byKey?: Map<string, PipelineStep>) {
+  if (String(run?.target_warehouse || '').toLowerCase() !== 'snowflake') return false
+  return (
+    String(run?.execution_engine || '').toLowerCase() === 'dbt' ||
+    String(run?.dbt_deployment_mode || '').toLowerCase() === 'generate_and_deploy' ||
+    Boolean(run?.snowflake_dbt_artifact_path) ||
+    Boolean(run?.snowflake_dbt_deploy_status) ||
+    Boolean(byKey?.has('snowflake_dbt_deploy'))
+  )
+}
+
+function phaseKeysForRun(run: any, templates: Array<{ keys: string[] }>): string[] {
+  const includeDbt = snowflakeDbtEnabled(run)
+  return templates.flatMap((phase) => phase.keys.filter((key) => key !== 'snowflake_dbt_deploy' || includeDbt))
+}
+
 function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
   const sourceType = isFileSource(run) ? 'file' : 'database'
-  const orderedKeys = PIPELINE_PHASE_TEMPLATES[sourceType].flatMap((phase) => phase.keys)
+  const orderedKeys = phaseKeysForRun(run, PIPELINE_PHASE_TEMPLATES[sourceType])
   const indexByKey = new Map(orderedKeys.map((key, index) => [key, index]))
   const progressedStates = new Set(['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'])
   const progressedIndexes = steps
@@ -257,9 +273,11 @@ export function getPhaseGroups(run, stepsOverride?) {
   const templates = PIPELINE_PHASE_TEMPLATES[sourceType]
   const steps = Array.isArray(stepsOverride) ? stepsOverride : getPipelineSteps(run)
   const byKey = new Map<string, PipelineStep>(steps.map((step) => [step.key, step]))
+  const includeDbt = snowflakeDbtEnabled(run, byKey)
 
   return templates.map((phase) => {
-    const phaseSteps: PipelineStep[] = phase.keys.map((key) => {
+    const keys = phase.keys.filter((key) => key !== 'snowflake_dbt_deploy' || includeDbt)
+    const phaseSteps: PipelineStep[] = keys.map((key) => {
       const step = byKey.get(key)
       return (
         step || {
@@ -342,6 +360,7 @@ function fallbackStepLabel(key) {
     silver_code_execution: 'Silver Code Execution',
     gold: 'Gold Code Generation',
     gold_code_execution: 'Gold Code Execution',
+    snowflake_dbt_deploy: 'Snowflake dbt',
   }
   return labels[key] || key
 }
@@ -356,14 +375,15 @@ function syntheticStepState(key, byKey: Map<string, PipelineStep>) {
   const silverExecution = state('silver_code_execution')
   const gold = state('gold')
   const goldExecution = state('gold_code_execution')
+  const snowflakeDbt = state('snowflake_dbt_deploy')
   const progressed = (...states: string[]) => states.some((item) => ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(item))
-  const silverProgressed = progressed(silver, gate5, silverExecution, gold, goldExecution)
+  const silverProgressed = progressed(silver, gate5, silverExecution, gold, goldExecution, snowflakeDbt)
 
   if (key === 'bronze') {
-    if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution, snowflakeDbt)) return 'COMPLETED'
   }
   if (key === 'gate4') {
-    if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution, snowflakeDbt)) return 'COMPLETED'
   }
   if (key === 'bronze_code_execution') {
     if (bronzeExecution === 'COMPLETED') return 'COMPLETED'
@@ -377,19 +397,22 @@ function syntheticStepState(key, byKey: Map<string, PipelineStep>) {
     if (mergeReview === 'COMPLETED' || silverProgressed) return 'COMPLETED'
   }
   if (key === 'silver') {
-    if (progressed(gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(gate5, silverExecution, gold, goldExecution, snowflakeDbt)) return 'COMPLETED'
   }
   if (key === 'gate5') {
-    if (progressed(silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(silverExecution, gold, goldExecution, snowflakeDbt)) return 'COMPLETED'
   }
   if (key === 'silver_code_execution') {
-    if (progressed(gold, goldExecution)) return 'COMPLETED'
+    if (progressed(gold, goldExecution, snowflakeDbt)) return 'COMPLETED'
   }
   if (key === 'gold') {
-    if (progressed(goldExecution)) return 'COMPLETED'
+    if (progressed(goldExecution, snowflakeDbt)) return 'COMPLETED'
   }
   if (key === 'gold_code_execution') {
     if (goldExecution === 'COMPLETED') return 'COMPLETED'
+  }
+  if (key === 'snowflake_dbt_deploy') {
+    if (snowflakeDbt === 'COMPLETED') return 'COMPLETED'
   }
   return 'PENDING'
 }
@@ -486,6 +509,11 @@ function buildStepDetail(run, key, state, existingDetail) {
         return 'Gold execution starts after Gold generation for Snowflake runs.'
       }
       return 'UI-only marker: Gold scripts are exported for external execution, not run inside Astra Data.'
+    case 'snowflake_dbt_deploy':
+      if (state === 'COMPLETED') return 'Snowflake dbt artifacts completed.'
+      if (state === 'RUNNING') return 'Snowflake dbt artifacts are being processed.'
+      if (state === 'FAILED') return 'Snowflake dbt processing failed.'
+      return 'Snowflake dbt starts after Gold execution.'
     default:
       return existingDetail || ''
   }

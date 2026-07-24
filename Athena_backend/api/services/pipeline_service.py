@@ -111,6 +111,12 @@ def run_pipeline_background(
     compliance_domain: str = "Insurance",
     compliance_countries: Optional[List[str]] = None,
     target_warehouse: str = "databricks",
+    execution_engine: str = "native",
+    dbt_deployment_mode: str = "generate_only",
+    dbt_target_name: Optional[str] = None,
+    dbt_threads: Optional[int] = None,
+    dbt_command_timeout_secs: Optional[int] = None,
+    force_dbt_deploy: bool = False,
 ) -> None:
     started_at = time.monotonic()
     try:
@@ -138,6 +144,12 @@ def run_pipeline_background(
                 compliance_domain=compliance_domain,
                 compliance_countries=compliance_countries or ["US"],
                 target_warehouse=target_warehouse,
+                execution_engine=execution_engine,
+                dbt_deployment_mode=dbt_deployment_mode,
+                dbt_target_name=dbt_target_name,
+                dbt_threads=dbt_threads,
+                dbt_command_timeout_secs=dbt_command_timeout_secs,
+                force_dbt_deploy=force_dbt_deploy,
             )
         elapsed_seconds = time.monotonic() - started_at
         if elapsed_seconds > _pipeline_timeout_seconds():
@@ -190,6 +202,12 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             compliance_domain=str(payload.compliance_domain or "Insurance"),
             compliance_countries=payload.compliance_countries or ["US"],
             target_warehouse=str(payload.target_warehouse or "databricks").lower(),
+            execution_engine=str(payload.execution_engine or "native").lower(),
+            dbt_deployment_mode=str(payload.dbt_deployment_mode or "generate_only").lower(),
+            dbt_target_name=payload.dbt_target_name,
+            dbt_threads=payload.dbt_threads,
+            dbt_command_timeout_secs=payload.dbt_command_timeout_secs,
+            force_dbt_deploy=bool(payload.force_dbt_deploy),
         )
         BACKGROUND_JOBS[job_key] = future
 
@@ -199,33 +217,59 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
 def normalized_source_databases(checkpoint: Dict[str, Any]) -> Optional[List[str]]:
     value = checkpoint.get("source_databases")
     if isinstance(value, list) and value:
-        return value
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        return cleaned or None
     database_name = checkpoint.get("database_name")
     if database_name:
-        return [database_name]
+        return [str(database_name).strip()]
     return None
+
+
+def _choice(value: Any, allowed: set[str], default: str) -> str:
+    normalized = str(value or default).strip().lower()
+    return normalized if normalized in allowed else default
 
 
 def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunRequest:
     source_databases = normalized_source_databases(checkpoint)
     database_name = source_databases[0] if source_databases else checkpoint.get("database_name")
+    database_name = str(database_name).strip() if database_name else None
+    compliance_countries = checkpoint.get("compliance_countries")
+    if not isinstance(compliance_countries, list):
+        compliance_countries = ["US"]
+    target_warehouse = _choice(checkpoint.get("target_warehouse"), {"databricks", "snowflake", "fabric"}, "databricks")
+    execution_engine = _choice(checkpoint.get("execution_engine"), {"native", "dbt"}, "native")
+    dbt_deployment_mode = _choice(
+        checkpoint.get("dbt_deployment_mode"),
+        {"generate_only", "generate_and_deploy"},
+        "generate_only",
+    )
+    if target_warehouse != "snowflake":
+        execution_engine = "native"
+        dbt_deployment_mode = "generate_only"
     return PipelineRunRequest(
         project_id=checkpoint.get("project_id"),
         brd_text=str(checkpoint.get("brd_text") or ""),
         brd_filename=checkpoint.get("brd_filename"),
-        source=str(checkpoint.get("source") or "database"),
+        source=_choice(checkpoint.get("source"), {"database", "sftp", "adls_gen2", "rdbms"}, "database"),
         provider=checkpoint.get("provider") or "azure_openai",
         deployment=checkpoint.get("deployment"),
         database_name=database_name,
         database_type=checkpoint.get("database_type"),
-        target_warehouse=checkpoint.get("target_warehouse") or "databricks",
+        target_warehouse=target_warehouse,
+        execution_engine=execution_engine,
+        dbt_deployment_mode=dbt_deployment_mode,
+        dbt_target_name=checkpoint.get("dbt_target_name"),
+        dbt_threads=checkpoint.get("dbt_threads"),
+        dbt_command_timeout_secs=checkpoint.get("dbt_command_timeout_secs"),
+        force_dbt_deploy=bool(checkpoint.get("force_dbt_deploy")),
         source_databases=source_databases,
-        sftp_entity=checkpoint.get("sftp_entity") or "transactions",
+        sftp_entity=_choice(checkpoint.get("sftp_entity"), {"transactions", "employee", "both", "auto"}, "transactions"),
         use_domain_kb=bool(checkpoint.get("use_domain_kb")),
         stage_confirmation_enabled=checkpoint.get("stage_confirmation_enabled"),
         compliance_enabled=bool(checkpoint.get("compliance_enabled")),
         compliance_domain=checkpoint.get("compliance_domain") or "Insurance",
-        compliance_countries=checkpoint.get("compliance_countries") or ["US"],
+        compliance_countries=compliance_countries or ["US"],
     )
 
 

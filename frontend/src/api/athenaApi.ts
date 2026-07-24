@@ -105,6 +105,12 @@ export const startRun = (payload: {
   database_type?: string
   database_name?: string
   target_warehouse?: string
+  execution_engine?: string
+  dbt_deployment_mode?: string
+  dbt_target_name?: string
+  dbt_threads?: number
+  dbt_command_timeout_secs?: number
+  force_dbt_deploy?: boolean
   deployment?: string
   budget?: number
   maxKpis?: number

@@ -102,6 +102,30 @@ test('shows Gold execution as waiting while generated Gold code is under review'
   })
 })
 
+test('shows Snowflake dbt as a Gold phase only when dbt is enabled', () => {
+  const nativeRun = {
+    status: 'PIPELINE_COMPLETED',
+    target_warehouse: 'snowflake',
+    pipeline_steps: [
+      { key: 'gold', label: 'Gold Code Generation', state: 'COMPLETED' },
+      { key: 'gold_code_execution', label: 'Gold Code Execution', state: 'COMPLETED' },
+    ],
+  }
+  const dbtRun = {
+    ...nativeRun,
+    execution_engine: 'dbt',
+    snowflake_dbt_deploy_status: 'SKIPPED_GENERATE_ONLY',
+    pipeline_steps: [
+      ...nativeRun.pipeline_steps,
+      { key: 'snowflake_dbt_deploy', label: 'Snowflake dbt', state: 'COMPLETED' },
+    ],
+  }
+
+  expect(getPhaseGroups(nativeRun, getPipelineSteps(nativeRun)).find((item) => item.id === 'phase-5')?.steps)
+    .not.toContainEqual(expect.objectContaining({ key: 'snowflake_dbt_deploy' }))
+  expect(phaseState(dbtRun, 'phase-5', 'snowflake_dbt_deploy')).toBe('COMPLETED')
+})
+
 test('uses the project name instead of rendering a run ID as the pipeline name', () => {
   expect(summarizeRunSource({
     id: 'run-6',
