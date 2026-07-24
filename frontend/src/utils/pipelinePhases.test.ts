@@ -202,3 +202,20 @@ test('keeps the SFTP Gold review separate from Gold execution', () => {
   expect(phaseState(run, 'phase-6', 'gold_review')).toBe('HITL_WAIT')
   expect(phaseState(run, 'phase-6', 'gold_code_execution')).toBe('PENDING')
 })
+
+test('shows only the furthest SFTP phase as running for legacy partial snapshots', () => {
+  const run = {
+    source: 'adls_gen2',
+    status: 'RUNNING',
+    pipeline_steps: [
+      { key: 'ingestion', state: 'RUNNING' },
+      { key: 'discovery', state: 'RUNNING' },
+    ],
+  }
+
+  const phases = getPhaseGroups(run, getPipelineSteps(run))
+
+  expect(phases.find((phase) => phase.id === 'phase-1')?.status).toBe('Done')
+  expect(phases.find((phase) => phase.id === 'phase-2')?.status).toBe('Running')
+  expect(phases.filter((phase) => phase.status === 'Running')).toHaveLength(1)
+})

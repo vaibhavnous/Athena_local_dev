@@ -21,6 +21,31 @@ test('keeps a later phase when a slower status response reports an earlier phase
   expect(useAthenaStore.getState().runs[0].pipeline_steps[0].key).toBe('silver_code_execution')
 })
 
+test('accepts SFTP nomination after discovery in the six-phase order', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-sftp',
+    source: 'adls_gen2',
+    status: 'RUNNING',
+    pipeline_steps: [{ key: 'discovery', state: 'RUNNING' }],
+  })
+
+  useAthenaStore.getState().updateRun('run-sftp', {
+    id: 'run-sftp',
+    source: 'adls_gen2',
+    status: 'RUNNING',
+    pipeline_steps: [
+      { key: 'discovery', state: 'COMPLETED' },
+      { key: 'nomination', state: 'RUNNING' },
+    ],
+  })
+
+  expect(useAthenaStore.getState().runs[0].pipeline_steps).toEqual([
+    { key: 'discovery', state: 'COMPLETED' },
+    { key: 'nomination', state: 'RUNNING' },
+  ])
+})
+
 test('does not erase stage detail from a sparse hydration fallback', () => {
   resetStore()
   useAthenaStore.getState().addRun({

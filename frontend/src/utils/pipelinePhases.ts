@@ -297,17 +297,24 @@ export function getPhaseGroups(run, stepsOverride?) {
   const templates = PIPELINE_PHASE_TEMPLATES[sourceType]
   const steps = Array.isArray(stepsOverride) ? stepsOverride : getPipelineSteps(run)
   const byKey = new Map<string, PipelineStep>(steps.map((step) => [step.key, step]))
+  const orderedKeys = templates.flatMap((phase) => phase.keys)
+  const indexByKey = new Map(orderedKeys.map((key, index) => [key, index]))
+  const furthestProgressIndex = steps.reduce((furthest, step) => {
+    const index = indexByKey.get(step.key) ?? -1
+    return normalizeState(step.state) === 'PENDING' ? furthest : Math.max(furthest, index)
+  }, -1)
 
   return templates.map((phase) => {
     const phaseSteps: PipelineStep[] = phase.keys.map((key) => {
       const step = byKey.get(key)
+      const syntheticState = syntheticStepState(key, byKey, indexByKey, furthestProgressIndex)
       return (
         step || {
           key,
           label: fallbackStepLabel(key, sourceType),
           detail: '',
-          state: syntheticStepState(key, byKey),
-          complete: syntheticStepState(key, byKey) === 'COMPLETED',
+          state: syntheticState,
+          complete: syntheticState === 'COMPLETED',
         }
       )
     })
@@ -402,7 +409,16 @@ function fallbackStepLabel(key, sourceType = 'database') {
   return labels[key] || key
 }
 
-function syntheticStepState(key, byKey: Map<string, PipelineStep>) {
+function syntheticStepState(
+  key,
+  byKey: Map<string, PipelineStep>,
+  indexByKey: Map<string, number>,
+  furthestProgressIndex: number,
+) {
+  const keyIndex = indexByKey.get(key) ?? -1
+  const executionKeys = new Set(['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'])
+  if (keyIndex >= 0 && keyIndex < furthestProgressIndex && !executionKeys.has(key)) return 'COMPLETED'
+
   const state = (stepKey: string) => normalizeState(byKey.get(stepKey)?.state)
   const bronze = state('bronze')
   const bronzeExecution = state('bronze_code_execution')

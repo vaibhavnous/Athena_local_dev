@@ -54,7 +54,7 @@ function normalizeRunStatus(value: any): string {
   return status
 }
 
-const PIPELINE_PROGRESS_ORDER = [
+const DATABASE_PROGRESS_ORDER = [
   'ingestion', 'memory', 'requirements', 'kpis', 'gate1',
   'nomination', 'gate2', 'discovery', 'profiling', 'enrichment', 'gate3',
   'bronze', 'gate4', 'bronze_code_execution',
@@ -62,8 +62,23 @@ const PIPELINE_PROGRESS_ORDER = [
   'gold', 'gold_code_execution',
 ]
 
-function runProgressIndex(run: any): number {
-  const order = new Map(PIPELINE_PROGRESS_ORDER.map((key, index) => [key, index]))
+const FILE_PROGRESS_ORDER = [
+  'ingestion', 'memory', 'requirements', 'kpis', 'gate1',
+  'discovery', 'nomination', 'gate2', 'schema', 'profiling', 'enrichment', 'gate3',
+  'pre_bronze_bootstrap_metadata', 'plan_seal', 'plan_freshness',
+  'pre_bronze_metadata_codegen', 'pre_bronze_metadata_codegen_review', 'bronze', 'gate4',
+  'runtime_bundle_handoff', 'pre_bronze_runtime_config', 'pre_bronze_validate_source',
+  'pre_bronze_discover_source_objects', 'pre_bronze_stage_to_landing',
+  'bronze_code_execution', 'bronze_runtime_validation',
+  'silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5',
+  'silver_code_execution', 'silver_runtime_validation',
+  'gold', 'gold_review', 'gold_code_execution', 'gold_runtime_validation', 'final_publish', 'finalize',
+]
+
+function runProgressIndex(run: any, sourceHint?: string): number {
+  const source = String(run?.source || sourceHint || '').toLowerCase()
+  const progressOrder = ['sftp', 'adls_gen2'].includes(source) ? FILE_PROGRESS_ORDER : DATABASE_PROGRESS_ORDER
+  const order = new Map(progressOrder.map((key, index) => [key, index]))
   const steps = Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length
     ? run.pipeline_steps
     : Array.isArray(run?.stages) ? run.stages : []
@@ -124,7 +139,8 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
 
   // Status hydration can return a sparse checkpoint snapshot after its detail query times out.
   // Keep the furthest known stage; a slower response must not move the UI back to an earlier phase.
-  if (runProgressIndex(incoming) < runProgressIndex(existing)) {
+  const sourceHint = incoming?.source || existing?.source
+  if (runProgressIndex(incoming, sourceHint) < runProgressIndex(existing, sourceHint)) {
     return preserveProgressFields(existing, merged)
   }
 
