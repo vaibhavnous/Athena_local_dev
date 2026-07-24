@@ -33,7 +33,8 @@ def execute_sftp_stage(
         "pipeline_revision": int(state.get("pipeline_revision") or 0) + 1,
         "resume_message": f"{spec.label} is running.",
     }
-    save_checkpoint_state_timed(run_id, running_state, context=f"{stage_key}:running")
+    if spec.checkpoint_policy == "before_after":
+        save_checkpoint_state_timed(run_id, running_state, context=f"{stage_key}:running")
 
     try:
         result = runner(running_state)
@@ -87,5 +88,6 @@ def execute_sftp_stage(
         "pipeline_revision": int(running_state.get("pipeline_revision") or 0) + 1,
         "resume_message": f"{spec.label} completed.",
     }
-    save_checkpoint_state_timed(run_id, completed_state, context=f"{stage_key}:complete")
+    if spec.checkpoint_policy in {"complete", "before_after"}:
+        save_checkpoint_state_timed(run_id, completed_state, context=f"{stage_key}:complete")
     return completed_state

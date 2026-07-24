@@ -53,6 +53,8 @@ def test_every_stage_has_one_status_handoff_and_phase():
     ]
     assert sum(len(phase["keys"]) for phase in phase_templates()) == 30
     assert stage_spec("gate4_metadata").artifact_type == "SFTP_GATE4_METADATA_DECISION"
+    assert stage_spec("plan_seal").checkpoint_policy == "none"
+    assert stage_spec("bronze_autoloader").checkpoint_policy == "before_after"
 
 
 def test_sftp_memory_check_writes_real_context_artifact(monkeypatch):
@@ -201,4 +203,29 @@ def test_stage_execution_refuses_to_complete_without_named_handoff(monkeypatch):
     assert result["status"] == "FAILED"
     assert result["stage_statuses"]["plan_seal"] == "FAILED"
     assert "plan_seal_status=COMPLETED" in result["error"]
-    assert [context for context, _ in saved] == ["plan_seal:running", "plan_seal:failed"]
+    assert [context for context, _ in saved] == ["plan_seal:failed"]
+
+
+def test_checkpoint_policy_skips_pure_nodes_and_bounds_external_side_effects(monkeypatch):
+    from services import pipeline_runtime
+
+    saved = []
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state_timed",
+        lambda run_id, state, context: saved.append(context),
+    )
+
+    execute_sftp_stage(
+        {"run_id": "run-pure", "source": "adls_gen2"},
+        "plan_seal",
+        lambda state: {**state, "plan_seal_status": "COMPLETED"},
+    )
+    assert saved == []
+
+    execute_sftp_stage(
+        {"run_id": "run-external", "source": "adls_gen2"},
+        "bronze_autoloader",
+        lambda state: {**state, "bronze_execution_status": "COMPLETED"},
+    )
+    assert saved == ["bronze_autoloader:running", "bronze_autoloader:complete"]
