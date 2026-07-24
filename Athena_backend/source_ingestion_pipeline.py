@@ -8,6 +8,7 @@ from sftp_nodes.feed_nomination import sftp_feed_nomination_node
 from sftp_nodes.governance import sftp_feed_discovery_node, sftp_gate1_node, sftp_gate2_node
 from sftp_nodes.ingestion import sftp_ingestion_node
 from sftp_nodes.kpi_extraction import sftp_kpi_extraction_node
+from sftp_nodes.memory_check import sftp_memory_check_node
 from sftp_nodes.metadata_discovery import file_metadata_discovery_node
 from sftp_nodes.req_extraction import sftp_req_extraction_node
 from sftp_nodes.review_gates import (
@@ -40,6 +41,7 @@ def build_source_ingestion_graph():
 
     graph.add_node("source_ingestion", _visible_stage("discovery", source_ingestion_node))
     graph.add_node("ingestion_context_setup", _visible_stage("ingestion", sftp_ingestion_node))
+    graph.add_node("memory_check", _visible_stage("memory", sftp_memory_check_node))
     graph.add_node("req_extraction", _visible_stage("requirements", sftp_req_extraction_node))
     graph.add_node("kpi_extraction", _visible_stage("kpis", sftp_kpi_extraction_node))
     graph.add_node("sftp_gate1", sftp_gate1_node)
@@ -69,7 +71,8 @@ def build_source_ingestion_graph():
         return "feed_discovery"
 
     graph.add_conditional_edges("source_ingestion", route_after_source_ingestion)
-    graph.add_edge("ingestion_context_setup", "req_extraction")
+    graph.add_edge("ingestion_context_setup", "memory_check")
+    graph.add_edge("memory_check", "req_extraction")
     graph.add_edge("req_extraction", "kpi_extraction")
     graph.add_edge("kpi_extraction", "sftp_gate1")
 
@@ -97,11 +100,9 @@ def build_source_ingestion_graph():
     graph.add_edge("file_metadata_discovery", "column_profiling")
     graph.add_edge("column_profiling", "semantic_enrichment")
     graph.add_edge("semantic_enrichment", "sftp_gate3")
-    graph.add_edge("sftp_gate3", "source_access_readiness_check")
     graph.add_edge("source_access_readiness_check", "bronze_code_generation")
     graph.add_edge("bronze_code_generation", "sftp_gate4")
     graph.add_edge("sftp_pull", "bronze_ingestion")
-    graph.add_edge("bronze_ingestion", "bronze_validation")
     graph.add_edge("bronze_validation", "silver_code_gen")
     graph.add_edge("silver_code_gen", "sftp_gate5")
     graph.add_edge("dq_validation", "gold_code_gen")
