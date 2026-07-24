@@ -297,6 +297,38 @@ def _script_name(script: Dict[str, Any]) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", target_table).strip("_") or "script"
 
 
+def _script_target_table(script: Dict[str, Any]) -> str:
+    target = str(
+        script.get("target_table")
+        or script.get("silver_table")
+        or script.get("gold_table")
+        or script.get("bronze_table")
+        or ""
+    ).strip()
+    if target:
+        return target
+    match = re.search(
+        r"(?m)^\s*TARGET_TABLE\s*=\s*r?[\"']([^\"']+)[\"']",
+        _read_script_text(script),
+    )
+    return str(match.group(1)).strip() if match else ""
+
+
+def _target_verification_code(target_table: str) -> str:
+    encoded_target = json.dumps(str(target_table or ""))
+    return f"""
+
+_ATHENA_TARGET_TABLE = {encoded_target}
+if not _ATHENA_TARGET_TABLE:
+    raise RuntimeError("Generated script did not declare a target table.")
+if not spark.catalog.tableExists(_ATHENA_TARGET_TABLE):
+    raise RuntimeError(f"Target table was not created: {{_ATHENA_TARGET_TABLE}}")
+_ATHENA_TARGET_ROW_COUNT = spark.table(_ATHENA_TARGET_TABLE).limit(1).count()
+if _ATHENA_TARGET_ROW_COUNT < 1:
+    raise RuntimeError(f"Target table is empty: {{_ATHENA_TARGET_TABLE}}")
+""".rstrip()
+
+
 def _script_keys(script: Dict[str, Any]) -> set[str]:
     keys: set[str] = set()
     for field in ("table", "table_name", "entity", "target_table", "source_table", "silver_table", "bronze_table", "kpi_name", "script_name"):
@@ -391,7 +423,7 @@ def _scripts_for_layer(state: Dict[str, Any], layer: str, review_artifact: Optio
         approved_scripts = [
             script
             for script in scripts
-            if str(script.get("status") or "APPROVED").upper() == "APPROVED"
+            if str(script.get("status") or "APPROVED").upper() in {"APPROVED", "COMPLETED", "SUCCESS"}
             and (script.get("script_body") or script.get("script_path"))
         ]
         dimension_scripts: List[Dict[str, Any]] = []
@@ -463,7 +495,7 @@ def _build_batch_driver_notebook(layer: str, scripts: List[Dict[str, Any]], *, w
         {
             "script_name": _script_name(script),
             "script_path": str(script.get("script_path") or "").strip(),
-            "target_table": script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
+            "target_table": _script_target_table(script),
             "script_text": _read_script_text(script),
         }
         for script in scripts
@@ -496,10 +528,20 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
         _script_globals["__name__"] = f"__athena_{{_name}}"
         _script_globals["__file__"] = _item.get("script_path") or f"<athena:{{_name}}>"
         exec(compile(_item.get("script_text") or "", f"<athena:{{_name}}>", "exec"), _script_globals)
+        _target = _item.get("target_table")
+        if not _target:
+            raise RuntimeError(f"Generated script did not declare a target table: {{_name}}")
+        if not spark.catalog.tableExists(_target):
+            raise RuntimeError(f"Target table was not created: {{_target}}")
+        _target_row_count = spark.table(_target).limit(1).count()
+        if _target_row_count < 1:
+            raise RuntimeError(f"Target table is empty: {{_target}}")
         _RESULTS.append({{
             "script_name": _name,
             "script_path": _item.get("script_path"),
             "target_table": _item.get("target_table"),
+            "target_verified": True,
+            "target_row_count_at_least": 1,
             "status": "SUCCESS",
             "elapsed_seconds": round(time.time() - _started, 2),
         }})
@@ -581,33 +623,6 @@ def _annotate_batch_results(
     ]
 
 
-def _successful_batch_results_from_scripts(
-    scripts: List[Dict[str, Any]],
-    *,
-    notebook_path: str,
-    run_state: Dict[str, Any],
-    warning: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    return [
-        {
-            "script_name": _script_name(script),
-            "script_path": str(script.get("script_path") or "").strip(),
-            "target_table": script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
-            "status": "SUCCESS",
-            "workspace_path": notebook_path,
-            "databricks_run_id": run_state.get("run_id"),
-            "run_page_url": run_state.get("run_page_url"),
-            "cluster_id": run_state.get("cluster_id"),
-            "compute_mode": _databricks_compute_mode(),
-            "life_cycle_state": run_state.get("life_cycle_state"),
-            "result_state": run_state.get("result_state"),
-            "state_message": run_state.get("state_message"),
-            **({"warning": warning} if warning else {}),
-        }
-        for script in scripts
-    ]
-
-
 def _run_failure_detail(run_state: Dict[str, Any]) -> str:
     detail = str(run_state.get("state_message") or run_state.get("result_state") or "unknown error")
     try:
@@ -685,30 +700,21 @@ def _execute_databricks_stage_batch(
         )
         raise RuntimeError(failure)
 
-    output_warning = None
     try:
         output_run_id = _task_run_id(run_state)
         output = _get_run_output(output_run_id) if output_run_id is not None else {}
         summary = _parse_notebook_result(output)
     except Exception as exc:
-        output_warning = f"Databricks run succeeded, but Athena could not read notebook output: {exc}"
-        logger.warning(
-            output_warning,
-            extra={"run_id": run_id, "node": f"{layer}_output_read_warning", "stage": f"{layer}_code_execution"},
-        )
-        summary = {}
+        raise RuntimeError(
+            f"Databricks {layer} run succeeded, but Athena could not verify its output: {exc}"
+        ) from exc
     results = [item for item in (summary.get("results") or []) if isinstance(item, dict)]
-    failed = [item for item in results if str(item.get("status") or "").upper() == "FAILED"]
-    executed_scripts = (
-        _annotate_batch_results(results, notebook_path=notebook_path, run_state=run_state)
-        if results
-        else _successful_batch_results_from_scripts(
-            scripts,
-            notebook_path=notebook_path,
-            run_state=run_state,
-            warning=output_warning or "Databricks run succeeded, but notebook output did not include per-script results.",
+    if len(results) != len(scripts):
+        raise RuntimeError(
+            f"Databricks {layer} run returned {len(results)}/{len(scripts)} verified script results."
         )
-    )
+    failed = [item for item in results if str(item.get("status") or "").upper() == "FAILED"]
+    executed_scripts = _annotate_batch_results(results, notebook_path=notebook_path, run_state=run_state)
     if failed:
         first = failed[0]
         raise RuntimeError(
@@ -778,7 +784,8 @@ def _execute_databricks_stage(
         script_path = str(script.get("script_path") or "").strip()
         script_name = _script_name(script)
         notebook_path = _workspace_path(layer, run_id, script_name)
-        script_text = _read_script_text(script)
+        target_table = _script_target_table(script)
+        script_text = f"{_read_script_text(script)}\n{_target_verification_code(target_table)}"
         logger.info(
             "Submitting Databricks %s script %d/%d for %s",
             layer,
@@ -800,7 +807,7 @@ def _execute_databricks_stage(
             completed_count=len(executed_scripts),
             current_index=index,
             current_name=script_name,
-            current_target=script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
+            current_target=target_table,
             message=f"Databricks {layer.capitalize()} execution running: table {index}/{len(scripts)} ({script_name}).",
         )
         started_at = time.monotonic()
@@ -826,7 +833,7 @@ def _execute_databricks_stage(
                 completed_count=len(executed_scripts),
                 current_index=index,
                 current_name=script_name,
-                current_target=script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
+                current_target=target_table,
                 message=failure,
             )
             raise RuntimeError(failure)
@@ -843,6 +850,9 @@ def _execute_databricks_stage(
                 "result_state": run_state.get("result_state"),
                 "state_message": run_state.get("state_message"),
                 "elapsed_seconds": elapsed_seconds,
+                "target_table": target_table,
+                "target_verified": True,
+                "target_row_count_at_least": 1,
             }
         )
         state = save_external_execution_progress(
@@ -856,7 +866,7 @@ def _execute_databricks_stage(
             completed_count=len(executed_scripts),
             current_index=index,
             current_name=script_name,
-            current_target=script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
+            current_target=target_table,
             message=f"Databricks {layer.capitalize()} execution progress: {len(executed_scripts)}/{len(scripts)} completed.",
         )
 

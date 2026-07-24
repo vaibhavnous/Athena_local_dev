@@ -190,8 +190,20 @@ def _compute_status(
         return "RUNNING"
     if gate1_decision == "APPROVED" and gate2_decision in {None, ""} and (not source_ingestion_completed or not feed_review_ready):
         return "RUNNING"
-    if gate5_decision == "APPROVED" or gold_generation_completed:
+    target = str(checkpoint.get("target_warehouse") or "").strip().lower()
+    target_gold_completed = (
+        target == "databricks"
+        and str(checkpoint.get("databricks_gold_execution_status") or "").upper() == "COMPLETED"
+    ) or (
+        target == "snowflake"
+        and str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
+    )
+    if target_gold_completed:
         return "PIPELINE_COMPLETED"
+    if gold_generation_completed:
+        return "HITL_WAIT"
+    if str(status or "").upper() == "PIPELINE_COMPLETED" and target in {"databricks", "snowflake"}:
+        return "RUNNING"
     if silver_generation_completed and gate5_decision not in {"APPROVED", "REJECTED"}:
         return "HITL_WAIT"
     return status

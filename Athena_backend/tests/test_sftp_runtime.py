@@ -242,6 +242,8 @@ def test_get_sftp_run_context_handles_script_loader_failure(monkeypatch):
         "gate4": {"decision": "APPROVED"},
         "gate5": {"decision": "APPROVED"},
         "gold_generation_status": "COMPLETED",
+        "target_warehouse": "databricks",
+        "databricks_gold_execution_status": "COMPLETED",
     }
     summary = [{"artifact_type": "GOLD_SCRIPTS", "stage": "gold generation"}]
 

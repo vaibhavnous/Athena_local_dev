@@ -723,7 +723,7 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
                 checkpoint.update(result)
             checkpoint.update({"run_id": run_id, "background_stage": None})
             if checkpoint.get("status") == "PROCESSING":
-                checkpoint["status"] = checkpoint.get("semantic_enrichment_status") or checkpoint.get("table_nomination_status") or "COMPLETED"
+                checkpoint["status"] = "RUNNING"
             save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_complete")
         except Exception as exc:
             logger.exception("Background %s failed for run_id=%s", stage, run_id)
@@ -2001,10 +2001,16 @@ def build_pipeline_steps(
     external_execution = checkpoint.get("external_execution") if isinstance(checkpoint.get("external_execution"), dict) else {}
     external_message = str(external_execution.get("message") or "").strip()
 
-    execution_completion = {
+    executor_owned_completion = {
         step["key"]: bool(step.get("complete"))
         for step in steps
-        if step.get("key") in {"bronze_code_execution", "silver_code_execution", "gold_code_execution"}
+        if step.get("key") in {
+            "bronze_code_execution",
+            "bronze_runtime_validation",
+            "silver_code_execution",
+            "silver_runtime_validation",
+            "gold_code_execution",
+        }
     }
 
     active_index = next((index for index, step in enumerate(steps) if step.get("key") == active_stage_key), None) if active_stage_key else None
@@ -2055,7 +2061,7 @@ def build_pipeline_steps(
     # executor-owned status (or a real external handoff result) can complete it.
     for step in steps:
         key = step.get("key")
-        if key in execution_completion and not execution_completion[key] and key != active_stage_key:
+        if key in executor_owned_completion and not executor_owned_completion[key] and key != active_stage_key:
             step["complete"] = False
             step["state"] = "PENDING"
 
@@ -2371,6 +2377,14 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         next_review_key = None
 
     status = checkpoint.get("status") or checkpoint.get("table_nomination_status") or checkpoint.get("enrichment_review_status") or "UNKNOWN"
+    target_warehouse = str(checkpoint.get("target_warehouse") or "").strip().lower()
+    target_gold_completed = (
+        target_warehouse == "databricks"
+        and str(checkpoint.get("databricks_gold_execution_status") or "").upper() == "COMPLETED"
+    ) or (
+        target_warehouse == "snowflake"
+        and str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
+    )
     if paused_before_review_gate:
         status = "HITL_WAIT"
     elif stale_stage_confirmation_completed and not stage_confirmation:
@@ -2386,25 +2400,16 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         "ABORTED",
     }
     if can_promote_to_completed and (
-        checkpoint.get("bronze_generation_status") == "COMPLETED"
-        or checkpoint.get("databricks_bronze_execution_status") == "COMPLETED"
-        or checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
-    ):
-        status = "PIPELINE_COMPLETED"
-    if can_promote_to_completed and gate3_payload and bronze_generation_completed:
-        status = "PIPELINE_COMPLETED"
-    if can_promote_to_completed and (
-        silver_generation_completed
-        or checkpoint.get("databricks_silver_execution_status") == "COMPLETED"
-        or checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
-    ):
-        status = "PIPELINE_COMPLETED"
-    if can_promote_to_completed and (
-        gold_generation_completed
-        or checkpoint.get("databricks_gold_execution_status") == "COMPLETED"
+        checkpoint.get("databricks_gold_execution_status") == "COMPLETED"
         or checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
     ):
         status = "PIPELINE_COMPLETED"
+    if (
+        str(status or "").upper() == "PIPELINE_COMPLETED"
+        and target_warehouse in {"databricks", "snowflake"}
+        and not target_gold_completed
+    ):
+        status = "HITL_WAIT" if gold_generation_completed else "RUNNING"
     if (
         not checkpoint.get("background_stage")
         and str(status or "").upper() in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
@@ -3372,6 +3377,10 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
         save_checkpoint_state(run_id, execution_state)
         try:
             final_state = run_snowflake_gold_scripts(execution_state)
+            if str(final_state.get("snowflake_gold_execution_status") or "").upper() != "COMPLETED":
+                raise RuntimeError(
+                    "Snowflake Gold execution did not complete; refusing to complete the pipeline."
+                )
         except Exception as exc:
             failed_state = {
                 **execution_state,
@@ -3385,32 +3394,49 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
     elif decision == "APPROVED" and str(final_state.get("target_warehouse") or "").lower() == "databricks":
         from services.databricks_runtime import databricks_gold_execution_enabled, run_databricks_gold_scripts
 
-        if databricks_gold_execution_enabled():
-            execution_state = {
-                **final_state,
-                "status": "RUNNING",
-                "background_stage": "gold_code_execution",
-                "resume_message": "Executing approved Gold scripts in Databricks.",
-            }
-            save_checkpoint_state(run_id, execution_state)
-            try:
-                final_state = run_databricks_gold_scripts(
-                    execution_state,
-                    review_artifact=execution_state["gold_review_artifact"],
-                    approved_only=True,
-                )
-            except Exception as exc:
-                failed_state = {
-                    **execution_state,
+        if not databricks_gold_execution_enabled():
+            error = "Databricks Gold execution is disabled; refusing to complete the pipeline."
+            save_checkpoint_state(
+                run_id,
+                {
+                    **final_state,
                     "status": "FAILED",
                     "failed_background_stage": "gold_code_execution",
-                    "error": str(exc),
-                }
-                save_checkpoint_state(run_id, failed_state)
-                raise
+                    "error": error,
+                },
+            )
+            raise RuntimeError(error)
+        execution_state = {
+            **final_state,
+            "status": "RUNNING",
+            "background_stage": "gold_code_execution",
+            "resume_message": "Executing approved Gold scripts in Databricks.",
+        }
+        save_checkpoint_state(run_id, execution_state)
+        try:
+            final_state = run_databricks_gold_scripts(
+                execution_state,
+                review_artifact=execution_state["gold_review_artifact"],
+                approved_only=True,
+            )
+            if str(final_state.get("databricks_gold_execution_status") or "").upper() != "COMPLETED":
+                raise RuntimeError(
+                    "Databricks Gold execution did not complete; refusing to complete the pipeline."
+                )
+        except Exception as exc:
+            failed_state = {
+                **execution_state,
+                "status": "FAILED",
+                "failed_background_stage": "gold_code_execution",
+                "error": str(exc),
+            }
+            save_checkpoint_state(run_id, failed_state)
+            raise
         final_state.update({"status": "PIPELINE_COMPLETED", "background_stage": None, "next_review_key": None})
     elif decision == "APPROVED":
-        final_state.update({"status": "PIPELINE_COMPLETED", "background_stage": None})
+        error = f"Unsupported target warehouse for Gold execution: {final_state.get('target_warehouse') or 'missing'}"
+        save_checkpoint_state(run_id, {**final_state, "status": "FAILED", "error": error})
+        raise RuntimeError(error)
 
     save_checkpoint_state(run_id, final_state)
     return final_state

@@ -23,29 +23,16 @@ def _run_slug(run_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", str(run_id or "run")).strip("_")[:48] or "run"
 
 
-def _resolve_sftp_entities(state: Stage01State) -> List[str]:
-    entities: List[str] = []
+def _resolve_sftp_silver_inputs(state: Stage01State) -> List[Dict[str, str]]:
+    inputs: List[Dict[str, str]] = []
     silver_results = state.get("silver_generation_results") or []
     for item in silver_results:
         if isinstance(item, dict):
             entity = str(item.get("entity") or "").strip().lower()
-            if entity and entity not in entities:
-                entities.append(entity)
-
-    bronze_results = state.get("bronze_generation_results") or []
-    for item in bronze_results:
-        if isinstance(item, dict):
-            entity = str(item.get("entity") or "").strip().lower()
-            if entity and entity not in entities:
-                entities.append(entity)
-
-    candidate_feed = state.get("candidate_feed")
-    if isinstance(candidate_feed, dict):
-        entity = str(candidate_feed.get("entity") or "").strip().lower()
-        if entity and entity not in entities:
-            entities.append(entity)
-
-    return entities
+            source_table = str(item.get("silver_table") or item.get("target_table") or "").strip()
+            if entity and source_table and not any(existing["entity"] == entity for existing in inputs):
+                inputs.append({"entity": entity, "source_table": source_table})
+    return inputs
 
 
 def _script_output_path(entity: str, run_id: str) -> str:
@@ -58,9 +45,7 @@ def _spark_col_expr(column_name: str) -> str:
     return f'F.col("`{escaped}`")'
 
 
-def _build_gold_script(entity: str, silver_schema: str, gold_schema: str, columns: List[str]) -> str:
-    source_table = f"{silver_schema}.silver_{entity}"
-    target_table = f"{gold_schema}.gold_{entity}"
+def _build_gold_script(source_table: str, target_table: str, columns: List[str]) -> str:
     select_columns = ", ".join([_spark_col_expr(col) for col in columns])
     select_block = f"df.select({select_columns})" if select_columns else "df"
 
@@ -133,11 +118,15 @@ def _write_readme(results: List[Dict[str, Any]], generated_at: str) -> str:
     return path
 
 
-def _generate_one_entity(entity: str, run_id: str, silver_schema: str, gold_schema: str, columns: List[str]) -> Dict[str, Any]:
+def _generate_one_entity(
+    entity: str,
+    run_id: str,
+    source_table: str,
+    target_table: str,
+    columns: List[str],
+) -> Dict[str, Any]:
     script_path = _script_output_path(entity, run_id)
-    source_table = f"{silver_schema}.silver_{entity}"
-    target_table = f"{gold_schema}.gold_{entity}"
-    code = _build_gold_script(entity=entity, silver_schema=silver_schema, gold_schema=gold_schema, columns=columns)
+    code = _build_gold_script(source_table=source_table, target_table=target_table, columns=columns)
     llm_error = None
     llm_enhanced = False
 
@@ -156,6 +145,9 @@ def _generate_one_entity(entity: str, run_id: str, silver_schema: str, gold_sche
     return {
         "run_id": run_id,
         "entity": entity,
+        "source_table": source_table,
+        "target_table": target_table,
+        "gold_table": target_table,
         "script_path": script_path,
         "llm_enhanced": llm_enhanced,
         "llm_error": llm_error,
@@ -166,13 +158,21 @@ def _generate_one_entity(entity: str, run_id: str, silver_schema: str, gold_sche
 def sftp_gold_code_generation_node(state: Stage01State) -> Stage01State:
     new_state = state.copy()
     run_id = str(state.get("run_id") or f"sftp_gold_{datetime.utcnow().timestamp()}")
-    silver_schema = str(state.get("silver_schema") or os.getenv("SILVER_SCHEMA", "silver"))
+    gold_catalog = str(
+        state.get("gold_catalog")
+        or os.getenv("GOLD_CATALOG")
+        or state.get("silver_catalog")
+        or os.getenv("SILVER_CATALOG")
+        or state.get("bronze_catalog")
+        or os.getenv("BRONZE_CATALOG", "workspace")
+    )
     gold_schema = str(state.get("gold_schema") or os.getenv("GOLD_SCHEMA", "gold"))
+    gold_namespace = gold_schema if "." in gold_schema else f"{gold_catalog}.{gold_schema}"
 
-    entities = _resolve_sftp_entities(state)
-    if not entities:
+    silver_inputs = _resolve_sftp_silver_inputs(state)
+    if not silver_inputs:
         new_state["gold_generation_status"] = "SKIPPED"
-        new_state["gold_generation_error"] = "No Silver or Bronze entities available for Gold generation."
+        new_state["gold_generation_error"] = "No executed Silver table mappings are available for Gold generation."
         return new_state
 
     columns: List[str] = []
@@ -184,8 +184,17 @@ def sftp_gold_code_generation_node(state: Stage01State) -> Stage01State:
                 columns.append(name)
 
     results: List[Dict[str, Any]] = []
-    for entity in entities:
-        results.append(_generate_one_entity(entity, run_id, silver_schema, gold_schema, columns))
+    for item in silver_inputs:
+        entity = item["entity"]
+        results.append(
+            _generate_one_entity(
+                entity,
+                run_id,
+                item["source_table"],
+                f"{gold_namespace}.gold_{entity}",
+                columns,
+            )
+        )
 
     generated_at = datetime.utcnow().isoformat()
     bundle = {
@@ -214,6 +223,8 @@ def sftp_gold_code_generation_node(state: Stage01State) -> Stage01State:
     new_state.update({
         "gold_generation_status": "COMPLETED",
         "gold_generation_error": None,
+        "gold_catalog": gold_catalog,
+        "gold_schema": gold_schema,
         "gold_generated_at": generated_at,
         "gold_generation_results": results,
         "gold_generation_bundle_path": bundle_path,

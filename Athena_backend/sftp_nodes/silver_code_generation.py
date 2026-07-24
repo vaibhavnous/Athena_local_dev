@@ -398,8 +398,16 @@ def _write_readme(results: List[Dict[str, Any]], generated_at: str) -> str:
 def sftp_silver_code_generation_node(state: Stage01State) -> Stage01State:
     new_state = state.copy()
     run_id = str(state.get("run_id") or f"sftp_silver_{datetime.now(timezone.utc).timestamp()}")
+    bronze_catalog = str(state.get("bronze_catalog") or os.getenv("BRONZE_CATALOG", "workspace"))
     bronze_schema = str(state.get("bronze_schema") or os.getenv("BRONZE_SCHEMA", "bronze"))
+    silver_catalog = str(
+        state.get("silver_catalog")
+        or os.getenv("SILVER_CATALOG")
+        or bronze_catalog
+    )
     silver_schema = str(state.get("silver_schema") or os.getenv("SILVER_SCHEMA", "silver"))
+    bronze_namespace = bronze_schema if "." in bronze_schema else f"{bronze_catalog}.{bronze_schema}"
+    silver_namespace = silver_schema if "." in silver_schema else f"{silver_catalog}.{silver_schema}"
 
     bronze_results = _resolve_sftp_bronze_results(state)
     if not bronze_results:
@@ -431,8 +439,8 @@ def sftp_silver_code_generation_node(state: Stage01State) -> Stage01State:
                 _generate_one_entity,
                 bronze_result=result,
                 run_id=run_id,
-                bronze_schema=bronze_schema,
-                silver_schema=silver_schema,
+                bronze_schema=bronze_namespace,
+                silver_schema=silver_namespace,
                 pii_columns=pii_columns,
                 state=state,
             )
@@ -472,6 +480,8 @@ def sftp_silver_code_generation_node(state: Stage01State) -> Stage01State:
     new_state.update({
         "silver_generation_status": "COMPLETED" if all(r.get("status") == "COMPLETED" for r in results) else "PARTIAL",
         "silver_generation_error": None,
+        "silver_catalog": silver_catalog,
+        "silver_schema": silver_schema,
         "silver_generated_at": generated_at,
         "silver_generation_results": results,
         "silver_generation_bundle_path": bundle_path,

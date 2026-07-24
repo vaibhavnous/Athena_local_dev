@@ -161,6 +161,58 @@ def _apply_reviewed_bronze_artifact_to_results(state: Dict[str, Any]) -> Dict[st
     return {**state, "bronze_generation_results": results}
 
 
+def _execute_reviewed_layer(
+    run_id: str,
+    state: Dict[str, Any],
+    layer: str,
+    review_artifact: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    from services.pipeline_runtime import save_checkpoint_state
+
+    target = str(state.get("target_warehouse") or "").strip().lower()
+    execution_state = {
+        **state,
+        "status": "RUNNING",
+        "background_stage": f"{layer}_code_execution",
+        "next_gate": None,
+        "resume_message": f"Executing approved {layer.capitalize()} scripts in {target.capitalize()}.",
+    }
+    save_checkpoint_state(run_id, execution_state)
+
+    if target == "databricks":
+        from services.databricks_runtime import (
+            databricks_execution_enabled,
+            run_databricks_bronze_scripts,
+            run_databricks_silver_scripts,
+        )
+
+        if not databricks_execution_enabled(layer):
+            raise RuntimeError(
+                f"Databricks {layer.capitalize()} execution is disabled; refusing to generate the next layer."
+            )
+        runner = {
+            "bronze": run_databricks_bronze_scripts,
+            "silver": run_databricks_silver_scripts,
+        }[layer]
+        result = runner(execution_state, review_artifact=review_artifact, approved_only=True)
+        status = result.get(f"databricks_{layer}_execution_status")
+    elif target == "snowflake":
+        if layer == "bronze":
+            from services.snowflake_bronze_runtime import run_snowflake_bronze_scripts as runner
+        else:
+            from services.snowflake_silver_runtime import run_snowflake_silver_scripts as runner
+        result = runner(execution_state, review_artifact=review_artifact, approved_only=True)
+        status = result.get(f"snowflake_{layer}_execution_status")
+    else:
+        raise RuntimeError(f"Unsupported target warehouse for {layer.capitalize()} execution: {target or 'missing'}")
+
+    if str(status or "").upper() != "COMPLETED":
+        raise RuntimeError(
+            f"{target.capitalize()} {layer.capitalize()} execution did not complete; refusing to generate the next layer."
+        )
+    return {**result, "background_stage": None}
+
+
 def submit_sftp_gate1_review(run_id: str, approve: bool = True) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
     from sftp_nodes.governance import sftp_feed_discovery_node, sftp_gate1_node, sftp_gate2_node
@@ -229,12 +281,8 @@ def submit_sftp_gate2_review(run_id: str, approve: bool = True) -> Dict[str, Any
 def submit_sftp_gate3_review(run_id: str, approve: bool = True, enriched_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
     from sftp_nodes.bronze_code_generation import sftp_bronze_code_generation_node
-    from sftp_nodes.review_gates import source_access_readiness_check_node, sftp_gate4_node, sftp_gate5_node, bronze_validation_node, dq_validation_node
+    from sftp_nodes.review_gates import source_access_readiness_check_node, sftp_gate4_node
     from sftp_nodes.semantic_enrichment import sftp_gate3_node
-    from sftp_nodes.sftp_pull import sftp_pull_node
-    from sftp_nodes.silver_code_generation import sftp_silver_code_generation_node
-    from sftp_nodes.bronze_ingestion import sftp_bronze_ingestion_node
-    from sftp_nodes.gold_code_generation import sftp_gold_code_generation_node
 
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
     checkpoint_state["gate3_decision"] = "APPROVED" if approve else "REJECTED"
@@ -266,34 +314,12 @@ def submit_sftp_gate3_review(run_id: str, approve: bool = True, enriched_metadat
         save_checkpoint_state(run_id, gate4_state)
         return gate4_state
 
-    if str(gate4_state.get("source") or "").lower() == "sftp":
-        pull_state = sftp_pull_node(gate4_state)
-        bronze_state = sftp_bronze_ingestion_node(pull_state)
-    else:
-        bronze_state = {
-            **gate4_state,
-            "bronze_ingestion_status": "HANDOFF_ONLY",
-            "bronze_handoff_status": "READY_FOR_DATABRICKS_REVIEWED_SCRIPT",
-        }
-    if bronze_state.get("status") == "FAILED":
-        save_checkpoint_state(run_id, bronze_state)
-        return bronze_state
-
-    validated_state = bronze_validation_node(bronze_state)
-    silver_state = sftp_silver_code_generation_node(validated_state)
-    if silver_state.get("silver_generation_status") == "FAILED" or silver_state.get("status") == "FAILED":
-        save_checkpoint_state(run_id, silver_state)
-        return silver_state
-
-    gate5_state = sftp_gate5_node({**silver_state, "silver_review_decision": "APPROVED"})
-    if gate5_state.get("status") == "HITL_WAIT" or gate5_state.get("status") == "FAILED":
-        save_checkpoint_state(run_id, gate5_state)
-        return gate5_state
-
-    dq_state = dq_validation_node(gate5_state)
-    gold_state = sftp_gold_code_generation_node(dq_state)
-    save_checkpoint_state(run_id, gold_state)
-    return gold_state
+    save_checkpoint_state(run_id, gate4_state)
+    return submit_sftp_gate4_review(
+        run_id,
+        action="APPROVED",
+        review_artifact=gate4_state.get("bronze_review_artifact"),
+    )
 
 
 def submit_sftp_gate4_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -333,12 +359,30 @@ def submit_sftp_gate4_review(run_id: str, action: str = "APPROVED", review_artif
             "bronze_ingestion_status": "HANDOFF_ONLY",
             "bronze_handoff_status": "READY_FOR_DATABRICKS_REVIEWED_SCRIPT",
         }
-    validated = bronze_validation_node(bronze_state)
+    reviewed_state = _apply_reviewed_bronze_artifact_to_results(bronze_state)
+    try:
+        executed_state = _execute_reviewed_layer(
+            run_id,
+            reviewed_state,
+            "bronze",
+            reviewed_state.get("bronze_review_artifact"),
+        )
+    except Exception as exc:
+        failed_state = {
+            **reviewed_state,
+            "status": "FAILED",
+            "background_stage": "bronze_code_execution",
+            "failed_background_stage": "bronze_code_execution",
+            "error": str(exc),
+        }
+        save_checkpoint_state(run_id, failed_state)
+        raise
+
+    validated = bronze_validation_node(executed_state)
     if validated.get("status") == "FAILED":
         save_checkpoint_state(run_id, validated)
         return validated
 
-    validated = _apply_reviewed_bronze_artifact_to_results(validated)
     silver_state = sftp_silver_code_generation_node(validated)
     silver_status = str(silver_state.get("silver_generation_status") or "").upper()
     silver_items = ((silver_state.get("silver_review_artifact") or {}).get("items") or [])
@@ -376,7 +420,42 @@ def submit_sftp_gate5_review(run_id: str, action: str = "APPROVED", review_artif
         save_checkpoint_state(run_id, gate5_state)
         return gate5_state
 
-    dq_state = dq_validation_node(gate5_state)
+    try:
+        executed_state = _execute_reviewed_layer(
+            run_id,
+            gate5_state,
+            "silver",
+            gate5_state.get("silver_review_artifact"),
+        )
+    except Exception as exc:
+        failed_state = {
+            **gate5_state,
+            "status": "FAILED",
+            "background_stage": "silver_code_execution",
+            "failed_background_stage": "silver_code_execution",
+            "error": str(exc),
+        }
+        save_checkpoint_state(run_id, failed_state)
+        raise
+
+    dq_state = dq_validation_node(executed_state)
     gold_state = sftp_gold_code_generation_node(dq_state)
+    if str(gold_state.get("gold_generation_status") or "").upper() == "COMPLETED":
+        gold_state.update(
+            {
+                "status": "HITL_WAIT",
+                "background_stage": None,
+                "next_gate": None,
+                "next_review_key": "gold_review",
+                "gold_review_artifact": {
+                    "items": [
+                        item
+                        for item in gold_state.get("gold_generation_results") or []
+                        if isinstance(item, dict)
+                    ],
+                },
+                "resume_message": "Gold Review is pending. Review generated Gold scripts before execution.",
+            }
+        )
     save_checkpoint_state(run_id, gold_state)
     return gold_state

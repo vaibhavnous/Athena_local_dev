@@ -1109,6 +1109,7 @@ def test_run_context_advances_stale_silver_stage_confirmation(monkeypatch):
         "next_stage_label": "Silver Generation",
         "bronze_generation_status": "COMPLETED",
         "silver_generation_status": "COMPLETED",
+        "gate4": {"decision": "APPROVED"},
         "enrichment_review_status": "COMPLETED",
         "enrichment_review_artifact": {"approved_from_checkpoint": True},
     }
@@ -1136,9 +1137,9 @@ def test_run_context_advances_stale_silver_stage_confirmation(monkeypatch):
 
     context = pipeline_runtime.get_run_context("run-silver-ready")
 
-    assert context["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
-    assert context["stage_confirmation"]["last_completed_stage_key"] == "silver"
-    assert context["stage_confirmation"]["next_stage_key"] == "gold"
+    assert context["status"] == "HITL_WAIT"
+    assert context["next_gate"] == 5
+    assert context["stage_confirmation"] is None
     assert context["silver"]["scripts"][0]["script_body"] == "print('silver')"
 
 
@@ -1156,6 +1157,9 @@ def test_run_context_clears_stale_stage_confirmation_when_gold_complete(monkeypa
         "next_stage_label": "Gold Generation",
         "silver_generation_status": "COMPLETED",
         "gold_generation_status": "COMPLETED",
+        "gate4": {"decision": "APPROVED"},
+        "gate5": {"decision": "APPROVED"},
+        "next_review_key": "gold_review",
         "enrichment_review_status": "COMPLETED",
         "enrichment_review_artifact": {"approved_from_checkpoint": True},
     }
@@ -1183,7 +1187,8 @@ def test_run_context_clears_stale_stage_confirmation_when_gold_complete(monkeypa
 
     context = pipeline_runtime.get_run_context("run-gold-ready")
 
-    assert context["status"] == "PIPELINE_COMPLETED"
+    assert context["status"] == "HITL_WAIT"
+    assert context["next_review_key"] == "gold_review"
     assert context["stage_confirmation"] is None
     assert context["gold"]["scripts"][0]["script_body"] == "print('gold')"
 

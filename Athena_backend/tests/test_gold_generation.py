@@ -703,7 +703,7 @@ def test_databricks_gold_submits_approved_scripts_as_one_batch(monkeypatch):
     assert len(result["databricks_gold_execution_results"]) == 2
 
 
-def test_databricks_gold_batch_success_survives_output_poll_failure(monkeypatch):
+def test_databricks_gold_batch_refuses_unverifiable_output(monkeypatch):
     monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
     monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_EXECUTION_MODE", raising=False)
     monkeypatch.delenv("ATHENA_DATABRICKS_EXECUTION_MODE", raising=False)
@@ -724,20 +724,17 @@ def test_databricks_gold_batch_success_survives_output_poll_failure(monkeypatch)
     monkeypatch.setattr(databricks_runtime, "_get_run_output", lambda *_: (_ for _ in ()).throw(RuntimeError("output unavailable")))
     monkeypatch.setattr(databricks_runtime, "save_external_execution_progress", lambda state, **_: state)
 
-    result = databricks_runtime.run_databricks_gold_scripts(
-        {
-            "run_id": "run-batch-gold-output-warning",
-            "target_warehouse": "databricks",
-            "gold_generation_results": [
-                {"status": "APPROVED", "script_body": "print('one')", "target_table": "gold.fact_one"},
-                {"status": "APPROVED", "script_body": "print('two')", "target_table": "gold.fact_two"},
-            ],
-        }
-    )
-
-    assert result["databricks_gold_execution_status"] == "COMPLETED"
-    assert [item["status"] for item in result["databricks_gold_execution_results"]] == ["SUCCESS", "SUCCESS"]
-    assert "output unavailable" in result["databricks_gold_execution_results"][0]["warning"]
+    with pytest.raises(RuntimeError, match="could not verify its output"):
+        databricks_runtime.run_databricks_gold_scripts(
+            {
+                "run_id": "run-batch-gold-output-warning",
+                "target_warehouse": "databricks",
+                "gold_generation_results": [
+                    {"status": "APPROVED", "script_body": "print('one')", "target_table": "gold.fact_one"},
+                    {"status": "APPROVED", "script_body": "print('two')", "target_table": "gold.fact_two"},
+                ],
+            }
+        )
 
 
 def test_databricks_batch_notebook_fails_the_job_when_any_script_fails():
@@ -750,6 +747,8 @@ def test_databricks_batch_notebook_fails_the_job_when_any_script_fails():
     assert 'if _SUMMARY["status"] == "FAILED":' in notebook
     assert 'exec(compile(_item.get("script_text") or "", f"<athena:{_name}>", "exec"), _script_globals)' in notebook
     assert '"scripts_ok": builtins.sum(' in notebook
+    assert "spark.catalog.tableExists(_target)" in notebook
+    assert "Target table is empty" in notebook
     assert notebook.index('raise RuntimeError(json.dumps(_SUMMARY') < notebook.index("dbutils.notebook.exit")
 
 
