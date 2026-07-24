@@ -324,6 +324,13 @@ def sftp_gate2_node(state: Stage01State) -> Stage01State:
             "payload_summary": (new_state.get("candidate_feed") or {}),
         }
         new_state["status"] = "HITL_WAIT"
+        new_state["background_stage"] = None
+        new_state["next_gate"] = 2
+        feed_count = len(new_state.get("candidate_feeds") or []) or 1
+        new_state["resume_message"] = (
+            f"Feed Review is pending. Review {feed_count} discovered "
+            f"feed{'s' if feed_count != 1 else ''} before continuing."
+        )
         return new_state
 
     if override in {"APPROVED", "REJECTED"}:

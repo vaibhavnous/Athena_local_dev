@@ -3,7 +3,7 @@ jest.mock('react-router-dom', () => ({
   useSearchParams: () => [new URLSearchParams(), jest.fn()],
 }), { virtual: true })
 
-import { hasGate2ReviewItems } from './HitlQueue'
+import { hasGate2ReviewItems, hasRenderableReviewData } from './HitlQueue'
 
 test('treats loaded SFTP feeds as ready while a background review refresh continues', () => {
   expect(hasGate2ReviewItems({
@@ -16,4 +16,5 @@ test('treats loaded SFTP feeds as ready while a background review refresh contin
 
 test('does not treat the Gate 2 marker alone as loaded feed content', () => {
   expect(hasGate2ReviewItems({ next_gate: 2, candidate_feeds: [] }, true)).toBe(false)
+  expect(hasRenderableReviewData({ next_gate: 2, candidate_feeds: [] }, 2, true)).toBe(false)
 })

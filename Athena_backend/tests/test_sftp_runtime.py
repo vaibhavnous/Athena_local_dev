@@ -214,6 +214,24 @@ def test_get_sftp_run_context_does_not_open_gate2_before_source_discovery(monkey
     assert "Feed review will open" in context["resume_message"]
 
 
+def test_sftp_gate2_replaces_running_stage_copy_with_review_state(monkeypatch):
+    monkeypatch.delenv("ATHENA_SFTP_HITL_AUTO", raising=False)
+
+    result = governance.sftp_gate2_node({
+        "run_id": "run-feed-review",
+        "source": "adls_gen2",
+        "status": "RUNNING",
+        "background_stage": "discovery",
+        "resume_message": "Column Extraction is running.",
+        "candidate_feeds": [{"entity": "claims"}, {"entity": "policies"}],
+    })
+
+    assert result["status"] == "HITL_WAIT"
+    assert result["background_stage"] is None
+    assert result["next_gate"] == 2
+    assert result["resume_message"] == "Feed Review is pending. Review 2 discovered feeds before continuing."
+
+
 def test_get_sftp_run_context_handles_script_loader_failure(monkeypatch):
     checkpoint = {
         "run_id": "run-script",

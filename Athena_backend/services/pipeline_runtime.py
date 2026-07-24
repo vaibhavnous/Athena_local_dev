@@ -48,6 +48,14 @@ DATABASE_STAGE_SEQUENCE = [
 ]
 
 DATABASE_STAGE_LABELS = dict(DATABASE_STAGE_SEQUENCE)
+FILE_SOURCE_STAGE_LABELS = {
+    "ingestion": "BRD Ingest",
+    "requirements": "Requirement Extraction",
+    "kpis": "KPI Extraction",
+    "discovery": "Discover Source Objects",
+    "schema": "Schema Snapshot",
+    "enrichment": "Semantic Enrichment",
+}
 MINIMUM_RUNTIME_STAGE_KEYS = {
     "ingestion",
     "memory",
@@ -83,11 +91,12 @@ def wait_for_minimum_stage_runtime(stage_key: str, started_at: float, state: Opt
 def run_with_minimum_stage_runtime(stage_key: str, runner, state: Dict[str, Any]) -> Dict[str, Any]:
     started_at = time.monotonic()
     run_id = str(state.get("run_id") or "").strip()
+    stage_labels = FILE_SOURCE_STAGE_LABELS if str(state.get("source") or "").lower() in {"sftp", "adls_gen2"} else DATABASE_STAGE_LABELS
     running_state = {
         **state,
         "status": "RUNNING",
         "background_stage": stage_key,
-        "resume_message": f"{DATABASE_STAGE_LABELS.get(stage_key, stage_key).replace('_', ' ').title()} is running.",
+        "resume_message": f"{stage_labels.get(stage_key, stage_key).replace('_', ' ').title()} is running.",
     }
     if run_id:
         save_checkpoint_state_timed(run_id, running_state, context=f"{stage_key}:running")

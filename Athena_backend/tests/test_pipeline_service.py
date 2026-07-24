@@ -195,6 +195,26 @@ def test_visible_stage_checkpoints_completion_before_wait(monkeypatch):
     assert result["requirement_status"] == "COMPLETED"
 
 
+def test_visible_stage_uses_file_source_labels(monkeypatch):
+    from services import pipeline_runtime
+
+    saved = []
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state_timed",
+        lambda run_id, state, context: saved.append(dict(state)),
+    )
+    monkeypatch.setattr(pipeline_runtime, "wait_for_minimum_stage_runtime", lambda *args, **kwargs: None)
+
+    pipeline_runtime.run_with_minimum_stage_runtime(
+        "discovery",
+        lambda state: state,
+        {"run_id": "run-adls", "source": "adls_gen2"},
+    )
+
+    assert saved[0]["resume_message"] == "Discover Source Objects is running."
+
+
 def test_load_checkpoint_fields_uses_json_value_projection(monkeypatch):
     from services import pipeline_runtime
 
