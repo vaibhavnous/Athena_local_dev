@@ -102,7 +102,7 @@ test('shows Gold execution as waiting while generated Gold code is under review'
   })
 })
 
-test('does not leave completed Bronze and Silver phases pending after Gold fails', () => {
+test('does not invent Bronze or Silver execution success from later Gold progress', () => {
   const run = {
     status: 'FAILED',
     pipeline_steps: [
@@ -120,8 +120,8 @@ test('does not leave completed Bronze and Silver phases pending after Gold fails
   }
 
   const phases = getPhaseGroups(run, getPipelineSteps(run))
-  expect(phases.find((phase) => phase.id === 'phase-3')?.status).toBe('Done')
-  expect(phases.find((phase) => phase.id === 'phase-4')?.status).toBe('Done')
+  expect(phases.find((phase) => phase.id === 'phase-3')?.status).toBe('Pending')
+  expect(phases.find((phase) => phase.id === 'phase-4')?.status).toBe('Pending')
   expect(phases.find((phase) => phase.id === 'phase-5')?.status).toBe('Failed')
 })
 
@@ -133,4 +133,72 @@ test('uses the project name instead of rendering a run ID as the pipeline name',
     project_name: 'Vialto',
     source: 'database',
   })).toBe('Vialto')
+})
+
+test('uses the six-phase SFTP and ADLS workflow without changing database phases', () => {
+  const run = {
+    source: 'adls_gen2',
+    status: 'RUNNING',
+    background_stage: 'bronze_code_execution',
+    pipeline_steps: [
+      { key: 'pre_bronze_bootstrap_metadata', state: 'COMPLETED' },
+      { key: 'plan_seal', state: 'COMPLETED' },
+      { key: 'plan_freshness', state: 'COMPLETED' },
+      { key: 'pre_bronze_metadata_codegen', state: 'COMPLETED' },
+      { key: 'pre_bronze_metadata_codegen_review', state: 'COMPLETED' },
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
+      { key: 'runtime_bundle_handoff', state: 'COMPLETED' },
+      { key: 'pre_bronze_runtime_config', state: 'COMPLETED' },
+      { key: 'pre_bronze_validate_source', state: 'COMPLETED' },
+      { key: 'pre_bronze_discover_source_objects', state: 'COMPLETED' },
+      { key: 'pre_bronze_stage_to_landing', state: 'COMPLETED' },
+      { key: 'bronze_code_execution', state: 'RUNNING' },
+    ],
+  }
+
+  const phases = getPhaseGroups(run, getPipelineSteps(run))
+
+  expect(phases.map((phase) => phase.label)).toEqual([
+    'Discovery & Requirement Intelligence',
+    'Feed & Metadata Intelligence',
+    'Metadata Bootstrap & Source Validation',
+    'Bronze Layer (Ingestion & DQ)',
+    'Silver Layer (Transformation & DQ)',
+    'Gold Layer & Deployment',
+  ])
+  expect(phases.find((phase) => phase.id === 'phase-3')?.steps.map((step) => step.key)).toEqual([
+    'pre_bronze_bootstrap_metadata',
+    'plan_seal',
+    'plan_freshness',
+    'pre_bronze_metadata_codegen',
+    'pre_bronze_metadata_codegen_review',
+    'bronze',
+    'gate4',
+  ])
+  expect(phaseState(run, 'phase-4', 'bronze_code_execution')).toBe('RUNNING')
+  expect(phases.find((phase) => phase.id === 'phase-6')?.steps.map((step) => step.key)).toEqual([
+    'gold',
+    'gold_review',
+    'gold_code_execution',
+    'gold_runtime_validation',
+    'final_publish',
+    'finalize',
+  ])
+})
+
+test('keeps the SFTP Gold review separate from Gold execution', () => {
+  const run = {
+    source: 'sftp',
+    status: 'HITL_WAIT',
+    next_review_key: 'gold_review',
+    pipeline_steps: [
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'PENDING' },
+      { key: 'gold_code_execution', state: 'PENDING' },
+    ],
+  }
+
+  expect(phaseState(run, 'phase-6', 'gold_review')).toBe('HITL_WAIT')
+  expect(phaseState(run, 'phase-6', 'gold_code_execution')).toBe('PENDING')
 })

@@ -650,6 +650,76 @@ def test_databricks_gold_generation_does_not_imply_execution_completion():
     assert by_key["gold_code_execution"]["state"] == "PENDING"
 
 
+def test_file_source_pipeline_steps_match_the_six_ui_phases():
+    from services import pipeline_runtime
+
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="adls_gen2",
+        checkpoint={
+            "status": "RUNNING",
+            "target_warehouse": "databricks",
+            "background_stage": "bronze_code_execution",
+            "databricks_bronze_execution_status": "RUNNING",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=False,
+        gold_generation_completed=False,
+    )
+
+    keys = [step["key"] for step in steps]
+    assert keys == [
+        "ingestion", "memory", "requirements", "kpis", "gate1",
+        "discovery", "nomination", "gate2", "schema", "profiling", "enrichment", "gate3",
+        "pre_bronze_bootstrap_metadata", "plan_seal", "plan_freshness",
+        "pre_bronze_metadata_codegen", "pre_bronze_metadata_codegen_review", "bronze", "gate4",
+        "runtime_bundle_handoff", "pre_bronze_runtime_config", "pre_bronze_validate_source",
+        "pre_bronze_discover_source_objects", "pre_bronze_stage_to_landing",
+        "bronze_code_execution", "bronze_runtime_validation",
+        "silver_merge_key_resolution", "silver_merge_key_review", "silver", "gate5",
+        "silver_code_execution", "silver_runtime_validation",
+        "gold", "gold_review", "gold_code_execution", "gold_runtime_validation",
+        "final_publish", "finalize",
+    ]
+    by_key = {step["key"]: step for step in steps}
+    assert by_key["bronze_code_execution"]["state"] == "RUNNING"
+    assert by_key["bronze_runtime_validation"]["state"] == "PENDING"
+    assert by_key["gold_code_execution"]["state"] == "PENDING"
+
+
+def test_sftp_pull_does_not_count_as_databricks_bronze_execution():
+    from services import pipeline_runtime
+
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="sftp",
+        checkpoint={
+            "status": "RUNNING",
+            "target_warehouse": "databricks",
+            "sftp_pull_status": "COMPLETED",
+            "bronze_ingestion_status": "COMPLETED",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=False,
+        gold_generation_completed=False,
+    )
+
+    by_key = {step["key"]: step for step in steps}
+    assert by_key["bronze_code_execution"]["state"] == "PENDING"
+
+
 def test_later_stage_cannot_infer_bronze_execution_completion():
     from services import pipeline_runtime
 

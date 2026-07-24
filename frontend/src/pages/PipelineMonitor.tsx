@@ -1061,6 +1061,7 @@ function formatScriptBody(script) {
 export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
   const steps = Array.isArray(phase?.steps) ? phase.steps : []
   const byKey = new Map([...allSteps, ...steps].map((step) => [step.key, step]))
+  const fileFlow = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
   const phaseState = phaseStatusToStepState(phase.status)
   const makeStep = (key, label, fallbackState = phaseState, forceState = false) => {
     const step = byKey.get(key)
@@ -1093,22 +1094,52 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeStep('gate1', 'KPI Review', reviewAwareStepState(byKey.get('gate1'), phase, run, 1)),
     ].filter((step) => byKey.has(step.key) || step.key !== 'memory')
   } else if (phase.id === 'phase-2') {
+    displaySteps = fileFlow
+      ? [
+          makeStep('discovery', 'Feed Discovery'),
+          makeStep('nomination', 'Feed Nomination'),
+          makeStep('gate2', 'Feed Review', reviewAwareStepState(byKey.get('gate2'), phase, run, 2)),
+          makeStep('schema', 'Schema Snapshot'),
+          makeStep('profiling', 'Column Profiling'),
+          makeStep('enrichment', 'Semantic Enrichment'),
+          makeStep('gate3', 'Semantic Review', reviewAwareStepState(byKey.get('gate3'), phase, run, 3)),
+        ]
+      : [
+          makeStep('nomination', 'Table Extraction'),
+          makeStep('gate2', 'Table Review', reviewAwareStepState(byKey.get('gate2'), phase, run, 2)),
+          makeStep('discovery', 'Column Extraction', byKey.get('discovery')?.state || byKey.get('schema')?.state || phaseState),
+          makeStep('profiling', 'Column Profiling', byKey.get('profiling')?.state || phaseState),
+          makeStep('enrichment', 'Semantic Enrichment', byKey.get('enrichment')?.state || phaseState),
+          makeStep('gate3', 'Semantic Review', reviewAwareStepState(byKey.get('gate3'), phase, run, 3)),
+        ]
+  } else if (fileFlow && phase.id === 'phase-3') {
     displaySteps = [
-      makeStep('nomination', 'Table Extraction'),
-      makeStep('gate2', byKey.has('gate2') && String(byKey.get('gate2')?.label || '').toLowerCase().includes('feed') ? 'Feed Review' : 'Table Review', reviewAwareStepState(byKey.get('gate2'), phase, run, 2)),
-      makeStep('discovery', 'Column Extraction', byKey.get('discovery')?.state || byKey.get('schema')?.state || phaseState),
-      makeStep('profiling', 'Column Profiling', byKey.get('profiling')?.state || phaseState),
-      makeStep('enrichment', 'Semantic Enrichment', byKey.get('enrichment')?.state || phaseState),
-      makeStep('gate3', 'Semantic Review', reviewAwareStepState(byKey.get('gate3'), phase, run, 3)),
+      makeStep('pre_bronze_bootstrap_metadata', 'Bootstrap Metadata'),
+      makeStep('plan_seal', 'Seal Approved Plan'),
+      makeStep('plan_freshness', 'Validate Plan Freshness'),
+      makeStep('pre_bronze_metadata_codegen', 'Metadata Code Generation'),
+      makeStep('pre_bronze_metadata_codegen_review', 'Metadata Code Review'),
+      makeStep('bronze', 'Bronze Code Generation'),
+      makeStep('gate4', 'Bronze Review', reviewAwareStepState(byKey.get('gate4'), phase, run, 4)),
     ]
-  } else if (phase.id === 'phase-3') {
+  } else if (!fileFlow && phase.id === 'phase-3') {
     const gate4State = reviewAwareStepState(byKey.get('gate4'), phase, run, 4)
     displaySteps = [
       makeStep('bronze', 'Bronze Code Generation'),
       makeStep('gate4', 'Bronze Review', gate4State),
       makeStep('bronze_code_execution', 'Bronze Code Execution'),
     ]
-  } else if (phase.id === 'phase-4') {
+  } else if (fileFlow && phase.id === 'phase-4') {
+    displaySteps = [
+      makeStep('runtime_bundle_handoff', 'Runtime Bundle Handoff'),
+      makeStep('pre_bronze_runtime_config', 'Prepare Runtime Configuration'),
+      makeStep('pre_bronze_validate_source', 'Validate Source Access'),
+      makeStep('pre_bronze_discover_source_objects', 'Discover Source Objects'),
+      makeStep('pre_bronze_stage_to_landing', 'Stage Files to Landing'),
+      makeStep('bronze_code_execution', 'Bronze Code Execution'),
+      makeStep('bronze_runtime_validation', 'Bronze Runtime Validation'),
+    ]
+  } else if (!fileFlow && phase.id === 'phase-4') {
     const silverState = normalizeState(byKey.get('silver')?.state || phaseState)
     const silverExecutionState = normalizeState(byKey.get('silver_code_execution')?.state)
     const gate4State = reviewAwareStepState(byKey.get('gate4'), phase, run, 4)
@@ -1131,7 +1162,16 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeStep('gate5', 'Silver Review', silverFlow.reviewGate, true),
       makeStep('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution, true),
     ]
-  } else if (phase.id === 'phase-5') {
+  } else if (fileFlow && phase.id === 'phase-5') {
+    displaySteps = [
+      makeStep('silver_merge_key_resolution', 'Silver Merge Key Resolution'),
+      makeStep('silver_merge_key_review', 'Silver Merge Key Review'),
+      makeStep('silver', 'Silver Code Generation'),
+      makeStep('gate5', 'Silver Code Review', reviewAwareStepState(byKey.get('gate5'), phase, run, 5)),
+      makeStep('silver_code_execution', 'Silver Code Execution'),
+      makeStep('silver_runtime_validation', 'Silver Runtime Validation'),
+    ]
+  } else if (!fileFlow && phase.id === 'phase-5') {
     const goldFlow = buildGoldPhaseStates(
       byKey.get('gold')?.state || phaseState,
       byKey.get('gold_code_execution')?.state,
@@ -1141,6 +1181,15 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
     displaySteps = [
       makeStep('gold', 'Gold Code Generation', goldFlow.codeGeneration, true),
       makeStep('gold_code_execution', 'Gold Code Execution', goldFlow.codeExecution, true),
+    ]
+  } else if (fileFlow && phase.id === 'phase-6') {
+    displaySteps = [
+      makeStep('gold', 'Gold Code Generation'),
+      makeStep('gold_review', 'Gold Code Review'),
+      makeStep('gold_code_execution', 'Gold Code Execution'),
+      makeStep('gold_runtime_validation', 'Gold Runtime Validation'),
+      makeStep('final_publish', 'Final Publish (Target Gate 5)'),
+      makeStep('finalize', 'Finalize Run'),
     ]
   }
 

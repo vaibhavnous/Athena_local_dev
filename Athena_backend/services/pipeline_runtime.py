@@ -1522,6 +1522,12 @@ def build_pipeline_steps(
                 "detail": "BRD parsed and run created",
             },
             {
+                "key": "memory",
+                "label": "Memory Check",
+                "complete": checkpoint.get("memory_lookup_status") == "COMPLETED",
+                "detail": "Exact and semantic BRD memory checked",
+            },
+            {
                 "key": "requirements",
                 "label": "Req Extract",
                 "complete": bool(artifact_types.intersection({"REQUIREMENTS", "REQUIREMENTS_WARN"})),
@@ -1541,13 +1547,22 @@ def build_pipeline_steps(
             },
             {
                 "key": "discovery",
-                "label": "Feed Discovery",
+                "label": "Discover Source Objects",
                 "complete": bool(
                     checkpoint.get("source_ingestion_status") == "COMPLETED"
                     or checkpoint.get("candidate_feed")
                     or checkpoint.get("candidate_feeds")
                 ),
                 "detail": f"{source_label} source scanned and candidate feeds identified",
+            },
+            {
+                "key": "nomination",
+                "label": "Feed Nomination",
+                "complete": bool(
+                    checkpoint.get("table_nomination_status") == "COMPLETED"
+                    or checkpoint.get("nominated_tables")
+                ),
+                "detail": "Approved feed candidates nominated for metadata extraction",
             },
             {
                 "key": "gate2",
@@ -1580,6 +1595,36 @@ def build_pipeline_steps(
                 "detail": "Semantic enrichment review",
             },
             {
+                "key": "pre_bronze_bootstrap_metadata",
+                "label": "Bootstrap Metadata",
+                "complete": checkpoint.get("metadata_bootstrap_status") == "COMPLETED",
+                "detail": "Approved feed schemas loaded into the metadata manifest",
+            },
+            {
+                "key": "plan_seal",
+                "label": "Seal Approved Plan",
+                "complete": checkpoint.get("plan_seal_status") == "COMPLETED",
+                "detail": "Approved KPI, feed, schema, and enrichment inputs sealed",
+            },
+            {
+                "key": "plan_freshness",
+                "label": "Validate Plan Freshness",
+                "complete": checkpoint.get("plan_freshness_status") == "COMPLETED",
+                "detail": "Current backend plan checked against its approved seal",
+            },
+            {
+                "key": "pre_bronze_metadata_codegen",
+                "label": "Metadata Code Generation",
+                "complete": checkpoint.get("metadata_codegen_status") == "COMPLETED",
+                "detail": "Canonical feed metadata and runtime manifest generated",
+            },
+            {
+                "key": "pre_bronze_metadata_codegen_review",
+                "label": "Metadata Code Review",
+                "complete": checkpoint.get("metadata_codegen_review_status") == "COMPLETED",
+                "detail": "Generated schema, keys, watermarks, and paths validated",
+            },
+            {
                 "key": "bronze",
                 "label": "Bronze Code Generation",
                 "complete": bronze_generation_completed,
@@ -1592,14 +1637,54 @@ def build_pipeline_steps(
                 "detail": "Bronze review and merge-key resolution",
             },
             {
+                "key": "runtime_bundle_handoff",
+                "label": "Runtime Bundle Handoff",
+                "complete": checkpoint.get("runtime_bundle_handoff_status") == "COMPLETED",
+                "detail": "Runtime manifest prepared for the selected target",
+            },
+            {
+                "key": "pre_bronze_runtime_config",
+                "label": "Prepare Runtime Configuration",
+                "complete": checkpoint.get("runtime_config_status") == "COMPLETED",
+                "detail": "Landing, Bronze output, and checkpoint paths loaded",
+            },
+            {
+                "key": "pre_bronze_validate_source",
+                "label": "Validate Source Access",
+                "complete": checkpoint.get("source_validation_status") == "COMPLETED",
+                "detail": "Approved file feeds confirmed in the source registry",
+            },
+            {
+                "key": "pre_bronze_discover_source_objects",
+                "label": "Discover Source Objects",
+                "complete": checkpoint.get("source_object_discovery_status") == "COMPLETED",
+                "detail": "Approved source feeds and entities enumerated",
+            },
+            {
+                "key": "pre_bronze_stage_to_landing",
+                "label": "Stage Files to Landing",
+                "complete": checkpoint.get("stage_to_landing_status") == "COMPLETED",
+                "detail": "SFTP files staged or ADLS landing paths registered",
+            },
+            {
                 "key": "bronze_code_execution",
                 "label": "Bronze Code Execution",
                 "complete": bool(
-                    checkpoint.get("sftp_pull_status") == "COMPLETED"
-                    or checkpoint.get("bronze_ingestion_status") in {"COMPLETED", "HANDOFF_ONLY"}
-                    or checkpoint.get("bronze_validation_status") == "COMPLETED"
+                    str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                    and checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
+                ) or bool(
+                    str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    and checkpoint.get("databricks_bronze_execution_status") == "COMPLETED"
                 ),
-                "detail": "UI-only execution marker; generated Bronze code runs outside Athena",
+                "detail": "Approved Bronze code executed by the selected target runtime",
+            },
+            {
+                "key": "bronze_runtime_validation",
+                "label": "Bronze Runtime Validation",
+                "complete": checkpoint.get("bronze_runtime_validation_status") == "COMPLETED"
+                or checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
+                or checkpoint.get("databricks_bronze_execution_status") == "COMPLETED",
+                "detail": "Target execution completion validated; full Bronze DQ remains a future runtime step",
             },
             {
                 "key": "silver_merge_key_resolution",
@@ -1624,9 +1709,9 @@ def build_pipeline_steps(
             },
             {
                 "key": "gate5",
-                "label": _gate_label(5, source=source),
+                "label": "Silver Code Review",
                 "complete": gate5_decision == "APPROVED",
-                "detail": "Silver review",
+                "detail": "Silver code reviewed before target execution",
             },
             {
                 "key": "silver_code_execution",
@@ -1650,10 +1735,24 @@ def build_pipeline_steps(
                 ),
             },
             {
+                "key": "silver_runtime_validation",
+                "label": "Silver Runtime Validation",
+                "complete": checkpoint.get("silver_runtime_validation_status") == "COMPLETED"
+                or checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
+                or checkpoint.get("databricks_silver_execution_status") == "COMPLETED",
+                "detail": "Target execution completion validated; full Silver DQ remains a future runtime step",
+            },
+            {
                 "key": "gold",
                 "label": "Gold Code Generation",
                 "complete": gold_generation_completed,
                 "detail": "Gold KPI generation completed",
+            },
+            {
+                "key": "gold_review",
+                "label": "Gold Code Review",
+                "complete": str(checkpoint.get("gold_review_decision") or "").upper() == "APPROVED",
+                "detail": "Generated Gold scripts approved for target execution",
             },
             {
                 "key": "gold_code_execution",
@@ -1675,6 +1774,29 @@ def build_pipeline_steps(
                     if str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
                     else "UI-only execution marker; generated Gold code runs outside Athena"
                 ),
+            },
+            {
+                "key": "gold_runtime_validation",
+                "label": "Gold Runtime Validation",
+                "complete": checkpoint.get("gold_runtime_validation_status") == "COMPLETED"
+                or checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
+                or checkpoint.get("databricks_gold_execution_status") == "COMPLETED",
+                "detail": "Target execution completion validated; full Gold DQ remains a future runtime step",
+            },
+            {
+                "key": "final_publish",
+                "label": "Final Publish (Target Gate 5)",
+                "complete": checkpoint.get("final_publish_status") == "COMPLETED"
+                or checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
+                or checkpoint.get("databricks_gold_execution_status") == "COMPLETED",
+                "detail": "Reviewed Gold outputs reached the selected target",
+            },
+            {
+                "key": "finalize",
+                "label": "Finalize Run",
+                "complete": checkpoint.get("finalization_status") == "COMPLETED"
+                or str(checkpoint.get("status") or "").upper() == "PIPELINE_COMPLETED",
+                "detail": "Run closed after reviewed Gold code executes successfully",
             },
         ]
     else:
@@ -2306,7 +2428,11 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         else None
     )
     waiting_stage_key = str(
-        "gold_code_execution" if next_review_key == "gold_review" else next_review_key or waiting_gate_key or ""
+        next_review_key or waiting_gate_key or ""
+        if source_value in {"sftp", "adls_gen2"}
+        else "gold_code_execution"
+        if next_review_key == "gold_review"
+        else next_review_key or waiting_gate_key or ""
     ) or None
     pipeline_steps = apply_waiting_stage_state(pipeline_steps, waiting_stage_key)
     if checkpoint.get("status") == "PAUSED_FOR_STAGE_CONFIRMATION" and checkpoint.get("next_stage_key"):

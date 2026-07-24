@@ -716,3 +716,20 @@ def test_configuration_crud_endpoints():
     delete_response = client.delete(f"/configurations/{created['id']}")
     assert delete_response.status_code == 200
     assert delete_response.json() == {"id": created["id"], "deleted": True}
+
+
+def test_configurations_include_insurance_sftp_adls_default(monkeypatch):
+    from api.routers import config_router
+
+    monkeypatch.setenv("ADLS_ACCOUNT_URL", "https://storageaccount.dfs.core.windows.net")
+    monkeypatch.setenv("ADLS_FILE_SYSTEM", "athena")
+    monkeypatch.setenv("ADLS_SOURCE_ROOT", "INSURANCE_SFTP/insurance")
+
+    connection = next(item for item in config_router.configurations() if item["id"] == "sftp_adls_insurance")
+
+    assert connection["integrationType"] == "SFTP"
+    assert connection["dataLakeSourceType"] == "ADLS"
+    assert connection["directoryName"] == "INSURANCE_SFTP/insurance"
+    assert connection["basePath"] == (
+        "abfss://athena@storageaccount.dfs.core.windows.net/INSURANCE_SFTP/insurance"
+    )

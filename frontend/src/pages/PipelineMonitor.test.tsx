@@ -43,7 +43,7 @@ jest.mock('../components/pipeline/PipelineLogsPanel', () => () => <div>Pipeline 
 jest.mock('../components/shared/PythonCodeDialog', () => () => null)
 jest.mock('../components/shared/DashboardLayout', () => ({ PageHeader: () => <div>Header</div> }))
 
-import PipelineMonitor from './PipelineMonitor'
+import PipelineMonitor, { buildPipelineDisplayPhase } from './PipelineMonitor'
 import { getRun } from '../api/athenaApi'
 
 test('hydrates detailed stages for the active run', async () => {
@@ -69,4 +69,33 @@ test('shows rotating markers for the active phase and stage', () => {
 
   expect(view.container.querySelectorAll('[data-running-indicator="rotation"]')).toHaveLength(2)
   view.unmount()
+})
+
+test('renders the SFTP metadata-bootstrap phase in the latest monitor UI', () => {
+  const phase = {
+    id: 'phase-3',
+    status: 'Running',
+    steps: [
+      { key: 'pre_bronze_bootstrap_metadata', state: 'COMPLETED' },
+      { key: 'plan_seal', state: 'RUNNING' },
+      { key: 'plan_freshness', state: 'PENDING' },
+      { key: 'pre_bronze_metadata_codegen', state: 'PENDING' },
+      { key: 'pre_bronze_metadata_codegen_review', state: 'PENDING' },
+      { key: 'bronze', state: 'PENDING' },
+      { key: 'gate4', state: 'PENDING' },
+    ],
+  }
+
+  const display = buildPipelineDisplayPhase(phase, phase.steps, { source: 'sftp', status: 'RUNNING' })
+
+  expect(display.steps.map((step) => step.label)).toEqual([
+    'Bootstrap Metadata',
+    'Seal Approved Plan',
+    'Validate Plan Freshness',
+    'Metadata Code Generation',
+    'Metadata Code Review',
+    'Bronze Code Generation',
+    'Bronze Review',
+  ])
+  expect(display.status).toBe('Running')
 })

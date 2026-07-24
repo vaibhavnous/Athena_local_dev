@@ -21,6 +21,7 @@ export function formatPipelineStepLabel(label?: string, key?: string) {
   const cleanLabel = String(label || '').replace(/Stage \d+ — /, '').trim()
   const normalizedLabel = cleanLabel.toLowerCase()
 
+  if (['feed discovery', 'discover source objects', 'feed nomination', 'schema snapshot'].includes(normalizedLabel)) return cleanLabel
   if (normalizedKey === 'ingestion' || normalizedLabel === 'ingestion') return 'BRD Ingest'
   if (normalizedKey === 'requirements' || normalizedLabel === 'req extract') return 'Requirement Extraction'
   if (normalizedKey === 'kpis' || normalizedLabel === 'kpi extract') return 'KPI Extraction'
@@ -73,27 +74,55 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-1',
       label: 'Discovery & Requirement Intelligence',
-      keys: ['ingestion', 'requirements', 'kpis', 'gate1'],
+      keys: ['ingestion', 'memory', 'requirements', 'kpis', 'gate1'],
     },
     {
       id: 'phase-2',
-      label: 'Source & Metadata Intelligence',
-      keys: ['discovery', 'gate2', 'schema', 'profiling', 'enrichment', 'gate3'],
+      label: 'Feed & Metadata Intelligence',
+      keys: ['discovery', 'nomination', 'gate2', 'schema', 'profiling', 'enrichment', 'gate3'],
     },
     {
       id: 'phase-3',
-      label: 'Bronze Layer (Ingestion)',
-      keys: ['bronze', 'gate4', 'bronze_code_execution'],
+      label: 'Metadata Bootstrap & Source Validation',
+      keys: [
+        'pre_bronze_bootstrap_metadata',
+        'plan_seal',
+        'plan_freshness',
+        'pre_bronze_metadata_codegen',
+        'pre_bronze_metadata_codegen_review',
+        'bronze',
+        'gate4',
+      ],
     },
     {
       id: 'phase-4',
-      label: 'Silver Layer (Transformation)',
-      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution'],
+      label: 'Bronze Layer (Ingestion & DQ)',
+      keys: [
+        'runtime_bundle_handoff',
+        'pre_bronze_runtime_config',
+        'pre_bronze_validate_source',
+        'pre_bronze_discover_source_objects',
+        'pre_bronze_stage_to_landing',
+        'bronze_code_execution',
+        'bronze_runtime_validation',
+      ],
     },
     {
       id: 'phase-5',
-      label: 'Gold Layer (Analytics)',
-      keys: ['gold', 'gold_code_execution'],
+      label: 'Silver Layer (Transformation & DQ)',
+      keys: [
+        'silver_merge_key_resolution',
+        'silver_merge_key_review',
+        'silver',
+        'gate5',
+        'silver_code_execution',
+        'silver_runtime_validation',
+      ],
+    },
+    {
+      id: 'phase-6',
+      label: 'Gold Layer & Deployment',
+      keys: ['gold', 'gold_review', 'gold_code_execution', 'gold_runtime_validation', 'final_publish', 'finalize'],
     },
   ],
 }
@@ -167,7 +196,7 @@ function applyExternalExecutionState(run, steps: PipelineStep[]) {
     ...next,
     {
       key: stageKey,
-      label: fallbackStepLabel(stageKey),
+      label: fallbackStepLabel(stageKey, sourceType),
       detail,
       state: 'RUNNING',
       complete: false,
@@ -179,6 +208,7 @@ function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
   const sourceType = isFileSource(run) ? 'file' : 'database'
   const orderedKeys = PIPELINE_PHASE_TEMPLATES[sourceType].flatMap((phase) => phase.keys)
   const indexByKey = new Map(orderedKeys.map((key, index) => [key, index]))
+  const executionKeys = new Set(['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'])
   const progressedStates = new Set(['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'])
   const progressedIndexes = steps
     .map((step) => indexByKey.get(step.key) ?? -1)
@@ -190,7 +220,12 @@ function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
   return steps.map((step) => {
     const stepIndex = indexByKey.get(step.key) ?? -1
     const state = normalizeState(step.state)
-    if (stepIndex >= 0 && stepIndex < furthestProgressIndex && ['PENDING', 'HITL_WAIT', 'RUNNING'].includes(state)) {
+    if (
+      stepIndex >= 0 &&
+      stepIndex < furthestProgressIndex &&
+      !executionKeys.has(step.key) &&
+      ['PENDING', 'HITL_WAIT', 'RUNNING'].includes(state)
+    ) {
       return {
         ...step,
         state: 'COMPLETED',
@@ -226,6 +261,11 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
   }
 
   if (run?.next_review_key === 'gold_review') {
+    if (steps.some((step) => step.key === 'gold_review')) {
+      return steps.map((step) => step.key === 'gold_review'
+        ? { ...step, state: 'HITL_WAIT', complete: false }
+        : step)
+    }
     return steps.map((step) => step.key === 'gold_code_execution'
       ? { ...step, label: 'Gold Review & Execution', state: 'HITL_WAIT', complete: false }
       : step)
@@ -244,7 +284,7 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
     ...steps,
     {
       key: gateKey,
-      label: fallbackStepLabel(gateKey),
+      label: fallbackStepLabel(gateKey, isFileSource(run) ? 'file' : 'database'),
       detail: buildStepDetail(run, gateKey, 'HITL_WAIT', ''),
       state: 'HITL_WAIT',
       complete: false,
@@ -264,7 +304,7 @@ export function getPhaseGroups(run, stepsOverride?) {
       return (
         step || {
           key,
-          label: fallbackStepLabel(key),
+          label: fallbackStepLabel(key, sourceType),
           detail: '',
           state: syntheticStepState(key, byKey),
           complete: syntheticStepState(key, byKey) === 'COMPLETED',
@@ -318,30 +358,46 @@ export function statusTone(status) {
   return 'slate'
 }
 
-function fallbackStepLabel(key) {
+function fallbackStepLabel(key, sourceType = 'database') {
   const labels = {
     ingestion: 'BRD Ingest',
     memory: 'Memory Check',
     requirements: 'Requirement Extraction',
     kpis: 'KPI Extraction',
     gate1: 'KPI Review',
-    nomination: 'Table Extraction',
-    gate2: 'Table Review',
-    discovery: 'Column Extraction',
-    schema: 'Column Extraction',
+    nomination: sourceType === 'file' ? 'Feed Nomination' : 'Table Extraction',
+    gate2: sourceType === 'file' ? 'Feed Review' : 'Table Review',
+    discovery: sourceType === 'file' ? 'Feed Discovery' : 'Column Extraction',
+    schema: sourceType === 'file' ? 'Schema Snapshot' : 'Column Extraction',
     profiling: 'Column Profiling',
     enrichment: 'Semantic Enrichment',
     gate3: 'Semantic Review',
     bronze: 'Bronze Code Generation',
     gate4: 'Bronze Review',
+    pre_bronze_bootstrap_metadata: 'Bootstrap Metadata',
+    plan_seal: 'Seal Approved Plan',
+    plan_freshness: 'Validate Plan Freshness',
+    pre_bronze_metadata_codegen: 'Metadata Code Generation',
+    pre_bronze_metadata_codegen_review: 'Metadata Code Review',
+    runtime_bundle_handoff: 'Runtime Bundle Handoff',
+    pre_bronze_runtime_config: 'Prepare Runtime Configuration',
+    pre_bronze_validate_source: 'Validate Source Access',
+    pre_bronze_discover_source_objects: 'Discover Source Objects',
+    pre_bronze_stage_to_landing: 'Stage Files to Landing',
     bronze_code_execution: 'Bronze Code Execution',
+    bronze_runtime_validation: 'Bronze Runtime Validation',
     silver_merge_key_resolution: 'Silver Merge Key Resolution',
     silver_merge_key_review: 'Silver Merge Key Review',
     silver: 'Silver Code Generation',
-    gate5: 'Silver Review',
+    gate5: sourceType === 'file' ? 'Silver Code Review' : 'Silver Review',
     silver_code_execution: 'Silver Code Execution',
+    silver_runtime_validation: 'Silver Runtime Validation',
     gold: 'Gold Code Generation',
+    gold_review: 'Gold Code Review',
     gold_code_execution: 'Gold Code Execution',
+    gold_runtime_validation: 'Gold Runtime Validation',
+    final_publish: 'Final Publish (Target Gate 5)',
+    finalize: 'Finalize Run',
   }
   return labels[key] || key
 }
