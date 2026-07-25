@@ -1,0 +1,359 @@
+import json
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from api.auth import AuthUser, assert_run_access, assert_run_gate_open, get_current_user, has_request_user
+from api.demo import demo_action, demo_enabled, demo_kpi_reviews, demo_start_progress
+from api.models import (
+    HitlDecisionPayload,
+    KpiActionPayload,
+    KpiBulkActionPayload,
+    KpiCreatePayload,
+    KpiModifyPayload,
+    KpiRejectPayload,
+)
+from utilis.logger import logger
+
+router = APIRouter()
+
+
+def _checkpoint_for_user(run_id: str, user: Any) -> Dict[str, Any]:
+    return assert_run_access(run_id, user) if has_request_user(user) else {}
+
+
+def _checkpoint_for_gate1(run_id: str, user: Any) -> Dict[str, Any]:
+    return assert_run_gate_open(run_id, user, gate_number=1) if has_request_user(user) else {}
+
+
+def _gate1_run_id_from_queue_id(queue_id: str) -> str:
+    if ":1:" not in queue_id:
+        raise HTTPException(status_code=400, detail="Invalid queue_id format")
+    return queue_id.split(":1:", 1)[0]
+
+
+def _hitl_update_conflict(exc: Exception) -> HTTPException:
+    if isinstance(exc, LookupError):
+        return HTTPException(status_code=409, detail="HITL item is not pending or does not exist.")
+    return HTTPException(status_code=503, detail="Failed to persist HITL decision.")
+
+
+# -------------------------
+# KPI Reviews
+# -------------------------
+@router.get("/kpi-reviews/{run_id}")
+def kpi_reviews(
+    run_id: str,
+    status: Optional[str] = None,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_kpi_reviews(run_id)
+
+    from api.services.kpi_service import artifact_kpis, fetch_hitl_rows, map_kpi
+    from services.pipeline_runtime import fetch_run_summary, load_checkpoint_fields
+
+    checkpoint = _checkpoint_for_user(run_id, user)
+    source_hint = checkpoint or load_checkpoint_fields(run_id, "source")
+    source = str(source_hint.get("source") or "database").lower()
+
+    try:
+        rows = fetch_hitl_rows(run_id, status=status)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if not rows:
+        rows = [map_kpi(kpi, run_id=run_id, source=source) for kpi in artifact_kpis(run_id)]
+    if not rows:
+        summary = fetch_run_summary(run_id)
+        kpis_failed = any(
+            str(row.get("artifact_type") or "").upper() == "KPIS"
+            and str(row.get("faithfulness_status") or "").upper() == "FAILED"
+            for row in summary
+            if isinstance(row, dict)
+        )
+        if kpis_failed:
+            raise HTTPException(
+                status_code=409,
+                detail="KPI extraction failed before review items were created. Retry KPI extraction for this run.",
+            )
+
+    rows = [
+        {**row, "run_id": run_id, "source": source}
+        for row in rows
+        if str(row.get("run_id") or run_id) == str(run_id)
+    ]
+
+    return {
+        "runId": run_id,
+        "run_id": run_id,
+        "source": source,
+        "kpis": rows,
+    }
+
+
+@router.post("/kpi-reviews/{run_id}")
+def create_kpi_review(
+    run_id: str,
+    payload: KpiCreatePayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    name = payload.name.strip()
+    definition = payload.definition.strip()
+
+    kpi = {
+        "name": name,
+        "kpi_name": name,
+        "definition": definition,
+        "kpi_description": definition,
+        "category": str(payload.category or "Business KPI"),
+        "domain": str(payload.domain or "Athena"),
+        "derivation_type": "reviewer_authored",
+        "grounding_status": "HUMAN_AUTHORED",
+    }
+    if demo_enabled():
+        return {
+            "id": f"{run_id}:1:manual-demo",
+            "queue_id": f"{run_id}:1:manual-demo",
+            "item_id": f"{run_id}:1:manual-demo",
+            "run_id": run_id,
+            "item_type": "KPI",
+            "status": "PENDING_REVIEW",
+            "name": name,
+            "definition": definition,
+            "kpi_detail": kpi,
+        }
+
+    from api.services.kpi_service import map_kpi
+    from services.pipeline_runtime import load_checkpoint_state
+    from utilis.db import get_pending_items, insert_hitl_queue_item
+
+    checkpoint = _checkpoint_for_gate1(run_id, user) or load_checkpoint_state(run_id) or {}
+    if not checkpoint:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    if int(checkpoint.get("next_gate") or 0) != 1 and not get_pending_items(run_id, 1):
+        raise HTTPException(status_code=409, detail="KPIs can only be added while KPI Review is pending.")
+
+    try:
+        item_id = insert_hitl_queue_item(run_id, kpi, gate_number=1)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Failed to add KPI to the review queue.") from exc
+
+    logger.info("Reviewer-authored KPI added", extra={"run_id": run_id, "queue_id": item_id})
+    return map_kpi(kpi, run_id=run_id, item_id=item_id, status="PENDING", source=checkpoint.get("source"))
+
+
+# -------------------------
+# Approve KPI
+# -------------------------
+@router.post("/kpi-reviews/{queue_id}/approve")
+def approve_kpi(
+    queue_id: str,
+    payload: KpiActionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    if demo_enabled():
+        run_id = queue_id.split(":1:", 1)[0] if ":1:" in queue_id else queue_id
+        return {"queue_id": queue_id, "status": "APPROVED", "run": demo_start_progress(run_id, "kpi")}
+
+    from api.services.kpi_service import maybe_resume_gate1
+    from utilis.db import update_hitl_item
+
+    run_id = _gate1_run_id_from_queue_id(queue_id)
+    _checkpoint_for_gate1(run_id, user)
+
+    try:
+        update_hitl_item(queue_id, "APPROVED")
+    except Exception as exc:
+        raise _hitl_update_conflict(exc) from exc
+
+    logger.info("KPI approved", extra={"queue_id": queue_id})
+
+    maybe_resume_gate1(run_id)
+
+    return {"queue_id": queue_id, "status": "APPROVED"}
+
+
+# -------------------------
+# Reject KPI
+# -------------------------
+@router.post("/kpi-reviews/{queue_id}/reject")
+def reject_kpi(
+    queue_id: str,
+    payload: KpiRejectPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    if demo_enabled():
+        return {"queue_id": queue_id, "status": "REJECTED"}
+
+    from api.services.kpi_service import maybe_resume_gate1
+    from utilis.db import update_hitl_item
+
+    run_id = _gate1_run_id_from_queue_id(queue_id)
+    _checkpoint_for_gate1(run_id, user)
+
+    try:
+        update_hitl_item(queue_id, "REJECTED", rejection_reason=payload.rejection_reason)
+    except Exception as exc:
+        raise _hitl_update_conflict(exc) from exc
+
+    logger.info("KPI rejected", extra={"queue_id": queue_id})
+
+    maybe_resume_gate1(run_id)
+
+    return {"queue_id": queue_id, "status": "REJECTED"}
+
+
+# -------------------------
+# Modify KPI
+# -------------------------
+@router.post("/kpi-reviews/{queue_id}/modify")
+def modify_kpi(
+    queue_id: str,
+    payload: KpiModifyPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    if demo_enabled():
+        run_id = queue_id.split(":1:", 1)[0] if ":1:" in queue_id else queue_id
+        return {"queue_id": queue_id, "status": "APPROVED", "run": demo_start_progress(run_id, "kpi")}
+
+    from api.services.kpi_service import maybe_resume_gate1
+    from utilis.db import update_hitl_item
+
+    run_id = _gate1_run_id_from_queue_id(queue_id)
+    _checkpoint_for_gate1(run_id, user)
+
+    try:
+        update_hitl_item(
+            queue_id,
+            "APPROVED",
+            edited_content=json.dumps(payload.edited_content or {}),
+        )
+    except Exception as exc:
+        raise _hitl_update_conflict(exc) from exc
+
+    logger.info("KPI modified", extra={"queue_id": queue_id})
+
+    maybe_resume_gate1(run_id)
+
+    return {"queue_id": queue_id, "status": "APPROVED"}
+
+
+# -------------------------
+# Bulk Action
+# -------------------------
+@router.post("/kpi-reviews/{run_id}/bulk")
+def bulk_kpi_action(
+    run_id: str,
+    payload: KpiBulkActionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    if demo_enabled():
+        action = payload.action
+        return demo_action(run_id, status=action, segment="kpi" if action == "APPROVED" else None)
+
+    from api.services.kpi_service import fetch_hitl_rows, maybe_resume_gate1
+    from utilis.db import update_hitl_item
+
+    _checkpoint_for_gate1(run_id, user)
+    rows = fetch_hitl_rows(run_id)
+    action = payload.action
+
+    for row in rows:
+        if row.get("decision"):
+            continue
+        try:
+            update_hitl_item(
+                row["queue_id"],
+                action,
+                rejection_reason=payload.rejection_reason,
+            )
+        except Exception:
+            logger.warning("Bulk update failed for KPI", extra={"queue_id": row.get("queue_id")})
+            continue
+
+    logger.info("Bulk KPI action executed", extra={"run_id": run_id, "action": action})
+
+    maybe_resume_gate1(run_id)
+
+    return {"run_id": run_id, "status": action}
+
+
+# -------------------------
+# HITL Queue (alias)
+# -------------------------
+@router.get("/hitl/{run_id}")
+def hitl_queue(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
+    return kpi_reviews(run_id, user=user)
+
+
+# -------------------------
+# Submit HITL Decisions
+# -------------------------
+@router.post("/hitl/{run_id}/decisions")
+def submit_hitl_decisions(
+    run_id: str,
+    payload: HitlDecisionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    if demo_enabled():
+        return demo_action(run_id, segment="kpi")
+
+    from api.services.kpi_service import maybe_resume_gate1
+    from utilis.db import update_hitl_item
+
+    _checkpoint_for_gate1(run_id, user)
+    for decision in payload.decisions:
+        if not str(decision.kpi_id or "").startswith(f"{run_id}:1:"):
+            raise HTTPException(status_code=400, detail="KPI decision does not belong to this run.")
+
+        status = decision.decision.upper()
+        if status not in {"APPROVED", "EDITED", "REJECTED"}:
+            raise HTTPException(status_code=400, detail="Unsupported KPI decision.")
+
+        try:
+            if status == "EDITED":
+                edited = decision.edited_content or {
+                    "definition": decision.edited_definition,
+                    "kpi_description": decision.edited_definition,
+                    "notes": decision.notes,
+                }
+                update_hitl_item(decision.kpi_id, "APPROVED", edited_content=json.dumps(edited))
+
+            elif status == "REJECTED":
+                update_hitl_item(decision.kpi_id, "REJECTED", rejection_reason=decision.notes)
+
+            else:
+                update_hitl_item(decision.kpi_id, "APPROVED")
+
+        except Exception as exc:
+            logger.warning(
+                "Failed to process HITL decision",
+                extra={"run_id": run_id, "kpi_id": decision.kpi_id, "error": str(exc)},
+            )
+            raise _hitl_update_conflict(exc) from exc
+
+    logger.info("HITL decisions submitted", extra={"run_id": run_id})
+
+    try:
+        maybe_resume_gate1(run_id)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"KPI decisions were saved, but pipeline resume check failed: {exc}",
+        ) from exc
+
+    return {"run_id": run_id, "status": "SUBMITTED"}
+
+
+# -------------------------
+# All KPIs
+# -------------------------
+@router.get("/kpis")
+def kpis(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
+    if demo_enabled():
+        return demo_kpi_reviews("athena-insurance-run")["kpis"]
+
+    from api.services.kpi_service import list_all_kpis
+
+    return list_all_kpis(user=user)

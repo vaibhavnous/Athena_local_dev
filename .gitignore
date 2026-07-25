@@ -1,4 +1,13 @@
 # Frontend
+apps/frontend/node_modules/
+apps/frontend/build/
+apps/frontend/.env
+apps/frontend/.env.*
+!apps/frontend/.env.example
+apps/frontend/.pnp
+apps/frontend/.pnp.js
+apps/frontend/coverage/
+apps/frontend/.git_disabled/
 frontend/node_modules/
 frontend/build/
 frontend/.env
@@ -16,6 +25,24 @@ frontend/.git_disabled/
 .tmp-update-worktree/
 
 # Backend
+apps/backend/.venv/
+apps/backend/.env
+apps/backend/.env.*
+!apps/backend/.env.example
+apps/backend/__pycache__/
+apps/backend/**/*.py[cod]
+apps/backend/pipeline_logs.json
+apps/backend/pipeline_logs.json.localbackup
+apps/backend/fetch_tmp*.json
+apps/backend/*_tmp.json
+apps/backend/*.local.json
+apps/backend/uploads/
+apps/backend/.pytest_cache/
+apps/backend/.pytest_tmp/
+apps/backend/.tmp-tests/
+apps/backend/generated_code/*.zip
+apps/backend/generated_code/**/__pycache__/
+apps/backend/generated_code/
 Athena_backend/.venv/
 Athena_backend/.env
 Athena_backend/.env.*
@@ -55,3 +82,4 @@ paramiko_debug.log
 .local_logs/
 .tmp-smoke/ponytail/
 generated_code/
+artifacts/

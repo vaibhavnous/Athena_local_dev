@@ -1,1 +1,1 @@
--r Athena_backend/requirements.txt
+-r apps/backend/requirements.txt

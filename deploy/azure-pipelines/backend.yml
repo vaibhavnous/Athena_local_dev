@@ -1,0 +1,116 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - apps/backend/**
+      - deploy/azure-pipelines/backend.yml
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  pythonVersion: '3.10'
+  backendFolder: 'apps/backend'
+  artifactName: 'backend-app'
+  artifactZip: 'backend-app.zip'
+  azureServiceConnection: 'azure-devops-service-connection'
+  webAppName: 'astra-data-eecthacqb5eherhk'
+  backendHealthUrl: 'https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net/health'
+
+stages:
+  - stage: Build
+    displayName: 'Build Backend'
+    jobs:
+      - job: BuildBackend
+        displayName: 'Install, Test, Package'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Use Python $(pythonVersion)'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r $(backendFolder)/requirements.txt
+            displayName: 'Install dependencies'
+
+          - script: |
+              cd $(backendFolder)
+              python -m pytest tests/ -v --junitxml=junit/test-results.xml
+            displayName: 'Run backend tests'
+
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFiles: '**/test-results.xml'
+              testResultsFormat: 'JUnit'
+              testRunTitle: 'Backend Tests'
+
+          - script: |
+              mkdir -p $(Build.ArtifactStagingDirectory)/backend
+              cp -r $(backendFolder)/* $(Build.ArtifactStagingDirectory)/backend/
+              chmod +x $(Build.ArtifactStagingDirectory)/backend/startup.sh
+            displayName: 'Prepare backend artifact'
+
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/backend'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactZip)'
+              replaceExistingArchive: true
+            displayName: 'Archive backend package'
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: '$(Build.ArtifactStagingDirectory)/$(artifactZip)'
+              artifactName: '$(artifactName)'
+              publishLocation: 'Container'
+            displayName: 'Publish backend artifact'
+
+  - stage: Deploy
+    displayName: 'Deploy Backend'
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployBackend
+        displayName: 'Deploy to Azure App Service'
+        environment: 'backend-prod'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadBuildArtifacts@1
+                  inputs:
+                    buildType: 'current'
+                    downloadType: 'single'
+                    artifactName: '$(artifactName)'
+                    downloadPath: '$(Pipeline.Workspace)'
+                  displayName: 'Download backend artifact'
+
+                - task: AzureWebApp@1
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    appType: 'webAppLinux'
+                    appName: '$(webAppName)'
+                    package: '$(Pipeline.Workspace)/$(artifactName)/$(artifactZip)'
+                    startUpCommand: 'bash startup.sh'
+                  displayName: 'Deploy backend app'
+
+                - script: |
+                    set -euo pipefail
+                    for attempt in {1..10}; do
+                      status="$(curl -sS -o health-body.txt -w '%{http_code}' \
+                        --connect-timeout 5 --max-time 15 \
+                        "$(backendHealthUrl)" || true)"
+                      echo "Health attempt ${attempt}/10 returned HTTP ${status}"
+                      if [ "${status}" = "200" ]; then
+                        exit 0
+                      fi
+                      sleep 6
+                    done
+                    cat health-body.txt || true
+                    exit 1
+                  displayName: 'Verify backend health'

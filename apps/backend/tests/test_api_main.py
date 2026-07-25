@@ -1,0 +1,910 @@
+from concurrent.futures import TimeoutError as FutureTimeoutError
+import os
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+os.environ.setdefault("ATHENA_DEMO_MODE", "false")
+
+from api.main import app
+from api.auth import AuthUser, get_current_user
+
+app.dependency_overrides[get_current_user] = lambda: AuthUser(
+    uid="test-user", username="Test User", email="test@example.com", userType="Admin"
+)
+
+client = TestClient(app)
+
+
+def test_health_endpoint():
+    response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "athena-fastapi"
+    embeddings = body["embeddings"]
+    assert isinstance(embeddings["enabled"], bool)
+    assert embeddings["mode"] in {"blocked", "disabled", "enabled"}
+
+
+def test_business_endpoints_require_authentication():
+    override = app.dependency_overrides.pop(get_current_user)
+    try:
+        response = client.get("/settings")
+    finally:
+        app.dependency_overrides[get_current_user] = override
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Authentication required"
+
+
+def test_configuration_rejects_client_users():
+    override = app.dependency_overrides[get_current_user]
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="client-user", username="Client User", email="client@example.com", userType="Client"
+    )
+    try:
+        response = client.get("/settings")
+    finally:
+        app.dependency_overrides[get_current_user] = override
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Administrator access required"
+
+
+def test_silver_merge_key_review_get_returns_checkpoint_artifact(monkeypatch):
+    from api.routers import reviews_router
+
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "status": "HITL_WAIT",
+            "next_review_key": "silver_merge_key_review",
+            "silver_merge_key_review_artifact": {"feeds": [{"table": "claims", "merge_keys": ["claim_id"]}]},
+        },
+    )
+
+    response = reviews_router.silver_merge_key_reviews("run-merge-review")
+
+    assert response["next_review_key"] == "silver_merge_key_review"
+    assert response["silver_merge_key_review_artifact"]["feeds"][0]["merge_keys"] == ["claim_id"]
+
+
+def test_kpi_review_returns_conflict_when_kpi_artifact_failed_without_rows(monkeypatch):
+    from api.routers import kpi_router
+
+    monkeypatch.setattr(kpi_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_fields", lambda run_id, *fields: {"source": "database"})
+    monkeypatch.setattr("api.services.kpi_service.fetch_hitl_rows", lambda run_id, status=None: [])
+    monkeypatch.setattr("api.services.kpi_service.artifact_kpis", lambda run_id: [])
+    monkeypatch.setattr(
+        "services.pipeline_runtime.fetch_run_summary",
+        lambda run_id: [{"artifact_type": "KPIS", "faithfulness_status": "FAILED"}],
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        kpi_router.kpi_reviews("run-kpi-failed")
+
+    assert exc.value.status_code == 409
+    assert "KPI extraction failed" in exc.value.detail
+
+
+def test_create_kpi_review_adds_pending_gate1_item(monkeypatch):
+    from api.models import KpiCreatePayload
+    from api.routers import kpi_router
+
+    monkeypatch.setattr(kpi_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "next_gate": 1, "source": "database"},
+    )
+    monkeypatch.setattr("utilis.db.insert_hitl_queue_item", lambda run_id, kpi, gate_number: f"{run_id}:1:manual-test")
+
+    result = kpi_router.create_kpi_review(
+        "run-add-kpi",
+        KpiCreatePayload(name="Claim Closure Rate", definition="Percentage of claims closed during the period."),
+    )
+
+    assert result["queue_id"] == "run-add-kpi:1:manual-test"
+    assert result["status"] == "PENDING_REVIEW"
+    assert result["name"] == "Claim Closure Rate"
+
+
+def test_submit_edited_kpi_persists_full_content(monkeypatch):
+    from api.models import HitlDecision, HitlDecisionPayload
+    from api.routers import kpi_router
+
+    updates = []
+    monkeypatch.setattr(kpi_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr("utilis.db.update_hitl_item", lambda *args, **kwargs: updates.append((args, kwargs)))
+    monkeypatch.setattr("api.services.kpi_service.maybe_resume_gate1", lambda run_id: None)
+
+    kpi_router.submit_hitl_decisions(
+        "run-edit-kpi",
+        HitlDecisionPayload(decisions=[HitlDecision(
+            kpi_id="run-edit-kpi:1:0",
+            decision="EDITED",
+            edited_content={"name": "Edited KPI", "definition": "Edited definition"},
+        )]),
+    )
+
+    assert updates[0][0][:2] == ("run-edit-kpi:1:0", "APPROVED")
+    assert '"name": "Edited KPI"' in updates[0][1]["edited_content"]
+
+
+def test_sql_tcp_probe_failure_is_cached(monkeypatch):
+    from utilis import db
+
+    calls = {"probe": 0}
+
+    def fake_probe(host, port, timeout_seconds):
+        calls["probe"] += 1
+        return TimeoutError("timed out")
+
+    db._SQL_ENDPOINT_FAILURE_CACHE.clear()
+    monkeypatch.setattr(db, "SQL_TCP_PROBE_ENABLED", True)
+    monkeypatch.setattr(db, "SQL_FAIL_FAST_ON_TCP_PROBE", True)
+    monkeypatch.setattr(db, "SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS", 60)
+    monkeypatch.setattr(db, "_probe_sql_endpoint", fake_probe)
+
+    with pytest.raises(RuntimeError, match="SQL TCP probe failed"):
+        db._connect_with_retry(
+            "DRIVER={stub};",
+            database_name="AdventureWorks2019",
+            host="dataedge.database.windows.net",
+            port=1433,
+            role="pipeline",
+        )
+
+    with pytest.raises(RuntimeError, match="SQL TCP probe failed"):
+        db._connect_with_retry(
+            "DRIVER={stub};",
+            database_name="AdventureWorks2019",
+            host="dataedge.database.windows.net",
+            port=1433,
+            role="pipeline",
+        )
+
+    assert calls["probe"] == 1
+
+
+def test_schema_embedding_is_skipped_when_embeddings_are_disabled(monkeypatch):
+    from nodes import ingestion
+    from utilis.embeddings import reset_embedding_model_cache
+
+    monkeypatch.setenv("ATHENA_BLOCK_EMBEDDINGS", "true")
+    reset_embedding_model_cache()
+    monkeypatch.setattr(
+        ingestion,
+        "execute_source_sql",
+        lambda db, query, params: (_ for _ in ()).throw(AssertionError("schema SQL should not run")),
+    )
+
+    result = ingestion._embed_schema_metadata({
+        "run_id": "run-schema-smoke",
+        "status": "RUNNING",
+        "source_databases": ["Insurance"],
+    })
+
+    assert result["schema_embedded"] is False
+    assert result["schema_columns_count"] == 0
+    reset_embedding_model_cache()
+
+
+def test_pipeline_run_requires_brd_text_for_database_source():
+    payload = {"source": "database", "brd_text": ""}
+    response = client.post("/pipeline/run", json=payload)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "brd_text is required"
+
+
+def test_pipeline_run_requires_brd_text_for_file_source():
+    response = client.post("/pipeline/run", json={"source": "sftp", "brd_text": ""})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "brd_text is required"
+
+
+def test_pipeline_run_rejects_unknown_source_before_checkpoint():
+    response = client.post("/pipeline/run", json={"source": "ftp", "brd_text": "valid brd text"})
+
+    assert response.status_code == 422
+
+
+def test_pipeline_run_starts_demo_progress_before_kpi_review(monkeypatch):
+    from api.routers import pipeline_router
+
+    monkeypatch.setattr(pipeline_router, "demo_enabled", lambda: True)
+    monkeypatch.setattr(pipeline_router, "new_demo_run_id", lambda: "demo-run-1")
+
+    recorded = {}
+
+    def fake_demo_start_progress(run_id, segment):
+        recorded["run_id"] = run_id
+        recorded["segment"] = segment
+        return {"run_id": run_id, "status": "PROCESSING"}
+
+    monkeypatch.setattr(pipeline_router, "demo_start_progress", fake_demo_start_progress)
+
+    response = client.post("/pipeline/run", json={"source": "database", "brd_text": "valid brd text"})
+
+    assert response.status_code == 200
+    assert response.json() == {"run_id": "demo-run-1", "status": "PROCESSING"}
+    assert recorded == {"run_id": "demo-run-1", "segment": "start"}
+
+
+def test_demo_mode_defaults_to_false(monkeypatch):
+    from api import demo
+
+    monkeypatch.delenv("ATHENA_DEMO_MODE", raising=False)
+
+    assert demo.demo_enabled() is False
+
+
+def test_pipeline_run_accepts_file_source_with_brd_text(monkeypatch):
+    saved = {}
+
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: None)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_checkpoint_state",
+        lambda run_id, state: saved.update({"run_id": run_id, "state": state}),
+    )
+    monkeypatch.setattr(
+        "api.services.pipeline_service.submit_pipeline_start",
+        lambda run_id, payload: saved.update({"submitted_run_id": run_id, "submitted_source": payload.source}),
+    )
+
+    response = client.post("/pipeline/run", json={"source": "sftp", "brd_text": "file source brd"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "RUNNING"
+    assert saved["state"]["source"] == "sftp"
+    assert saved["state"]["sftp_entity"] == "transactions"
+    assert saved["submitted_run_id"] == body["run_id"]
+    assert saved["submitted_source"] == "sftp"
+
+
+def test_resume_from_failure_uses_real_resume_path(monkeypatch):
+    from api.routers import pipeline_router
+
+    monkeypatch.setattr(pipeline_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "FAILED", "owner_email": "test@example.com"},
+    )
+    monkeypatch.setattr(
+        pipeline_router,
+        "_resume_failed_run",
+        lambda run_id, action_name: {"run_id": run_id, "status": "SUBMITTED", "action": action_name},
+    )
+
+    response = client.post("/pipeline/run-123/resume-from-failure")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": "run-123",
+        "status": "SUBMITTED",
+        "action": "resume_from_failure",
+    }
+
+
+def test_restart_creates_new_real_run(monkeypatch):
+    from api.routers import pipeline_router
+
+    monkeypatch.setattr(pipeline_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "brd_text": "real brd",
+            "brd_filename": "real.txt",
+            "source": "database",
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.pipeline_service.seed_payload_from_checkpoint",
+        lambda checkpoint: pipeline_router.PipelineRunRequest(
+            brd_text=checkpoint["brd_text"],
+            brd_filename=checkpoint["brd_filename"],
+            source=checkpoint["source"],
+        ),
+    )
+
+    recorded = {}
+    monkeypatch.setattr(
+        pipeline_router,
+        "_seed_run_checkpoint",
+        lambda run_id, payload, owner_email=None: recorded.update(
+            {"run_id": run_id, "payload": payload, "owner_email": owner_email}
+        ),
+    )
+    monkeypatch.setattr(
+        "api.services.pipeline_service.submit_pipeline_start",
+        lambda run_id, payload: recorded.update({"submitted_run_id": run_id, "submitted_payload": payload}),
+    )
+    monkeypatch.setattr(pipeline_router.uuid, "uuid4", lambda: "new-real-run")
+
+    response = client.post("/pipeline/run-old/restart")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": "new-real-run",
+        "status": "RUNNING",
+        "action": "restart",
+        "source_run_id": "run-old",
+    }
+    assert recorded["run_id"] == "new-real-run"
+    assert recorded["submitted_run_id"] == "new-real-run"
+
+
+def test_pipeline_run_returns_503_when_checkpoint_init_fails(monkeypatch):
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: None)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_checkpoint_state",
+        lambda run_id, state: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+
+    response = client.post("/pipeline/run", json={"source": "database", "brd_text": "valid brd text"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Failed to initialize run checkpoint"
+
+
+def test_upload_brd_creates_file(monkeypatch):
+    monkeypatch.setattr("api.routers.pipeline_router.api_utils.ROOT_DIR", Path(__file__).resolve().parents[1])
+
+    file_content = b"test content"
+    response = client.post(
+        "/pipeline/upload-brd",
+        files={"file": ("sample.brd", file_content, "text/plain")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["filename"] == "sample.brd"
+    assert body["status"] == "uploaded"
+    assert Path(body["path"]).exists()
+    assert Path(body["path"]).read_bytes() == file_content
+
+
+def test_upload_brd_rejects_large_file(monkeypatch):
+    monkeypatch.setattr("api.routers.pipeline_router.api_utils.ROOT_DIR", Path(__file__).resolve().parents[1])
+
+    response = client.post(
+        "/pipeline/upload-brd",
+        files={"file": ("large.brd", b"x" * (5 * 1024 * 1024 + 1), "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "File too large"
+
+
+def test_pipeline_status_returns_404_for_missing_run(monkeypatch):
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {})
+    monkeypatch.setattr("api.services.ui_service.ui_run", lambda run_id: {"status": "NOT_FOUND"})
+
+    response = client.get("/pipeline/run-123/status")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Run not found: run-123"
+
+
+def test_pipeline_status_shapes_running_response(monkeypatch):
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "RUNNING", "owner_email": "test@example.com"},
+    )
+    monkeypatch.setattr(
+        "api.services.ui_service.ui_run",
+        lambda run_id: {"status": "RUNNING", "run_id": run_id},
+    )
+
+    response = client.get("/pipeline/run-123/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "run-123"
+    assert body["state"]["life_cycle_state"] == "RUNNING"
+    assert body["state"]["result_state"] == "RUNNING"
+
+
+def test_pipeline_status_fallback_treats_completed_databricks_gold_as_terminal():
+    from api.routers.pipeline_router import _fallback_status_payload
+
+    payload = _fallback_status_payload(
+        "run-gold",
+        checkpoint={
+            "run_id": "run-gold",
+            "status": "RUNNING",
+            "background_stage": None,
+            "databricks_gold_execution_status": "COMPLETED",
+        },
+    )
+
+    assert payload["status"] == "PIPELINE_COMPLETED"
+    assert payload["state"]["life_cycle_state"] == "TERMINATED"
+
+
+def test_abort_run_persists_aborted_status(monkeypatch):
+    saved = {}
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"run_id": run_id, "status": "RUNNING"})
+    monkeypatch.setattr("services.pipeline_runtime.save_checkpoint_state", lambda run_id, state: saved.update({"run_id": run_id, "state": state}))
+
+    response = client.post("/pipeline/run-123/abort")
+
+    assert response.status_code == 200
+    assert response.json() == {"run_id": "run-123", "status": "ABORTED"}
+    assert saved["state"]["status"] == "ABORTED"
+
+
+def test_continue_stage_returns_404_when_run_is_missing(monkeypatch):
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {})
+
+    response = client.post("/pipeline/run-123/continue-stage", json={"auto_advance": False})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Run not found: run-123"
+
+
+def test_continue_stage_rejects_file_source(monkeypatch):
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"next_stage_key": "ingestion", "source": "sftp"},
+    )
+
+    response = client.post("/pipeline/run-123/continue-stage", json={"auto_advance": False})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Stage-by-stage confirmation is not enabled for file-source runs yet."
+
+
+def test_continue_stage_submits_background_job(monkeypatch):
+    recorded = {}
+    checkpoint = {
+        "run_id": "run-123",
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "next_stage_key": "enrichment",
+        "source": "database",
+    }
+
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_checkpoint_state",
+        lambda run_id, state: recorded.update({"saved_run_id": run_id, "saved_state": state}),
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update(
+            {"background_run_id": run_id, "background_stage": stage, "background_fn": fn.__name__, "background_args": args}
+        ),
+    )
+
+    response = client.post("/pipeline/run-123/continue-stage", json={"auto_advance": False})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": "run-123",
+        "status": "SUBMITTED",
+        "next_stage_key": "enrichment",
+        "resume_message": "enrichment is running.",
+    }
+    assert recorded["saved_state"]["status"] == "PROCESSING"
+    assert recorded["saved_state"]["background_stage"] == "enrichment"
+    assert recorded["saved_state"]["stage_confirmation_enabled"] is True
+    assert recorded["background_stage"] == "enrichment"
+    assert recorded["background_fn"] == "continue_database_pipeline_job"
+    assert recorded["background_args"][0:3] == ("run-123", "enrichment", recorded["saved_state"])
+    assert recorded["background_args"][3] is False
+
+
+def test_run_lineage_endpoint_returns_payload(monkeypatch):
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"run_id": run_id})
+    monkeypatch.setattr(
+        "services.pipeline_runtime.build_run_lineage",
+        lambda run_id, checkpoint: {"run_id": run_id, "nodes": [{"id": "n1"}], "edges": [], "summary": {"fk_edge_count": 0}},
+    )
+
+    response = client.get("/run-lineage/run-123")
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "run-123"
+    assert response.json()["nodes"][0]["id"] == "n1"
+
+
+def test_bronze_review_submit_uses_checkpoint_artifact_when_payload_empty(monkeypatch):
+    recorded = {}
+    checkpoint_artifact = {"feeds": [{"entity": "claims", "review_status": "APPROVED"}]}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "source": "database", "next_gate": 4, "bronze_review_artifact": checkpoint_artifact},
+    )
+    monkeypatch.setattr("api.services.ui_service.bronze_review_from_scripts", lambda run_id, checkpoint: {})
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update({"stage": stage, "args": args}),
+    )
+
+    response = client.post("/bronze-reviews/run-123", json={"action": "APPROVED", "review_artifact": {"feeds": []}})
+
+    assert response.status_code == 200
+    assert recorded["stage"] == "silver_merge_key_review"
+    assert recorded["args"][2] == checkpoint_artifact
+
+
+def test_bronze_review_submit_rejects_when_artifact_not_ready(monkeypatch):
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "source": "database", "next_gate": 4},
+    )
+    monkeypatch.setattr("api.services.ui_service.bronze_review_from_scripts", lambda run_id, checkpoint: {})
+
+    response = client.post("/bronze-reviews/run-123", json={"action": "APPROVED", "review_artifact": {"feeds": []}})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Bronze review is not ready yet. Generated Bronze scripts are still loading."
+
+
+def test_bronze_review_submit_rejects_replay(monkeypatch):
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "source": "database",
+            "status": "HITL_WAIT",
+            "next_gate": 4,
+            "bronze_review_decision": "APPROVED",
+            "bronze_review_artifact": {"feeds": [{"entity": "claims", "review_status": "APPROVED"}]},
+        },
+    )
+
+    response = client.post(
+        "/bronze-reviews/run-123",
+        json={"action": "APPROVED", "review_artifact": {"feeds": [{"entity": "claims"}]}},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "This review has already been decided for this run."
+
+
+def test_gold_review_submit_runs_execution_in_background(monkeypatch):
+    recorded = {}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "next_review_key": "gold_review"},
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update({"run_id": run_id, "stage": stage, "args": args}),
+    )
+
+    response = client.post(
+        "/gold-reviews/run-123",
+        json={"action": "APPROVED", "review_artifact": {"items": [{"script_body": "select 1"}]}},
+    )
+
+    assert response.status_code == 200
+    assert recorded["run_id"] == "run-123"
+    assert recorded["stage"] == "gold_code_execution"
+    assert recorded["args"][1] == "APPROVED"
+
+
+def test_review_payload_rejects_invalid_artifact_shape():
+    response = client.post(
+        "/gold-reviews/run-123",
+        json={"action": "APPROVED", "review_artifact": {"items": {"table": "claims"}}},
+    )
+
+    assert response.status_code == 422
+
+
+def test_bronze_review_normalizes_legacy_feed_lineage_fields():
+    from api.services.ui.review_ui_service import normalize_bronze_review_artifact
+
+    artifact = normalize_bronze_review_artifact(
+        {"feeds": [{"database_name": "insurance", "schema_name": "dbo", "table": "claims"}]},
+        {"bronze_catalog": "ATHENA_DB", "bronze_schema": "BRONZE"},
+    )
+
+    assert artifact["feeds"][0]["source_table"] == "insurance.dbo.claims"
+    assert artifact["feeds"][0]["target_table"] == "ATHENA_DB.BRONZE.bronze_claims"
+
+
+def test_retry_failed_stage_rejects_non_failed_run(monkeypatch):
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"status": "RUNNING"})
+
+    response = client.post("/pipeline/run-123/retry-failed-stage")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Only failed runs can retry a failed stage."
+
+
+def test_retry_failed_stage_submits_file_resume(monkeypatch):
+    recorded = {}
+    checkpoint = {"status": "FAILED", "source": "sftp", "error": "boom"}
+
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(
+        "api.services.pipeline_service.clean_checkpoint_for_resume",
+        lambda state: {"status": "RUNNING", "source": state["source"]},
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_checkpoint_state",
+        lambda run_id, state: recorded.update({"saved_run_id": run_id, "saved_state": state}),
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update(
+            {"background_run_id": run_id, "background_stage": stage, "background_fn": fn.__name__, "background_args": args}
+        ),
+    )
+
+    response = client.post("/pipeline/run-123/retry-failed-stage")
+
+    assert response.status_code == 200
+    assert response.json() == {"run_id": "run-123", "status": "SUBMITTED", "action": "retry_failed_stage"}
+    assert recorded["saved_state"]["status"] == "RUNNING"
+    assert recorded["background_stage"] == "file_resume"
+    assert recorded["background_fn"] == "continue_file_pipeline_job"
+
+
+def test_runs_returns_503_on_timeout(monkeypatch):
+    class StubFuture:
+        def result(self, timeout):
+            raise FutureTimeoutError()
+
+    class StubExecutor:
+        def submit(self, fn, *args, **kwargs):
+            return StubFuture()
+
+    monkeypatch.setattr("api.routers.runs_router.RUN_LIST_EXECUTOR", StubExecutor())
+
+    response = client.get("/runs")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Run list temporarily unavailable"
+
+
+def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
+    class StubFuture:
+        def result(self, timeout):
+            return [{"run_id": "good-run"}, {"run_id": None}, {"run_id": "bad-run"}]
+
+    class StubExecutor:
+        def submit(self, fn, *args, **kwargs):
+            return StubFuture()
+
+    def fake_summary(run_id):
+        if run_id == "bad-run":
+            raise RuntimeError("summary failed")
+        return {"run_id": run_id, "status": "SUCCESS"}
+
+    monkeypatch.setenv("ATHENA_RUNS_FAST_SUMMARY", "false")
+    monkeypatch.setattr("api.routers.runs_router.RUN_LIST_EXECUTOR", StubExecutor())
+    monkeypatch.setattr("api.services.ui_service.ui_run_summary", fake_summary)
+
+    response = client.get("/runs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0] == {"run_id": "good-run", "status": "SUCCESS"}
+    assert payload[1]["run_id"] == "bad-run"
+    assert payload[1]["status"] == "UNKNOWN"
+
+
+def test_runs_uses_fast_checkpoint_summary_by_default(monkeypatch):
+    monkeypatch.delenv("ATHENA_RUNS_FAST_SUMMARY", raising=False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.list_runs",
+        lambda limit: [{"run_id": "run-fast", "last_activity": "2026-06-30T00:00:00Z"}],
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "brd_filename": "fast-summary.docx",
+            "source": "database",
+            "status": "RUNNING",
+            "next_gate": 2,
+            "resume_message": "Table Review is pending.",
+        },
+    )
+
+    def fail_full_summary(run_id):
+        raise AssertionError("ui_run_summary should not be called by default /runs")
+
+    monkeypatch.setattr("api.services.ui_service.ui_run_summary", fail_full_summary)
+
+    response = client.get("/runs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["id"] == "run-fast"
+    assert payload[0]["brd_filename"] == "fast-summary.docx"
+    assert payload[0]["next_gate"] == 2
+    assert payload[0]["resume_message"] == "Table Review is pending."
+
+
+def test_run_detail_returns_fallback_on_failure(monkeypatch):
+    monkeypatch.setattr(
+        "api.services.ui_service.ui_run",
+        lambda run_id, include_scripts=True: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"status": "RUNNING"})
+
+    response = client.get("/runs/run-123")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_id"] == "run-123"
+    assert payload["status"] == "RUNNING"
+    assert payload["checkpoint"] == {"status": "RUNNING"}
+
+
+def test_run_detail_rejects_foreign_client_run(monkeypatch):
+    override = app.dependency_overrides[get_current_user]
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="client-user", username="Client User", email="client@example.com", userType="Client"
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "owner_email": "other@example.com", "status": "RUNNING"},
+    )
+
+    try:
+        response = client.get("/runs/run-foreign")
+    finally:
+        app.dependency_overrides[get_current_user] = override
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Run access denied"
+
+
+def test_settings_roundtrip():
+    response = client.get("/settings")
+    assert response.status_code == 200
+    assert response.json()["provider"] == "azure_openai"
+
+    payload = {"provider": "azure_openai", "budget": 42}
+    response = client.put("/settings", json=payload)
+    assert response.status_code == 200
+    assert response.json()["budget"] == 42
+
+
+def test_configuration_crud_endpoints():
+    create_response = client.post("/configurations", json={"name": "custom"})
+    assert create_response.status_code == 200
+    created = create_response.json()
+    assert created["name"] == "custom"
+    assert created["id"]
+
+    update_response = client.put(f"/configurations/{created['id']}", json={"name": "updated"})
+    assert update_response.status_code == 200
+    assert update_response.json() == {"name": "updated", "id": created["id"]}
+
+    delete_response = client.delete(f"/configurations/{created['id']}")
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {"id": created["id"], "deleted": True}
+
+
+def test_configuration_write_endpoints_redact_secret_fields():
+    create_response = client.post(
+        "/configurations",
+        json={
+            "name": "custom",
+            "password": "plain-text",
+            "apiKey": "api-key",
+            "nested": {"source_password": "nested-secret"},
+        },
+    )
+
+    assert create_response.status_code == 200
+    created = create_response.json()
+    assert created["password"] == ""
+    assert created["apiKey"] == ""
+    assert created["nested"]["source_password"] == ""
+
+    update_response = client.put(
+        "/configurations/config-1",
+        json={"name": "custom", "secret": "stored-secret"},
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.json()["secret"] == ""
+
+
+def test_configuration_test_endpoint_accepts_database_shape_without_arbitrary_network(monkeypatch):
+    from api.routers import config_router
+
+    monkeypatch.setattr(config_router, "_load_env_if_available", lambda: None)
+    monkeypatch.delenv("AZURE_SQL_SOURCE_USERNAME", raising=False)
+    monkeypatch.delenv("AZURE_SQL_SOURCE_PASSWORD", raising=False)
+
+    def fail_probe(address, timeout):
+        raise AssertionError("arbitrary configuration test should not probe the network")
+
+    monkeypatch.setattr(config_router.socket, "create_connection", fail_probe)
+
+    response = client.post(
+        "/configurations/test",
+        json={
+            "sourceType": "database",
+            "dbType": "azure_sql",
+            "host": "example.database.windows.net",
+            "port": "1433",
+            "databaseName": "claims",
+            "username": "db_user",
+            "password": "db-password",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert "live connection test is not enabled" in response.json()["message"]
+
+
+def test_configuration_test_endpoint_probes_configured_default_with_bounded_timeout(monkeypatch):
+    from api.routers import config_router
+
+    recorded = {}
+    monkeypatch.setattr(config_router, "_load_env_if_available", lambda: None)
+    monkeypatch.setenv("AZURE_SQL_SOURCE_HOST", "configured.database.windows.net")
+    monkeypatch.setenv("AZURE_SQL_PORT", "1433")
+    monkeypatch.setenv("AZURE_SQL_SOURCE_DATABASE", "insurance")
+    monkeypatch.setenv("AZURE_SQL_SOURCE_USERNAME", "db_user")
+    monkeypatch.setenv("AZURE_SQL_SOURCE_PASSWORD", "db-password")
+    monkeypatch.setenv("ATHENA_SQL_TCP_PROBE_TIMEOUT_SECONDS", "30")
+
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_create_connection(address, timeout):
+        recorded.update({"address": address, "timeout_seconds": timeout})
+        return FakeSocket()
+
+    monkeypatch.setattr(config_router.socket, "create_connection", fake_create_connection)
+
+    response = client.post(
+        "/configurations/test",
+        json={
+            "sourceType": "database",
+            "dbType": "azure_sql",
+            "host": "configured.database.windows.net",
+            "port": "1433",
+            "databaseName": "insurance",
+            "username": "db_user",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert recorded == {"address": ("configured.database.windows.net", 1433), "timeout_seconds": 2.0}
+
+
+def test_configuration_test_endpoint_rejects_invalid_database_payload():
+    response = client.post(
+        "/configurations/test",
+        json={"sourceType": "database", "dbType": "azure_sql", "username": "db_user"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Host is required"
+
+
+def test_configuration_payload_rejects_bad_source_type():
+    response = client.post("/configurations/test", json={"sourceType": "ftp"})
+
+    assert response.status_code == 422
+
+
+def test_bulk_kpi_action_rejects_invalid_action():
+    response = client.post("/kpi-reviews/run-123/bulk", json={"action": "DROP"})
+
+    assert response.status_code == 422

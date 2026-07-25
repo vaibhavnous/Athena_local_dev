@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - Athena_backend/**
+      - apps/backend/**
       - .github/workflows/main_Astra-data.yml
   workflow_dispatch:
 
@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p deploy
-          rsync -a Athena_backend/ deploy/Backend/ \
+          rsync -a apps/backend/ deploy/Backend/ \
             --exclude '.env' \
             --exclude '.venv' \
             --exclude '.pytest_cache' \

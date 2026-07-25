@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "eastus"
+    },
+    "projectName": {
+      "value": "athena"
+    },
+    "environment": {
+      "value": "dev"
+    },
+    "sqlHost": {
+      "value": "YOUR_SQL_SERVER.database.windows.net"
+    },
+    "sqlUsername": {
+      "value": "YOUR_SQL_USERNAME"
+    },
+    "sqlPassword": {
+      "value": "YOUR_SQL_PASSWORD"
+    },
+    "sqlDatabase": {
+      "value": "metadata"
+    },
+    "sqlSchema": {
+      "value": "metadata"
+    }
+  }
+}

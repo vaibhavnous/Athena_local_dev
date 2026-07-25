@@ -4,7 +4,7 @@ This project currently deploys as one Azure App Service:
 
 - FastAPI backend serves the API
 - React frontend is built in GitHub Actions
-- React build output is copied into `Athena_backend/static`
+- React build output is copied into `apps/backend/static`
 - The same App Service serves both UI and API
 
 Because of that, production configuration is mostly backend App Service settings plus one GitHub Actions secret for deployment.
@@ -23,7 +23,7 @@ Value:
 
 Used by:
 
-- `azure-pipelines-backend.yml`
+- `deploy/azure-pipelines/backend.yml`
 
 Notes:
 
@@ -248,7 +248,7 @@ ATHENA_SFTP_GOLD_LLM_TIMEOUT_SECONDS=60
 
 Use:
 
-- [Athena_backend/.env.example](C:/Users/vaibhavmalik/Athena%20agentic/Athena_backend/.env.example)
+- [apps/backend/.env.example](apps/backend/.env.example)
 
 Recommended local minimum:
 
@@ -292,7 +292,7 @@ ASTRA_JWT_AUDIENCE=astra-frontend
 
 ## 9. Local Frontend `.env`
 
-Create `frontend/.env.local` if needed:
+Create `apps/frontend/.env.local` if needed:
 
 ```text
 REACT_APP_API_BASE_URL=http://127.0.0.1:8000
@@ -308,7 +308,7 @@ Notes:
 
 Workflow:
 
-- `azure-pipelines-backend.yml`
+- `deploy/azure-pipelines/backend.yml`
 
 Current behavior:
 

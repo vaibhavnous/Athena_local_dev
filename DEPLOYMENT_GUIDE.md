@@ -63,7 +63,7 @@ az group create \
 
 ## Step 5: Update Infrastructure Parameters
 
-Edit `infrastructure.parameters.json`:
+Edit `infra/azure/parameters/dev.json`:
 
 ```json
 {
@@ -80,12 +80,12 @@ Edit `infrastructure.parameters.json`:
 
 ## Step 6: Create Pipelines in Azure DevOps
 
-### Pipeline 1: Backend deployment (azure-pipelines-backend.yml)
+### Pipeline 1: Backend deployment (`deploy/azure-pipelines/backend.yml`)
 *Builds and deploys the backend to the configured Azure App Service*
 
 1. **Pipelines** → **New pipeline** → **GitHub** (or your repo)
 2. Select **Existing Azure Pipelines YAML file**
-3. Path: `azure-pipelines-backend.yml`
+3. Path: `deploy/azure-pipelines/backend.yml`
 4. Name: `Athena-Backend-CI`
 5. Save & queue
 
@@ -93,7 +93,7 @@ Edit `infrastructure.parameters.json`:
 *Deploys combined artifact to single App Service*
 
 1. **Pipelines** → **New pipeline**
-2. This legacy pipeline has been removed; use `azure-pipelines-backend.yml`.
+2. This legacy pipeline has been removed; use `deploy/azure-pipelines/backend.yml`.
 3. Name: `Athena-CD`
 4. Configure trigger: **Pipeline completion** for Athena-Backend-CI
 5. Save & queue
@@ -104,8 +104,8 @@ Edit `infrastructure.parameters.json`:
 # Deploy Bicep template
 az deployment group create \
   --resource-group athena-rg-dev \
-  --template-file infrastructure.bicep \
-  --parameters infrastructure.parameters.json \
+  --template-file infra/azure/main.bicep \
+  --parameters infra/azure/parameters/dev.json \
   --parameters projectName=athena environment=dev
 ```
 
@@ -176,7 +176,7 @@ az webapp log tail \
 
 ## Environment Variables Reference
 
-### Combined App Service (Athena_backend + React Frontend)
+### Combined App Service (`apps/backend` + React frontend)
 
 - `SQL_CONNECTION_STRING`: Database connection (from Key Vault)
 - `API_KEY`: API authentication key (from Key Vault)
@@ -185,7 +185,7 @@ az webapp log tail \
 - `PYTHONUNBUFFERED`: 1 (for unbuffered Python output)
 - `APPINSIGHTS_INSTRUMENTATIONKEY`: Application Insights key
 
-### Frontend (frontend)
+### Frontend (`apps/frontend`)
 
 - `REACT_APP_API_ENDPOINT`: Backend API base URL
 - `REACT_APP_ENVIRONMENT`: dev/prod

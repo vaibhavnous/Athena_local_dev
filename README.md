@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/Athena_logo.png" alt="Athena Logo" width="140" />
+  <img src="apps/frontend/public/Athena_logo.png" alt="Athena Logo" width="140" />
 </p>
 
 # Athena
