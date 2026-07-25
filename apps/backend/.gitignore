@@ -1,17 +1,27 @@
 .venv/
 .env
+.env.*
+!.env.example
 pipeline_logs.json
 pipeline_logs.json.localbackup
+fetch_tmp*.json
+*_tmp.json
+*.local.json
 
 # Python cache
 __pycache__/
 *.py[cod]
 *.pyd
+.pytest_cache/
+.pytest_tmp/
+.tmp-tests/
+.mypy_cache/
+.ruff_cache/
 
 # Local uploads / artifacts
 uploads/
-generated_code/*.zip
-generated_code/**/__pycache__/
+generated_code/
+.tmp-*.log
 
 # OS / tooling
 .DS_Store

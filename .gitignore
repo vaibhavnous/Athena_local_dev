@@ -1,66 +1,63 @@
+# Obsolete pre-restructure app roots
+/Athena_backend/
+/frontend/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!apps/backend/.env.example
+!apps/frontend/.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.pytest_tmp/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+venv/
+
 # Frontend
 apps/frontend/node_modules/
 apps/frontend/build/
-apps/frontend/.env
-apps/frontend/.env.*
-!apps/frontend/.env.example
 apps/frontend/.pnp
 apps/frontend/.pnp.js
 apps/frontend/coverage/
-apps/frontend/.git_disabled/
-frontend/node_modules/
-frontend/build/
-frontend/.env
-frontend/.env.*
-!frontend/.env.example
-frontend/.pnp
-frontend/.pnp.js
-frontend/coverage/
-frontend/.git_disabled/
+apps/frontend/.cache/
+apps/frontend/.eslintcache
+apps/frontend/npm-debug.log*
+apps/frontend/yarn-debug.log*
+apps/frontend/yarn-error.log*
 
-# Git internals / leftovers
-.gitdir/
-.git_bad/
-.git_denied2/
-.tmp-update-worktree/
-
-# Backend
-apps/backend/.venv/
-apps/backend/.env
-apps/backend/.env.*
-!apps/backend/.env.example
-apps/backend/__pycache__/
-apps/backend/**/*.py[cod]
+# Backend runtime artifacts
 apps/backend/pipeline_logs.json
 apps/backend/pipeline_logs.json.localbackup
 apps/backend/fetch_tmp*.json
 apps/backend/*_tmp.json
 apps/backend/*.local.json
 apps/backend/uploads/
-apps/backend/.pytest_cache/
-apps/backend/.pytest_tmp/
 apps/backend/.tmp-tests/
-apps/backend/generated_code/*.zip
-apps/backend/generated_code/**/__pycache__/
+apps/backend/.tmp-*.log
 apps/backend/generated_code/
-Athena_backend/.venv/
-Athena_backend/.env
-Athena_backend/.env.*
-!Athena_backend/.env.example
-Athena_backend/__pycache__/
-Athena_backend/**/*.py[cod]
-Athena_backend/pipeline_logs.json
-Athena_backend/pipeline_logs.json.localbackup
-Athena_backend/fetch_tmp*.json
-Athena_backend/*_tmp.json
-Athena_backend/*.local.json
-Athena_backend/uploads/
-Athena_backend/.pytest_cache/
-Athena_backend/.pytest_tmp/
-Athena_backend/.tmp-tests/
-Athena_backend/generated_code/*.zip
-Athena_backend/generated_code/**/__pycache__/
-Athena_backend/generated_code/
+
+# Repo-local generated artifacts
+.local_logs/
+.tmp-smoke/
+artifacts/
+generated_code/
+*.log
+*.bak
 
 # OS / editor
 .DS_Store
@@ -68,18 +65,8 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Misc
-.env
-.env.*
-!.env.example
-*.key
-*.pem
-*.p12
-*.pfx
-*.crt
-*.bak
-paramiko_debug.log
-.local_logs/
-.tmp-smoke/ponytail/
-generated_code/
-artifacts/
+# Git/tooling leftovers
+.gitdir/
+.git_bad/
+.git_denied2/
+.tmp-update-worktree/
