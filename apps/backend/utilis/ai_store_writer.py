@@ -18,6 +18,7 @@ def ai_store_db_writer(
     token_count: int = 0,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    cost_usd: float | None = None,
 ) -> None:
     """
     Write AI artifact to existing ai_store table (no schema changes).
@@ -40,6 +41,7 @@ def ai_store_db_writer(
         storage_fingerprint = artifact_storage_fingerprint(fingerprint, artifact_type)
         payload.setdefault("fingerprint", fingerprint)
         payload.setdefault("storage_fingerprint", f"{fingerprint}:{artifact_type}")
+        stored_cost_usd = payload.get("cost_usd") if cost_usd is None else cost_usd
 
         cursor.execute(
             f"""
@@ -60,13 +62,14 @@ def ai_store_db_writer(
                     retry_count = ?,
                     token_count = ?,
                     input_tokens = ?,
-                    output_tokens = ?
+                    output_tokens = ?,
+                    cost_usd = ?
             WHEN NOT MATCHED THEN
                 INSERT (run_id, fingerprint, stored_at, payload, stage, artifact_type,
                         schema_version, prompt_version, faithfulness_status, 
                         faithfulness_warn_count, retry_count, token_count, 
-                        input_tokens, output_tokens)
-                VALUES (?, ?, GETUTCDATE(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        input_tokens, output_tokens, cost_usd)
+                VALUES (?, ?, GETUTCDATE(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             storage_fingerprint,
             run_id,
@@ -81,6 +84,7 @@ def ai_store_db_writer(
             token_count,
             input_tokens,
             output_tokens,
+            stored_cost_usd,
             run_id,
             storage_fingerprint,
             json.dumps(payload),
@@ -94,6 +98,7 @@ def ai_store_db_writer(
             token_count,
             input_tokens,
             output_tokens,
+            stored_cost_usd,
         )
         
         conn.commit()

@@ -6,8 +6,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pydantic
 from pydantic import BaseModel, Field
-from langchain_core.callbacks.base import BaseCallbackHandler
-from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pinecone import Pinecone
 
@@ -16,7 +14,8 @@ from schema import KPISchema, KPISchemaItem, DerivationType
 from utilis.embeddings import get_embedding_model
 from utilis.logger import logger
 from utilis.db import ai_store_db_writer, config as db_config, insert_hitl_queue_items, get_pipeline_connection
-from nodes.req_extraction import get_llm, compute_cost_usd, TokenAccumulator, _strip_fences, handoff_validator
+from utilis.llm_usage import LLMUsage, combine_llm_usage, metered_invoke
+from nodes.req_extraction import get_llm, _strip_fences, handoff_validator
 
 SYSTEM_PROMPT_KPI = """You are a KPI analyst specialized in data-driven systems.
 
@@ -81,17 +80,18 @@ def _resolve_source_databases(state: Stage01State) -> List[str]:
     return [default_db] if default_db else []
 
 
-def _fetch_relevant_schema(brd_text: str, source_databases: List[str], top_k: int = 10) -> List[Dict[str, Any]]:
+def _fetch_relevant_schema(brd_text: str, source_databases: List[str], top_k: int = 10) -> tuple[List[Dict[str, Any]], LLMUsage]:
     log_context = {"node": "kpi_extraction", "pass": "schema_grounding"}
     model = get_embedding_model(log_context=log_context)
     api_key = os.getenv("PINECONE_API_KEY", "").strip()
     index_name = (os.getenv("PINECONE_SCHEMA_INDEX_NAME") or "metadata").strip()
     if model is None or not api_key or not index_name:
         logger.info("Embedding schema grounding unavailable", extra=log_context)
-        return []
+        return [], LLMUsage()
 
     try:
         vector = model.embed_query(brd_text or "schema grounding")
+        embedding_usage = getattr(model, "last_usage", LLMUsage())
         matches = Pinecone(api_key=api_key).Index(index_name).query(
             vector=vector,
             top_k=top_k * 4,
@@ -100,7 +100,7 @@ def _fetch_relevant_schema(brd_text: str, source_databases: List[str], top_k: in
         ).matches
     except Exception as exc:
         logger.warning("Embedding schema grounding failed: %s", exc, extra=log_context)
-        return []
+        return [], getattr(model, "last_usage", LLMUsage())
 
     source_set = {str(db).lower() for db in source_databases}
     table_map: Dict[str, Dict[str, Any]] = {}
@@ -131,7 +131,7 @@ def _fetch_relevant_schema(brd_text: str, source_databases: List[str], top_k: in
     rows = list(table_map.values())
     for row in rows:
         row["columns"] = sorted(set(row["columns"]))
-    return sorted(rows, key=lambda row: row["semantic_score"], reverse=True)[:top_k]
+    return sorted(rows, key=lambda row: row["semantic_score"], reverse=True)[:top_k], embedding_usage
 
 
 def _format_schema_context(schema_rows: List[Dict[str, Any]]) -> str:
@@ -288,7 +288,7 @@ def build_kpi_extraction_node(
         cost_usd = 0.0
         attempts = 0
         source = "LLM"
-        token_acc = None
+        llm_usage = LLMUsage()
 
         log_context = {"run_id": state.get("run_id", "unknown"), "node": "kpi_extraction"}
 
@@ -306,12 +306,12 @@ def build_kpi_extraction_node(
         context_text = state["context_text"]
         requirements = _build_requirements(state)
         source_databases = _resolve_source_databases(state)
-        relevant_schema = _fetch_relevant_schema(context_text, source_databases, top_k=10)
+        relevant_schema, embedding_usage = _fetch_relevant_schema(context_text, source_databases, top_k=10)
         schema_context = _format_schema_context(relevant_schema)
         file_source_context = _format_file_source_context(state, context_text)
+        llm_usage = combine_llm_usage([llm_usage, embedding_usage])
 
         llm = get_llm(provider=llm_provider)
-        token_acc = TokenAccumulator()
         last_error = None
         kpis = []
         rejected_kpis = state.get("rejected_kpis", [])
@@ -333,10 +333,13 @@ For file sources, every KPI must reference at least one available column when po
             logger.info("KPI LLM attempt %d/%d (path=%s)", attempt + 1, max_retries + 1, source, extra=log_context)
 
             try:
-                response = llm.invoke(
+                metered = metered_invoke(
+                    llm,
                     [SystemMessage(content=SYSTEM_PROMPT_KPI), HumanMessage(content=user_prompt)],
-                    config={"callbacks": [token_acc]},
+                    provider=llm_provider,
                 )
+                response = metered.response
+                llm_usage = combine_llm_usage([llm_usage, metered.usage])
 
                 raw_json = _strip_fences(response.content)
                 parsed_list = _coerce_kpi_payload(json.loads(raw_json))
@@ -361,8 +364,8 @@ For file sources, every KPI must reference at least one available column when po
                     }]
 
                 kpis = kpis_final
-                tokens_used = token_acc.total
-                cost_usd = compute_cost_usd(token_acc.total_input, token_acc.total_output)
+                tokens_used = llm_usage.token_count
+                cost_usd = llm_usage.cost_usd
                 attempts = attempt + 1
                 break
 
@@ -381,8 +384,8 @@ For file sources, every KPI must reference at least one available column when po
                 kpis = fallback_kpis
                 source = "FILE_SOURCE_FALLBACK"
                 attempts = max_retries + 1
-                tokens_used = token_acc.total if token_acc else 0
-                cost_usd = compute_cost_usd(token_acc.total_input, token_acc.total_output) if token_acc else 0.0
+                tokens_used = llm_usage.token_count
+                cost_usd = llm_usage.cost_usd
 
         if not kpis:
             logger.error("KPI extraction FAILED after %d attempts", max_retries + 1, extra=log_context)
@@ -392,6 +395,8 @@ For file sources, every KPI must reference at least one available column when po
                 "kpi_count": 0,
                 "source": source,
                 "error": last_error,
+                "cost_usd": cost_usd,
+                "llm_usage": llm_usage.to_payload(),
             }
             ai_store_db_writer(
                 run_id=run_id,
@@ -403,8 +408,8 @@ For file sources, every KPI must reference at least one available column when po
                 faithfulness_status="FAILED",
                 retry_count=max_retries,
                 token_count=tokens_used,
-                input_tokens=0,
-                output_tokens=0,
+                input_tokens=llm_usage.input_tokens,
+                output_tokens=llm_usage.output_tokens,
                 fingerprint=fingerprint,
             )
             return {**state, "status": "FAILED", "error": "KPI extraction failed"}
@@ -416,6 +421,7 @@ For file sources, every KPI must reference at least one available column when po
             "kpis": kpis,
             "cost_usd": cost_usd,
             "source": source,
+            "llm_usage": llm_usage.to_payload(),
         }
         ai_store_db_writer(
             run_id=run_id,
@@ -427,8 +433,8 @@ For file sources, every KPI must reference at least one available column when po
             faithfulness_status="PASSED",
             retry_count=max(attempts - 1, 0),
             token_count=tokens_used,
-            input_tokens=token_acc.total_input if token_acc else 0,
-            output_tokens=token_acc.total_output if token_acc else 0,
+            input_tokens=llm_usage.input_tokens,
+            output_tokens=llm_usage.output_tokens,
             fingerprint=fingerprint,
         )
         logger.info("Skipping kpi_memory insert; current schema does not support detailed KPI columns", extra=log_context)

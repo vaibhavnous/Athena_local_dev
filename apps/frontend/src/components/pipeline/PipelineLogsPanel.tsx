@@ -65,7 +65,7 @@ interface Props {
 export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdated }: Props) {
   const getRunById = useAthenaStore((s) => s.getRunById)
   const run = getRunById(runId || '')
-  const { discoveredRunId, isDiscovering, discoveryError, logs, isLoadingLogs, logsError } =
+  const { discoveredRunId, isDiscovering, discoveryError, logs, isLoadingLogs, logsError, logsNotice } =
     usePipelineLogs(runId, isActive, onLogsUpdated)
 
   const [filterLevel, setFilterLevel] = useState('ALL')
@@ -225,7 +225,14 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
                   </div>
                 )}
 
-                {logs.length === 0 && !isLoadingLogs && !logsError && (
+                {logsNotice && !logsError && (
+                  <div className="m-4 p-3 bg-amber-500/10 border border-amber-500/25 rounded-lg">
+                    <p className="text-xs font-semibold text-amber-300">Logs temporarily unavailable</p>
+                    <p className="text-xs text-amber-300/70 mt-1">{logsNotice}</p>
+                  </div>
+                )}
+
+                {logs.length === 0 && !isLoadingLogs && !logsError && !logsNotice && (
                   <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
                     <p className="text-sm text-gray-400 font-medium">No logs yet</p>
                     <p className="text-xs text-gray-500 mt-1">Logs will appear as the pipeline executes</p>

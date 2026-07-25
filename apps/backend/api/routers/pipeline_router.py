@@ -15,26 +15,41 @@ from utilis.logger import logger
 router = APIRouter()
 RUN_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_STATUS_WORKERS", "2"))))
 
+ACTIVE_RUN_STATUSES = {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
+HITL_RUN_STATUSES = {"HITL_WAIT", "PAUSED_FOR_HITL", "PENDING_REVIEW"}
+TERMINAL_RUN_STATUSES = {"SUCCESS", "FAILED", "ABORTED", "PIPELINE_COMPLETED", "COMPLETED"}
 
-def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    checkpoint = checkpoint or {}
-    result_state = str(checkpoint.get("status") or status or "RUNNING")
+
+def _fallback_result_state(status: str, checkpoint: Dict[str, Any]) -> str:
+    result_state = str(checkpoint.get("status") or status or "RUNNING").upper()
+    has_review_wait = bool(checkpoint.get("next_gate") or checkpoint.get("next_review_key"))
+    if result_state in HITL_RUN_STATUSES:
+        return "HITL_WAIT"
+    if not checkpoint.get("background_stage") and has_review_wait and result_state not in TERMINAL_RUN_STATUSES:
+        return "HITL_WAIT"
     if (
         not checkpoint.get("background_stage")
-        and result_state.upper() in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
+        and result_state in ACTIVE_RUN_STATUSES
         and (
             str(checkpoint.get("databricks_gold_execution_status") or "").upper() == "COMPLETED"
             or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
         )
     ):
-        result_state = "PIPELINE_COMPLETED"
+        return "PIPELINE_COMPLETED"
+    return result_state
+
+
+def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    checkpoint = checkpoint or {}
+    result_state = _fallback_result_state(status, checkpoint)
+    visible_background_stage = None if result_state == "HITL_WAIT" else checkpoint.get("background_stage")
     return {
         "run_id": run_id,
         "status": result_state,
         "state": {
             "life_cycle_state": (
                 "TERMINATED"
-                if result_state in {"SUCCESS", "FAILED", "ABORTED", "PIPELINE_COMPLETED", "COMPLETED"}
+                if result_state in TERMINAL_RUN_STATUSES
                 else "RUNNING"
             ),
             "result_state": result_state,
@@ -49,7 +64,7 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "provider": checkpoint.get("provider") or "azure_openai",
             "deployment": checkpoint.get("deployment"),
             "stages": [],
-            "background_stage": checkpoint.get("background_stage"),
+            "background_stage": visible_background_stage,
             "external_execution": checkpoint.get("external_execution"),
             "snowflake_bronze_execution_status": checkpoint.get("snowflake_bronze_execution_status"),
             "snowflake_bronze_execution_progress": checkpoint.get("snowflake_bronze_execution_progress"),

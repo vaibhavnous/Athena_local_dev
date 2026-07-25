@@ -11,7 +11,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pydantic
 from pydantic import BaseModel, Field
-from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -19,61 +18,19 @@ from state import Stage01State
 from schema import RequirementsSchema
 from utilis.logger import logger
 from utilis.db import ai_store_db_writer
-
-
-class TokenAccumulator(BaseCallbackHandler):
-    def __init__(self) -> None:
-        super().__init__()
-        self.total_input: int = 0
-        self.total_output: int = 0
-
-    @property
-    def total(self) -> int:
-        return self.total_input + self.total_output
-
-    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        try:
-            usage = response.llm_output.get("token_usage", {})
-            self.total_input += usage.get("prompt_tokens", 0)
-            self.total_output += usage.get("completion_tokens", 0)
-        except AttributeError:
-            pass
-
-    def reset(self) -> None:
-        self.total_input = 0
-        self.total_output = 0
-
-
-_LLM_PRICING: Dict[str, Dict[str, float]] = {
-    "gpt-4o": {"input": 0.005, "output": 0.015},
-    "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
-    "gpt-4-turbo": {"input": 0.01, "output": 0.03},
-    "gpt-35-turbo": {"input": 0.0005, "output": 0.0015},
-    "claude-3-5-sonnet": {"input": 0.003, "output": 0.015},
-    "claude-3-haiku": {"input": 0.00025, "output": 0.00125},
-    "_default": {"input": 0.001, "output": 0.002},
-}
-
-_ACTIVE_MODEL: str = (
-    os.getenv("AZURE_OPENAI_DEPLOYMENT")
-    or os.getenv("AZURE_OPENAI_MODEL")
-    or "gpt-4o-mini"
+from utilis.llm_usage import (
+    LLMUsage,
+    TokenAccumulator,
+    active_model_name,
+    combine_llm_usage,
+    compute_cost_usd,
+    metered_invoke,
+    set_active_model,
 )
 
 
-def set_active_model(model_name: str) -> None:
-    global _ACTIVE_MODEL
-    _ACTIVE_MODEL = model_name
-
-
-def compute_cost_usd(input_tokens: int, output_tokens: int) -> float:
-    pricing = _LLM_PRICING.get(_ACTIVE_MODEL, _LLM_PRICING["_default"])
-    cost = (input_tokens / 1000) * pricing["input"] + (output_tokens / 1000) * pricing["output"]
-    return round(cost, 6)
-
-
 def get_llm(provider: str = "azure_openai", model: str | None = None, temperature: float = 0.0, **kwargs: Any) -> BaseChatModel:
-    _model = model or _ACTIVE_MODEL
+    _model = model or active_model_name()
 
     if provider == "azure_openai":
         from langchain_openai import AzureChatOpenAI
@@ -202,7 +159,7 @@ def build_req_extraction_node(
 
         logger.info("Requirement Extraction — starting extraction (run_id=%s)", run_id, extra=log_context)
 
-        token_acc = TokenAccumulator()
+        llm_usage = LLMUsage()
         last_error: Optional[str] = None
 
         for attempt in range(max_retries + 1):
@@ -213,10 +170,13 @@ def build_req_extraction_node(
             logger.info("Requirement Extraction — attempt %d / %d", attempt + 1, max_retries + 1, extra=log_context)
 
             try:
-                response = _llm.invoke(
+                metered = metered_invoke(
+                    _llm,
                     [SystemMessage(content=SYSTEM_MSG), HumanMessage(content=prompt_text)],
-                    config={"callbacks": [token_acc]},
+                    provider=llm_provider,
                 )
+                response = metered.response
+                llm_usage = combine_llm_usage([llm_usage, metered.usage])
 
                 raw = _strip_fences(response.content)
                 parsed = json.loads(raw)
@@ -235,7 +195,7 @@ def build_req_extraction_node(
                 faithfulness_status = "WARN" if ungrounded else "PASSED"
                 
                 # Calculate cost before payload construction so we can log it inside the DB json
-                cost = compute_cost_usd(token_acc.total_input, token_acc.total_output)
+                cost = llm_usage.cost_usd
 
                 # Store to DB
                 ai_store_db_writer(
@@ -247,19 +207,20 @@ def build_req_extraction_node(
                         "fingerprint": fingerprint,
                         "run_id": run_id,
                         "cost_usd": cost,
+                        "llm_usage": llm_usage.to_payload(),
                     },
                     schema_version="RequirementsSchema_v1",
                     prompt_version="PROMPT_REQ_v1",
                     faithfulness_status=faithfulness_status,
                     faithfulness_warn_count=len(ungrounded),
                     retry_count=attempt,
-                    token_count=token_acc.total,
-                    input_tokens=token_acc.total_input,
-                    output_tokens=token_acc.total_output,
+                    token_count=llm_usage.token_count,
+                    input_tokens=llm_usage.input_tokens,
+                    output_tokens=llm_usage.output_tokens,
                     fingerprint=fingerprint,
                 )
 
-                logger.info("Requirement Extraction — success (attempt=%d tokens=%d)", attempt + 1, token_acc.total, extra=log_context)
+                logger.info("Requirement Extraction — success (attempt=%d tokens=%d)", attempt + 1, llm_usage.token_count, extra=log_context)
 
                 new_state = state.copy()
                 new_state.update({
@@ -271,7 +232,7 @@ def build_req_extraction_node(
                     "req_schema_valid": result.schema_valid,
                     "req_prompt_version": result.prompt_version,
                     "req_agent_attempts": attempt + 1,
-                    "req_tokens_used": token_acc.total,
+                    "req_tokens_used": llm_usage.token_count,
                     "req_cost_usd": cost,
                     "req_faithfulness_status": faithfulness_status,
                 })
@@ -295,14 +256,15 @@ def build_req_extraction_node(
                 "error": last_error,
                 "attempts": max_retries + 1,
                 "fingerprint": fingerprint,
+                "llm_usage": llm_usage.to_payload(),
             },
             schema_version="RequirementsSchema_v1",
             prompt_version="PROMPT_REQ_v1",
             faithfulness_status="FAILED",
             retry_count=max_retries,
-            token_count=token_acc.total,
-            input_tokens=token_acc.total_input,
-            output_tokens=token_acc.total_output,
+            token_count=llm_usage.token_count,
+            input_tokens=llm_usage.input_tokens,
+            output_tokens=llm_usage.output_tokens,
             fingerprint=fingerprint,
         )
         logger.error("Requirement Extraction failed after %d attempts", max_retries + 1, extra=log_context)

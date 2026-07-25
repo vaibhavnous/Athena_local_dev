@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from nodes.req_extraction import get_llm
 from state import Stage01State
 from utilis.ai_store_writer import ai_store_db_writer
+from utilis.llm_usage import LLMUsage, combine_llm_usage, metered_invoke
 from utilis.logger import logger
 
 GOLD_OUTPUT_DIR = os.path.join(os.getcwd(), "generated_code", "gold")
@@ -105,16 +106,21 @@ Current script:
 """.strip()
 
 
-def _enhance_with_llm(code: str, entity: str, source_table: str, target_table: str) -> str:
+def _enhance_with_llm(code: str, entity: str, source_table: str, target_table: str) -> tuple[str, LLMUsage]:
     if not GOLD_LLM_ENABLED:
-        return code
+        return code, LLMUsage()
 
     provider = os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")
     model = os.getenv("ATHENA_SFTP_GOLD_LLM_MODEL")
     llm = get_llm(provider=provider, model=model, temperature=0.0, request_timeout=GOLD_LLM_TIMEOUT_SECONDS)
     prompt = _llm_prompt(code, entity, source_table, target_table)
-    response = llm.invoke([SystemMessage(content="You are a senior Spark data engineer. Return only valid Python code."), HumanMessage(content=prompt)])
-    return str(response.content).strip()
+    metered = metered_invoke(
+        llm,
+        [SystemMessage(content="You are a senior Spark data engineer. Return only valid Python code."), HumanMessage(content=prompt)],
+        provider=provider,
+        model_name=model,
+    )
+    return str(metered.response.content).strip(), metered.usage
 
 
 def _write_bundle(bundle: Dict[str, Any], run_id: str) -> str:
@@ -140,9 +146,14 @@ def _generate_one_entity(entity: str, run_id: str, silver_schema: str, gold_sche
     code = _build_gold_script(entity=entity, silver_schema=silver_schema, gold_schema=gold_schema, columns=columns)
     llm_error = None
     llm_enhanced = False
+    llm_usage = LLMUsage()
 
     try:
-        enhanced = _enhance_with_llm(code, entity, source_table, target_table)
+        enhanced_result = _enhance_with_llm(code, entity, source_table, target_table)
+        if isinstance(enhanced_result, tuple):
+            enhanced, llm_usage = enhanced_result
+        else:
+            enhanced = enhanced_result
         if enhanced and enhanced != code:
             code = enhanced
             llm_enhanced = True
@@ -159,6 +170,7 @@ def _generate_one_entity(entity: str, run_id: str, silver_schema: str, gold_sche
         "script_path": script_path,
         "llm_enhanced": llm_enhanced,
         "llm_error": llm_error,
+        "llm_usage": llm_usage.to_payload(),
         "status": "COMPLETED",
     }
 
@@ -188,11 +200,18 @@ def sftp_gold_code_generation_node(state: Stage01State) -> Stage01State:
         results.append(_generate_one_entity(entity, run_id, silver_schema, gold_schema, columns))
 
     generated_at = datetime.utcnow().isoformat()
+    usage = combine_llm_usage(
+        LLMUsage.from_payload(result.get("llm_usage"))
+        for result in results
+        if isinstance(result, dict)
+    )
     bundle = {
         "run_id": run_id,
         "fingerprint": str(state.get("fingerprint") or run_id),
         "generated_at": generated_at,
         "script_count": len(results),
+        "cost_usd": usage.cost_usd,
+        "llm_usage": usage.to_payload(),
         "scripts": results,
     }
     bundle_path = _write_bundle(bundle, run_id)
@@ -206,9 +225,9 @@ def sftp_gold_code_generation_node(state: Stage01State) -> Stage01State:
         schema_version="SFTP_GOLD_GENERATION_v1",
         prompt_version="SFTP_GOLD_v1",
         faithfulness_status="PASSED",
-        token_count=0,
-        input_tokens=0,
-        output_tokens=0,
+        token_count=usage.token_count,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
     )
 
     new_state.update({

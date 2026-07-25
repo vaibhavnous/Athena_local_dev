@@ -19,6 +19,7 @@ from typing import Any, Dict, List, TypedDict
 from state import Stage01State
 from utilis.db import ai_store_db_writer
 from utilis.generated_code_paths import generated_code_dir
+from utilis.llm_usage import LLMUsage, MeteredUsageError, combine_llm_usage, metered_invoke
 from utilis.logger import logger
 
 
@@ -100,7 +101,7 @@ def _llm_generate_silver_code(
     deterministic_code: str,
     target_warehouse: str,
     validation_feedback: str = "",
-) -> str:
+) -> tuple[str, LLMUsage]:
     from nodes.req_extraction import get_llm
 
     language = "Snowflake SQL" if str(target_warehouse).lower() == "snowflake" else "Databricks PySpark"
@@ -141,11 +142,17 @@ BASELINE:
         model=os.getenv("ATHENA_SILVER_LLM_MODEL"),
         temperature=0.0,
     )
-    response = llm.invoke(prompt)
+    metered = metered_invoke(
+        llm,
+        prompt,
+        provider=os.getenv("ATHENA_SILVER_LLM_PROVIDER", os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")),
+        model_name=os.getenv("ATHENA_SILVER_LLM_MODEL"),
+    )
+    response = metered.response
     content = getattr(response, "content", response)
     text = str(content).strip()
     match = re.search(r"```(?:python|sql)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
-    return match.group(1).strip() if match else text
+    return (match.group(1).strip() if match else text), metered.usage
 
 
 def _canonicalize_snowflake_source_identifiers(code: str, table_ref: SilverTableRef) -> str:
@@ -935,14 +942,16 @@ def _generate_one_table(
         merge_strategy = "Delta MERGE on silver_upsert_key built from reviewed merge keys"
 
     generation_mode = "DETERMINISTIC"
+    llm_usage = LLMUsage()
     if _llm_enabled_for_silver():
         try:
-            candidate = _llm_generate_silver_code(
+            candidate, usage = _llm_generate_silver_code(
                 table_ref=table_ref,
                 enriched_columns=enriched_columns,
                 deterministic_code=code,
                 target_warehouse=target_warehouse,
             )
+            llm_usage = combine_llm_usage([llm_usage, usage])
             repaired_candidate = (
                 _canonicalize_snowflake_temporal_conversions(
                     _canonicalize_snowflake_source_identifiers(candidate, table_ref)
@@ -960,13 +969,14 @@ def _generate_one_table(
             generation_mode = "LLM_REPAIRED" if repaired_candidate != candidate else "LLM"
         except Exception as first_exc:
             try:
-                retry_candidate = _llm_generate_silver_code(
+                retry_candidate, retry_usage = _llm_generate_silver_code(
                     table_ref=table_ref,
                     enriched_columns=enriched_columns,
                     deterministic_code=code,
                     target_warehouse=target_warehouse,
                     validation_feedback=str(first_exc),
                 )
+                llm_usage = combine_llm_usage([llm_usage, retry_usage])
                 repaired_retry = (
                     _canonicalize_snowflake_temporal_conversions(
                         _canonicalize_snowflake_source_identifiers(retry_candidate, table_ref)
@@ -1009,6 +1019,7 @@ def _generate_one_table(
         "script_language": script_language,
         "generation_mode": generation_mode,
         "llm_enabled": _llm_enabled_for_silver(),
+        "llm_usage": llm_usage.to_payload(),
         "target_warehouse": str(target_warehouse or "databricks").lower(),
         "status": "APPROVED",
         "script_path": script_path,
@@ -1638,12 +1649,23 @@ def _llm_kimball_plan(
     columns: List[Dict[str, Any]],
     certified_joins: List[Dict[str, Any]],
     validation_feedback: str = "",
-) -> Dict[str, Any]:
+) -> tuple[Dict[str, Any], LLMUsage]:
     from nodes.req_extraction import get_llm
-    llm = get_llm(provider=os.getenv("ATHENA_GOLD_LLM_PROVIDER", os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")), model=os.getenv("ATHENA_GOLD_KIMBALL_PLAN_MODEL") or os.getenv("ATHENA_GOLD_LLM_MODEL"), temperature=0.0)
-    response = llm.invoke(_kimball_plan_prompt(kpi=kpi, mapping=mapping, columns=columns, certified_joins=certified_joins, validation_feedback=validation_feedback))
-    plan = _extract_json_object(getattr(response, "content", response))
-    validated = _validate_kimball_plan(plan, columns=columns, certified_joins=certified_joins)
+
+    provider = os.getenv("ATHENA_GOLD_LLM_PROVIDER", os.getenv("ATHENA_LLM_PROVIDER", "azure_openai"))
+    model = os.getenv("ATHENA_GOLD_KIMBALL_PLAN_MODEL") or os.getenv("ATHENA_GOLD_LLM_MODEL")
+    llm = get_llm(provider=provider, model=model, temperature=0.0)
+    metered = metered_invoke(
+        llm,
+        _kimball_plan_prompt(kpi=kpi, mapping=mapping, columns=columns, certified_joins=certified_joins, validation_feedback=validation_feedback),
+        provider=provider,
+        model_name=model,
+    )
+    try:
+        plan = _extract_json_object(getattr(metered.response, "content", metered.response))
+        validated = _validate_kimball_plan(plan, columns=columns, certified_joins=certified_joins)
+    except Exception as exc:
+        raise MeteredUsageError(str(exc), metered.usage) from exc
     selected = validated.get("measure") or {}
     selected_meta = next(
         (
@@ -1656,17 +1678,19 @@ def _llm_kimball_plan(
     )
     best = _best_measure_for_kpi(kpi, columns)
     if selected_meta and best and _score_column_for_kpi(kpi, selected_meta) < _score_column_for_kpi(kpi, best):
-        raise ValueError(
+        raise MeteredUsageError(
             "Kimball plan selected a weaker KPI measure than the deterministic semantic match: "
-            f"{selected.get('column')} < {best.get('column_name')}"
+            f"{selected.get('column')} < {best.get('column_name')}",
+            metered.usage,
         )
     expected_aggregation = _infer_aggregation(_extract_kpi_name(kpi), selected_meta)
     if expected_aggregation != "RATIO" and str(selected.get("aggregation") or "").upper() != expected_aggregation:
-        raise ValueError(
+        raise MeteredUsageError(
             f"Kimball plan changed KPI aggregation from {expected_aggregation} "
-            f"to {selected.get('aggregation')}"
+            f"to {selected.get('aggregation')}",
+            metered.usage,
         )
-    return validated
+    return validated, metered.usage
 
 
 def _build_gold_generation_contract(
@@ -1692,6 +1716,7 @@ def _build_gold_generation_contract(
     silver_tables = _silver_tables_by_name(results)
     warnings: List[str] = []
     kpi_mappings: List[Dict[str, Any]] = []
+    kimball_usage = LLMUsage()
 
     for kpi in certified_kpis:
         if not isinstance(kpi, dict):
@@ -1746,17 +1771,46 @@ def _build_gold_generation_contract(
             }
         if _llm_enabled_for_kimball_plan() and measure:
             try:
-                plan = _llm_kimball_plan(kpi=kpi, mapping=mapping, columns=columns, certified_joins=joins)
+                plan, usage = _llm_kimball_plan(kpi=kpi, mapping=mapping, columns=columns, certified_joins=joins)
+                kimball_usage = combine_llm_usage([kimball_usage, usage])
                 mapping = _apply_kimball_plan(mapping, plan)
-            except Exception as first_exc:
+            except MeteredUsageError as first_exc:
+                kimball_usage = combine_llm_usage([kimball_usage, first_exc.usage])
                 try:
-                    plan = _llm_kimball_plan(
+                    plan, usage = _llm_kimball_plan(
                         kpi=kpi,
                         mapping=mapping,
                         columns=columns,
                         certified_joins=joins,
                         validation_feedback=str(first_exc),
                     )
+                    kimball_usage = combine_llm_usage([kimball_usage, usage])
+                    mapping = _apply_kimball_plan(mapping, plan)
+                    mapping["kimball_plan_source"] = "LLM_RETRY_VALIDATED"
+                except MeteredUsageError as retry_exc:
+                    kimball_usage = combine_llm_usage([kimball_usage, retry_exc.usage])
+                    mapping["kimball_plan_source"] = "DETERMINISTIC_FALLBACK"
+                    warnings.append(f"KPI '{kpi_name}' Kimball LLM plan rejected; deterministic plan retained: {retry_exc}")
+                    logger.warning("Kimball plan rejected for KPI %s; deterministic fallback retained: %s", kpi_name, retry_exc)
+                except MeteredUsageError as retry_exc:
+                    kimball_usage = combine_llm_usage([kimball_usage, retry_exc.usage])
+                    mapping["kimball_plan_source"] = "DETERMINISTIC_FALLBACK"
+                    warnings.append(f"KPI '{kpi_name}' Kimball LLM plan rejected; deterministic plan retained: {retry_exc}")
+                    logger.warning("Kimball plan rejected for KPI %s; deterministic fallback retained: %s", kpi_name, retry_exc)
+                except Exception as retry_exc:
+                    mapping["kimball_plan_source"] = "DETERMINISTIC_FALLBACK"
+                    warnings.append(f"KPI '{kpi_name}' Kimball LLM plan rejected; deterministic plan retained: {retry_exc}")
+                    logger.warning("Kimball plan rejected for KPI %s; deterministic fallback retained: %s", kpi_name, retry_exc)
+            except Exception as first_exc:
+                try:
+                    plan, usage = _llm_kimball_plan(
+                        kpi=kpi,
+                        mapping=mapping,
+                        columns=columns,
+                        certified_joins=joins,
+                        validation_feedback=str(first_exc),
+                    )
+                    kimball_usage = combine_llm_usage([kimball_usage, usage])
                     mapping = _apply_kimball_plan(mapping, plan)
                     mapping["kimball_plan_source"] = "LLM_RETRY_VALIDATED"
                 except Exception as retry_exc:
@@ -1795,6 +1849,8 @@ def _build_gold_generation_contract(
         "dimension_mappings": _dimension_mappings_from_kpis(kpi_mappings, silver_tables),
         "kpi_mappings": kpi_mappings,
         "kimball_plan_enabled": _llm_enabled_for_kimball_plan(),
+        "cost_usd": kimball_usage.cost_usd,
+        "llm_usage": kimball_usage.to_payload(),
         "available_joins": joins,
         "join_candidates": fallback_joins,
         "warnings": sorted(set(warnings)),
@@ -1818,17 +1874,19 @@ def _persist_generation_artifacts(
 ) -> None:
     run_id = str(state.get("run_id") or "SILVER_POC_RUN_001")
     fingerprint = str(state.get("fingerprint") or run_id)
+    silver_usage = LLMUsage.from_payload(silver_bundle.get("llm_usage"))
+    gold_contract_usage = LLMUsage.from_payload(gold_contract.get("llm_usage"))
     ai_store_db_writer(
         run_id=run_id,
         stage="Silver Code Generation",
         artifact_type="SILVER_GENERATION",
         payload=silver_bundle,
         schema_version="SilverGeneration_v1",
-        prompt_version="DETERMINISTIC_SPARK_SILVER_v1",
+        prompt_version="LLM_SILVER_v1" if silver_usage.token_count else "DETERMINISTIC_SPARK_SILVER_v1",
         faithfulness_status="PASSED",
-        token_count=0,
-        input_tokens=0,
-        output_tokens=0,
+        token_count=silver_usage.token_count,
+        input_tokens=silver_usage.input_tokens,
+        output_tokens=silver_usage.output_tokens,
         fingerprint=fingerprint,
     )
     ai_store_db_writer(
@@ -1837,11 +1895,11 @@ def _persist_generation_artifacts(
         artifact_type="GOLD_GENERATION_CONTRACT",
         payload=gold_contract,
         schema_version="GoldGenerationContract_v1",
-        prompt_version="HEURISTIC_GOLD_CONTRACT_v1",
+        prompt_version="LLM_KIMBALL_GOLD_CONTRACT_v1" if gold_contract_usage.token_count else "HEURISTIC_GOLD_CONTRACT_v1",
         faithfulness_status="PASSED" if gold_contract.get("status") != "FAILED" else "WARN",
-        token_count=0,
-        input_tokens=0,
-        output_tokens=0,
+        token_count=gold_contract_usage.token_count,
+        input_tokens=gold_contract_usage.input_tokens,
+        output_tokens=gold_contract_usage.output_tokens,
         fingerprint=fingerprint,
     )
 
@@ -1889,12 +1947,19 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
             results.append(future.result())
 
     generated_at = datetime.utcnow().isoformat()
+    silver_usage = combine_llm_usage(
+        LLMUsage.from_payload(result.get("llm_usage"))
+        for result in results
+        if isinstance(result, dict)
+    )
     bundle = {
         "run_id": run_id,
         "generated_at": generated_at,
         "script_count": len(results),
         "target_warehouse": target_warehouse,
         "llm_enabled": _llm_enabled_for_silver(),
+        "cost_usd": silver_usage.cost_usd,
+        "llm_usage": silver_usage.to_payload(),
         "scripts": results,
     }
 

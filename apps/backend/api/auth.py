@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -79,6 +80,8 @@ class AuthService:
         self.repository = repository or AuthRepository()
         self._ready = False
         self._ready_lock = threading.Lock()
+        self._user_cache: dict[str, tuple[int, AuthUser, float]] = {}
+        self._user_cache_lock = threading.Lock()
 
     def login(self, email: str, password: str) -> LoginResponse:
         self._ensure_ready()
@@ -107,10 +110,12 @@ class AuthService:
             "aud": self._audience,
         }
         token = jwt.encode(payload, self._jwt_secret(), algorithm="HS256")
+        public_user = self._public_user(user)
+        self._cache_public_user(public_user, int(user["token_version"]))
         return LoginResponse(
             access_token=token,
             expires_in=expires_in,
-            user=self._public_user(user),
+            user=public_user,
         )
 
     def authenticate_token(self, token: str) -> AuthUser:
@@ -127,10 +132,19 @@ class AuthService:
             raise HTTPException(status_code=401, detail="Invalid or expired session") from exc
 
         uid = str(payload.get("sub") or "")
-        user = self.repository.find_by_uid(uid) if uid else None
-        if not user or not user["is_active"] or int(payload.get("ver", -1)) != int(user["token_version"]):
+        token_version = int(payload.get("ver", -1))
+        try:
+            user = self.repository.find_by_uid(uid) if uid else None
+        except Exception as exc:
+            cached = self._cached_public_user(uid, token_version)
+            if cached:
+                return cached
+            raise HTTPException(status_code=503, detail="Authentication service temporarily unavailable") from exc
+        if not user or not user["is_active"] or token_version != int(user["token_version"]):
             raise HTTPException(status_code=401, detail="Invalid or expired session")
-        return self._public_user(user)
+        public_user = self._public_user(user)
+        self._cache_public_user(public_user, int(user["token_version"]))
+        return public_user
 
     def list_users(self, requester: AuthUser) -> list[AuthUser]:
         self._assert_primary_admin(requester)
@@ -268,6 +282,26 @@ class AuthService:
         auth_user.can_manage_accounts = self._is_primary_admin(auth_user)
         return auth_user
 
+    def _cache_public_user(self, user: AuthUser, token_version: int) -> None:
+        ttl = self._auth_cache_ttl_seconds()
+        if ttl <= 0:
+            return
+        with self._user_cache_lock:
+            self._user_cache[user.uid] = (token_version, user, time.monotonic() + ttl)
+
+    def _cached_public_user(self, uid: str, token_version: int) -> AuthUser | None:
+        if not uid:
+            return None
+        with self._user_cache_lock:
+            cached = self._user_cache.get(uid)
+            if not cached:
+                return None
+            cached_version, user, expires_at = cached
+            if expires_at <= time.monotonic() or cached_version != token_version or not user.is_active:
+                self._user_cache.pop(uid, None)
+                return None
+            return user
+
     @staticmethod
     def _validate_username(value: str) -> str:
         username = value.strip()
@@ -327,6 +361,14 @@ class AuthService:
         if not 300 <= ttl <= 86400:
             raise RuntimeError("ASTRA_JWT_EXPIRES_IN_SECONDS must be between 300 and 86400")
         return ttl
+
+    @staticmethod
+    def _auth_cache_ttl_seconds() -> int:
+        try:
+            ttl = int(os.getenv("ASTRA_AUTH_CACHE_TTL_SECONDS", "60"))
+        except ValueError:
+            ttl = 60
+        return max(0, min(ttl, 300))
 
     @staticmethod
     def _jwt_secret() -> str:

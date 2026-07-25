@@ -30,6 +30,7 @@ from utilis.db import (
     get_pipeline_connection,
 )
 from utilis.logger import logger
+from utilis.llm_usage import LLMUsage, MeteredUsageError, combine_llm_usage, metered_invoke
 
 PLATFORM_TABLES: Set[str] = {"ai_store", "brd_run_registry", "hitl_review_queue"}
 
@@ -205,7 +206,7 @@ def _save_keyword_expansion_cache(
     )
 
 
-def _expand_keywords_llm(kpi_names: List[str], keywords: List[str]) -> Dict[str, Set[str]]:
+def _expand_keywords_llm(kpi_names: List[str], keywords: List[str]) -> tuple[Dict[str, Set[str]], LLMUsage]:
     if not keywords:
         return {}
 
@@ -231,16 +232,20 @@ Rules:
 - Keys must exactly match the provided base keywords.
 """.strip()
 
-    response = llm.invoke(
-        [
-            SystemMessage(content=KEYWORD_EXPANSION_SYSTEM_MSG),
-            HumanMessage(content=prompt),
-        ]
+    metered = metered_invoke(
+        llm,
+        [SystemMessage(content=KEYWORD_EXPANSION_SYSTEM_MSG), HumanMessage(content=prompt)],
+        provider=provider,
+        model_name=model,
     )
+    response = metered.response
 
-    parsed = json.loads(_strip_fences(str(response.content)))
+    try:
+        parsed = json.loads(_strip_fences(str(response.content)))
+    except Exception as exc:
+        raise MeteredUsageError(str(exc), metered.usage) from exc
     if not isinstance(parsed, dict):
-        raise ValueError("Keyword expansion response must be a JSON object")
+        raise MeteredUsageError("Keyword expansion response must be a JSON object", metered.usage)
 
     expanded: Dict[str, Set[str]] = {}
     for keyword in keywords:
@@ -248,7 +253,7 @@ Rules:
         if raw_variants is None:
             raw_variants = []
         if not isinstance(raw_variants, list):
-            raise ValueError(f"Keyword expansion for {keyword!r} must be a list")
+            raise MeteredUsageError(f"Keyword expansion for {keyword!r} must be a list", metered.usage)
 
         variants = {keyword}
         variants.update(SYNONYMS.get(keyword, []))
@@ -258,17 +263,17 @@ Rules:
 
         expanded[keyword] = {_normalize(variant) for variant in variants if variant}
 
-    return expanded
+    return expanded, metered.usage
 
 
-def _expand_keywords(kpi_names: List[str], keywords: List[str]) -> Dict[str, Set[str]]:
+def _expand_keywords(kpi_names: List[str], keywords: List[str]) -> tuple[Dict[str, Set[str]], LLMUsage]:
     expanded = _static_expand_keywords(keywords)
     if not keywords:
-        return expanded
+        return expanded, LLMUsage()
 
     use_llm = os.getenv("ATHENA_ENABLE_LLM_KEYWORD_EXPANSION", "true").lower() in {"1", "true", "yes", "on"}
     if not use_llm:
-        return expanded
+        return expanded, LLMUsage()
 
     cache_fingerprint = _keyword_expansion_fingerprint(kpi_names, keywords)
     cached = _load_keyword_expansion_cache(cache_fingerprint)
@@ -280,17 +285,24 @@ def _expand_keywords(kpi_names: List[str], keywords: List[str]) -> Dict[str, Set
             len(cached),
             extra={"node": "table_nomination", "pass": "keyword_expansion_cache"},
         )
-        return expanded
+        return expanded, LLMUsage(usage_source="cache")
 
     try:
-        llm_expanded = _expand_keywords_llm(kpi_names, keywords)
+        llm_expanded, llm_usage = _expand_keywords_llm(kpi_names, keywords)
+    except MeteredUsageError as exc:
+        logger.warning(
+            "LLM keyword expansion failed, falling back to static synonyms: %s",
+            exc,
+            extra={"node": "table_nomination", "pass": "keyword_expansion"},
+        )
+        return expanded, exc.usage
     except Exception as exc:
         logger.warning(
             "LLM keyword expansion failed, falling back to static synonyms: %s",
             exc,
             extra={"node": "table_nomination", "pass": "keyword_expansion"},
         )
-        return expanded
+        return expanded, LLMUsage()
 
     for keyword, variants in llm_expanded.items():
         expanded.setdefault(keyword, set()).update(variants)
@@ -309,7 +321,7 @@ def _expand_keywords(kpi_names: List[str], keywords: List[str]) -> Dict[str, Set
         len(llm_expanded),
         extra={"node": "table_nomination", "pass": "keyword_expansion"},
     )
-    return expanded
+    return expanded, llm_usage
 
 
 def _domain_keywords(kpi_names: List[str]) -> Set[str]:
@@ -501,17 +513,18 @@ def _lexical_search(
     return all_results
 
 
-def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> List[Dict[str, Any]]:
+def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> tuple[List[Dict[str, Any]], LLMUsage]:
     log_context = {"node": "table_nomination", "pass": "semantic"}
     model = get_embedding_model(log_context=log_context)
     api_key = os.getenv("PINECONE_API_KEY", "").strip()
     index_name = (os.getenv("PINECONE_SCHEMA_INDEX_NAME") or "metadata").strip()
     if model is None or not api_key or not index_name:
         logger.info("Semantic vector ranking unavailable; using catalog and lexical matching", extra=log_context)
-        return []
+        return [], LLMUsage()
 
     try:
         vector = model.embed_query(combined_kpi_string or "table nomination")
+        embedding_usage = getattr(model, "last_usage", LLMUsage())
         source_set = {str(db).lower() for db in source_databases}
         matches = Pinecone(api_key=api_key).Index(index_name).query(
             vector=vector,
@@ -521,7 +534,7 @@ def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> L
         ).matches
     except Exception as exc:
         logger.warning("Semantic vector ranking failed: %s", exc, extra=log_context)
-        return []
+        return [], getattr(model, "last_usage", LLMUsage())
 
     table_map: Dict[str, Dict[str, Any]] = {}
     for match in matches or []:
@@ -551,7 +564,7 @@ def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> L
 
     for entry in table_map.values():
         entry["matched_columns"] = sorted(set(entry["matched_columns"]))
-    return list(table_map.values())
+    return list(table_map.values()), embedding_usage
 
 
 def _fuse_results(
@@ -833,12 +846,13 @@ def build_table_nomination_node() -> Callable[[Stage01State], Stage01State]:
         kpi_names = _extract_kpi_names(certified_kpis)
         keywords = _build_keywords(kpi_names)
         domain_tokens = {_normalize(token) for token in keywords}
-        expanded_keywords = _expand_keywords(kpi_names, keywords)
+        expanded_keywords, keyword_usage = _expand_keywords(kpi_names, keywords)
         for variants in expanded_keywords.values():
             domain_tokens.update(variants)
 
         lexical_results = _lexical_search(keywords, source_databases, expanded_keywords=expanded_keywords)
-        semantic_results = _semantic_search("; ".join(kpi_names), source_databases)
+        semantic_results, semantic_usage = _semantic_search("; ".join(kpi_names), source_databases)
+        nomination_usage = combine_llm_usage([keyword_usage, semantic_usage])
         fused = _fuse_results(lexical_results, semantic_results, source_databases)
 
         if not fused:
@@ -868,6 +882,8 @@ def build_table_nomination_node() -> Callable[[Stage01State], Stage01State]:
             "source_databases": source_databases,
             "kpi_names": kpi_names,
             "keyword_expansions": {keyword: sorted(list(variants)) for keyword, variants in expanded_keywords.items()},
+            "cost_usd": nomination_usage.cost_usd,
+            "llm_usage": nomination_usage.to_payload(),
         }
         ai_store_db_writer(
             run_id=run_id,
@@ -877,9 +893,9 @@ def build_table_nomination_node() -> Callable[[Stage01State], Stage01State]:
             schema_version="NominationSchema_v2",
             prompt_version="FIVE_PASS_HYBRID_v1",
             faithfulness_status="PASSED",
-            token_count=0,
-            input_tokens=0,
-            output_tokens=0,
+            token_count=nomination_usage.token_count,
+            input_tokens=nomination_usage.input_tokens,
+            output_tokens=nomination_usage.output_tokens,
             fingerprint=fingerprint,
         )
 

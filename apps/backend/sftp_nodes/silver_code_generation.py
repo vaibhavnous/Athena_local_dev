@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from nodes.req_extraction import get_llm
 from state import Stage01State
 from utilis.ai_store_writer import ai_store_db_writer
+from utilis.llm_usage import LLMUsage, combine_llm_usage, metered_invoke
 from utilis.logger import logger
 
 SILVER_OUTPUT_DIR = os.path.join(os.getcwd(), "generated_code", "silver")
@@ -343,18 +344,24 @@ Current script:
 """.strip()
 
 
-def _enhance_with_llm(code: str, entity: str, bronze_table: str, silver_table: str) -> str:
+def _enhance_with_llm(code: str, entity: str, bronze_table: str, silver_table: str) -> tuple[str, LLMUsage]:
     if not SILVER_LLM_ENABLED:
-        return code
+        return code, LLMUsage()
 
     provider = os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")
     model = os.getenv("ATHENA_SFTP_SILVER_LLM_MODEL")
     llm = get_llm(provider=provider, model=model, temperature=0.0, request_timeout=SILVER_LLM_TIMEOUT_SECONDS)
     prompt = _llm_prompt(code, entity, bronze_table, silver_table)
-    response = llm.invoke([
-        SystemMessage(content="You are a senior Spark data engineer. Return only valid Python code. Do NOT use .rdd or SparkSession.builder.getOrCreate()."),
-        HumanMessage(content=prompt),
-    ])
+    metered = metered_invoke(
+        llm,
+        [
+            SystemMessage(content="You are a senior Spark data engineer. Return only valid Python code. Do NOT use .rdd or SparkSession.builder.getOrCreate()."),
+            HumanMessage(content=prompt),
+        ],
+        provider=provider,
+        model_name=model,
+    )
+    response = metered.response
 
     enhanced = str(response.content).strip()
 
@@ -362,15 +369,15 @@ def _enhance_with_llm(code: str, entity: str, bronze_table: str, silver_table: s
         compile(enhanced, "<silver_llm_output>", "exec")
     except SyntaxError as exc:
         logger.warning("LLM Silver output failed syntax check: %s", exc, extra={"entity": entity})
-        return code
+        return code, metered.usage
 
     forbidden = [".rdd", "SparkSession.builder", "spark.sparkContext", "eval(", "exec(", "subprocess"]
     for pattern in forbidden:
         if pattern in enhanced:
             logger.warning("LLM Silver output contains forbidden pattern: %s", pattern, extra={"entity": entity})
-            return code
+            return code, metered.usage
 
-    return enhanced
+    return enhanced, metered.usage
 
 
 def _write_bundle(bundle: Dict[str, Any], run_id: str) -> str:
@@ -446,11 +453,18 @@ def sftp_silver_code_generation_node(state: Stage01State) -> Stage01State:
                 results.append({"run_id": run_id, "entity": "unknown", "status": "FAILED", "error": str(exc)})
 
     generated_at = datetime.now(timezone.utc).isoformat()
+    usage = combine_llm_usage(
+        LLMUsage.from_payload(result.get("llm_usage"))
+        for result in results
+        if isinstance(result, dict)
+    )
     bundle = {
         "run_id": run_id,
         "fingerprint": str(state.get("fingerprint") or run_id),
         "generated_at": generated_at,
         "script_count": len(results),
+        "cost_usd": usage.cost_usd,
+        "llm_usage": usage.to_payload(),
         "scripts": results,
     }
     bundle_path = _write_bundle(bundle, run_id)
@@ -464,9 +478,9 @@ def sftp_silver_code_generation_node(state: Stage01State) -> Stage01State:
         schema_version="SFTP_SILVER_GENERATION_v2",
         prompt_version="SFTP_SILVER_v2",
         faithfulness_status="PASSED" if all(r.get("status") == "COMPLETED" for r in results) else "NEEDS_REVIEW",
-        token_count=0,
-        input_tokens=0,
-        output_tokens=0,
+        token_count=usage.token_count,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
     )
 
     new_state.update({
@@ -544,10 +558,15 @@ def _generate_one_entity(
 
     llm_error = None
     llm_enhanced = False
+    llm_usage = LLMUsage()
 
     try:
         silver_table = f"{silver_schema}.{_safe_sql_name(vendor)}_{_safe_sql_name(entity)}_clean"
-        enhanced = _enhance_with_llm(code, entity, bronze_table, silver_table)
+        enhanced_result = _enhance_with_llm(code, entity, bronze_table, silver_table)
+        if isinstance(enhanced_result, tuple):
+            enhanced, llm_usage = enhanced_result
+        else:
+            enhanced = enhanced_result
         if enhanced and enhanced != code:
             code = enhanced
             llm_enhanced = True
@@ -567,6 +586,7 @@ def _generate_one_entity(
         "script_path": script_path,
         "llm_enhanced": llm_enhanced,
         "llm_error": llm_error,
+        "llm_usage": llm_usage.to_payload(),
         "primary_keys": primary_keys,
         "watermark_column": watermark_column,
         "bronze_columns_count": len(bronze_columns),

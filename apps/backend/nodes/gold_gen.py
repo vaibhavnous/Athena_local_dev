@@ -18,6 +18,7 @@ from state import Stage01State
 from utilis.db import ai_store_db_writer
 from utilis.domain_kb import get_domain_kb_config, load_domain_kb
 from utilis.generated_code_paths import generated_code_dir
+from utilis.llm_usage import LLMUsage, combine_llm_usage, metered_invoke
 from utilis.logger import logger
 
 
@@ -636,9 +637,10 @@ def llm_generate_gold_code(
     from nodes.req_extraction import get_llm
 
     llm = get_llm(provider=provider, model=model, temperature=0.0)
-    response = llm.invoke(prompt)
+    metered = metered_invoke(llm, prompt, provider=provider, model_name=model)
+    response = metered.response
     content = getattr(response, "content", response)
-    return _extract_code_block(str(content))
+    return _extract_code_block(str(content)), metered.usage
 
 
 def llm_generate_snowflake_gold_code(
@@ -647,7 +649,7 @@ def llm_generate_snowflake_gold_code(
     gold_catalog: str,
     gold_schema: str,
     validation_feedback: str = "",
-) -> str:
+) -> tuple[str, LLMUsage]:
     """Ask the model to improve Snowflake SQL, then validate/fallback upstream."""
     deterministic = generate_snowflake_gold_script(
         mapping=mapping,
@@ -680,18 +682,15 @@ BASELINE:
     provider = os.getenv("ATHENA_GOLD_LLM_PROVIDER", os.getenv("ATHENA_LLM_PROVIDER", "azure_openai"))
     from nodes.req_extraction import get_llm
 
-    llm = get_llm(provider=provider, model=os.getenv("ATHENA_GOLD_LLM_MODEL"), temperature=0.0)
-    response = llm.invoke(prompt)
+    model = os.getenv("ATHENA_GOLD_LLM_MODEL")
+    llm = get_llm(provider=provider, model=model, temperature=0.0)
+    metered = metered_invoke(llm, prompt, provider=provider, model_name=model)
+    response = metered.response
     content = getattr(response, "content", response)
     text = str(content).strip()
     match = re.search(r"```(?:sql)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
     candidate = match.group(1).strip() if match else text
-    normalized = candidate.upper()
-    if "CREATE TABLE" not in normalized or "MERGE INTO" not in normalized:
-        raise ValueError("LLM Gold SQL must contain CREATE TABLE and MERGE INTO")
-    if any(token in normalized for token in ("SPARK.", "PYSPARK", "DATABRICKS")):
-        raise ValueError("LLM Gold SQL returned non-Snowflake syntax")
-    return candidate
+    return candidate, metered.usage
 
 
 def _snowflake_source_select_region(code: str, mapping: Dict[str, Any]) -> str:
@@ -2021,6 +2020,7 @@ def _generate_one_mapping(
     llm_requested = _llm_enabled_for_gold()
     generation_mode = "LLM" if llm_requested else "DETERMINISTIC"
     fallback_reason = None
+    llm_usage = LLMUsage()
     if is_dbt_snowflake:
         code = generate_snowflake_gold_dbt_model(
             mapping=mapping,
@@ -2031,25 +2031,35 @@ def _generate_one_mapping(
         generation_mode = "SNOWFLAKE_DBT_SQL"
     elif is_snowflake and llm_requested:
         try:
-            code = llm_generate_snowflake_gold_code(
+            code_result = llm_generate_snowflake_gold_code(
                 mapping=mapping,
                 run_id=run_id,
                 gold_catalog=gold_catalog,
                 gold_schema=gold_schema,
             )
+            if isinstance(code_result, tuple):
+                code, usage = code_result
+            else:
+                code, usage = code_result, LLMUsage()
+            llm_usage = combine_llm_usage([llm_usage, usage])
             repaired_code = _canonicalize_snowflake_gold_identifiers(code, mapping)
             generation_mode = "LLM_REPAIRED" if repaired_code != code else "LLM"
             code = repaired_code
             _validate_snowflake_gold_candidate(code, mapping, target_table)
         except Exception as first_exc:
             try:
-                retry_code = llm_generate_snowflake_gold_code(
+                retry_result = llm_generate_snowflake_gold_code(
                     mapping=mapping,
                     run_id=run_id,
                     gold_catalog=gold_catalog,
                     gold_schema=gold_schema,
                     validation_feedback=str(first_exc),
                 )
+                if isinstance(retry_result, tuple):
+                    retry_code, retry_usage = retry_result
+                else:
+                    retry_code, retry_usage = retry_result, LLMUsage()
+                llm_usage = combine_llm_usage([llm_usage, retry_usage])
                 repaired_retry = _canonicalize_snowflake_gold_identifiers(retry_code, mapping)
                 _validate_snowflake_gold_candidate(repaired_retry, mapping, target_table)
                 code = repaired_retry
@@ -2077,17 +2087,22 @@ def _generate_one_mapping(
         generation_mode = "SNOWFLAKE_SQL"
     elif llm_requested:
         try:
-            code = llm_generate_gold_code(
+            code_result = llm_generate_gold_code(
                 mapping=mapping,
                 run_id=run_id,
                 gold_schema=gold_schema,
                 dimension_contract=dimension_contract,
                 domain_reference_context=str(kb_result.get("context_text") or ""),
             )
+            if isinstance(code_result, tuple):
+                code, usage = code_result
+            else:
+                code, usage = code_result, LLMUsage()
+            llm_usage = combine_llm_usage([llm_usage, usage])
             _validate_databricks_gold_candidate(code, mapping, gold_schema, dimension_contract)
         except Exception as first_exc:
             try:
-                retry_code = llm_generate_gold_code(
+                retry_result = llm_generate_gold_code(
                     mapping=mapping,
                     run_id=run_id,
                     gold_schema=gold_schema,
@@ -2095,6 +2110,11 @@ def _generate_one_mapping(
                     validation_feedback=str(first_exc),
                     domain_reference_context=str(kb_result.get("context_text") or ""),
                 )
+                if isinstance(retry_result, tuple):
+                    retry_code, retry_usage = retry_result
+                else:
+                    retry_code, retry_usage = retry_result, LLMUsage()
+                llm_usage = combine_llm_usage([llm_usage, retry_usage])
                 _validate_databricks_gold_candidate(retry_code, mapping, gold_schema, dimension_contract)
                 code = retry_code
                 generation_mode = "LLM_RETRY"
@@ -2160,6 +2180,7 @@ def _generate_one_mapping(
         "dbt_alias": target_table.split(".")[-1] if is_dbt_snowflake else None,
         "generation_mode": generation_mode,
         "fallback_reason": fallback_reason,
+        "llm_usage": llm_usage.to_payload(),
         "time_grain": (mapping.get("time") or {}).get("grain"),
         "validation_columns": sorted(_mapping_source_columns(mapping)),
         "dimension_count": len(mapping.get("grouping_dimensions") or []),
@@ -2184,6 +2205,11 @@ def _write_bundle(
     target_warehouse: str = "databricks",
 ) -> str:
     dimension_paths = sorted({str(item.get("dimension_script_path")) for item in results if item.get("dimension_script_path")})
+    usage = combine_llm_usage(
+        LLMUsage.from_payload(result.get("llm_usage"))
+        for result in results
+        if isinstance(result, dict)
+    )
     bundle = {
         "run_id": contract.get("run_id"),
         "generated_at": generated_at,
@@ -2194,6 +2220,8 @@ def _write_bundle(
         "contract_status": contract.get("status"),
         "target_warehouse": str(target_warehouse or "databricks").lower(),
         "llm_enabled": _llm_enabled_for_gold(),
+        "cost_usd": usage.cost_usd,
+        "llm_usage": usage.to_payload(),
         "scripts": results,
     }
     os.makedirs(_gold_output_dir_for(target_warehouse), exist_ok=True)
@@ -2335,17 +2363,18 @@ def _write_ui(
 def _persist_gold_generation(*, state: Stage01State, bundle: Dict[str, Any]) -> None:
     run_id = str(state.get("run_id") or "GOLD_RUN")
     fingerprint = str(state.get("fingerprint") or run_id)
+    usage = LLMUsage.from_payload(bundle.get("llm_usage"))
     ai_store_db_writer(
         run_id=run_id,
         stage="Gold Code Generation",
         artifact_type="GOLD_GENERATION",
         payload=bundle,
         schema_version="GoldGeneration_v1",
-        prompt_version="HYBRID_KIMBALL_SPARK_GOLD_v1" if _llm_enabled_for_gold() else "DETERMINISTIC_KIMBALL_SPARK_GOLD_v1",
+        prompt_version="HYBRID_KIMBALL_SPARK_GOLD_v1" if usage.token_count else "DETERMINISTIC_KIMBALL_SPARK_GOLD_v1",
         faithfulness_status="PASSED",
-        token_count=0,
-        input_tokens=0,
-        output_tokens=0,
+        token_count=usage.token_count,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
         fingerprint=fingerprint,
     )
 
@@ -2470,6 +2499,11 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
             if isinstance(item, dict)
         ]
 
+    gold_usage = combine_llm_usage(
+        LLMUsage.from_payload(result.get("llm_usage"))
+        for result in results
+        if isinstance(result, dict)
+    )
     bundle = {
         "generated_at": generated_at,
         "script_count": sum(1 for item in results if item.get("script_path")),
@@ -2479,6 +2513,8 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         "contract_status": contract.get("status"),
         "target_warehouse": target_warehouse,
         "llm_enabled": _llm_enabled_for_gold(),
+        "cost_usd": gold_usage.cost_usd,
+        "llm_usage": gold_usage.to_payload(),
         "scripts": results,
     }
     bundle_path = _write_bundle(

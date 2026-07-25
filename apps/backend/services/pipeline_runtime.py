@@ -734,13 +734,14 @@ def _checkpoint_slow_seconds() -> float:
 
 
 def save_checkpoint_state_timed(run_id: str, state: Dict[str, Any], *, context: str) -> None:
-    stage = state.get("background_stage") or state.get("failed_background_stage") or state.get("last_completed_stage_key")
+    active_stage = state.get("background_stage")
+    log_stage = active_stage or state.get("failed_background_stage") or state.get("last_completed_stage_key")
     logger.info(
-        "Saving checkpoint context=%s status=%s background_stage=%s",
+        "Saving checkpoint context=%s status=%s active_background_stage=%s",
         context,
         state.get("status"),
-        stage,
-        extra={"run_id": run_id, "node": stage or "checkpoint", "stage": stage or "checkpoint", "step_name": "checkpoint_save_start"},
+        active_stage,
+        extra={"run_id": run_id, "node": log_stage or "checkpoint", "stage": log_stage or "checkpoint", "step_name": "checkpoint_save_start"},
     )
     started = time.perf_counter()
     try:
@@ -749,7 +750,7 @@ def save_checkpoint_state_timed(run_id: str, state: Dict[str, Any], *, context: 
         logger.exception(
             "Checkpoint save failed context=%s",
             context,
-            extra={"run_id": run_id, "node": stage or "checkpoint", "stage": stage or "checkpoint", "step_name": "checkpoint_save_failed"},
+            extra={"run_id": run_id, "node": log_stage or "checkpoint", "stage": log_stage or "checkpoint", "step_name": "checkpoint_save_failed"},
         )
         raise
 
@@ -761,8 +762,8 @@ def save_checkpoint_state_timed(run_id: str, state: Dict[str, Any], *, context: 
         elapsed,
         extra={
             "run_id": run_id,
-            "node": stage or "checkpoint",
-            "stage": stage or "checkpoint",
+            "node": log_stage or "checkpoint",
+            "stage": log_stage or "checkpoint",
             "step_name": "checkpoint_save_complete",
             "duration_seconds": round(elapsed, 3),
         },
@@ -1142,8 +1143,8 @@ def _scripts_from_checkpoint(
 ) -> Dict[str, Any]:
     scripts: List[Dict[str, Any]] = []
     for item in checkpoint.get(result_key) or []:
-        script_body = str(item.get("script_body") or "").strip()
-        if not script_body:
+        script_body = str(item.get("script_body") or "")
+        if not script_body.strip():
             script_body = _read_script_body(item.get("script_path"))
         dimension_script_body = _read_script_body(item.get("dimension_script_path"))
         row = _normalize_bronze_script({
@@ -1256,8 +1257,8 @@ def load_gold_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) 
     for item in bundle.get("scripts", []):
         if not isinstance(item, dict):
             continue
-        script_body = str(item.get("script_body") or "").strip()
-        if not script_body:
+        script_body = str(item.get("script_body") or "")
+        if not script_body.strip():
             script_body = _read_script_body(item.get("script_path"))
         dimension_script_body = _read_script_body(item.get("dimension_script_path"))
         if not _script_matches_run(
@@ -2104,12 +2105,16 @@ def build_pipeline_steps(
         ]
 
     checkpoint_status = str(checkpoint.get("status") or "").upper()
+    checkpoint_waiting_for_review = checkpoint_status in {"HITL_WAIT", "PAUSED_FOR_HITL", "PENDING_REVIEW"}
     pipeline_is_active = bool(
-        checkpoint.get("background_stage")
-        or checkpoint_status in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
+        not checkpoint_waiting_for_review
+        and (
+            checkpoint.get("background_stage")
+            or checkpoint_status in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
+        )
     )
 
-    active_stage_key = str(checkpoint.get("background_stage") or "")
+    active_stage_key = "" if checkpoint_waiting_for_review else str(checkpoint.get("background_stage") or "")
     external_execution = checkpoint.get("external_execution") if isinstance(checkpoint.get("external_execution"), dict) else {}
     external_message = str(external_execution.get("message") or "").strip()
 

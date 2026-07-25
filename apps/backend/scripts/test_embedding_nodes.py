@@ -90,14 +90,14 @@ def test_schema_consumers(model: Any, pc: Pinecone) -> list[dict[str, Any]]:
     database_name = f"smokedb_{uuid.uuid4().hex[:8]}"
     _seed_schema_vector(model, pc, vector_id, database_name)
     try:
-        table_results = table_nomination._semantic_search(
+        table_results, _table_usage = table_nomination._semantic_search(
             "claim severity amount KPI",
             [database_name],
         )
         if not table_results:
             raise RuntimeError("table_nomination._semantic_search returned no semantic matches")
 
-        kpi_results = kpi_extraction._fetch_relevant_schema(
+        kpi_results, _kpi_usage = kpi_extraction._fetch_relevant_schema(
             "claim severity amount KPI",
             [database_name],
             top_k=5,

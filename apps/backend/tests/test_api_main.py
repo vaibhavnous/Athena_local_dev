@@ -429,6 +429,47 @@ def test_pipeline_status_fallback_treats_completed_databricks_gold_as_terminal()
     assert payload["state"]["life_cycle_state"] == "TERMINATED"
 
 
+def test_pipeline_status_fallback_treats_review_wait_as_hitl_even_with_stale_background():
+    from api.routers.pipeline_router import _fallback_status_payload
+
+    payload = _fallback_status_payload(
+        "run-review",
+        checkpoint={
+            "run_id": "run-review",
+            "status": "HITL_WAIT",
+            "background_stage": "gate3",
+            "next_review_key": "enrichment_review",
+        },
+    )
+
+    assert payload["status"] == "HITL_WAIT"
+    assert payload["run"]["status"] == "HITL_WAIT"
+    assert payload["run"]["background_stage"] is None
+
+
+def test_logs_return_degraded_payload_when_access_verification_is_temporarily_unavailable(monkeypatch):
+    from api.routers import logs_router
+
+    def unavailable(*_args, **_kwargs):
+        raise HTTPException(status_code=503, detail="Failed to verify run access")
+
+    monkeypatch.setattr(logs_router, "assert_run_access", unavailable)
+    monkeypatch.setattr(
+        logs_router,
+        "read_logs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("logs must not be read without access")),
+    )
+
+    response = client.get("/logs/run-log")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["runId"] == "run-log"
+    assert body["logs"] == []
+    assert body["logs_available"] is False
+    assert body["log_status"] == "access_verification_unavailable"
+
+
 def test_abort_run_persists_aborted_status(monkeypatch):
     saved = {}
     monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"run_id": run_id, "status": "RUNNING"})

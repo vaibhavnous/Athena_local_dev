@@ -60,9 +60,11 @@ def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _status_from_checkpoint(checkpoint: Dict[str, Any]) -> str:
     status = str(checkpoint.get("status") or "UNKNOWN").upper()
+    if status in {"HITL_WAIT", "PAUSED_FOR_HITL", "PENDING_REVIEW"}:
+        return "HITL_WAIT"
     if checkpoint.get("background_stage") or status in {"RUNNING", "PROCESSING", "PENDING", "SUBMITTED", "IN_PROGRESS"}:
         return "RUNNING"
-    if checkpoint.get("next_gate") or checkpoint.get("next_review_key") or status in {"HITL_WAIT", "PAUSED_FOR_HITL"}:
+    if checkpoint.get("next_gate") or checkpoint.get("next_review_key"):
         return "HITL_WAIT"
     if status == "PAUSED_FOR_STAGE_CONFIRMATION":
         return "PAUSED_FOR_STAGE_CONFIRMATION"

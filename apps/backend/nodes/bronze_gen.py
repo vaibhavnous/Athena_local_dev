@@ -16,8 +16,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from nodes.req_extraction import get_llm
 from state import Stage01State
-from utilis.db import build_source_jdbc_url
+from utilis.db import ai_store_db_writer, build_source_jdbc_url
 from utilis.generated_code_paths import generated_code_dir
+from utilis.llm_usage import LLMUsage, combine_llm_usage, metered_invoke
 from utilis.logger import logger
 
 
@@ -475,7 +476,7 @@ def _llm_enabled_for_snowflake_bronze() -> bool:
     return os.getenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "false").lower() in {"1", "true", "yes", "on"}
 
 
-def _enhance_with_llm(code: str, metadata: Dict[str, Any]) -> str:
+def _enhance_with_llm(code: str, metadata: Dict[str, Any]) -> tuple[str, LLMUsage]:
     provider = os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")
     model = os.getenv("ATHENA_BRONZE_LLM_MODEL")
     llm = get_llm(
@@ -510,37 +511,43 @@ Current script:
             f"Bronze LLM enhancement prompt too large: {len(prompt)} chars > {BRONZE_LLM_MAX_PROMPT_CHARS}"
         )
 
-    response = llm.invoke(
-        [
-            SystemMessage(content=BRONZE_LLM_SYSTEM_MSG),
-            HumanMessage(content=prompt),
-        ]
+    metered = metered_invoke(
+        llm,
+        [SystemMessage(content=BRONZE_LLM_SYSTEM_MSG), HumanMessage(content=prompt)],
+        provider=provider,
+        model_name=model,
     )
+    response = metered.response
     enhanced = _strip_code_fences(str(response.content))
     if not enhanced:
         raise ValueError("Bronze LLM enhancement returned empty code")
-    return enhanced
+    return enhanced, metered.usage
 
 
-def _maybe_enhance_with_llm(code: str, metadata: Dict[str, Any]) -> tuple[str, bool, str | None]:
+def _maybe_enhance_with_llm(code: str, metadata: Dict[str, Any]) -> tuple[str, bool, str | None, LLMUsage]:
     if not _llm_enabled_for_bronze():
-        return code, False, None
+        return code, False, None, LLMUsage()
 
+    usage = LLMUsage()
     try:
-        enhanced = _enhance_with_llm(code, metadata)
+        enhanced_result = _enhance_with_llm(code, metadata)
+        if isinstance(enhanced_result, tuple):
+            enhanced, usage = enhanced_result
+        else:
+            enhanced = enhanced_result
         _validate_python(enhanced)
         _detect_dangerous_sql(enhanced)
-        return enhanced, True, None
+        return enhanced, True, None, usage
     except Exception as exc:
         logger.warning(
             "Bronze LLM enhancement failed; using deterministic template: %s",
             exc,
             extra={"node": "bronze_gen", "pass": "llm_enhancement"},
         )
-        return code, False, str(exc)[:500]
+        return code, False, str(exc)[:500], usage
 
 
-def _enhance_snowflake_with_llm(sql: str, metadata: Dict[str, Any]) -> str:
+def _enhance_snowflake_with_llm(sql: str, metadata: Dict[str, Any]) -> tuple[str, LLMUsage]:
     provider = os.getenv("ATHENA_LLM_PROVIDER", "azure_openai")
     model = os.getenv("ATHENA_SNOWFLAKE_BRONZE_LLM_MODEL") or os.getenv("ATHENA_BRONZE_LLM_MODEL")
     llm = get_llm(
@@ -575,16 +582,17 @@ Current SQL:
             f"Snowflake Bronze LLM enhancement prompt too large: {len(prompt)} chars > {BRONZE_LLM_MAX_PROMPT_CHARS}"
         )
 
-    response = llm.invoke(
-        [
-            SystemMessage(content=SNOWFLAKE_BRONZE_LLM_SYSTEM_MSG),
-            HumanMessage(content=prompt),
-        ]
+    metered = metered_invoke(
+        llm,
+        [SystemMessage(content=SNOWFLAKE_BRONZE_LLM_SYSTEM_MSG), HumanMessage(content=prompt)],
+        provider=provider,
+        model_name=model,
     )
+    response = metered.response
     enhanced = _strip_code_fences(str(response.content))
     if not enhanced:
         raise ValueError("Snowflake Bronze LLM enhancement returned empty SQL")
-    return enhanced
+    return enhanced, metered.usage
 
 
 def _maybe_enhance_snowflake_with_llm(
@@ -593,21 +601,26 @@ def _maybe_enhance_snowflake_with_llm(
     *,
     source_table: str | None = None,
     target_table: str | None = None,
-) -> tuple[str, bool, str | None]:
+) -> tuple[str, bool, str | None, LLMUsage]:
     if not _llm_enabled_for_snowflake_bronze():
-        return sql, False, None
+        return sql, False, None, LLMUsage()
 
+    usage = LLMUsage()
     try:
-        enhanced = _enhance_snowflake_with_llm(sql, metadata)
+        enhanced_result = _enhance_snowflake_with_llm(sql, metadata)
+        if isinstance(enhanced_result, tuple):
+            enhanced, usage = enhanced_result
+        else:
+            enhanced = enhanced_result
         _validate_snowflake_sql(enhanced, source_table=source_table, target_table=target_table)
-        return enhanced, True, None
+        return enhanced, True, None, usage
     except Exception as exc:
         logger.warning(
             "Snowflake Bronze LLM enhancement failed; using deterministic template: %s",
             exc,
             extra={"node": "bronze_gen", "pass": "snowflake_llm_enhancement"},
         )
-        return sql, False, str(exc)[:500]
+        return sql, False, str(exc)[:500], usage
 
 
 def _write_bronze_readme(
@@ -1463,6 +1476,7 @@ def _generate_one_table(
     table_name = table_ref["table_name"]
     target_warehouse = str(target_warehouse or "databricks").lower()
     file_source_config = file_source_config or {}
+    llm_usage = LLMUsage()
 
     if target_warehouse == "snowflake":
         code = generate_snowflake_bronze_script(
@@ -1484,7 +1498,7 @@ def _generate_one_table(
         }
         source_table = _snowflake_qualified_name(database_name, schema_name, table_name)
         target_table = _snowflake_qualified_name(bronze_catalog, bronze_schema, f"bronze_{table_name}")
-        code, llm_enhanced, llm_error = _maybe_enhance_snowflake_with_llm(
+        code, llm_enhanced, llm_error, llm_usage = _maybe_enhance_snowflake_with_llm(
             code,
             enhancement_metadata,
             source_table=source_table,
@@ -1520,7 +1534,7 @@ def _generate_one_table(
             "table_metadata": table_metadata or {},
             "file_source_config": file_source_config,
         }
-        code, llm_enhanced, llm_error = _maybe_enhance_with_llm(code, enhancement_metadata)
+        code, llm_enhanced, llm_error, llm_usage = _maybe_enhance_with_llm(code, enhancement_metadata)
 
         _validate_python(code)
         _detect_dangerous_sql(code)
@@ -1569,6 +1583,7 @@ def _generate_one_table(
         "target_warehouse": target_warehouse,
         "script_language": "sql" if target_warehouse == "snowflake" else "python",
         "script_path": script_path,
+        "llm_usage": llm_usage.to_payload(),
     }
 # ------------------------------------------------------------------------------
 # LANGGRAPH NODE
@@ -1682,6 +1697,12 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
                 },
             )
 
+    stage_usage = combine_llm_usage(
+        LLMUsage.from_payload(result.get("llm_usage"))
+        for result in results
+        if isinstance(result, dict)
+    )
+
     # Write bundle summary
     bundle = {
         "run_id": run_id,
@@ -1689,6 +1710,8 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
         "source_database": table_refs[0]["database_name"],
         "target_warehouse": target_warehouse,
         "script_count": len(results),
+        "cost_usd": stage_usage.cost_usd,
+        "llm_usage": stage_usage.to_payload(),
         "scripts": results,
     }
 
@@ -1717,6 +1740,23 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
         bronze_schema=bronze_schema,
         target_warehouse=target_warehouse,
     )
+
+    try:
+        ai_store_db_writer(
+            run_id=run_id,
+            stage="Bronze Code Generation",
+            artifact_type="BRONZE_GENERATION",
+            payload={**bundle, "fingerprint": str(state.get("fingerprint") or run_id)},
+            schema_version="BronzeGeneration_v1",
+            prompt_version="LLM_BRONZE_ENHANCEMENT_v1" if stage_usage.token_count else "DETERMINISTIC_BRONZE_v1",
+            faithfulness_status="PASSED",
+            token_count=stage_usage.token_count,
+            input_tokens=stage_usage.input_tokens,
+            output_tokens=stage_usage.output_tokens,
+            fingerprint=str(state.get("fingerprint") or run_id),
+        )
+    except Exception as exc:
+        logger.warning("Bronze generation artifact persistence failed: %s", exc, extra=log_context)
 
     new_state["bronze_generation_status"] = "COMPLETED"
     new_state["bronze_generation_error"] = None

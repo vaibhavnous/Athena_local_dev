@@ -93,6 +93,21 @@ def test_disabling_account_immediately_invalidates_existing_token(auth):
     assert exc.value.status_code == 401
 
 
+def test_authenticate_token_uses_short_cache_during_transient_repository_failure(auth, monkeypatch):
+    service, repository = auth
+    session = service.login("admin@astra.local", "AdminPass!234")
+
+    def unavailable(_uid):
+        raise RuntimeError("metadata store unavailable")
+
+    monkeypatch.setattr(repository, "find_by_uid", unavailable)
+
+    current_user = service.authenticate_token(session.access_token)
+
+    assert current_user.email == "admin@astra.local"
+    assert current_user.user_type == "Admin"
+
+
 def test_only_primary_admin_can_create_accounts(auth):
     service, _ = auth
     request = CreateUserRequest(

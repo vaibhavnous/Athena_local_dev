@@ -6,6 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from typing import Any, Dict, Optional
 
 from utilis.env import load_backend_env
+from utilis.llm_usage import LLMUsage, combine_llm_usage, metered_embedding_usage
 from utilis.logger import logger
 
 
@@ -23,9 +24,17 @@ class _OpenAIEmbeddingAdapter:
         *,
         client: Any,
         model_name: str,
+        provider: str,
     ) -> None:
         self._client = client
         self._model_name = model_name
+        self._provider = provider
+        self.last_usage = LLMUsage()
+        self.total_usage = LLMUsage()
+
+    def reset_usage(self) -> None:
+        self.last_usage = LLMUsage()
+        self.total_usage = LLMUsage()
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
@@ -37,6 +46,13 @@ class _OpenAIEmbeddingAdapter:
             model=self._model_name,
             input=texts,
         )
+        self.last_usage = metered_embedding_usage(
+            texts,
+            response,
+            provider=self._provider,
+            model_name=self._model_name,
+        )
+        self.total_usage = combine_llm_usage([self.total_usage, self.last_usage])
         rows = sorted(response.data, key=lambda item: item.index)
         return [list(item.embedding) for item in rows]
 
@@ -117,8 +133,9 @@ def _build_azure_embedding_model(config: Dict[str, Any], log_context: Optional[d
             timeout=10.0,
             max_retries=1,
         )
-        model = _OpenAIEmbeddingAdapter(client=client, model_name=config["azure_deployment"])
+        model = _OpenAIEmbeddingAdapter(client=client, model_name=config["azure_deployment"], provider="azure_openai")
         model.embed_query("athena embedding healthcheck")
+        model.reset_usage()
         return model
     except Exception as exc:
         _log_probe("Azure OpenAI embeddings unavailable: %s", log_context, "warning", exc)
@@ -142,8 +159,9 @@ def _build_openai_embedding_model(config: Dict[str, Any], log_context: Optional[
             timeout=10.0,
             max_retries=1,
         )
-        model = _OpenAIEmbeddingAdapter(client=client, model_name=config["openai_model"])
+        model = _OpenAIEmbeddingAdapter(client=client, model_name=config["openai_model"], provider="openai")
         model.embed_query("athena embedding healthcheck")
+        model.reset_usage()
         return model
     except Exception as exc:
         _log_probe("OpenAI embeddings unavailable: %s", log_context, "warning", exc)

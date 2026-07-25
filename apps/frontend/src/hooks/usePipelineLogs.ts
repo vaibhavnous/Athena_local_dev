@@ -37,6 +37,16 @@ export function isCurrentLogRequest(requestedRunId: string, activeRunId: string 
   return requestedRunId === activeRunId
 }
 
+export function transientLogNotice(error: any): string | null {
+  const status = Number(error?.status || 0)
+  const code = String(error?.code || '')
+  const transientStatuses = new Set([408, 429, 500, 502, 503, 504])
+  if (transientStatuses.has(status) || code === 'ECONNABORTED' || code === 'ERR_NETWORK') {
+    return 'Execution logs are temporarily unavailable. The pipeline can continue while the backend reconnects.'
+  }
+  return null
+}
+
 export function usePipelineLogs(
   runId: string | null | undefined,
   isActive = true,
@@ -58,6 +68,7 @@ export function usePipelineLogs(
   const [isLoadingLogs, setIsLoadingLogs] = useState(false)
   const [isRefreshingLogs, setIsRefreshingLogs] = useState(false)
   const [logsError, setLogsError] = useState<string | null>(null)
+  const [logsNotice, setLogsNotice] = useState<string | null>(null)
   const [lastLogTimestamp, setLastLogTimestamp] = useState<string | null>(null)
   const [terminalLogs] = useState<{ message: string; timestamp: string }[]>([])
 
@@ -77,6 +88,7 @@ export function usePipelineLogs(
       if (initialLoad) {
         setIsLoadingLogs(true)
         setLogsError(null)
+        setLogsNotice(null)
       } else {
         setIsRefreshingLogs(true)
       }
@@ -86,10 +98,22 @@ export function usePipelineLogs(
           ? await getPipelineLogsSinceWithLimit(targetRunId, since, 300)
           : await getPipelineLogs(targetRunId, 300)
         if (!isCurrentLogRequest(targetRunId, activeRunIdRef.current)) return []
+        if (data?.logs_available === false) {
+          setLogsError(null)
+          setLogsNotice(data?.message || 'Execution logs are temporarily unavailable.')
+          return []
+        }
+        setLogsNotice(null)
         return Array.isArray(data?.logs) ? (data.logs as PipelineLog[]) : []
       } catch (error: any) {
         if (isCurrentLogRequest(targetRunId, activeRunIdRef.current)) {
-          setLogsError(error?.message ?? 'Fetch error')
+          const notice = transientLogNotice(error)
+          if (notice) {
+            setLogsError(null)
+            setLogsNotice(notice)
+          } else {
+            setLogsError(error?.message ?? 'Fetch error')
+          }
         }
         return []
       } finally {
@@ -124,7 +148,13 @@ export function usePipelineLogs(
         const incoming = await fetchLogs(targetRunId, since, initialLoad)
         mergeLogs(incoming)
       } catch (err: any) {
-        setLogsError(`Failed to fetch logs: ${err?.message}`)
+        const notice = transientLogNotice(err)
+        if (notice) {
+          setLogsError(null)
+          setLogsNotice(notice)
+        } else {
+          setLogsError(`Failed to fetch logs: ${err?.message}`)
+        }
       }
     },
     [fetchLogs, mergeLogs]
@@ -154,6 +184,7 @@ export function usePipelineLogs(
     setDiscoveryError(null)
     setLogs([])
     setLogsError(null)
+    setLogsNotice(null)
     lastLogTimestampRef.current = null
     setLastLogTimestamp(null)
   }, [runId])
@@ -200,6 +231,7 @@ export function usePipelineLogs(
     isLoadingLogs,
     isRefreshingLogs,
     logsError,
+    logsNotice,
     lastLogTimestamp,
     terminalLogs,
     fetchLogs,

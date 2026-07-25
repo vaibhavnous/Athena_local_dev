@@ -717,6 +717,33 @@ def test_databricks_gate4_does_not_mark_merge_key_review_complete():
     assert by_key["silver"]["state"] == "PENDING"
 
 
+def test_hitl_wait_checkpoint_does_not_treat_stale_background_stage_as_running():
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            "status": "HITL_WAIT",
+            "background_stage": "gate3",
+            "next_review_key": "enrichment_review",
+            "enrichment_review_status": "PENDING",
+            "enriched_metadata": {"tables": []},
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={"tables": []},
+        gate3_payload={"tables": []},
+        bronze_generation_completed=False,
+        silver_generation_completed=False,
+        gold_generation_completed=False,
+    )
+
+    by_key = {step["key"]: step for step in steps}
+    assert by_key["gate3"]["state"] == "HITL_WAIT"
+    assert by_key["bronze"]["state"] == "PENDING"
+
+
 def test_merge_key_resolution_completes_only_after_resolver_artifact_exists():
     steps = pipeline_runtime.build_pipeline_steps(
         source="database",
