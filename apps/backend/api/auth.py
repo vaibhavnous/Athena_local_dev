@@ -501,7 +501,7 @@ def _checkpoint_review_decision(
     if gate_number == 1:
         return str(checkpoint.get("human_decision") or "").strip().upper()
     if gate_number == 2:
-        return nested("gate2")
+        return str(checkpoint.get("human_table_decision") or "").strip().upper() or nested("gate2")
     if gate_number == 3:
         return str(checkpoint.get("enrichment_review_decision") or "").strip().upper() or nested("gate3")
     if gate_number == 4:
@@ -515,6 +515,83 @@ def _checkpoint_review_decision(
     if review_key == "gold_review":
         return str(checkpoint.get("gold_review_decision") or "").strip().upper()
     return ""
+
+
+def _checkpoint_is_waiting_for_hitl(checkpoint: dict[str, Any]) -> bool:
+    return str(checkpoint.get("status") or "").strip().upper() in {"HITL_WAIT", "PAUSED_FOR_HITL"}
+
+
+def _checkpoint_has_pending_gate2_review(checkpoint: dict[str, Any]) -> bool:
+    if not _checkpoint_is_waiting_for_hitl(checkpoint):
+        return False
+    if str(checkpoint.get("human_table_decision") or "").strip().upper() not in {"", "PENDING"}:
+        return False
+    if checkpoint.get("certified_tables"):
+        return False
+
+    source = str(checkpoint.get("source") or "database").strip().lower()
+    if source in {"sftp", "adls_gen2"}:
+        return bool(checkpoint.get("candidate_feed") or checkpoint.get("candidate_feeds"))
+
+    return bool(checkpoint.get("nominated_tables"))
+
+
+def _checkpoint_has_pending_gate3_review(checkpoint: dict[str, Any]) -> bool:
+    if not _checkpoint_is_waiting_for_hitl(checkpoint):
+        return False
+    if str(checkpoint.get("enrichment_review_status") or "").strip().upper() not in {"", "PENDING"}:
+        return False
+    if str(checkpoint.get("enrichment_review_decision") or "").strip().upper() not in {"", "PENDING"}:
+        return False
+    if checkpoint.get("enrichment_review_artifact") or checkpoint.get("gate3_approved"):
+        return False
+
+    metadata = checkpoint.get("enriched_metadata")
+    return bool(
+        metadata
+        or checkpoint.get("enriched_columns")
+        or checkpoint.get("feed_semantic_summary")
+        or checkpoint.get("semantic_counts")
+        or checkpoint.get("pii_columns")
+        or checkpoint.get("join_key_columns")
+        or checkpoint.get("measure_columns")
+    )
+
+
+def _checkpoint_has_pending_gate4_review(checkpoint: dict[str, Any]) -> bool:
+    if not _checkpoint_is_waiting_for_hitl(checkpoint):
+        return False
+    if str(checkpoint.get("bronze_review_decision") or "").strip().upper() not in {"", "PENDING"}:
+        return False
+    artifact = checkpoint.get("bronze_review_artifact")
+    return bool((isinstance(artifact, dict) and artifact.get("feeds")) or checkpoint.get("bronze_generation_results"))
+
+
+def _checkpoint_has_pending_gate5_review(checkpoint: dict[str, Any]) -> bool:
+    if not _checkpoint_is_waiting_for_hitl(checkpoint):
+        return False
+    if str(checkpoint.get("silver_review_decision") or "").strip().upper() not in {"", "PENDING"}:
+        return False
+    artifact = checkpoint.get("silver_review_artifact")
+    return bool((isinstance(artifact, dict) and artifact.get("items")) or checkpoint.get("silver_generation_results"))
+
+
+def _checkpoint_has_pending_silver_merge_key_review(checkpoint: dict[str, Any]) -> bool:
+    if not _checkpoint_is_waiting_for_hitl(checkpoint):
+        return False
+    if str(checkpoint.get("silver_merge_key_review_decision") or "").strip().upper() not in {"", "PENDING"}:
+        return False
+    artifact = checkpoint.get("silver_merge_key_review_artifact") or checkpoint.get("silver_merge_key_resolution_artifact")
+    return bool(isinstance(artifact, dict) and artifact.get("feeds"))
+
+
+def _checkpoint_has_pending_gold_review(checkpoint: dict[str, Any]) -> bool:
+    if not _checkpoint_is_waiting_for_hitl(checkpoint):
+        return False
+    if str(checkpoint.get("gold_review_decision") or "").strip().upper() not in {"", "PENDING"}:
+        return False
+    artifact = checkpoint.get("gold_review_artifact")
+    return bool((isinstance(artifact, dict) and artifact.get("items")) or checkpoint.get("gold_generation_results"))
 
 
 def assert_run_gate_open(
@@ -548,6 +625,14 @@ def assert_run_gate_open(
                 return checkpoint
         except (TypeError, ValueError):
             pass
+    if gate_number == 2 and _checkpoint_has_pending_gate2_review(checkpoint):
+        return checkpoint
+    if gate_number == 3 and _checkpoint_has_pending_gate3_review(checkpoint):
+        return checkpoint
+    if gate_number == 4 and _checkpoint_has_pending_gate4_review(checkpoint):
+        return checkpoint
+    if gate_number == 5 and _checkpoint_has_pending_gate5_review(checkpoint):
+        return checkpoint
     if gate_number == 1:
         try:
             from utilis.db import get_pending_items
@@ -557,6 +642,10 @@ def assert_run_gate_open(
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Failed to verify KPI review state") from exc
     if review_key and str(checkpoint.get("next_review_key") or "") == review_key:
+        return checkpoint
+    if review_key == "silver_merge_key_review" and _checkpoint_has_pending_silver_merge_key_review(checkpoint):
+        return checkpoint
+    if review_key == "gold_review" and _checkpoint_has_pending_gold_review(checkpoint):
         return checkpoint
 
     expected = review_key or (f"gate {gate_number}" if gate_number is not None else "review")

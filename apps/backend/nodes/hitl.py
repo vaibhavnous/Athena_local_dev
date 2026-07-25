@@ -42,6 +42,7 @@ def build_hitl_enrichment_review_node() -> Callable[[Stage01State], Stage01State
     def hitl_enrichment_review_node(state: Stage01State) -> Stage01State:
         log_context = {"run_id": state.get("run_id", "unknown"), "node": "enrichment_review"}
         dev_mode = os.getenv("DEV_MODE", "").strip().lower() in {"1", "true", "yes", "on", "dev"}
+        review_decision = str(state.get("enrichment_review_decision") or "").strip().upper()
 
         if dev_mode:
             logger.info("[DEV] Auto-approving enrichment review", extra=log_context)
@@ -54,7 +55,18 @@ def build_hitl_enrichment_review_node() -> Callable[[Stage01State], Stage01State
             new_state["join_key_annotations_reviewed"] = True
             new_state["enrichment_review_decision"] = "APPROVED"
             new_state["enrichment_review_artifact"] = artifact
+            new_state["next_gate"] = None
             certify_hitl_enrichment(state["run_id"], artifact, state.get("fingerprint"))
+            return new_state
+
+        if review_decision == "REJECTED":
+            logger.warning("Enrichment review rejected by human", extra=log_context)
+            new_state = state.copy()
+            new_state["status"] = "FAILED"
+            new_state["enrichment_review_status"] = "FAILED"
+            new_state["enrichment_review_error"] = "Rejected by reviewer"
+            new_state["next_gate"] = None
+            new_state["next_review_key"] = None
             return new_state
 
         if not state.get("semantic_tags_reviewed") or not state.get("pii_classifications_reviewed"):
@@ -63,28 +75,28 @@ def build_hitl_enrichment_review_node() -> Callable[[Stage01State], Stage01State
             new_state["status"] = "HITL_WAIT"
             new_state["enrichment_review_status"] = "PENDING"
             new_state["enrichment_review_decision"] = "PENDING"
+            new_state["next_gate"] = 3
+            new_state["next_review_key"] = None
+            new_state["resume_message"] = "Semantic Review is pending. Review enriched column metadata below."
             return new_state
 
-        if state.get("enrichment_review_decision") == "APPROVED":
+        if review_decision == "APPROVED":
             artifact = state.get("enriched_metadata")
             certify_hitl_enrichment(state["run_id"], artifact, state.get("fingerprint"))
             new_state = state.copy()
             new_state["status"] = "GATE3_COMPLETE"
             new_state["enrichment_review_status"] = "COMPLETED"
             new_state["enrichment_review_artifact"] = artifact
-            return new_state
-
-        if state.get("enrichment_review_decision") == "REJECTED":
-            logger.warning("Enrichment review rejected by human", extra=log_context)
-            new_state = state.copy()
-            new_state["enrichment_review_status"] = "FAILED"
-            new_state["enrichment_review_error"] = "Rejected by reviewer"
+            new_state["next_gate"] = None
             return new_state
 
         new_state = state.copy()
         new_state["status"] = "HITL_WAIT"
         new_state["enrichment_review_status"] = "PENDING"
         new_state["enrichment_review_decision"] = "PENDING"
+        new_state["next_gate"] = 3
+        new_state["next_review_key"] = None
+        new_state["resume_message"] = "Semantic Review is pending. Review enriched column metadata below."
         return new_state
 
     return hitl_enrichment_review_node
@@ -175,6 +187,9 @@ def build_hitl_table_review_node() -> Callable[[Stage01State], Stage01State]:
             new_state = state.copy()
             new_state["status"] = "HITL_WAIT"
             new_state["human_table_decision"] = human_table_decision or "PENDING"
+            new_state["next_gate"] = 2
+            new_state["next_review_key"] = None
+            new_state["resume_message"] = "Table Review is pending. Review and certify nominated tables below."
             return new_state
 
         certified_tables = state.get("certified_tables")
@@ -189,6 +204,7 @@ def build_hitl_table_review_node() -> Callable[[Stage01State], Stage01State]:
         logger.info("HITL certified %d tables to ai_store", len(certified_tables), extra=log_context)
         new_state = state.copy()
         new_state["status"] = "GATE2_COMPLETE"
+        new_state["next_gate"] = None
         return new_state
 
     return hitl_table_review_node

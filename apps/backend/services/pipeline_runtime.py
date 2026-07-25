@@ -2949,6 +2949,8 @@ def submit_gate4_review(
         "bronze_review_decision": decision,
         "bronze_review_artifact": review_artifact or checkpoint_state.get("bronze_review_artifact") or {},
         "gate4": {"gate": "gate4", "status": "COMPLETED", "decision": decision},
+        "next_gate": None,
+        "next_review_key": None,
     }
 
     if decision == "REJECTED":
@@ -3069,6 +3071,7 @@ def submit_silver_merge_key_review(run_id: str, action: str = "APPROVED", review
         "run_id": run_id,
         "silver_merge_key_review_decision": decision,
         "silver_merge_key_review_artifact": artifact,
+        "next_gate": None,
         "next_review_key": None,
         "gate_silver_merge_key_review": {
             "gate": "silver_merge_key_review",
@@ -3191,6 +3194,8 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
         "silver_review_decision": decision,
         "silver_review_artifact": review_artifact or checkpoint_state.get("silver_review_artifact") or {},
         "gate5": {"gate": "gate5", "status": "COMPLETED", "decision": decision},
+        "next_gate": None,
+        "next_review_key": None,
     }
 
     if decision == "REJECTED":
@@ -3339,6 +3344,7 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
         "run_id": run_id,
         "gold_review_decision": decision,
         "gold_review_artifact": review_artifact or checkpoint.get("gold_review_artifact") or {},
+        "next_gate": None,
         "next_review_key": None,
     }
 

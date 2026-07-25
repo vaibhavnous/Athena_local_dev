@@ -313,6 +313,9 @@ def sftp_gate3_node(state: Stage01State) -> Stage01State:
         new_state["enrichment_review_status"] = "PENDING"
         new_state["enrichment_review_decision"] = "PENDING"
         new_state["status"] = "HITL_WAIT"
+        new_state["next_gate"] = 3
+        new_state["next_review_key"] = None
+        new_state["resume_message"] = "Semantic Review is pending. Review semantic enrichment before continuing."
         return new_state
 
     if override == "REJECTED":
@@ -327,6 +330,7 @@ def sftp_gate3_node(state: Stage01State) -> Stage01State:
         new_state["enrichment_review_decision"] = "REJECTED"
         new_state["enrichment_review_error"] = "Rejected by reviewer"
         new_state["status"] = "FAILED"
+        new_state["next_gate"] = None
         return new_state
 
     certify_sftp_gate3(
@@ -348,5 +352,6 @@ def sftp_gate3_node(state: Stage01State) -> Stage01State:
     new_state["join_key_annotations_reviewed"] = True
     new_state["enrichment_review_artifact"] = artifact
     new_state["status"] = "IN_PROGRESS"
+    new_state["next_gate"] = None
     logger.info("SFTP Gate 3 approved", extra={**log_context, "event_type": "stage_end"})
     return new_state

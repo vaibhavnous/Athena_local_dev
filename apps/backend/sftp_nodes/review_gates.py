@@ -287,8 +287,13 @@ def sftp_gate4_node(state: Stage01State) -> Stage01State:
             "payload_summary": new_state.get("bronze_review_artifact") or {},
         }
         new_state["status"] = "HITL_WAIT"
+        new_state["next_gate"] = 4
+        new_state["next_review_key"] = None
+        new_state["resume_message"] = "Bronze Review is pending. Review Bronze plan before ingestion."
         return new_state
 
+    new_state["next_gate"] = None
+    new_state["next_review_key"] = None
     if decision == "REJECTED":
         new_state["gate4"] = {"gate": "gate4", "status": "COMPLETED", "decision": "REJECTED"}
         new_state["status"] = "FAILED"
@@ -333,8 +338,13 @@ def sftp_gate5_node(state: Stage01State) -> Stage01State:
             "payload_summary": new_state.get("silver_review_artifact") or {},
         }
         new_state["status"] = "HITL_WAIT"
+        new_state["next_gate"] = 5
+        new_state["next_review_key"] = None
+        new_state["resume_message"] = "Silver Review is pending. Review Silver plan before execution."
         return new_state
 
+    new_state["next_gate"] = None
+    new_state["next_review_key"] = None
     if decision == "REJECTED":
         new_state["gate5"] = {"gate": "gate5", "status": "COMPLETED", "decision": "REJECTED"}
         new_state["status"] = "FAILED"

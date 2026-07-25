@@ -4,7 +4,7 @@ import sys
 import types
 from pathlib import Path
 
-from sftp_nodes import governance, source_ingestion
+from sftp_nodes import governance, review_gates, source_ingestion
 from services import sftp_runtime
 
 
@@ -277,3 +277,31 @@ def test_build_sftp_display_name_uses_discovered_entities():
     )
 
     assert name == "sftp:VendorX:employee+transactions"
+
+
+def test_sftp_gate4_pending_sets_resume_marker():
+    result = review_gates.sftp_gate4_node(
+        {
+            "run_id": "run-gate4",
+            "bronze_review_artifact": {"feeds": [{"entity": "claims", "review_status": "PENDING"}]},
+        }
+    )
+
+    assert result["status"] == "HITL_WAIT"
+    assert result["next_gate"] == 4
+    assert result["next_review_key"] is None
+    assert result["gate4"]["status"] == "PENDING"
+
+
+def test_sftp_gate5_pending_sets_resume_marker():
+    result = review_gates.sftp_gate5_node(
+        {
+            "run_id": "run-gate5",
+            "silver_review_artifact": {"items": [{"entity": "claims", "review_status": "PENDING"}]},
+        }
+    )
+
+    assert result["status"] == "HITL_WAIT"
+    assert result["next_gate"] == 5
+    assert result["next_review_key"] is None
+    assert result["gate5"]["status"] == "PENDING"

@@ -197,3 +197,247 @@ def test_review_gate_replay_is_rejected():
         )
 
     assert exc.value.status_code == 409
+
+
+def test_stale_gate2_checkpoint_with_nominated_tables_is_open():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+    checkpoint = {
+        "run_id": "run-gate2",
+        "status": "HITL_WAIT",
+        "human_table_decision": "PENDING",
+        "nominated_tables": [{"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"}],
+    }
+
+    result = assert_run_gate_open("run-gate2", admin, checkpoint=checkpoint, gate_number=2)
+
+    assert result is checkpoint
+
+
+def test_gate2_fallback_does_not_open_active_checkpoint():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        assert_run_gate_open(
+            "run-gate2",
+            admin,
+            checkpoint={
+                "run_id": "run-gate2",
+                "status": "RUNNING",
+                "human_table_decision": "PENDING",
+                "nominated_tables": [{"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"}],
+            },
+            gate_number=2,
+        )
+
+    assert exc.value.status_code == 409
+    assert "not waiting for gate 2" in exc.value.detail
+
+
+def test_gate2_review_replay_is_rejected_from_human_decision():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        assert_run_gate_open(
+            "run-gate2",
+            admin,
+            checkpoint={
+                "run_id": "run-gate2",
+                "status": "HITL_WAIT",
+                "next_gate": 2,
+                "human_table_decision": "COMPLETED",
+                "certified_tables": [{"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"}],
+            },
+            gate_number=2,
+        )
+
+    assert exc.value.status_code == 409
+    assert "already been decided" in exc.value.detail
+
+
+def test_stale_gate3_checkpoint_with_enriched_metadata_is_open():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+    checkpoint = {
+        "run_id": "run-gate3",
+        "status": "HITL_WAIT",
+        "enrichment_review_status": "PENDING",
+        "enrichment_review_decision": "PENDING",
+        "enriched_metadata": {"columns": [{"table_name": "claims", "column_name": "claim_id"}]},
+    }
+
+    result = assert_run_gate_open("run-gate3", admin, checkpoint=checkpoint, gate_number=3)
+
+    assert result is checkpoint
+
+
+def test_gate3_fallback_does_not_open_active_checkpoint():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        assert_run_gate_open(
+            "run-gate3",
+            admin,
+            checkpoint={
+                "run_id": "run-gate3",
+                "status": "RUNNING",
+                "enrichment_review_status": "PENDING",
+                "enrichment_review_decision": "PENDING",
+                "enriched_metadata": {"columns": [{"table_name": "claims", "column_name": "claim_id"}]},
+            },
+            gate_number=3,
+        )
+
+    assert exc.value.status_code == 409
+    assert "not waiting for gate 3" in exc.value.detail
+
+
+def test_gate3_review_replay_is_rejected_from_enrichment_decision():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        assert_run_gate_open(
+            "run-gate3",
+            admin,
+            checkpoint={
+                "run_id": "run-gate3",
+                "status": "HITL_WAIT",
+                "next_gate": 3,
+                "enrichment_review_status": "COMPLETED",
+                "enrichment_review_decision": "APPROVED",
+                "enrichment_review_artifact": {"columns": []},
+            },
+            gate_number=3,
+        )
+
+    assert exc.value.status_code == 409
+    assert "already been decided" in exc.value.detail
+
+
+def test_stale_gate4_checkpoint_with_bronze_artifact_is_open():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+    checkpoint = {
+        "run_id": "run-gate4",
+        "status": "HITL_WAIT",
+        "bronze_review_artifact": {"feeds": [{"entity": "claims", "review_status": "PENDING"}]},
+    }
+
+    result = assert_run_gate_open("run-gate4", admin, checkpoint=checkpoint, gate_number=4)
+
+    assert result is checkpoint
+
+
+def test_gate4_fallback_does_not_open_active_checkpoint():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        assert_run_gate_open(
+            "run-gate4",
+            admin,
+            checkpoint={
+                "run_id": "run-gate4",
+                "status": "RUNNING",
+                "bronze_review_artifact": {"feeds": [{"entity": "claims", "review_status": "PENDING"}]},
+            },
+            gate_number=4,
+        )
+
+    assert exc.value.status_code == 409
+    assert "not waiting for gate 4" in exc.value.detail
+
+
+def test_stale_gate5_checkpoint_with_silver_artifact_is_open():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+    checkpoint = {
+        "run_id": "run-gate5",
+        "status": "HITL_WAIT",
+        "silver_review_artifact": {"items": [{"entity": "claims", "review_status": "PENDING"}]},
+    }
+
+    result = assert_run_gate_open("run-gate5", admin, checkpoint=checkpoint, gate_number=5)
+
+    assert result is checkpoint
+
+
+def test_stale_silver_merge_key_checkpoint_with_artifact_is_open():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+    checkpoint = {
+        "run_id": "run-merge-key",
+        "status": "HITL_WAIT",
+        "silver_merge_key_review_artifact": {"feeds": [{"entity": "claims", "merge_keys": ["claim_id"]}]},
+    }
+
+    result = assert_run_gate_open(
+        "run-merge-key",
+        admin,
+        checkpoint=checkpoint,
+        review_key="silver_merge_key_review",
+    )
+
+    assert result is checkpoint
+
+
+def test_stale_gold_checkpoint_with_artifact_is_open():
+    admin = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Admin",
+        email="admin@astra.local",
+        userType="Admin",
+    )
+    checkpoint = {
+        "run_id": "run-gold",
+        "status": "HITL_WAIT",
+        "gold_review_artifact": {"items": [{"name": "claims_kpi", "review_status": "PENDING"}]},
+    }
+
+    result = assert_run_gate_open("run-gold", admin, checkpoint=checkpoint, review_key="gold_review")
+
+    assert result is checkpoint
