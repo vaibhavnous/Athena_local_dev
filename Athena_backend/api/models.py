@@ -129,6 +129,26 @@ class ProjectRequest(StrictApiModel):
     use_domain_knowledge_base: bool = False
     domain_profile: Optional[str] = Field(default=None, max_length=200)
     knowledge_base_id: Optional[str] = Field(default=None, max_length=200)
+    execution_engine: ExecutionEngine = "native"
+    dbt_deployment_mode: DbtDeploymentMode = "generate_only"
+    dbt_target_name: Optional[str] = Field(default=None, max_length=80)
+    dbt_threads: Optional[int] = Field(default=None, ge=1, le=32)
+    dbt_command_timeout_secs: Optional[int] = Field(default=None, ge=60, le=86_400)
+    force_dbt_deploy: Optional[bool] = False
+
+    @field_validator("execution_engine", "dbt_deployment_mode", mode="before")
+    @classmethod
+    def normalize_dbt_choices(cls, value: Any) -> Any:
+        return _lower(value)
+
+    @model_validator(mode="after")
+    def validate_dbt_project_target(self) -> "ProjectRequest":
+        dbt_requested = self.execution_engine == "dbt" or self.dbt_deployment_mode != "generate_only"
+        if dbt_requested and str(self.target or "").strip().lower() != "snowflake":
+            raise ValueError("dbt execution is only supported when target='Snowflake'")
+        if dbt_requested and str(self.connection_type or "").strip().lower() != "database":
+            raise ValueError("Snowflake dbt execution is only supported for database projects")
+        return self
 
 
 class StageContinueRequest(StrictApiModel):

@@ -37,8 +37,12 @@ const DEFAULT_FORM = {
   stageConfirmationEnabled: false,
 }
 
+function normalizeChoice(value, fallback = '') {
+  return String(value || fallback).trim().toLowerCase()
+}
+
 function buildInitialForm(settings, seedRun, project) {
-  const seedSource = seedRun?.source || DEFAULT_FORM.source
+  const seedSource = normalizeChoice(seedRun?.source, DEFAULT_FORM.source)
   return {
     ...DEFAULT_FORM,
     provider: settings.provider || DEFAULT_FORM.provider,
@@ -54,26 +58,31 @@ function buildInitialForm(settings, seedRun, project) {
           deployment: seedRun.deployment || settings.azure_deployment || DEFAULT_FORM.deployment,
           databaseType: seedRun.database_type || DEFAULT_FORM.databaseType,
           databaseName: seedRun.database_name || DEFAULT_FORM.databaseName,
-          targetWarehouse: seedRun.target_warehouse || DEFAULT_FORM.targetWarehouse,
-          executionEngine: seedRun.execution_engine || DEFAULT_FORM.executionEngine,
-          dbtDeploymentMode: seedRun.dbt_deployment_mode || DEFAULT_FORM.dbtDeploymentMode,
+          targetWarehouse: normalizeChoice(seedRun.target_warehouse, DEFAULT_FORM.targetWarehouse),
+          executionEngine: normalizeChoice(seedRun.execution_engine, DEFAULT_FORM.executionEngine),
+          dbtDeploymentMode: normalizeChoice(seedRun.dbt_deployment_mode, DEFAULT_FORM.dbtDeploymentMode),
           forceDbtDeploy: !!seedRun.force_dbt_deploy,
           useDomainKb: !!seedRun.use_domain_kb,
           complianceEnabled: !!seedRun.compliance_enabled,
         }
       : {}),
-    ...(project ? {
-      projectName: project.name,
-      projectDescription: project.description,
-      source: project.connectionType === 'data_lake' ? 'adls_gen2' : 'database',
-      databaseType: project.dbType || DEFAULT_FORM.databaseType,
-      databaseName: project.databaseName || DEFAULT_FORM.databaseName,
-      targetWarehouse: String(project.target || 'Databricks').toLowerCase(),
-      executionEngine: DEFAULT_FORM.executionEngine,
-      dbtDeploymentMode: DEFAULT_FORM.dbtDeploymentMode,
-      forceDbtDeploy: false,
-      useDomainKb: !!project.useDomainKB,
-    } : {}),
+    ...(project ? (() => {
+      const projectSource = project.connectionType === 'data_lake' ? 'adls_gen2' : 'database'
+      const projectTarget = normalizeChoice(project.target, DEFAULT_FORM.targetWarehouse)
+      const dbtSupported = projectSource === 'database' && projectTarget === 'snowflake'
+      return {
+        projectName: project.name,
+        projectDescription: project.description,
+        source: projectSource,
+        databaseType: project.dbType || DEFAULT_FORM.databaseType,
+        databaseName: project.databaseName || DEFAULT_FORM.databaseName,
+        targetWarehouse: projectTarget,
+        executionEngine: dbtSupported ? normalizeChoice(project.executionEngine, DEFAULT_FORM.executionEngine) : 'native',
+        dbtDeploymentMode: dbtSupported ? normalizeChoice(project.dbtDeploymentMode, DEFAULT_FORM.dbtDeploymentMode) : 'generate_only',
+        forceDbtDeploy: dbtSupported && !!project.forceDbtDeploy,
+        useDomainKb: !!project.useDomainKB,
+      }
+    })() : {}),
   }
 }
 
@@ -125,25 +134,29 @@ function buildAdlsRunLabel(entity) {
 }
 
 function isFileSource(source) {
-  return source === 'sftp' || source === 'adls_gen2'
+  const normalized = normalizeChoice(source)
+  return normalized === 'sftp' || normalized === 'adls_gen2'
 }
 
 function normalizeFileEntity(source, entity) {
-  if (source === 'adls_gen2') return 'auto'
-  if (source === 'sftp') {
+  const normalizedSource = normalizeChoice(source)
+  if (normalizedSource === 'adls_gen2') return 'auto'
+  if (normalizedSource === 'sftp') {
     return ['transactions', 'employee', 'both'].includes(entity) ? entity : 'transactions'
   }
   return entity || DEFAULT_FORM.sftpEntity
 }
 
 function buildFileRunLabel(source, entity) {
-  const normalizedEntity = normalizeFileEntity(source, entity)
-  if (source === 'adls_gen2') return buildAdlsRunLabel(normalizedEntity)
+  const normalizedSource = normalizeChoice(source)
+  const normalizedEntity = normalizeFileEntity(normalizedSource, entity)
+  if (normalizedSource === 'adls_gen2') return buildAdlsRunLabel(normalizedEntity)
   return buildSftpRunLabel(normalizedEntity)
 }
 
 function connectionTypeFromSource(source) {
-  return source === 'adls_gen2' || source === 'sftp' ? 'data_lake' : 'database'
+  const normalized = normalizeChoice(source)
+  return normalized === 'adls_gen2' || normalized === 'sftp' ? 'data_lake' : 'database'
 }
 
 function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false, project = null }) {
@@ -161,6 +174,11 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
   const [error, setError] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
   const [openSourceSelect, setOpenSourceSelect] = useState(null)
+  const sourceValue = normalizeChoice(form.source, DEFAULT_FORM.source)
+  const targetWarehouseValue = normalizeChoice(form.targetWarehouse, DEFAULT_FORM.targetWarehouse)
+  const executionEngineValue = normalizeChoice(form.executionEngine, DEFAULT_FORM.executionEngine)
+  const dbtDeploymentModeValue = normalizeChoice(form.dbtDeploymentMode, DEFAULT_FORM.dbtDeploymentMode)
+  const snowflakeDatabaseTarget = targetWarehouseValue === 'snowflake' && sourceValue === 'database'
 
   const resetState = () => {
     setForm(buildInitialForm(settings, initialSeedRun, project))
@@ -172,7 +190,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
   const handleConnectionTypeChange = (connectionType) => {
     setOpenSourceSelect(null)
     setForm((current) => {
-      const source = connectionType === 'data_lake' ? 'adls_gen2' : 'database'
+      const source = normalizeChoice(connectionType) === 'data_lake' ? 'adls_gen2' : 'database'
       return {
         ...current,
         source,
@@ -186,11 +204,12 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
   }
 
   const handleDataLakeTypeChange = (source) => {
+    const nextSource = normalizeChoice(source)
     setOpenSourceSelect(null)
     setForm((current) => ({
       ...current,
-      source,
-      sftpEntity: normalizeFileEntity(source, current.sftpEntity),
+      source: nextSource,
+      sftpEntity: normalizeFileEntity(nextSource, current.sftpEntity),
       useDomainKb: false,
       executionEngine: 'native',
       dbtDeploymentMode: 'generate_only',
@@ -312,19 +331,19 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
     setLoading(true)
     setError(null)
 
-    const normalizedSftpEntity = normalizeFileEntity(form.source, form.sftpEntity)
+    const normalizedSftpEntity = normalizeFileEntity(sourceValue, form.sftpEntity)
     const displayName =
       form.projectName.trim() ||
       form.fileName ||
-      (isFileSource(form.source)
-        ? buildFileRunLabel(form.source, normalizedSftpEntity)
+      (isFileSource(sourceValue)
+        ? buildFileRunLabel(sourceValue, normalizedSftpEntity)
         : 'pasted_brd.txt')
     const startedAt = new Date().toISOString()
     addNotification({
       type: 'info',
       title: 'Starting Run',
-      message: isFileSource(form.source)
-        ? `Submitting the ${form.source === 'adls_gen2' ? 'ADLS Gen2' : 'SFTP'} pipeline run.`
+      message: isFileSource(sourceValue)
+        ? `Submitting the ${sourceValue === 'adls_gen2' ? 'ADLS Gen2' : 'SFTP'} pipeline run.`
         : `Submitting ${displayName}.`,
       duration: 3000,
     })
@@ -340,7 +359,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
 
       const run = await startRun({
         project_id: project?.id,
-        source: form.source,
+        source: sourceValue,
         sftp_entity: normalizedSftpEntity,
         brd_text: form.brdText,
         brd_filename: displayName,
@@ -348,18 +367,16 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         deployment: form.deployment || undefined,
         database_type: form.databaseType,
         database_name: form.databaseName,
-        target_warehouse: form.targetWarehouse,
-        execution_engine:
-          form.targetWarehouse === 'snowflake' && form.source === 'database' ? form.executionEngine : 'native',
+        target_warehouse: targetWarehouseValue,
+        execution_engine: snowflakeDatabaseTarget ? executionEngineValue : 'native',
         dbt_deployment_mode:
-          form.targetWarehouse === 'snowflake' && form.source === 'database' && form.executionEngine === 'dbt'
-            ? form.dbtDeploymentMode
+          snowflakeDatabaseTarget && executionEngineValue === 'dbt'
+            ? dbtDeploymentModeValue
             : 'generate_only',
         force_dbt_deploy:
-          form.targetWarehouse === 'snowflake' &&
-          form.source === 'database' &&
-          form.executionEngine === 'dbt' &&
-          form.dbtDeploymentMode === 'generate_and_deploy'
+          snowflakeDatabaseTarget &&
+          executionEngineValue === 'dbt' &&
+          dbtDeploymentModeValue === 'generate_and_deploy'
             ? !!form.forceDbtDeploy
             : false,
         budget: settings.budget,
@@ -379,16 +396,15 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         status: run.status || 'RUNNING',
         background_stage: 'ingestion',
         resume_message: 'BRD Ingest is running.',
-        source: form.source,
+        source: sourceValue,
         sftp_entity: normalizedSftpEntity,
         provider: form.provider,
         deployment: form.deployment || null,
-        target_warehouse: form.targetWarehouse,
-        execution_engine:
-          form.targetWarehouse === 'snowflake' && form.source === 'database' ? form.executionEngine : 'native',
+        target_warehouse: targetWarehouseValue,
+        execution_engine: snowflakeDatabaseTarget ? executionEngineValue : 'native',
         dbt_deployment_mode:
-          form.targetWarehouse === 'snowflake' && form.source === 'database' && form.executionEngine === 'dbt'
-            ? form.dbtDeploymentMode
+          snowflakeDatabaseTarget && executionEngineValue === 'dbt'
+            ? dbtDeploymentModeValue
             : 'generate_only',
         use_domain_kb: !!form.useDomainKb,
         started_at: startedAt,
@@ -414,8 +430,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
       addNotification({
         type: 'success',
         title: 'Run Started',
-        message: isFileSource(form.source)
-          ? `Pipeline submitted for the ${form.source === 'adls_gen2' ? 'ADLS Gen2' : 'SFTP'} source.`
+        message: isFileSource(sourceValue)
+          ? `Pipeline submitted for the ${sourceValue === 'adls_gen2' ? 'ADLS Gen2' : 'SFTP'} source.`
           : `Pipeline submitted for ${displayName}.`,
         duration: 4000,
       })
@@ -474,7 +490,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                     <div>
                       <h2 className="text-[28px] font-semibold leading-tight text-white">New Pipeline Run</h2>
                       <p className="mt-1 text-[15px] text-[#b5c3da]">
-                        {isFileSource(form.source)
+                        {isFileSource(sourceValue)
                           ? 'Upload or paste a BRD, then configure the file source.'
                           : 'Upload or paste a BRD to extract KPIs.'}
                       </p>
@@ -587,7 +603,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                           <Field label="Target Warehouse" required compact>
                             <ModalSelect
                               id="targetWarehouse"
-                              value={form.targetWarehouse}
+                              value={targetWarehouseValue}
                               options={TARGET_WAREHOUSE_OPTIONS}
                               openSelect={openSourceSelect}
                               setOpenSelect={setOpenSourceSelect}
@@ -595,9 +611,9 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                 setForm((current) => ({
                                   ...current,
                                   targetWarehouse,
-                                  executionEngine: targetWarehouse === 'snowflake' ? current.executionEngine : 'native',
-                                  dbtDeploymentMode: targetWarehouse === 'snowflake' ? current.dbtDeploymentMode : 'generate_only',
-                                  forceDbtDeploy: targetWarehouse === 'snowflake' ? current.forceDbtDeploy : false,
+                                  executionEngine: normalizeChoice(targetWarehouse) === 'snowflake' ? current.executionEngine : 'native',
+                                  dbtDeploymentMode: normalizeChoice(targetWarehouse) === 'snowflake' ? current.dbtDeploymentMode : 'generate_only',
+                                  forceDbtDeploy: normalizeChoice(targetWarehouse) === 'snowflake' ? current.forceDbtDeploy : false,
                                 }))
                               }
                               activeBorder
@@ -605,12 +621,12 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                             />
                           </Field>
 
-                          {form.targetWarehouse === 'snowflake' && form.source === 'database' && (
+                          {snowflakeDatabaseTarget && (
                             <>
                               <Field label="Snowflake Engine" required compact>
                                 <ModalSelect
                                   id="executionEngine"
-                                  value={form.executionEngine}
+                                  value={executionEngineValue}
                                   options={EXECUTION_ENGINE_OPTIONS}
                                   openSelect={openSourceSelect}
                                   setOpenSelect={setOpenSourceSelect}
@@ -618,20 +634,21 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                     setForm((current) => ({
                                       ...current,
                                       executionEngine,
-                                      dbtDeploymentMode: executionEngine === 'dbt' ? current.dbtDeploymentMode : 'generate_only',
-                                      forceDbtDeploy: executionEngine === 'dbt' ? current.forceDbtDeploy : false,
+                                      dbtDeploymentMode: normalizeChoice(executionEngine) === 'dbt' ? current.dbtDeploymentMode : 'generate_only',
+                                      forceDbtDeploy: normalizeChoice(executionEngine) === 'dbt' ? current.forceDbtDeploy : false,
                                     }))
                                   }
                                   activeBorder
+                                  disabled={!!project}
                                 />
                               </Field>
 
-                              {form.executionEngine === 'dbt' && (
+                              {executionEngineValue === 'dbt' && (
                                 <>
                                   <Field label="dbt Mode" required compact>
                                     <ModalSelect
                                       id="dbtDeploymentMode"
-                                      value={form.dbtDeploymentMode}
+                                      value={dbtDeploymentModeValue}
                                       options={DBT_DEPLOYMENT_MODE_OPTIONS}
                                       openSelect={openSourceSelect}
                                       setOpenSelect={setOpenSourceSelect}
@@ -640,13 +657,14 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                           ...current,
                                           dbtDeploymentMode,
                                           forceDbtDeploy:
-                                            dbtDeploymentMode === 'generate_and_deploy' ? current.forceDbtDeploy : false,
+                                            normalizeChoice(dbtDeploymentMode) === 'generate_and_deploy' ? current.forceDbtDeploy : false,
                                         }))
                                       }
                                       activeBorder
+                                      disabled={!!project}
                                     />
                                   </Field>
-                                  {form.dbtDeploymentMode === 'generate_and_deploy' && (
+                                  {dbtDeploymentModeValue === 'generate_and_deploy' && (
                                     <label className={`flex cursor-pointer items-start gap-3 rounded-[10px] border px-4 py-4 transition-colors ${
                                       form.forceDbtDeploy
                                         ? 'border-[#3f82ff] bg-[#102144]'
@@ -656,6 +674,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                         type="checkbox"
                                         className="mt-1 h-5 w-5 rounded border-[#3c4b63] bg-[#071021]"
                                         checked={!!form.forceDbtDeploy}
+                                        disabled={!!project}
                                         onChange={(event) =>
                                           setForm((current) => ({ ...current, forceDbtDeploy: event.target.checked }))
                                         }
@@ -675,7 +694,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                             <Field label="Connection Type" required compact>
                               <ModalSelect
                                 id="connectionType"
-                                value={connectionTypeFromSource(form.source)}
+                                value={connectionTypeFromSource(sourceValue)}
                                 options={SOURCE_OPTIONS}
                                 openSelect={openSourceSelect}
                                 setOpenSelect={setOpenSourceSelect}
@@ -685,7 +704,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                               />
                             </Field>
 
-                            {form.source === 'database' && (
+                            {sourceValue === 'database' && (
                               <>
                                 <Field label="Database Type" required compact>
                                   <div className="relative">
@@ -753,12 +772,12 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                               </>
                             )}
 
-                            {connectionTypeFromSource(form.source) === 'data_lake' && (
+                            {connectionTypeFromSource(sourceValue) === 'data_lake' && (
                               <div className="space-y-3">
                                 <Field label="Data Lake Type" required compact>
                                   <ModalSelect
                                     id="dataLakeType"
-                                    value={form.source === 'adls_gen2' ? 'adls_gen2' : ''}
+                                    value={sourceValue === 'adls_gen2' ? 'adls_gen2' : ''}
                                     options={DATA_LAKE_OPTIONS}
                                     placeholder="Select type..."
                                     openSelect={openSourceSelect}
