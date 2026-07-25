@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
+from services import self_healing
 from services.pipeline_runtime import (
     BACKGROUND_EXECUTOR,
     BACKGROUND_JOBS,
@@ -78,6 +79,7 @@ def _mark_run_failed(run_id: str, exc: Exception, *, stage: str) -> None:
             "failed_at": time.time(),
         }
     )
+    checkpoint = self_healing.apply_failure_metadata(checkpoint, stage_key=stage, error=str(exc))
     save_checkpoint_state(run_id, checkpoint)
 
 
@@ -274,7 +276,7 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
 
 
 def clean_checkpoint_for_resume(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
-    cleaned = dict(checkpoint or {})
+    cleaned = self_healing.clear_for_manual_resume(dict(checkpoint or {}))
     cleaned["status"] = "RUNNING"
     cleaned["background_stage"] = None
     cleaned["failed_background_stage"] = None

@@ -225,6 +225,70 @@ def test_stage_local_failure_stops_database_continuation(monkeypatch):
     assert saved_states[-1]["status"] == "FAILED"
 
 
+def test_database_continue_self_heals_transient_idempotent_stage(monkeypatch):
+    from services import pipeline_runtime
+
+    saved_states = []
+    visited = []
+    monkeypatch.setenv("ATHENA_SELF_HEAL_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("ATHENA_SELF_HEAL_BACKOFF_BASE_SECONDS", "0")
+    monkeypatch.setattr(pipeline_runtime.time, "sleep", lambda _seconds: None)
+
+    def fake_runner(stage_key):
+        def _run(state):
+            visited.append(stage_key)
+            if len(visited) == 1:
+                return {"metadata_status": "FAILED", "metadata_error": "HYT00 timeout while reading catalog"}
+            return {"metadata_status": "COMPLETED", "status": "HITL_WAIT"}
+
+        return _run
+
+    monkeypatch.setattr(pipeline_runtime, "_database_stage_runner", fake_runner)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved_states.append(dict(state)))
+
+    result = pipeline_runtime.continue_database_pipeline(
+        "run-metadata-retry",
+        start_stage_key="discovery",
+        state={"run_id": "run-metadata-retry"},
+    )
+
+    assert visited == ["discovery", "discovery"]
+    assert result["status"] == "HITL_WAIT"
+    assert result["self_healing"]["stage_attempts"]["discovery"] == 2
+    assert any(state.get("self_healing_action") == "AUTO_RETRY" for state in saved_states)
+
+
+def test_database_continue_self_heals_transient_stage_exception(monkeypatch):
+    from services import pipeline_runtime
+
+    visited = []
+    monkeypatch.setenv("ATHENA_SELF_HEAL_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("ATHENA_SELF_HEAL_BACKOFF_BASE_SECONDS", "0")
+    monkeypatch.setattr(pipeline_runtime.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda _run_id, _state: None)
+
+    def fake_runner(stage_key):
+        def _run(state):
+            visited.append(stage_key)
+            if len(visited) == 1:
+                raise TimeoutError("metadata discovery timed out")
+            return {"metadata_status": "COMPLETED", "status": "HITL_WAIT"}
+
+        return _run
+
+    monkeypatch.setattr(pipeline_runtime, "_database_stage_runner", fake_runner)
+
+    result = pipeline_runtime.continue_database_pipeline(
+        "run-metadata-exception-retry",
+        start_stage_key="discovery",
+        state={"run_id": "run-metadata-exception-retry"},
+    )
+
+    assert visited == ["discovery", "discovery"]
+    assert result["status"] == "HITL_WAIT"
+    assert result["self_healing"]["stage_attempts"]["discovery"] == 2
+
+
 def test_generation_skipped_is_retryable_failure():
     from services import pipeline_runtime
 

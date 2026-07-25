@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
+from services import self_healing
 from utilis.db import ai_store_db_writer, config, get_completed_items, get_connection, get_pending_items, timed_stage, update_hitl_items_batch
 from utilis.generated_code_paths import generated_code_dir
 from utilis.logger import logger
@@ -127,13 +128,18 @@ def _stage_failure_message(stage_key: str, state: Dict[str, Any], field: str, st
 
 def _normalize_stage_failure(stage_key: str, state: Dict[str, Any]) -> Dict[str, Any]:
     if str(state.get("status") or "").upper() == "FAILED":
-        return {
+        failed_state = {
             **state,
             "failed_background_stage": state.get("failed_background_stage") or stage_key,
             "failed_stage": state.get("failed_stage") or stage_key,
             "failed_stage_label": state.get("failed_stage_label") or DATABASE_STAGE_LABELS.get(stage_key, stage_key),
             "background_stage": None,
         }
+        return self_healing.apply_failure_metadata(
+            failed_state,
+            stage_key=failed_state.get("failed_background_stage") or stage_key,
+            error=failed_state.get("error_message") or failed_state.get("error") or "Stage failed.",
+        )
 
     marker = _stage_failure_marker(stage_key, state)
     if not marker:
@@ -142,7 +148,7 @@ def _normalize_stage_failure(stage_key: str, state: Dict[str, Any]) -> Dict[str,
     field, status = marker
     message = _stage_failure_message(stage_key, state, field, status)
     label = DATABASE_STAGE_LABELS.get(stage_key, stage_key)
-    return {
+    failed_state = {
         **state,
         "status": "FAILED",
         "background_stage": None,
@@ -154,35 +160,84 @@ def _normalize_stage_failure(stage_key: str, state: Dict[str, Any]) -> Dict[str,
         "error_message": message,
         "resume_message": f"{label} failed. Use Retry Failed Stage or Resume from Failure.",
     }
+    return self_healing.apply_failure_metadata(failed_state, stage_key=stage_key, error=message)
+
+
+def _prepare_stage_retry_state(state: Dict[str, Any], stage_key: str) -> Dict[str, Any]:
+    decision = ((state.get("self_healing") or {}).get("last_decision") or {}) if isinstance(state.get("self_healing"), dict) else {}
+    delay_seconds = float(decision.get("retry_delay_seconds") or 0.0)
+    label = DATABASE_STAGE_LABELS.get(stage_key, stage_key)
+    cleaned = {
+        **state,
+        "status": "RUNNING",
+        "background_stage": stage_key,
+        "failed_background_stage": None,
+        "failed_stage": None,
+        "failed_stage_label": None,
+        "error": None,
+        "error_type": None,
+        "error_message": None,
+        "resume_message": f"Self-healing retry scheduled for {label}.",
+    }
+    for field in (*STAGE_STATUS_FIELDS.get(stage_key, ()), *STAGE_ERROR_FIELDS.get(stage_key, ())):
+        cleaned.pop(field, None)
+    return self_healing.append_event(
+        cleaned,
+        stage_key=stage_key,
+        event="stage_retry_scheduled",
+        delay_seconds=delay_seconds,
+    )
 
 
 def run_with_minimum_stage_runtime(stage_key: str, runner, state: Dict[str, Any]) -> Dict[str, Any]:
     started_at = time.monotonic()
     run_id = str(state.get("run_id") or "").strip()
-    running_state = {
-        **state,
-        "status": "RUNNING",
-        "background_stage": stage_key,
-        "resume_message": f"{DATABASE_STAGE_LABELS.get(stage_key, stage_key).replace('_', ' ').title()} is running.",
-    }
-    if run_id:
-        save_checkpoint_state_timed(run_id, running_state, context=f"{stage_key}:running")
+    working_state = dict(state)
 
-    result = runner(running_state)
-    if isinstance(result, dict):
-        result = {
-            **running_state,
-            **result,
-            "background_stage": None,
+    while True:
+        running_state = {
+            **working_state,
+            "status": "RUNNING",
+            "background_stage": stage_key,
+            "resume_message": f"{DATABASE_STAGE_LABELS.get(stage_key, stage_key).replace('_', ' ').title()} is running.",
         }
-        result = _normalize_stage_failure(stage_key, result)
-        if str(result.get("status") or "").upper() != "FAILED":
-            result["last_completed_stage_key"] = stage_key
+        running_state = self_healing.begin_stage_attempt(running_state, run_id=run_id, stage_key=stage_key)
         if run_id:
-            context = f"{stage_key}:failed" if str(result.get("status") or "").upper() == "FAILED" else f"{stage_key}:complete"
-            save_checkpoint_state_timed(run_id, result, context=context)
-        wait_for_minimum_stage_runtime(stage_key, started_at, result)
-    return result
+            save_checkpoint_state_timed(run_id, running_state, context=f"{stage_key}:running")
+
+        try:
+            result = runner(running_state)
+        except Exception as exc:
+            result = {
+                **running_state,
+                "status": "FAILED",
+                "background_stage": None,
+                "failed_background_stage": stage_key,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            }
+        if isinstance(result, dict):
+            result = {
+                **running_state,
+                **result,
+                "background_stage": None,
+            }
+            result = _normalize_stage_failure(stage_key, result)
+            if str(result.get("status") or "").upper() == "FAILED" and self_healing.should_retry(result):
+                retry_state = _prepare_stage_retry_state(result, stage_key)
+                if run_id:
+                    save_checkpoint_state_timed(run_id, retry_state, context=f"{stage_key}:self_healing_retry")
+                time.sleep(float(((retry_state.get("self_healing") or {}).get("last_decision") or {}).get("retry_delay_seconds") or 0.0))
+                working_state = retry_state
+                continue
+            if str(result.get("status") or "").upper() != "FAILED":
+                result["last_completed_stage_key"] = stage_key
+            if run_id:
+                context = f"{stage_key}:failed" if str(result.get("status") or "").upper() == "FAILED" else f"{stage_key}:complete"
+                save_checkpoint_state_timed(run_id, result, context=context)
+            wait_for_minimum_stage_runtime(stage_key, started_at, result)
+        return result
 
 
 def _bundle_cache_token(path: Path) -> Optional[str]:
@@ -412,6 +467,7 @@ def continue_database_pipeline(
             "interrupted_by_backend_restart": False,
             "resume_message": f"{DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key)} is running.",
         }
+        running_state = self_healing.begin_stage_attempt(running_state, run_id=run_id, stage_key=current_stage_key)
         logger.info(
             "START %s stage=%s",
             DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key),
@@ -422,7 +478,16 @@ def continue_database_pipeline(
         working_state = running_state
 
         runner = _database_stage_runner(current_stage_key)
-        result = runner(working_state)
+        try:
+            result = runner(working_state)
+        except Exception as exc:
+            result = {
+                "status": "FAILED",
+                "failed_background_stage": current_stage_key,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            }
         if not isinstance(result, dict):
             raise ValueError(f"Stage {current_stage_key} returned an invalid state.")
 
@@ -443,6 +508,12 @@ def continue_database_pipeline(
             },
         )
         if str(working_state.get("status") or "").upper() == "FAILED":
+            if self_healing.should_retry(working_state):
+                retry_state = _prepare_stage_retry_state(working_state, current_stage_key)
+                save_checkpoint_state_timed(run_id, retry_state, context=f"{current_stage_key}:self_healing_retry")
+                time.sleep(float(((retry_state.get("self_healing") or {}).get("last_decision") or {}).get("retry_delay_seconds") or 0.0))
+                working_state = retry_state
+                continue
             save_checkpoint_state_timed(run_id, working_state, context=f"{current_stage_key}:failed")
             return working_state
 
@@ -700,7 +771,7 @@ def save_checkpoint_state_timed(run_id: str, state: Dict[str, Any], *, context: 
 
 def _interrupted_checkpoint_state(state: Dict[str, Any], reason: str) -> Dict[str, Any]:
     failed_stage = state.get("background_stage") or state.get("failed_background_stage") or state.get("last_failed_stage_key") or "pipeline"
-    return {
+    failed_state = {
         **state,
         "status": "FAILED",
         "background_stage": None,
@@ -712,6 +783,47 @@ def _interrupted_checkpoint_state(state: Dict[str, Any], reason: str) -> Dict[st
         "interrupted_by_backend_restart": True,
         "interrupted_at": time.time(),
     }
+    failed_state = self_healing.apply_failure_metadata(failed_state, stage_key=failed_stage, error=reason)
+    if self_healing.should_auto_resume_interrupted(failed_state):
+        failed_state["resume_message"] = (
+            "Backend restarted while this run was active. Self-healing will replay the interrupted stage."
+        )
+    return failed_state
+
+
+def _resume_interrupted_database_stage(run_id: str, stage_key: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    resumed = _prepare_stage_retry_state(state, stage_key)
+    resumed.update(
+        {
+            "run_id": run_id,
+            "interrupted_by_backend_restart": False,
+            "resume_message": f"Self-healing is replaying {DATABASE_STAGE_LABELS.get(stage_key, stage_key)} after backend restart.",
+        }
+    )
+    return continue_database_pipeline(run_id, start_stage_key=stage_key, state=resumed)
+
+
+def _try_auto_resume_interrupted_run(run_id: str, state: Dict[str, Any]) -> bool:
+    if not self_healing.should_auto_resume_interrupted(state):
+        return False
+    stage_key = str(state.get("failed_background_stage") or "").strip()
+    if not stage_key:
+        return False
+    try:
+        submit_background(run_id, stage_key, _resume_interrupted_database_stage, run_id, stage_key, state)
+        logger.warning("Self-healing auto-resume submitted run_id=%s stage=%s", run_id, stage_key)
+        return True
+    except Exception as exc:
+        failed = self_healing.append_event(
+            state,
+            stage_key=stage_key,
+            event="startup_auto_resume_failed",
+            error=str(exc),
+        )
+        failed["resume_message"] = "Self-healing could not auto-resume this run. Use Retry Failed Stage."
+        save_checkpoint_state(run_id, failed)
+        logger.exception("Self-healing auto-resume failed run_id=%s stage=%s", run_id, stage_key)
+        return False
 
 
 def mark_interrupted_background_runs_on_startup() -> int:
@@ -749,7 +861,9 @@ def mark_interrupted_background_runs_on_startup() -> int:
         if status not in ACTIVE_CHECKPOINT_STATUSES and not state.get("background_stage"):
             continue
 
-        save_checkpoint_state(run_id, _interrupted_checkpoint_state({**state, "run_id": run_id}, reason))
+        interrupted_state = _interrupted_checkpoint_state({**state, "run_id": run_id}, reason)
+        save_checkpoint_state(run_id, interrupted_state)
+        _try_auto_resume_interrupted_run(run_id, interrupted_state)
         recovered += 1
 
     if recovered:
@@ -838,6 +952,11 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
                     "failed_background_stage": checkpoint.get("failed_background_stage") or stage,
                     "error": str(exc),
                 }
+            )
+            checkpoint = self_healing.apply_failure_metadata(
+                checkpoint,
+                stage_key=checkpoint.get("failed_background_stage") or stage,
+                error=str(exc),
             )
             try:
                 save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_failed")
@@ -2474,6 +2593,15 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         "pipeline_steps": pipeline_steps,
         "current_pipeline_step": current_pipeline_step,
         "external_execution": checkpoint.get("external_execution"),
+        "self_healing": checkpoint.get("self_healing"),
+        "self_healing_status": checkpoint.get("self_healing_status"),
+        "self_healing_action": checkpoint.get("self_healing_action"),
+        "root_cause_category": checkpoint.get("root_cause_category"),
+        "recommended_recovery_action": checkpoint.get("recommended_recovery_action"),
+        "circuit_breaker_open": bool(checkpoint.get("circuit_breaker_open")),
+        "dead_lettered": bool(checkpoint.get("dead_lettered")),
+        "dead_letter_stage": checkpoint.get("dead_letter_stage"),
+        "dead_letter_reason": checkpoint.get("dead_letter_reason"),
     }
 
 
