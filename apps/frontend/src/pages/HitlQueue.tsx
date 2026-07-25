@@ -1820,67 +1820,55 @@ function HitlQueue({ onClose = null }) {
   if (selectedRunId && isReviewableRun && isGate3) {
     return (
       <div className="flex h-full min-h-0 flex-col gap-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-semibold text-white">Enrichment Review</p>
-            <p className="text-xs text-[#8fa0bf]">Astra Data semantic enrichment approval for the active run.</p>
-          </div>
-          {reviewRuns.length > 0 && (
-            <select
-              value={selectedRunId || ''}
-              onChange={(event) => selectReviewRun(event.target.value)}
-              className="h-10 rounded-xl border border-[#253044] bg-[#0a1220] px-3 text-xs text-[#c6d2e8] outline-none"
-            >
-              {reviewRuns.map((run) => (
-                <option key={run.id} value={run.id}>
-                  {run.id.slice(0, 14)} - {run.brd_filename} (Gate {run.next_gate})
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-
-        <div className="flex min-h-0 flex-1 items-stretch justify-center overflow-y-auto rounded-[28px] bg-[radial-gradient(circle_at_top,_rgba(44,87,150,0.2),_transparent_42%),linear-gradient(180deg,#09101c_0%,#060b14_100%)] px-3 py-4 sm:px-5 sm:py-6">
-          <div className="flex min-h-0 w-full max-w-[940px] flex-1 flex-col overflow-hidden rounded-[18px] border border-[#1d2940] bg-[#0d1729] shadow-[0_30px_90px_rgba(0,0,0,0.46)]">
-            <div className="flex flex-col gap-4 border-b border-[#1d2940] bg-[#10192c] px-6 py-5 md:flex-row md:items-center md:justify-between">
-              <div className="flex min-w-0 items-center gap-3">
-                <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-[14px] border border-[#29496f] bg-[#11213a]">
-                  <Database size={22} className="text-[#78a9ff]" />
+        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto rounded-[28px] bg-[linear-gradient(180deg,#0a1020_0%,#070c16_100%)] px-5 py-6">
+          <div className="flex w-full max-w-6xl flex-col overflow-hidden rounded-[24px] border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
+            <div className="flex flex-col gap-4 border-b border-[#1d2940] px-5 py-5 md:flex-row md:items-center md:justify-between">
+              <div className="flex min-w-0 items-center gap-4">
+                <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-[10px] border border-[#244a93] bg-[#142952] text-[#69a0ff]">
+                  <Database size={20} strokeWidth={2.2} />
                 </div>
                 <div className="min-w-0">
-                  <h2 className="text-xl font-bold text-white">Enrichment Review</h2>
-                  <p className="mt-1 text-sm text-[#a9b6cc]">
-                    Review semantic enrichment for {semanticReviewItems.length} table{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
+                  <h2 className="text-[18px] font-extrabold text-white">Action Required: {gate3Name}</h2>
+                  <p className="mt-1 text-sm text-[#b9c1cf]">
+                    {semanticReviewSource?.resume_message || enrichmentReview?.resume_message || currentRun?.resume_message || `Review semantic enrichment for ${semanticReviewItems.length} table${semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.`}
                   </p>
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-3">
-                <div className="rounded-[12px] border border-[#22304b] bg-[#0b1424] px-4 py-2 text-xs text-[#c6d2e8]">
-                  {selectedRunId?.slice(0, 14)} - {currentRun?.brd_filename || 'Active run'}
-                </div>
+                {reviewRuns.length > 0 && (
+                  <select
+                    value={selectedRunId || ''}
+                    onChange={(event) => selectReviewRun(event.target.value)}
+                    className="h-11 rounded-[10px] border border-[#2c3b54] bg-[#1a2536] px-3 text-xs font-semibold text-[#b8c6dd] outline-none transition-colors hover:bg-[#223149] hover:text-white"
+                  >
+                    {reviewRuns.map((run) => (
+                      <option key={run.id} value={run.id}>
+                        {run.id.slice(0, 14)} - {run.brd_filename} (Gate {run.next_gate})
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <button
                   type="button"
                   onClick={handleAutoApproveSemanticItems}
-                  className="inline-flex h-11 items-center gap-2 rounded-[12px] border border-[#2e845c] bg-[#112d21] px-4 text-sm font-semibold text-[#65d69e] transition-colors hover:bg-[#153925]"
+                  className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
                 >
-                  <CheckCircle size={15} />
+                  <CheckCircle size={16} className="text-[#12b886]" />
                   Auto-Approve Pending
                 </button>
               </div>
             </div>
 
-            <div className="flex-1 space-y-4 overflow-y-auto bg-[#0b1220] p-3 sm:p-4">
-              {semanticReviewItems.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center gap-4 py-16 text-center">
-                  <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#131d30]">
-                    <Inbox size={28} className="text-[#6f809f]" />
-                  </div>
+            <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
+              {hydrating && semanticReviewItems.length === 0 ? (
+                <div className="flex min-h-[220px] items-center justify-center rounded-[18px] border border-[#263247] bg-[#0d1524] p-6 text-sm text-[#9fb0ca]">
+                  <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin text-[#4fa3ff]" /> Loading semantic review artifacts...</span>
+                </div>
+              ) : semanticReviewItems.length === 0 ? (
+                <div className="flex min-h-[220px] items-center justify-center rounded-[18px] border border-dashed border-[#263247] bg-[#0d1524] text-center">
                   <div>
-                    <p className="font-medium text-white">No Items Available</p>
-                    <p className="mt-1 text-sm text-[#8fa0bf]">
-                      The pipeline did not return any items for semantic review.
-                    </p>
+                    <p className="text-sm font-semibold text-white">No semantic review items found for this run.</p>
                   </div>
                 </div>
               ) : (
@@ -1901,21 +1889,18 @@ function HitlQueue({ onClose = null }) {
               )}
             </div>
 
-            <div className="flex shrink-0 flex-col gap-3 border-t border-[#1d2940] bg-[#10192c] px-6 pb-5 pt-4">
+            <div className="flex shrink-0 flex-col gap-3 border-t border-[#1d2940] bg-[#101726] px-5 py-4">
               {semanticValidationError && (
                 <div className="flex items-center gap-2 rounded-lg border border-accent-red/30 bg-accent-red/10 px-3 py-2 text-sm text-accent-red">
                   <AlertTriangle size={14} />
                   <span>{semanticValidationError}</span>
                 </div>
               )}
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <p className="text-sm text-[#9ca9bd]">
-                  <span className="font-medium text-white">
-                    {semanticReviewItems.length - pendingSemanticReviewItems.length}
-                  </span>{' '}
-                  / {semanticReviewItems.length} items reviewed
+              <div className="flex items-center justify-between gap-4">
+                <p className="text-sm text-[#c6d2e8]">
+                  <span className="font-semibold text-white">{semanticReviewItems.length - pendingSemanticReviewItems.length}</span> / {semanticReviewItems.length} items reviewed
                 </p>
-                <div className="flex gap-3">
+                <div className="flex items-center gap-3">
                   <button type="button" onClick={() => returnToMonitor(selectedRunId)} className="btn-secondary">
                     Pause Pipeline
                   </button>
@@ -1924,7 +1909,7 @@ function HitlQueue({ onClose = null }) {
                     disabled={submitting}
                     className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {submitting ? 'Saving...' : 'Submit Decisions & Resume'}
+                    {submitting ? 'Submitting...' : 'Submit Decisions & Resume'}
                   </button>
                 </div>
               </div>

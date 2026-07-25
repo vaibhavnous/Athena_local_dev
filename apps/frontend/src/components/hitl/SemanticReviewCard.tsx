@@ -185,55 +185,63 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
   }
 
   return (
-    <article className={`rounded-[18px] border bg-[#10192a] p-5 transition-colors ${decision === 'APPROVED' ? 'border-[#14745e]' : decision === 'REJECTED' ? 'border-[#7d2e43]' : 'border-[#26334a]'}`}>
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+    <article className={`rounded-[16px] border px-5 py-5 transition-colors ${decision === 'APPROVED' ? 'border-[#1f5d4e] bg-[#112d2b]' : decision === 'REJECTED' ? 'border-[#723148] bg-[#2c1823]' : 'border-[#263247] bg-[#121a2b]'}`}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-            <Database size={17} className="shrink-0 text-[#4388ff]" />
-            <h3 className="truncate font-mono text-lg font-bold text-white">{tableName}</h3>
-            <span className="rounded-full bg-[#202b3d] px-3 py-1 text-[10px] font-extrabold uppercase text-[#b9c2d1]">Enrichment</span>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <Database size={14} className="shrink-0 text-[#6ea2ff]" />
+            <h3 className="truncate text-[15px] font-bold text-white">{tableName}</h3>
+            <span className="rounded-full border border-[#2e394d] bg-[#202938] px-2 py-0.5 text-[10px] font-semibold text-[#d5deec]">
+              SEMANTIC
+            </span>
           </div>
-          <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-[#98a5ba]">
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-[#9ca8bb]">
             <span className="inline-flex items-center gap-1.5"><Layers3 size={13} /> {columns.length} columns</span>
-            <span className="inline-flex items-center gap-1.5 text-[#4388ff]"><Sparkles size={13} /> {llmColumns} LLM-enriched</span>
+            <span className="inline-flex items-center gap-1.5 text-[#69a0ff]"><Sparkles size={13} /> {llmColumns} LLM-enriched</span>
             <span className="inline-flex items-center gap-1.5"><Clock3 size={13} /> Queued: {formatDateTime(item?.queued_at || item?.created_at)}</span>
             <span className="inline-flex items-center gap-1.5"><CheckCircle2 size={13} /> Decided: {formatDateTime(item?.decided_at)}</span>
           </div>
         </div>
 
-        <button type="button" onClick={() => setEditorOpen(true)} className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-[#202b3d] px-5 text-sm font-bold text-[#d0d6e1] transition-colors hover:bg-[#29374d] hover:text-white">
-          <Pencil size={15} className="text-[#4388ff]" />
+        <button type="button" onClick={() => setEditorOpen(true)} className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[10px] border border-[#2c3b54] bg-[#1a2536] px-3 text-xs font-semibold text-[#b8c6dd] transition-colors hover:bg-[#223149] hover:text-white">
+          <Pencil size={12} className="text-[#6ea2ff]" />
           Edit
         </button>
       </div>
 
-      <button type="button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen} className="mt-5 inline-flex items-center gap-2 text-xs font-bold text-[#c4ccda] transition-colors hover:text-white">
+      <button type="button" onClick={() => setColumnsOpen((open) => !open)} aria-expanded={columnsOpen} className="mt-4 inline-flex items-center gap-2 text-xs font-bold text-[#c4ccda] transition-colors hover:text-white">
         {columnsOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
         {columnsOpen ? `Hide columns (${columns.length})` : `Show columns (${columns.length})`}
       </button>
 
       {columnsOpen && (
-        <div className="mt-3 max-h-56 overflow-auto rounded-xl border border-[#26334a] bg-[#091221]">
+        <div className="mt-3 max-h-56 overflow-auto rounded-[10px] border border-[#263247] bg-[#0d1524]">
           {columns.map((column) => (
             <div key={column.column_name} className="grid grid-cols-[minmax(150px,1fr)_minmax(120px,0.8fr)_2fr] gap-3 border-b border-[#202c40] px-4 py-3 text-xs last:border-b-0">
               <span className="truncate font-mono font-semibold text-white">{column.column_name}</span>
-              <span className="text-[#77a8ff]">{column.semantic_type}</span>
-              <span className="truncate text-[#9ca8bc]">{column.business_description || '-'}</span>
+              <span className="text-[#69a0ff]">{column.semantic_type}</span>
+              <span className="truncate text-[#c8d2e5]">{column.business_description || '-'}</span>
             </div>
           ))}
         </div>
       )}
 
       {decision === 'REJECTED' && (
-        <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Rejection reason" className="mt-4 h-11 w-full rounded-xl border border-[#673044] bg-[#1d1420] px-3 text-sm text-white outline-none placeholder:text-[#886b76] focus:border-[#b23d5d]" />
+        <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Rejection reason" className="mt-4 h-11 w-full rounded-[10px] border border-[#7a3346] bg-[#0d1524] px-3 text-sm text-white outline-none placeholder:text-[#886b76] focus:border-[#ff647f]" />
       )}
 
-      <div className="mt-5 grid gap-3 sm:grid-cols-2">
-        <button type="button" onClick={() => onApprove(id, { table_name: tableName, table_summary: summary, columns })} className={`inline-flex h-12 items-center justify-center gap-2 rounded-xl border text-sm font-bold transition-colors ${decision === 'APPROVED' ? 'border-[#13a47d] bg-[#103f36] text-[#26d5a3]' : 'border-[#12634f] bg-[#0d302d] text-[#22c99a] hover:bg-[#104039]'}`}>
-          <Check size={17} /> Approve
+      <div className="mt-4 flex gap-2">
+        <button type="button" onClick={() => onApprove(id, { table_name: tableName, table_summary: summary, columns })} className="flex-1 rounded-[10px] border border-[#14856d] bg-[#103533] px-4 py-2.5 text-sm font-semibold text-[#31d49f] transition-colors hover:bg-[#15413d]">
+          <span className="inline-flex items-center gap-1.5">
+            <Check size={14} strokeWidth={2.5} />
+            Approve
+          </span>
         </button>
-        <button type="button" onClick={() => onReject(id, reason || 'Rejected by reviewer')} className={`inline-flex h-12 items-center justify-center gap-2 rounded-xl border text-sm font-bold transition-colors ${decision === 'REJECTED' ? 'border-[#b43b5c] bg-[#3a1928] text-[#ff506e]' : 'border-[#6d2d42] bg-[#281722] text-[#ff4d68] hover:bg-[#351a28]'}`}>
-          <X size={17} /> Reject
+        <button type="button" onClick={() => onReject(id, reason || 'Rejected by reviewer')} className="flex-1 rounded-[10px] border border-[#8a3148] bg-[#2a1823] px-4 py-2.5 text-sm font-semibold text-[#ff647f] transition-colors hover:bg-[#351d29]">
+          <span className="inline-flex items-center gap-1.5">
+            <X size={14} strokeWidth={2.5} />
+            Reject
+          </span>
         </button>
       </div>
 
