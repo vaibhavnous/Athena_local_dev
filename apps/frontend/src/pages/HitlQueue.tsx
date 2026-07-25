@@ -2075,6 +2075,49 @@ function HitlQueue({ onClose = null }) {
     )
   }
 
+  if (selectedRunId && isReviewableRun && isGate4) {
+    return (
+      <CodeReviewPanel
+        reviewShell
+        headline={`Action Required: ${gate4Name}`}
+        title="Bronze Code Review"
+        description={bronzeReview?.resume_message || `Review ${bronzeReviewFeeds.length} generated script${bronzeReviewFeeds.length !== 1 ? 's' : ''} before the pipeline continues.`}
+        reviewSelector={reviewRuns.length > 0 && (
+          <select
+            value={selectedRunId || ''}
+            onChange={(event) => selectReviewRun(event.target.value)}
+            className="h-11 rounded-[10px] border border-[#2c3b54] bg-[#1a2536] px-3 text-xs font-semibold text-[#b8c6dd] outline-none transition-colors hover:bg-[#223149] hover:text-white"
+          >
+            {reviewRuns.map((run) => (
+              <option key={run.id} value={run.id}>
+                {run.id.slice(0, 14)} - {run.brd_filename} ({run.next_review_key === 'silver_merge_key_review' ? 'Silver Merge Key Review' : `Gate ${run.next_gate}`})
+              </option>
+            ))}
+          </select>
+        )}
+        lineageLabel="View Source -> Bronze Lineage"
+        onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
+        emptyMessage={`Bronze scripts are not loaded yet. Keep the monitor open while ${gate4Name} is prepared.`}
+        items={bronzeCodeReviewItems}
+        loading={hydrating}
+        reviewedCount={reviewedCodeReviewCount}
+        totalCount={bronzeCodeReviewItems.length}
+        gateDecision={codeReviewGateDecision || gateDecision}
+        decisions={codeReviewDecisions}
+        sessionKey={reviewSessionKeyRef.current}
+        onSetItemDecision={setCodeReviewDecision}
+        onAutoApprovePending={handleAutoApproveCodeReviewItems}
+        onSetAllDecision={setAllCodeReviewItemsDecision}
+        onDraftItemsChange={setCodeReviewDraftItems}
+        onPause={() => returnToMonitor(selectedRunId)}
+        onSubmit={handleSubmit}
+        submitting={submitting}
+        disabled={submitting || !gateReviewReady}
+        submitLabel="Submit Decisions & Resume"
+      />
+    )
+  }
+
   return (
     <div className="flex flex-col h-full gap-4">
       <div className="overflow-hidden rounded-[16px] border border-[#1d2940] bg-[#0f1829] shadow-[0_20px_80px_rgba(0,0,0,0.28)]">
@@ -3137,6 +3180,9 @@ function CodeReviewPanel({
   onDraftItemsChange,
   sessionKey,
   loading,
+  reviewShell = false,
+  headline,
+  reviewSelector = null,
 }) {
   const [expandedKey, setExpandedKey] = useState(null)
   const [draftItems, setDraftItems] = useState(items)
@@ -3195,6 +3241,154 @@ function CodeReviewPanel({
     gateDecision === 'REJECTED' ? 'border-red-500/35 bg-red-500/10 text-red-300' :
     gateDecision === 'REGENERATE' ? 'border-[#3f82ff]/35 bg-[#3f82ff]/10 text-[#78a9ff]' :
     'border-amber-500/35 bg-amber-500/10 text-amber-300'
+
+  const renderReviewBody = () => (
+    <div className={reviewShell ? 'flex-1 space-y-4 overflow-y-auto px-5 py-5' : 'flex-1 space-y-4 overflow-y-auto bg-[#0b1220] p-6'}>
+      {loading && draftItems.length === 0 ? (
+        <div className={reviewShell ? 'flex min-h-[220px] items-center justify-center rounded-[18px] border border-[#263247] bg-[#0d1524] p-6 text-sm text-[#9fb0ca]' : 'flex min-h-[180px] items-center justify-center rounded-2xl border border-[#22304b] bg-[#0b1424] p-6 text-sm text-[#9fb0ca]'}>
+          <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin text-[#4fa3ff]" /> Loading generated review artifacts...</span>
+        </div>
+      ) : draftItems.length === 0 ? (
+        <div className={reviewShell ? 'flex min-h-[220px] items-center justify-center rounded-[18px] border border-dashed border-[#263247] bg-[#0d1524] p-6 text-center text-sm text-[#c6d2e8]' : 'rounded-2xl border border-[#22304b] bg-[#0b1424] p-4 text-sm text-[#c6d2e8]'}>
+          {emptyMessage}
+        </div>
+      ) : (
+        draftItems.map((item) => (
+          <CodeReviewItem
+            key={item.key}
+            item={item}
+            expanded={expandedKey === item.key}
+            onToggle={() => setExpandedKey((current) => (current === item.key ? null : item.key))}
+            onCodeChange={(code) => updateItemCode(item.key, code)}
+            onMergeKeysChange={(mergeKeys) => updateItemFields(item.key, { mergeKeys, primaryKeys: mergeKeys })}
+            onApprove={() => onSetItemDecision(item.key, 'APPROVED')}
+            onReject={() => onSetItemDecision(item.key, 'REJECTED')}
+            onRegenerate={() => onSetItemDecision(item.key, 'REGENERATE')}
+            decision={decisions[item.key] || ''}
+          />
+        ))
+      )}
+    </div>
+  )
+
+  const renderReviewFooter = () => (
+    <div className={reviewShell ? 'flex shrink-0 flex-col gap-3 border-t border-[#1d2940] bg-[#101726] px-5 py-4 lg:flex-row lg:items-center lg:justify-between' : 'flex shrink-0 items-center justify-between gap-4 border-t border-[#1d2940] bg-[#101726] px-6 py-4'}>
+      <p className="text-sm text-[#c6d2e8]">
+        <span className="font-semibold text-white">{reviewedCount}</span> / {totalCount} items reviewed
+      </p>
+      <div className={reviewShell ? 'flex flex-wrap items-center justify-end gap-3' : 'flex items-center gap-3'}>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onSetAllDecision('APPROVED')}
+            aria-pressed={gateDecision === 'APPROVED'}
+            className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
+              gateDecision === 'APPROVED'
+                ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300'
+                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/15'
+            }`}
+          >
+            <span className="inline-flex items-center gap-1">
+              <CheckCircle2 size={13} />
+              Approve Gate
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onSetAllDecision('REJECTED')}
+            aria-pressed={gateDecision === 'REJECTED'}
+            className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
+              gateDecision === 'REJECTED'
+                ? 'border-red-400 bg-red-500/20 text-red-300'
+                : 'border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/15'
+            }`}
+          >
+            <span className="inline-flex items-center gap-1">
+              <XCircle size={13} />
+              Reject Gate
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onSetAllDecision('REGENERATE')}
+            aria-pressed={gateDecision === 'REGENERATE'}
+            className={`rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
+              gateDecision === 'REGENERATE'
+                ? 'border-[#3f82ff] bg-[#3f82ff]/20 text-[#78a9ff]'
+                : 'border-[#3f82ff]/30 bg-[#3f82ff]/10 text-[#78a9ff] hover:bg-[#3f82ff]/15'
+            }`}
+          >
+            <span className="inline-flex items-center gap-1">
+              <RotateCcw size={13} />
+              Regenerate
+            </span>
+          </button>
+        </div>
+        <button type="button" onClick={onPause} className="btn-secondary">
+          Pause Pipeline
+        </button>
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={disabled}
+          className="inline-flex items-center gap-2 rounded-lg bg-accent-blue px-5 py-3 text-sm font-bold text-white shadow-lg transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {submitting ? <Loader2 size={15} className="animate-spin" /> : <Copy size={15} />}
+          {submitting ? 'Submitting...' : submitLabel}
+        </button>
+      </div>
+    </div>
+  )
+
+  if (reviewShell) {
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-4">
+        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto rounded-[28px] bg-[linear-gradient(180deg,#0a1020_0%,#070c16_100%)] px-5 py-6">
+          <div className="flex w-full max-w-6xl flex-col overflow-hidden rounded-[24px] border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
+            <div className="flex flex-col gap-4 border-b border-[#1d2940] px-5 py-5 md:flex-row md:items-center md:justify-between">
+              <div className="flex min-w-0 items-center gap-4">
+                <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-[10px] border border-[#244a93] bg-[#142952] text-[#69a0ff]">
+                  <Copy size={20} strokeWidth={2.2} />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-[18px] font-extrabold text-white">{headline || title}</h2>
+                  <p className="mt-1 text-sm text-[#b9c1cf]">{description}</p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                {reviewSelector}
+                <span className={`inline-flex h-11 items-center rounded-[10px] border px-3 text-xs font-bold ${decisionTone}`}>
+                  {decisionLabel}
+                </span>
+                {onViewLineage && (
+                  <button
+                    type="button"
+                    onClick={onViewLineage}
+                    className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
+                  >
+                    <Database size={16} className="text-[#69a0ff]" />
+                    {lineageLabel || 'View Lineage'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onAutoApprovePending}
+                  className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
+                >
+                  <CheckCircle size={16} className="text-[#12b886]" />
+                  Auto-Approve Pending
+                </button>
+              </div>
+            </div>
+
+            {renderReviewBody()}
+            {renderReviewFooter()}
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }} className="flex h-[calc(100vh-240px)] min-h-[620px] flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#0f1829] shadow-2xl">
