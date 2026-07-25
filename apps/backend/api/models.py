@@ -106,11 +106,16 @@ class PipelineRunRequest(StrictApiModel):
 
     @model_validator(mode="after")
     def validate_dbt_target(self) -> "PipelineRunRequest":
-        dbt_requested = self.execution_engine == "dbt" or self.dbt_deployment_mode != "generate_only"
-        if dbt_requested and self.target_warehouse != "snowflake":
-            raise ValueError("dbt execution is only supported when target_warehouse='snowflake'")
-        if dbt_requested and self.source not in {"database", "rdbms"}:
-            raise ValueError("Snowflake dbt execution is only supported for database sources in this branch")
+        if self.execution_engine != "dbt":
+            self.dbt_deployment_mode = "generate_only"
+            self.force_dbt_deploy = False
+            return self
+        if self.target_warehouse != "snowflake":
+            raise ValueError("dbt code generation is only supported when target_warehouse='snowflake'")
+        if self.source not in {"database", "rdbms"}:
+            raise ValueError("Snowflake dbt code generation is only supported for database sources in this branch")
+        self.dbt_deployment_mode = "generate_only"
+        self.force_dbt_deploy = False
         return self
 
 
@@ -143,11 +148,16 @@ class ProjectRequest(StrictApiModel):
 
     @model_validator(mode="after")
     def validate_dbt_project_target(self) -> "ProjectRequest":
-        dbt_requested = self.execution_engine == "dbt" or self.dbt_deployment_mode != "generate_only"
-        if dbt_requested and str(self.target or "").strip().lower() != "snowflake":
-            raise ValueError("dbt execution is only supported when target='Snowflake'")
-        if dbt_requested and str(self.connection_type or "").strip().lower() != "database":
-            raise ValueError("Snowflake dbt execution is only supported for database projects")
+        if self.execution_engine != "dbt":
+            self.dbt_deployment_mode = "generate_only"
+            self.force_dbt_deploy = False
+            return self
+        if str(self.target or "").strip().lower() != "snowflake":
+            raise ValueError("dbt code generation is only supported when target='Snowflake'")
+        if str(self.connection_type or "").strip().lower() != "database":
+            raise ValueError("Snowflake dbt code generation is only supported for database projects")
+        self.dbt_deployment_mode = "generate_only"
+        self.force_dbt_deploy = False
         return self
 
 

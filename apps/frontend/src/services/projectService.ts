@@ -47,11 +47,11 @@ const fromApi = (raw: any): AthenaProject => ({
   domainProfile: raw.domain_profile,
   knowledgeBaseId: raw.knowledge_base_id,
   executionEngine: raw.execution_engine || 'native',
-  dbtDeploymentMode: raw.dbt_deployment_mode || 'generate_only',
+  dbtDeploymentMode: 'generate_only',
   dbtTargetName: raw.dbt_target_name,
   dbtThreads: raw.dbt_threads,
   dbtCommandTimeoutSecs: raw.dbt_command_timeout_secs,
-  forceDbtDeploy: !!raw.force_dbt_deploy,
+  forceDbtDeploy: false,
   createdAt: raw.created_at,
   updatedAt: raw.updated_at,
 })
@@ -72,11 +72,11 @@ const toApi = (project: ProjectInput) => ({
   domain_profile: project.domainProfile,
   knowledge_base_id: project.knowledgeBaseId,
   execution_engine: project.executionEngine || 'native',
-  dbt_deployment_mode: project.dbtDeploymentMode || 'generate_only',
+  dbt_deployment_mode: 'generate_only',
   dbt_target_name: project.dbtTargetName,
   dbt_threads: project.dbtThreads,
   dbt_command_timeout_secs: project.dbtCommandTimeoutSecs,
-  force_dbt_deploy: !!project.forceDbtDeploy,
+  force_dbt_deploy: false,
 })
 
 export const projectService = {

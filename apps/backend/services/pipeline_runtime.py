@@ -1611,9 +1611,6 @@ def build_pipeline_steps(
     target_warehouse = str(checkpoint.get("target_warehouse") or "").lower()
     dbt_enabled = target_warehouse == "snowflake" and (
         str(checkpoint.get("execution_engine") or "").lower() == "dbt"
-        or str(checkpoint.get("dbt_deployment_mode") or "").lower() == "generate_and_deploy"
-        or bool(checkpoint.get("snowflake_dbt_artifact_path"))
-        or bool(checkpoint.get("snowflake_dbt_deploy_status"))
     )
 
     if source in {"sftp", "adls_gen2"}:
@@ -1775,7 +1772,10 @@ def build_pipeline_steps(
                 "label": "Gold Code Execution",
                 "complete": bool(
                     target_warehouse == "snowflake"
-                    and checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
+                    and (
+                        checkpoint.get("snowflake_gold_execution_status") in {"COMPLETED", "SKIPPED_DBT_CODEGEN_ONLY"}
+                        or (dbt_enabled and str(checkpoint.get("gold_review_decision") or "").upper() == "APPROVED")
+                    )
                 ) or bool(
                     target_warehouse == "databricks"
                     and checkpoint.get("databricks_gold_execution_status") == "COMPLETED"
@@ -1784,6 +1784,9 @@ def build_pipeline_steps(
                     and gold_generation_completed
                 ),
                 "detail": (
+                    "Snowflake dbt-compatible Gold artifacts are reviewed and exported for external dbt execution."
+                    if target_warehouse == "snowflake" and dbt_enabled
+                    else
                     "Generated Gold scripts are executed in Snowflake after Gold generation."
                     if target_warehouse == "snowflake"
                     else "Generated Gold scripts are executed in Databricks after Gold generation."
@@ -1960,12 +1963,18 @@ def build_pipeline_steps(
                 "label": "Gold Code Execution",
                 "complete": bool(
                     target_warehouse == "snowflake"
-                    and checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
+                    and (
+                        checkpoint.get("snowflake_gold_execution_status") in {"COMPLETED", "SKIPPED_DBT_CODEGEN_ONLY"}
+                        or (dbt_enabled and str(checkpoint.get("gold_review_decision") or "").upper() == "APPROVED")
+                    )
                 ) or bool(
                     target_warehouse == "databricks"
                     and checkpoint.get("databricks_gold_execution_status") == "COMPLETED"
                 ),
                 "detail": (
+                    "Snowflake dbt-compatible Gold artifacts are reviewed and exported for external dbt execution."
+                    if target_warehouse == "snowflake" and dbt_enabled
+                    else
                     "Generated Gold scripts are executed in Snowflake after Gold generation."
                     if target_warehouse == "snowflake"
                     else "Generated Gold scripts are executed in Databricks after Gold generation."
@@ -1974,17 +1983,6 @@ def build_pipeline_steps(
                 ),
             },
         ]
-
-    if dbt_enabled and not any(step.get("key") == "snowflake_dbt_deploy" for step in steps):
-        dbt_status = str(checkpoint.get("snowflake_dbt_deploy_status") or "").upper()
-        steps.append(
-            {
-                "key": "snowflake_dbt_deploy",
-                "label": "Snowflake dbt",
-                "complete": dbt_status in {"COMPLETED", "SKIPPED_GENERATE_ONLY", "SKIPPED_ALREADY_DEPLOYED"},
-                "detail": "Snowflake dbt artifacts generated or deployed.",
-            }
-        )
 
     checkpoint_status = str(checkpoint.get("status") or "").upper()
     pipeline_is_active = bool(
@@ -1999,7 +1997,7 @@ def build_pipeline_steps(
     execution_completion = {
         step["key"]: bool(step.get("complete"))
         for step in steps
-        if step.get("key") in {"bronze_code_execution", "silver_code_execution", "gold_code_execution", "snowflake_dbt_deploy"}
+        if step.get("key") in {"bronze_code_execution", "silver_code_execution", "gold_code_execution"}
     }
 
     active_index = next((index for index, step in enumerate(steps) if step.get("key") == active_stage_key), None) if active_stage_key else None
@@ -3352,8 +3350,27 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
         final_state.update({"status": "FAILED", "error": "Gold Review rejected generated Gold scripts"})
     elif decision == "REGENERATE":
         final_state.update({"status": "REGENERATE_REQUIRED", "resume_message": "Gold Review requested regeneration."})
+    elif (
+        decision == "APPROVED"
+        and str(final_state.get("target_warehouse") or "").lower() == "snowflake"
+        and str(final_state.get("execution_engine") or "").lower() == "dbt"
+    ):
+        if not final_state.get("snowflake_dbt_artifact_path"):
+            from services.dbt_snowflake_runtime import build_snowflake_dbt_artifacts
+
+            final_state = build_snowflake_dbt_artifacts(final_state)
+        final_state.update(
+            {
+                "status": "PIPELINE_COMPLETED",
+                "background_stage": None,
+                "next_review_key": None,
+                "snowflake_dbt_status": "GENERATED",
+                "snowflake_dbt_deploy_status": final_state.get("snowflake_dbt_deploy_status") or "NOT_APPLICABLE_CODEGEN_ONLY",
+                "snowflake_gold_execution_status": "SKIPPED_DBT_CODEGEN_ONLY",
+                "resume_message": "Snowflake dbt-compatible Gold artifacts approved. Execute the generated dbt project outside Astra Data.",
+            }
+        )
     elif decision == "APPROVED" and str(final_state.get("target_warehouse") or "").lower() == "snowflake":
-        from services.dbt_snowflake_runtime import DBT_STAGE_KEY, run_snowflake_dbt, snowflake_dbt_enabled
         from services.snowflake_gold_runtime import run_snowflake_gold_scripts
 
         execution_state = {
@@ -3374,30 +3391,6 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
             }
             save_checkpoint_state(run_id, failed_state)
             raise
-        if snowflake_dbt_enabled(final_state):
-            dbt_state = {
-                **final_state,
-                "status": "RUNNING",
-                "background_stage": DBT_STAGE_KEY,
-                "resume_message": "Generating Snowflake dbt artifacts.",
-            }
-            save_checkpoint_state(run_id, dbt_state)
-            try:
-                final_state = run_snowflake_dbt(dbt_state)
-            except Exception as exc:
-                exception_state = getattr(exc, "athena_state", None)
-                base_failed_state = exception_state if isinstance(exception_state, dict) else dbt_state
-                failed_state = {
-                    **base_failed_state,
-                    "status": "FAILED",
-                    "background_stage": None,
-                    "failed_background_stage": DBT_STAGE_KEY,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                }
-                save_checkpoint_state(run_id, failed_state)
-                raise
         final_state.update({"status": "PIPELINE_COMPLETED", "background_stage": None, "next_review_key": None})
     elif decision == "APPROVED" and str(final_state.get("target_warehouse") or "").lower() == "databricks":
         from services.databricks_runtime import databricks_gold_execution_enabled, run_databricks_gold_scripts

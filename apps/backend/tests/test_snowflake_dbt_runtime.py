@@ -41,7 +41,8 @@ def test_snowflake_dbt_generate_only_writes_deterministic_project(monkeypatch):
 
     rerun_state = dbt_snowflake_runtime.run_snowflake_dbt(state)
 
-    assert state["snowflake_dbt_deploy_status"] == "SKIPPED_GENERATE_ONLY"
+    assert state["snowflake_dbt_status"] == "GENERATED"
+    assert state["snowflake_dbt_deploy_status"] == "NOT_APPLICABLE_CODEGEN_ONLY"
     assert state["snowflake_dbt_model_count"] == 1
     assert 'from "ATHENA_DB"."GOLD"."fact_total_claims"' in model_sql
     assert "env_var('SNOWFLAKE_PASSWORD')" in profiles_yml
@@ -49,30 +50,28 @@ def test_snowflake_dbt_generate_only_writes_deterministic_project(monkeypatch):
     assert rerun_state["snowflake_dbt_artifact_set_hash"] == first_hash
 
 
-def test_snowflake_dbt_deploy_requires_optional_cli(monkeypatch):
+def test_snowflake_dbt_codegen_ignores_legacy_deploy_mode(monkeypatch):
     workdir = _workdir("snowflake_dbt")
     monkeypatch.setattr(dbt_snowflake_runtime, "generated_code_dir", lambda *parts: workdir.joinpath(*parts))
     monkeypatch.setattr(dbt_snowflake_runtime, "_write_ai_store_summary", lambda state, payload: None)
     monkeypatch.setattr(dbt_snowflake_runtime.shutil, "which", lambda command: None)
-    monkeypatch.setenv("SNOWFLAKE_ACCOUNT", "acct")
-    monkeypatch.setenv("SNOWFLAKE_USER", "user")
-    monkeypatch.setenv("SNOWFLAKE_PASSWORD", "secret")
-    monkeypatch.setenv("SNOWFLAKE_WAREHOUSE", "wh")
 
-    with pytest.raises(RuntimeError, match="dbt CLI is not installed"):
-        dbt_snowflake_runtime.run_snowflake_dbt(
-            {
-                "run_id": "run-2",
-                "target_warehouse": "snowflake",
-                "execution_engine": "dbt",
-                "dbt_deployment_mode": "generate_and_deploy",
-                "gold_generation_results": [{"status": "APPROVED", "target_table": "ATHENA_DB.GOLD.fact_claims"}],
-            }
-        )
+    state = dbt_snowflake_runtime.run_snowflake_dbt(
+        {
+            "run_id": "run-2",
+            "target_warehouse": "snowflake",
+            "execution_engine": "dbt",
+            "dbt_deployment_mode": "generate_and_deploy",
+            "gold_generation_results": [{"status": "APPROVED", "target_table": "ATHENA_DB.GOLD.fact_claims"}],
+        }
+    )
+
+    assert state["snowflake_dbt_status"] == "GENERATED"
+    assert state["snowflake_dbt_deploy_status"] == "NOT_APPLICABLE_CODEGEN_ONLY"
 
 
 def test_pipeline_request_rejects_dbt_for_non_snowflake():
-    with pytest.raises(ValueError, match="dbt execution is only supported"):
+    with pytest.raises(ValueError, match="dbt code generation is only supported"):
         PipelineRunRequest(
             brd_text="brd",
             target_warehouse="databricks",

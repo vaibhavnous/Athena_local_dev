@@ -102,7 +102,7 @@ test('shows Gold execution as waiting while generated Gold code is under review'
   })
 })
 
-test('shows Snowflake dbt as a Gold phase only when dbt is enabled', () => {
+test('does not render Snowflake dbt as a separate Gold phase', () => {
   const nativeRun = {
     status: 'PIPELINE_COMPLETED',
     target_warehouse: 'snowflake',
@@ -114,7 +114,7 @@ test('shows Snowflake dbt as a Gold phase only when dbt is enabled', () => {
   const dbtRun = {
     ...nativeRun,
     execution_engine: 'dbt',
-    snowflake_dbt_deploy_status: 'SKIPPED_GENERATE_ONLY',
+    snowflake_dbt_deploy_status: 'NOT_APPLICABLE_CODEGEN_ONLY',
     pipeline_steps: [
       ...nativeRun.pipeline_steps,
       { key: 'snowflake_dbt_deploy', label: 'Snowflake dbt', state: 'COMPLETED' },
@@ -123,7 +123,26 @@ test('shows Snowflake dbt as a Gold phase only when dbt is enabled', () => {
 
   expect(getPhaseGroups(nativeRun, getPipelineSteps(nativeRun)).find((item) => item.id === 'phase-5')?.steps)
     .not.toContainEqual(expect.objectContaining({ key: 'snowflake_dbt_deploy' }))
-  expect(phaseState(dbtRun, 'phase-5', 'snowflake_dbt_deploy')).toBe('COMPLETED')
+  expect(getPhaseGroups(dbtRun, getPipelineSteps(dbtRun)).find((item) => item.id === 'phase-5')?.steps)
+    .not.toContainEqual(expect.objectContaining({ key: 'snowflake_dbt_deploy' }))
+})
+
+test('labels pending dbt Gold review without execution wording', () => {
+  const run = {
+    status: 'HITL_WAIT',
+    target_warehouse: 'snowflake',
+    execution_engine: 'dbt',
+    next_review_key: 'gold_review',
+    pipeline_steps: [
+      { key: 'gold', label: 'Gold Code Generation', state: 'COMPLETED' },
+      { key: 'gold_code_execution', label: 'Gold Code Execution', state: 'PENDING' },
+    ],
+  }
+
+  expect(getPipelineSteps(run).find((step) => step.key === 'gold_code_execution')).toMatchObject({
+    label: 'Gold Review',
+    state: 'HITL_WAIT',
+  })
 })
 
 test('uses the project name instead of rendering a run ID as the pipeline name', () => {

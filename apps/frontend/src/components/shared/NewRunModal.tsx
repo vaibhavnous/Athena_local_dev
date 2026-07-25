@@ -105,11 +105,6 @@ const EXECUTION_ENGINE_OPTIONS = [
   { id: 'dbt', label: 'dbt' },
 ]
 
-const DBT_DEPLOYMENT_MODE_OPTIONS = [
-  { id: 'generate_only', label: 'Generate Only' },
-  { id: 'generate_and_deploy', label: 'Generate & Deploy' },
-]
-
 const DATABASE_OPTIONS = {
   azure_sql: [
     { id: 'insurance', name: 'insurance' },
@@ -177,7 +172,6 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
   const sourceValue = normalizeChoice(form.source, DEFAULT_FORM.source)
   const targetWarehouseValue = normalizeChoice(form.targetWarehouse, DEFAULT_FORM.targetWarehouse)
   const executionEngineValue = normalizeChoice(form.executionEngine, DEFAULT_FORM.executionEngine)
-  const dbtDeploymentModeValue = normalizeChoice(form.dbtDeploymentMode, DEFAULT_FORM.dbtDeploymentMode)
   const snowflakeDatabaseTarget = targetWarehouseValue === 'snowflake' && sourceValue === 'database'
 
   const resetState = () => {
@@ -369,16 +363,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         database_name: form.databaseName,
         target_warehouse: targetWarehouseValue,
         execution_engine: snowflakeDatabaseTarget ? executionEngineValue : 'native',
-        dbt_deployment_mode:
-          snowflakeDatabaseTarget && executionEngineValue === 'dbt'
-            ? dbtDeploymentModeValue
-            : 'generate_only',
-        force_dbt_deploy:
-          snowflakeDatabaseTarget &&
-          executionEngineValue === 'dbt' &&
-          dbtDeploymentModeValue === 'generate_and_deploy'
-            ? !!form.forceDbtDeploy
-            : false,
+        dbt_deployment_mode: 'generate_only',
+        force_dbt_deploy: false,
         budget: settings.budget,
         maxKpis: settings.maxKpis,
         devMode: settings.devMode,
@@ -402,10 +388,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         deployment: form.deployment || null,
         target_warehouse: targetWarehouseValue,
         execution_engine: snowflakeDatabaseTarget ? executionEngineValue : 'native',
-        dbt_deployment_mode:
-          snowflakeDatabaseTarget && executionEngineValue === 'dbt'
-            ? dbtDeploymentModeValue
-            : 'generate_only',
+        dbt_deployment_mode: 'generate_only',
         use_domain_kb: !!form.useDomainKb,
         started_at: startedAt,
         stages: [],
@@ -612,8 +595,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                   ...current,
                                   targetWarehouse,
                                   executionEngine: normalizeChoice(targetWarehouse) === 'snowflake' ? current.executionEngine : 'native',
-                                  dbtDeploymentMode: normalizeChoice(targetWarehouse) === 'snowflake' ? current.dbtDeploymentMode : 'generate_only',
-                                  forceDbtDeploy: normalizeChoice(targetWarehouse) === 'snowflake' ? current.forceDbtDeploy : false,
+                                  dbtDeploymentMode: 'generate_only',
+                                  forceDbtDeploy: false,
                                 }))
                               }
                               activeBorder
@@ -634,8 +617,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                     setForm((current) => ({
                                       ...current,
                                       executionEngine,
-                                      dbtDeploymentMode: normalizeChoice(executionEngine) === 'dbt' ? current.dbtDeploymentMode : 'generate_only',
-                                      forceDbtDeploy: normalizeChoice(executionEngine) === 'dbt' ? current.forceDbtDeploy : false,
+                                      dbtDeploymentMode: 'generate_only',
+                                      forceDbtDeploy: false,
                                     }))
                                   }
                                   activeBorder
@@ -643,49 +626,6 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                 />
                               </Field>
 
-                              {executionEngineValue === 'dbt' && (
-                                <>
-                                  <Field label="dbt Mode" required compact>
-                                    <ModalSelect
-                                      id="dbtDeploymentMode"
-                                      value={dbtDeploymentModeValue}
-                                      options={DBT_DEPLOYMENT_MODE_OPTIONS}
-                                      openSelect={openSourceSelect}
-                                      setOpenSelect={setOpenSourceSelect}
-                                      onChange={(dbtDeploymentMode) =>
-                                        setForm((current) => ({
-                                          ...current,
-                                          dbtDeploymentMode,
-                                          forceDbtDeploy:
-                                            normalizeChoice(dbtDeploymentMode) === 'generate_and_deploy' ? current.forceDbtDeploy : false,
-                                        }))
-                                      }
-                                      activeBorder
-                                      disabled={!!project}
-                                    />
-                                  </Field>
-                                  {dbtDeploymentModeValue === 'generate_and_deploy' && (
-                                    <label className={`flex cursor-pointer items-start gap-3 rounded-[10px] border px-4 py-4 transition-colors ${
-                                      form.forceDbtDeploy
-                                        ? 'border-[#3f82ff] bg-[#102144]'
-                                        : 'border-[#26344b] bg-[#070d1a] hover:border-[#3f82ff]/60'
-                                    }`}>
-                                      <input
-                                        type="checkbox"
-                                        className="mt-1 h-5 w-5 rounded border-[#3c4b63] bg-[#071021]"
-                                        checked={!!form.forceDbtDeploy}
-                                        disabled={!!project}
-                                        onChange={(event) =>
-                                          setForm((current) => ({ ...current, forceDbtDeploy: event.target.checked }))
-                                        }
-                                      />
-                                      <span className="min-w-0">
-                                        <span className="block text-[17px] font-semibold text-white">Force dbt deploy</span>
-                                      </span>
-                                    </label>
-                                  )}
-                                </>
-                              )}
                             </>
                           )}
 

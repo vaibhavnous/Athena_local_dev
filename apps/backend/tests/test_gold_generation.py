@@ -98,6 +98,73 @@ def test_snowflake_gold_generation_writes_sql_from_contract(monkeypatch):
     assert loaded["scripts"][0]["script_body"] == sql
 
 
+def test_snowflake_dbt_gold_generation_writes_model_artifact(monkeypatch):
+    monkeypatch.setenv("SNOWFLAKE_GOLD_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_GOLD_SCHEMA", "GOLD")
+    monkeypatch.setattr(gold_gen, "ai_store_db_writer", lambda **_: None)
+    workdir = Path.cwd() / ".tmp-tests" / f"gold_snowflake_dbt_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    state = {
+        "run_id": "run-snowflake-dbt",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "dbt_deployment_mode": "generate_and_deploy",
+        "gold_generation_contract": {
+            "run_id": "run-snowflake-dbt",
+            "status": "READY",
+            "silver_tables": [
+                {
+                    "table": "claim_information",
+                    "target_table": "ATHENA_DB.SILVER.silver_claim_information",
+                    "column_count": 10,
+                },
+            ],
+            "kpi_mappings": [
+                {
+                    "kpi_name": "Total Claims",
+                    "source_silver_table": "ATHENA_DB.SILVER.silver_claim_information",
+                    "measure": {
+                        "table": "claim_information",
+                        "column": "ClaimAmount",
+                        "aggregation": "SUM",
+                    },
+                    "formula": {"status": "PROPOSED"},
+                    "grouping_dimensions": [
+                        {"table": "claim_information", "column": "ClaimStatus", "semantic_type": "DIMENSION"},
+                    ],
+                    "time": {"grain": "month", "column": {"table": "claim_information", "column": "ClaimOpenDate"}},
+                    "filters": [],
+                    "join_paths": [],
+                    "readiness": "READY",
+                }
+            ],
+        },
+    }
+
+    result = gold_gen.gold_code_generation_node(state)
+    script = result["gold_generation_results"][0]
+    model_path = Path(script["script_path"])
+    model_sql = model_path.read_text(encoding="utf-8")
+    loaded = pipeline_runtime.load_gold_scripts("run-snowflake-dbt", result)
+
+    assert result["gold_generation_status"] == "COMPLETED"
+    assert result["snowflake_dbt_deploy_status"] == "NOT_APPLICABLE_CODEGEN_ONLY"
+    assert Path(result["snowflake_dbt_artifact_path"]).joinpath("dbt_project.yml").exists()
+    assert script["code_generation_format"] == "dbt"
+    assert script["generation_mode"] == "SNOWFLAKE_DBT_SQL"
+    assert script["dbt_model_name"] == "gold_total_claims"
+    assert script["dbt_alias"] == "fact_total_claims"
+    assert model_path.parts[-3:] == ("models", "gold", "gold_total_claims.sql")
+    assert "{{ config(" in model_sql
+    assert "MERGE INTO" not in model_sql
+    assert "CREATE TABLE" not in model_sql
+    assert 'FROM "ATHENA_DB"."SILVER"."silver_claim_information"' in model_sql
+    assert 'SUM(TRY_TO_DECIMAL(TO_VARCHAR("claimamount")))' in model_sql
+    assert loaded["scripts"][0]["script_body"] == model_sql
+
+
 def test_snowflake_gold_generation_uses_silver_canonical_column_names():
     mapping = {
         "kpi_name": "Reference Count",
