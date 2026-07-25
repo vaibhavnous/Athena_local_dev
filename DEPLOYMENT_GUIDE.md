@@ -1,278 +1,213 @@
-# Azure DevOps Deployment Guide
+# Athena Deployment Guide
 
-This guide explains how to deploy the Athena application to Azure as a single combined App Service running both backend and frontend.
+This guide documents the deployment files that currently exist in this repository after the `apps/`, `deploy/`, and `infra/` restructure.
 
-## Architecture
+## Current Repository Layout
 
-- **Combined App Service**: Single Linux App Service running Python 3.9 (FastAPI) + React frontend as static files
-- **Key Vault**: Azure Key Vault for secure secret management
-- **App Service Plan**: B2 tier Linux plan
-- **Application Insights**: Monitoring and telemetry
-
-## Prerequisites
-
-1. **Azure Subscription**
-2. **Azure DevOps Organization** (free tier acceptable)
-3. **Azure CLI** installed locally
-4. Service Principal for Azure DevOps
-
-## Step 1: Create Azure AD Service Principal
-
-```bash
-# Create service principal
-az ad sp create-for-rbac \
-  --name "athena-devops-sp" \
-  --role "Contributor" \
-  --scopes /subscriptions/{subscription-id}
+```text
+apps/backend/                      FastAPI backend
+apps/frontend/                     React frontend
+deploy/azure-pipelines/backend.yml Azure DevOps backend CI/CD
+deploy/azure-pipelines/frontend.yml Azure DevOps frontend build artifact pipeline
+deploy/github/frontend-build.yml   GitHub Actions frontend build workflow
+.github/workflows/azure-static-web-apps-black-sand-013f9d900.yml
+infra/azure/main.bicep             Azure dev/bootstrap infrastructure
+infra/azure/parameters/dev.json    Dev/bootstrap parameter file
 ```
 
-Save the output:
-- `appId` → Client ID
-- `password` → Client Secret
-- `tenant` → Tenant ID
+## Active Deployment Paths
 
-## Step 2: Create Resource Group
+### Backend App Service
 
-```bash
-az group create \
-  --name athena-rg-dev \
-  --location eastus
+The backend production pipeline is:
+
+```text
+deploy/azure-pipelines/backend.yml
 ```
 
-## Step 3: Set Up Azure DevOps Service Connection
+It:
 
-1. Go to **Project Settings** → **Service Connections** → **Create service connection**
-2. Choose **Azure Resource Manager**
-3. Select **Service Principal (manual)**
-4. Enter details from Step 1:
-   - Subscription ID
-   - Subscription Name
-   - Service Principal ID (appId)
-   - Service Principal Key (password)
-   - Tenant ID
-5. Name it: `azure-devops-service-connection`
+- uses Python `3.10`
+- installs dependencies from `apps/backend/requirements.txt`
+- runs backend tests from `apps/backend/tests`
+- packages `apps/backend`
+- deploys to the configured Linux App Service
+- verifies `/health`
 
-## Step 4: Create Variable Group for Secrets
+Required Azure DevOps variables:
 
-1. Go to **Pipelines** → **Library** → **+ Variable group**
-2. Create group `athena-secrets`:
-   - `AZURE_SUBSCRIPTION_ID`: Your subscription ID
-   - `AZURE_DEVOPS_SERVICE_CONNECTION`: `azure-devops-service-connection`
-   - `SQL_CONNECTION_STRING`: Your SQL connection string
-   - `API_KEY`: Your API key
-
-## Step 5: Update Infrastructure Parameters
-
-Edit `infra/azure/parameters/dev.json`:
-
-```json
-{
-  "parameters": {
-    "sqlConnectionString": {
-      "value": "Your actual SQL connection string"
-    },
-    "apiKey": {
-      "value": "Your actual API key"
-    }
-  }
-}
+```text
+azureServiceConnection
+webAppName
+backendHealthUrl
 ```
 
-## Step 6: Create Pipelines in Azure DevOps
+The checked-in pipeline currently sets those values directly in `deploy/azure-pipelines/backend.yml`. For enterprise environments, move environment-specific values into Azure DevOps variable groups or pipeline library variables.
 
-### Pipeline 1: Backend deployment (`deploy/azure-pipelines/backend.yml`)
-*Builds and deploys the backend to the configured Azure App Service*
+### Frontend Static Web App
 
-1. **Pipelines** → **New pipeline** → **GitHub** (or your repo)
-2. Select **Existing Azure Pipelines YAML file**
-3. Path: `deploy/azure-pipelines/backend.yml`
-4. Name: `Athena-Backend-CI`
-5. Save & queue
+The active frontend deployment workflow is:
 
-### Legacy CD pipeline (removed)
-*Deploys combined artifact to single App Service*
+```text
+.github/workflows/azure-static-web-apps-black-sand-013f9d900.yml
+```
 
-1. **Pipelines** → **New pipeline**
-2. This legacy pipeline has been removed; use `deploy/azure-pipelines/backend.yml`.
-3. Name: `Athena-CD`
-4. Configure trigger: **Pipeline completion** for Athena-Backend-CI
-5. Save & queue
+It:
 
-## Step 7: Deploy Infrastructure
+- uses Node `20`
+- installs dependencies in `apps/frontend`
+- runs frontend tests
+- builds the React app
+- deploys `apps/frontend/build` to Azure Static Web Apps
+
+Required GitHub secret:
+
+```text
+AZURE_STATIC_WEB_APPS_API_TOKEN_ASTRADATA
+```
+
+The workflow also supports the legacy secret names already present in the YAML.
+
+### Azure DevOps Frontend Build
+
+```text
+deploy/azure-pipelines/frontend.yml
+```
+
+This pipeline builds and publishes a frontend artifact. It does not currently perform a production deployment by itself.
+
+## Dev Infrastructure Bootstrap
+
+The Bicep template is:
+
+```text
+infra/azure/main.bicep
+```
+
+The default parameter file is:
+
+```text
+infra/azure/parameters/dev.json
+```
+
+Current template defaults:
+
+- Linux App Service
+- Python `3.10`
+- Basic `B2` App Service Plan
+- Application Insights
+- staging slot
+- app settings for Azure SQL, Pinecone, ADLS, and Azure OpenAI
+
+The current template is suitable as a dev/bootstrap baseline. For enterprise production, validate and harden it before rollout:
+
+- use Key Vault references for secrets instead of plain App Settings values
+- use Premium v3 or isolated tiers if SLA, scale-out, VNet integration, or deployment-slot limits require it
+- define per-environment parameter files under `infra/azure/parameters/`
+- enforce private networking where required
+- add backup, disaster recovery, alerting, and retention policies
+- move environment-specific app names out of checked-in pipeline YAML
+
+Deploy the dev/bootstrap template:
 
 ```bash
-# Deploy Bicep template
 az deployment group create \
   --resource-group athena-rg-dev \
   --template-file infra/azure/main.bicep \
-  --parameters infra/azure/parameters/dev.json \
-  --parameters projectName=athena environment=dev
+  --parameters infra/azure/parameters/dev.json
 ```
 
-## Step 8: Grant Key Vault Access to App Service
+The setup helper:
 
-After infrastructure deployment:
+```text
+deploy/azure/setup.sh
+```
+
+is a convenience wrapper around the same Bicep deployment. It is not a replacement for reviewed production infrastructure automation.
+
+## Required Runtime Configuration
+
+Use `ENV_VARIABLES.md` as the environment-variable source of truth.
+
+Minimum backend categories:
+
+- Azure SQL pipeline database
+- Azure OpenAI
+- authentication secrets
+- CORS origins
+- optional Pinecone settings
+- optional Snowflake and dbt settings
+- optional ADLS/SFTP/Databricks settings
+
+Never commit real `.env` files, private keys, tokens, passwords, or publish profiles.
+
+## Pre-Deployment Validation
+
+Run from the repository root.
+
+Backend:
+
+```powershell
+cd apps/backend
+$env:PYTHONPATH='.'
+pytest -p no:cacheprovider tests/test_projects.py tests/test_snowflake_dbt_runtime.py
+```
+
+Frontend:
+
+```powershell
+cd apps/frontend
+npm ci
+npm run build
+```
+
+For full release readiness, run the complete backend test suite and the frontend test suite in CI.
+
+## Deployment Checks
+
+Before deployment:
+
+1. Confirm no active pipeline execution will be interrupted.
+2. Confirm App Service settings match `ENV_VARIABLES.md`.
+3. Confirm CORS allows only approved frontend origins.
+4. Confirm Snowflake, ADLS, Azure SQL, and Databricks network allowlists include the deployed app where applicable.
+5. Confirm rollback artifact or previous release version is available.
+
+After backend deployment:
 
 ```bash
-# Get app service identity
-APP_PRINCIPAL=$(az webapp identity show \
-  --resource-group athena-rg-dev \
-  --name athena-combined-dev \
-  --query principalId -o tsv)
-
-# Grant Key Vault access
-az keyvault set-policy \
-  --name athena-kv-dev \
-  --object-id $APP_PRINCIPAL \
-  --secret-permissions get list
+curl https://<backend-app-host>/health
 ```
 
-## Step 9: Configure App Service Environment Variables
-
-### Combined App Service (Python + React)
+After frontend deployment:
 
 ```bash
-az webapp config appsettings set \
-  --resource-group athena-rg-dev \
-  --name athena-combined-dev \
-  --settings \
-    SQL_CONNECTION_STRING="@Microsoft.KeyVault(VaultName=athena-kv-dev;SecretName=sql-connection-string)" \
-    API_KEY="@Microsoft.KeyVault(VaultName=athena-kv-dev;SecretName=api-key)" \
-    ENVIRONMENT="dev" \
-    PYTHONUNBUFFERED="1" \
-    LOG_LEVEL="INFO"
+curl https://<frontend-host>
 ```
 
-## Step 10: Enable Deployment Slot Swap
+Then run one small end-to-end project flow through project creation and the selected target execution path.
 
-```bash
-# Create staging slot if not already created
-az webapp deployment slot create \
-  --resource-group athena-rg-dev \
-  --name athena-combined-dev \
-  --slot staging
-```
+## Rollback
 
-## Step 11: Verify Deployment
+Backend rollback depends on the configured App Service deployment method:
 
-Check app service:
+- redeploy the previous backend artifact, or
+- swap back from a staging slot if the environment uses slot-based release.
 
-```bash
-# Health check (backend)
-curl https://athena-combined-dev.azurewebsites.net/health
+Frontend rollback:
 
-# Frontend (React app loads at root)
-curl https://athena-combined-dev.azurewebsites.net
-```
+- redeploy the previous Static Web App artifact or rerun the previous successful workflow.
 
-View logs:
+## Production Readiness Gaps
 
-```bash
-# Stream logs from combined app service
-az webapp log tail \
-  --resource-group athena-rg-dev \
-  --name athena-combined-dev
-```
+The repository is deployable, but the checked-in infrastructure is not yet a complete enterprise production baseline. Before treating it as production-standard, close these gaps:
 
-## Environment Variables Reference
-
-### Combined App Service (`apps/backend` + React frontend)
-
-- `SQL_CONNECTION_STRING`: Database connection (from Key Vault)
-- `API_KEY`: API authentication key (from Key Vault)
-- `ENVIRONMENT`: dev/prod
-- `LOG_LEVEL`: DEBUG/INFO/WARNING/ERROR
-- `PYTHONUNBUFFERED`: 1 (for unbuffered Python output)
-- `APPINSIGHTS_INSTRUMENTATIONKEY`: Application Insights key
-
-### Frontend (`apps/frontend`)
-
-- `REACT_APP_API_ENDPOINT`: Backend API base URL
-- `REACT_APP_ENVIRONMENT`: dev/prod
-- `PUBLIC_URL`: CDN URL (if applicable)
-
-## Pipeline Flow
-
-```
-Commit to main
-    ↓
-[Backend-CI] Install deps → Run tests → Build artifact
-[Frontend-CI] npm install → npm build → Build artifact
-    ↓
-[CD Pipeline] 
-  ├→ Deploy Infrastructure (Bicep)
-  ├→ Deploy Backend (to staging slot)
-  │   ├→ Swap staging → production
-  │   └→ Configure env vars from Key Vault
-  └→ Deploy Frontend
-      └→ Configure env vars
-```
-
-## Rollback Strategy
-
-### Backend (Blue-Green Swap)
-
-```bash
-# Swap back to previous version (if staging has previous code)
-az webapp deployment slot swap \
-  --resource-group athena-rg-dev \
-  --name athena-backend-dev \
-  --slot staging
-```
-
-### Frontend (Manual Redeploy)
-
-Redeploy previous build artifact or manually update the app.
-
-## Monitoring
-
-1. **Application Insights**: https://portal.azure.com → Resource group → App Insights resource
-2. **Log Analytics**: View live logs in portal
-3. **Alerts**: Configure alert rules for failures, high latency, exceptions
-
-## Troubleshooting
-
-### App Service logs not showing
-
-```bash
-# Enable application logging
-az webapp log config \
-  --resource-group athena-rg-dev \
-  --name athena-backend-dev \
-  --application-logging filesystem \
-  --level information
-```
-
-### Key Vault secret not accessible
-
-```bash
-# Verify access policy
-az keyvault show \
-  --name athena-kv-dev \
-  --query properties.accessPolicies
-```
-
-### Deployment slot swap failed
-
-```bash
-# Check slot status
-az webapp deployment slot list \
-  --resource-group athena-rg-dev \
-  --name athena-backend-dev
-```
-
-## Next Steps
-
-1. Configure custom domain (DNS)
-2. Set up SSL/TLS certificates
-3. Enable App Service authentication (Azure AD)
-4. Configure auto-scaling based on CPU/memory
-5. Set up backup and disaster recovery
-6. Implement deployment approvals in pipeline
-
-## Cost Optimization
-
-- **Dev**: B2 (Basic) tier ~$40/month per app
-- Consider reducing to B1 if load is minimal
-- Combine multiple services on one App Service Plan to reduce costs
-- Use Azure DevOps Free tier (up to 1 job concurrency)
+- secret references through Key Vault or equivalent secret store
+- environment-specific IaC parameter files
+- deployment approvals
+- least-privilege service connections
+- managed identity access model
+- private networking and firewall policy
+- centralized monitoring dashboards and alerts
+- backup and disaster-recovery runbooks
+- load, resilience, and concurrency validation

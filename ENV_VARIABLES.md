@@ -1,34 +1,45 @@
 # Environment Variables
 
-This project currently deploys as one Azure App Service:
+This project currently has two active deployment surfaces:
 
-- FastAPI backend serves the API
-- React frontend is built in GitHub Actions
-- React build output is copied into `apps/backend/static`
-- The same App Service serves both UI and API
+- FastAPI backend deploys from `apps/backend` to Azure App Service.
+- React frontend deploys from `apps/frontend` to Azure Static Web Apps.
+- The dev/bootstrap Bicep template can create a combined App Service baseline, but it is not the full production deployment source of truth.
 
-Because of that, production configuration is mostly backend App Service settings plus one GitHub Actions secret for deployment.
+Production configuration is split between backend App Service settings, frontend build-time settings, Azure DevOps pipeline variables, and GitHub Actions secrets.
 
-## 1. Required For Azure DevOps Deployment
+## 1. Required For Deployment Automation
 
-Repository secret:
+Azure DevOps backend pipeline:
 
 ```text
-AZURE_WEBAPP_PUBLISH_PROFILE
+deploy/azure-pipelines/backend.yml
 ```
 
-Value:
+Required values:
 
-- Paste the full contents of the downloaded Azure publish profile XML
-
-Used by:
-
-- `deploy/azure-pipelines/backend.yml`
+```text
+azureServiceConnection
+webAppName
+backendHealthUrl
+```
 
 Notes:
 
-- Do not split the XML into multiple secrets
-- Do not add `azure/login` when you are using publish profile deployment
+- Prefer Azure DevOps variable groups or library variables for environment-specific values.
+- Use least-privilege service connections.
+
+GitHub Actions frontend workflow:
+
+```text
+.github/workflows/azure-static-web-apps-black-sand-013f9d900.yml
+```
+
+Required secret:
+
+```text
+AZURE_STATIC_WEB_APPS_API_TOKEN_ASTRADATA
+```
 
 ## 2. Required In Azure App Service Configuration
 
@@ -302,31 +313,40 @@ Notes:
 
 - Do not use `REACT_APP_API_ENDPOINT`
 - Current frontend code uses `REACT_APP_API_BASE_URL`
-- In Azure production build, the workflow sets `REACT_APP_API_BASE_URL=''` so the UI uses same-origin API calls
+- In Azure production build, the active Static Web App workflow sets `REACT_APP_API_BASE_URL` to the backend App Service URL.
 
-## 10. Current Azure DevOps Production Behavior
+## 10. Current Production Deployment Behavior
 
-Workflow:
+Backend workflow:
 
 - `deploy/azure-pipelines/backend.yml`
 
 Current behavior:
 
-- builds React with `REACT_APP_API_BASE_URL=''`
-- copies frontend build into backend static folder
-- deploys backend + static frontend together to one App Service
+- installs backend dependencies from `apps/backend/requirements.txt`
+- runs backend tests
+- packages `apps/backend`
+- deploys the backend to Azure App Service
 - health check uses:
 
 ```text
 https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net/health
 ```
 
+Frontend workflow:
+
+- `.github/workflows/azure-static-web-apps-black-sand-013f9d900.yml`
+- installs frontend dependencies in `apps/frontend`
+- runs frontend tests
+- builds `apps/frontend/build`
+- deploys the build output to Azure Static Web Apps
+
 ## 11. What To Configure Where
 
 ### GitHub Repository Secrets
 
 ```text
-AZURE_WEBAPP_PUBLISH_PROFILE
+AZURE_STATIC_WEB_APPS_API_TOKEN_ASTRADATA
 ```
 
 ### Azure App Service Application Settings
@@ -381,31 +401,28 @@ AZURE_CLIENT_SECRET
 
 ## 12. Security
 
-Your local backend `.env` currently contains real secrets.
+Never commit real secrets. Local `.env` files are ignored and must stay local.
 
-You should rotate these immediately:
+Rotate credentials immediately if they were ever committed, shared in logs, pasted into chat, or stored in plaintext outside an approved secret store:
 
 - Azure OpenAI key
 - Azure SQL password
 - Azure client secret
 - Pinecone API key
 
-Reason:
-
-- those credentials were exposed in plaintext locally and should be treated as compromised
-
 ## 13. Quick Setup Checklist
 
-1. Add `AZURE_WEBAPP_PUBLISH_PROFILE` in GitHub repository secrets.
-2. Open Azure App Service `Configuration`.
-3. Add all required `AZURE_OPENAI_*` settings.
-4. Add all required `AZURE_SQL_*` settings.
-5. Add `ATHENA_CORS_ORIGINS` with your Azure site URL.
-6. Add Pinecone settings if semantic memory is required.
-7. Add ADLS settings if data lake ingestion is required.
-8. Save and restart the App Service.
-9. Push to `main`.
-10. Verify:
+1. Configure Azure DevOps backend pipeline variables.
+2. Add `AZURE_STATIC_WEB_APPS_API_TOKEN_ASTRADATA` in GitHub repository secrets.
+3. Open Azure App Service `Configuration`.
+4. Add all required `AZURE_OPENAI_*` settings.
+5. Add all required `AZURE_SQL_*` settings.
+6. Add `ATHENA_CORS_ORIGINS` with your Azure Static Web App and local dev origins as needed.
+7. Add Pinecone settings if semantic memory is required.
+8. Add ADLS/SFTP/Snowflake/Databricks settings only for enabled features.
+9. Save and restart the App Service.
+10. Push to `main`.
+11. Verify:
 ```text
 https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net/health
 ```

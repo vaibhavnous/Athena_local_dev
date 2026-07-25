@@ -2,7 +2,7 @@
 
 This document focuses only on the architecture of the Athena pipeline. It is meant to help explain where the current design is strong, where it is fragile, and what should be improved next from a system-design point of view.
 
-The companion file `PIPELINE_DEEP_DIVE.md` explains how the pipeline works node by node. This file looks at the architecture across nodes.
+This is an internal architecture debt and improvement note. It is not a deployment runbook, release checklist, or product user guide.
 
 ## 1. Current Architecture Summary
 
@@ -14,6 +14,7 @@ Athena is a multi-stage BRD-to-metadata pipeline. It uses:
 - Azure OpenAI for requirements and KPI extraction.
 - Human-in-the-loop gates for KPI and table certification.
 - Source Azure SQL databases for schema and metadata discovery.
+- Snowflake runtime services for reviewed Bronze, Silver, Gold, and optional dbt generation/deployment paths.
 
 The current flow is:
 
@@ -28,10 +29,12 @@ BRD Input
   -> Gate 2 HITL Review
   -> Metadata Discovery
   -> Column Profiling
-  -> Final Metadata Artifact
+  -> Reviewed Bronze/Silver/Gold generation
+  -> Optional Snowflake native or dbt deployment
+  -> Final execution artifacts
 ```
 
-At a conceptual level, this architecture is good: it separates document understanding, memory reuse, KPI generation, human validation, table discovery, and deterministic metadata extraction.
+At a conceptual level, this architecture is good: it separates document understanding, memory reuse, KPI generation, human validation, table discovery, deterministic metadata extraction, and reviewed warehouse execution.
 
 The main architectural issue is that the boundaries between orchestration, persistence, memory, and HITL resume are not clean enough yet.
 
