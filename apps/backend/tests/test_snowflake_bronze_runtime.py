@@ -47,6 +47,44 @@ def test_gate4_refuses_silver_when_snowflake_bronze_execution_does_not_complete(
     assert saved[-1]["failed_background_stage"] == "bronze_code_execution"
 
 
+def test_gate4_snowflake_dbt_skips_native_bronze_execution(monkeypatch):
+    saved = []
+    checkpoint = {
+        "run_id": "run-dbt-bronze",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "bronze_generation_results": [{"table": "claims", "code_generation_format": "dbt"}],
+        "enriched_metadata": {},
+    }
+
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved.append(state.copy()))
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda run_id, state, context=None: saved.append(state.copy()))
+    monkeypatch.setattr(pipeline_runtime, "ai_store_db_writer", lambda **_: None)
+    monkeypatch.setattr(pipeline_runtime, "_apply_gate4_merge_keys_to_metadata", lambda enriched, artifact: enriched)
+    monkeypatch.setattr(pipeline_runtime, "_filter_bronze_results_by_gate4_review", lambda results, artifact: results)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_pause_for_silver_merge_key_review",
+        lambda run_id, state: {**state, "next_review_key": "silver_merge_key_review"},
+    )
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "run_snowflake_bronze_scripts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("native Snowflake Bronze execution should not run")),
+    )
+
+    result = pipeline_runtime.submit_gate4_review(
+        "run-dbt-bronze",
+        action="APPROVED",
+        review_artifact={"feeds": [{"table": "claims", "review_status": "APPROVED"}]},
+    )
+
+    assert result["snowflake_bronze_execution_status"] == "SKIPPED_DBT_CODEGEN_ONLY"
+    assert result["next_review_key"] == "silver_merge_key_review"
+    assert all(state.get("background_stage") != "bronze_code_execution" for state in saved)
+
+
 def test_snowflake_account_url_is_normalized():
     assert (
         snowflake_bronze_runtime._normalize_account("https://app.snowflake.com/xbuxnho/pr61204/#/workspaces/ws")

@@ -354,3 +354,35 @@ def test_submit_gate5_review_executes_snowflake_silver_before_gold(monkeypatch):
     assert result["continued"] == "gold"
     assert result["snowflake_silver_execution_status"] == "COMPLETED"
     assert any(state.get("background_stage") == "silver_code_execution" for state in saved_states)
+
+
+def test_submit_gate5_snowflake_dbt_skips_native_silver_execution(monkeypatch):
+    saved_states = []
+
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda run_id: {
+        "run_id": run_id,
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "silver_generation_results": [{"table": "claims", "code_generation_format": "dbt"}],
+    })
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved_states.append(state.copy()))
+    monkeypatch.setattr(pipeline_runtime, "ai_store_db_writer", lambda **_: None)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "continue_database_pipeline",
+        lambda run_id, start_stage_key, state: {"continued": start_stage_key, **state},
+    )
+    monkeypatch.setattr(
+        "services.snowflake_silver_runtime.run_snowflake_silver_scripts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("native Snowflake Silver execution should not run")),
+    )
+
+    result = pipeline_runtime.submit_gate5_review(
+        "run-gate5-dbt",
+        action="APPROVED",
+        review_artifact={"items": [{"table": "claims", "review_status": "APPROVED"}]},
+    )
+
+    assert result["continued"] == "gold"
+    assert result["snowflake_silver_execution_status"] == "SKIPPED_DBT_CODEGEN_ONLY"
+    assert all(state.get("background_stage") != "silver_code_execution" for state in saved_states)

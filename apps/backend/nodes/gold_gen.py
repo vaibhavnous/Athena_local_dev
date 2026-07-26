@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Tuple
 from state import Stage01State
 from utilis.db import ai_store_db_writer
 from utilis.domain_kb import get_domain_kb_config, load_domain_kb
-from utilis.generated_code_paths import generated_code_dir
+from utilis.generated_code_paths import generated_code_dir, generated_run_dir
 from utilis.llm_usage import LLMUsage, combine_llm_usage, metered_invoke
 from utilis.logger import logger
 
@@ -30,8 +30,10 @@ SILVER_COLUMN_NAME_CORRECTIONS = {
 }
 
 
-def _gold_output_dir_for(target_warehouse: str = "databricks") -> str:
+def _gold_output_dir_for(target_warehouse: str = "databricks", run_id: Any = None) -> str:
     if str(target_warehouse or "").lower() == "snowflake":
+        if run_id:
+            return str(generated_run_dir("snowflake", run_id, "gold"))
         return str(generated_code_dir("snowflake", "gold"))
     return str(generated_code_dir("gold"))
 
@@ -45,24 +47,24 @@ def _run_slug(run_id: str) -> str:
     return cleaned[:48] or "run"
 
 
-def _contract_path() -> str:
-    return os.path.join(_gold_output_dir(), "gold_generation_contract.json")
+def _contract_path(target_warehouse: str = "databricks", run_id: Any = None) -> str:
+    return os.path.join(_gold_output_dir_for(target_warehouse, run_id), "gold_generation_contract.json")
 
 
-def _bundle_path(target_warehouse: str = "databricks") -> str:
-    return os.path.join(_gold_output_dir_for(target_warehouse), "gold_scripts.json")
+def _bundle_path(target_warehouse: str = "databricks", run_id: Any = None) -> str:
+    return os.path.join(_gold_output_dir_for(target_warehouse, run_id), "gold_scripts.json")
 
 
 def _run_bundle_path(run_id: Any, target_warehouse: str = "databricks") -> str:
-    return os.path.join(_gold_output_dir_for(target_warehouse), f"{_run_slug(str(run_id or 'run'))}_gold_scripts.json")
+    return os.path.join(_gold_output_dir_for(target_warehouse, run_id), f"{_run_slug(str(run_id or 'run'))}_gold_scripts.json")
 
 
-def _readme_path(target_warehouse: str = "databricks") -> str:
-    return os.path.join(_gold_output_dir_for(target_warehouse), "README.md")
+def _readme_path(target_warehouse: str = "databricks", run_id: Any = None) -> str:
+    return os.path.join(_gold_output_dir_for(target_warehouse, run_id), "README.md")
 
 
-def _ui_path(target_warehouse: str = "databricks") -> str:
-    return os.path.join(_gold_output_dir_for(target_warehouse), "index.html")
+def _ui_path(target_warehouse: str = "databricks", run_id: Any = None) -> str:
+    return os.path.join(_gold_output_dir_for(target_warehouse, run_id), "index.html")
 
 
 def _validate_python(code: str) -> None:
@@ -270,10 +272,17 @@ def _load_contract(state: Stage01State) -> Dict[str, Any]:
     if contract:
         return contract
 
-    path = str(state.get("gold_contract_bundle_path") or _contract_path())
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+    run_id = state.get("run_id")
+    target_warehouse = _target_warehouse(state)
+    candidates = [
+        str(state.get("gold_contract_bundle_path") or ""),
+        _contract_path(target_warehouse, run_id),
+        _contract_path(),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
 
     return {}
 
@@ -1912,6 +1921,8 @@ def generate_snowflake_gold_dbt_model(
     gold_catalog: str,
     gold_schema: str,
 ) -> str:
+    from services import dbt_snowflake_runtime
+
     parts = _snowflake_gold_query_parts(
         mapping=mapping,
         run_id=run_id,
@@ -1920,8 +1931,15 @@ def generate_snowflake_gold_dbt_model(
     )
     alias = parts["target_table"].split(".")[-1]
     kpi_name = parts["kpi_name"]
+    source_model = dbt_snowflake_runtime.dbt_safe_name(
+        parts["source_table"].split(".")[-1],
+        prefix="silver",
+    )
+    source_relation = dbt_snowflake_runtime.dbt_ref(source_model)
     return f"""{{{{ config(
     materialized=env_var('ATHENA_SNOWFLAKE_DBT_MATERIALIZATION', 'table'),
+    database=env_var('SNOWFLAKE_GOLD_CATALOG', '{gold_catalog}'),
+    schema=env_var('SNOWFLAKE_GOLD_SCHEMA', '{gold_schema}'),
     alias='{alias}',
     unique_key='gold_upsert_key',
     on_schema_change='sync_all_columns'
@@ -1937,7 +1955,7 @@ def generate_snowflake_gold_dbt_model(
 WITH aggregate_data AS (
     SELECT
         {parts["aggregate_select"]}
-    FROM {parts["source_qname"]}{parts["group_by_clause"]}
+    FROM {source_relation}{parts["group_by_clause"]}
 ),
 final AS (
     SELECT
@@ -2151,7 +2169,7 @@ def _generate_one_mapping(
     if is_dbt_snowflake:
         script_path = None
     else:
-        output_dir = _gold_output_dir_for(target_warehouse)
+        output_dir = _gold_output_dir_for(target_warehouse, run_id)
         os.makedirs(output_dir, exist_ok=True)
         extension = "sql" if is_snowflake else "py"
         script_path = os.path.join(output_dir, f"gold_kpi_{_run_slug(run_id)}_{kpi_id}.{extension}")
@@ -2224,8 +2242,9 @@ def _write_bundle(
         "llm_usage": usage.to_payload(),
         "scripts": results,
     }
-    os.makedirs(_gold_output_dir_for(target_warehouse), exist_ok=True)
-    path = _bundle_path(target_warehouse)
+    run_id = contract.get("run_id")
+    os.makedirs(_gold_output_dir_for(target_warehouse, run_id), exist_ok=True)
+    path = _bundle_path(target_warehouse, run_id)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
     run_path = _run_bundle_path(contract.get("run_id"), target_warehouse)
@@ -2239,6 +2258,7 @@ def _write_readme(
     generated_at: str,
     results: List[Dict[str, Any]],
     target_warehouse: str = "databricks",
+    run_id: Any = None,
 ) -> str:
     lines = [
         "# Gold Scripts",
@@ -2263,7 +2283,7 @@ def _write_readme(
             f"{dimension_link} | `{item.get('generation_mode') or '-'}` |"
         )
 
-    path = _readme_path(target_warehouse)
+    path = _readme_path(target_warehouse, run_id)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return path
@@ -2274,6 +2294,7 @@ def _write_ui(
     generated_at: str,
     results: List[Dict[str, Any]],
     target_warehouse: str = "databricks",
+    run_id: Any = None,
 ) -> str:
     rows: List[Dict[str, str]] = []
     for item in sorted(results, key=lambda row: str(row.get("kpi_name", ""))):
@@ -2354,7 +2375,7 @@ def _write_ui(
 </body>
 </html>
 """
-    path = _ui_path(target_warehouse)
+    path = _ui_path(target_warehouse, run_id)
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
     return path
@@ -2460,7 +2481,7 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
 
     shared_dimension_path = None
     if shared_dimension_code:
-        output_dir = _gold_output_dir_for(target_warehouse)
+        output_dir = _gold_output_dir_for(target_warehouse, run_id)
         os.makedirs(output_dir, exist_ok=True)
         dimension_extension = "sql" if target_warehouse == "snowflake" else "py"
         shared_dimension_path = os.path.join(
@@ -2523,8 +2544,18 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         contract=contract,
         target_warehouse=target_warehouse,
     )
-    readme_path = _write_readme(generated_at=generated_at, results=results, target_warehouse=target_warehouse)
-    ui_path = _write_ui(generated_at=generated_at, results=results, target_warehouse=target_warehouse)
+    readme_path = _write_readme(
+        generated_at=generated_at,
+        results=results,
+        target_warehouse=target_warehouse,
+        run_id=run_id,
+    )
+    ui_path = _write_ui(
+        generated_at=generated_at,
+        results=results,
+        target_warehouse=target_warehouse,
+        run_id=run_id,
+    )
 
     try:
         _persist_gold_generation(state=state, bundle=bundle)

@@ -15,7 +15,7 @@ def _workdir(name: str) -> Path:
 
 def test_snowflake_dbt_generate_only_writes_deterministic_project(monkeypatch):
     workdir = _workdir("snowflake_dbt")
-    monkeypatch.setattr(dbt_snowflake_runtime, "generated_code_dir", lambda *parts: workdir.joinpath(*parts))
+    monkeypatch.setattr(dbt_snowflake_runtime, "generated_run_dir", lambda target, run_id, *parts: workdir.joinpath(target, str(run_id), *parts))
     monkeypatch.setattr(dbt_snowflake_runtime, "_write_ai_store_summary", lambda state, payload: None)
     monkeypatch.delenv("SNOWFLAKE_PASSWORD", raising=False)
 
@@ -52,7 +52,7 @@ def test_snowflake_dbt_generate_only_writes_deterministic_project(monkeypatch):
 
 def test_snowflake_dbt_codegen_ignores_legacy_deploy_mode(monkeypatch):
     workdir = _workdir("snowflake_dbt")
-    monkeypatch.setattr(dbt_snowflake_runtime, "generated_code_dir", lambda *parts: workdir.joinpath(*parts))
+    monkeypatch.setattr(dbt_snowflake_runtime, "generated_run_dir", lambda target, run_id, *parts: workdir.joinpath(target, str(run_id), *parts))
     monkeypatch.setattr(dbt_snowflake_runtime, "_write_ai_store_summary", lambda state, payload: None)
     monkeypatch.setattr(dbt_snowflake_runtime.shutil, "which", lambda command: None)
 

@@ -273,9 +273,55 @@ def test_snowflake_bronze_generation_writes_sql_without_databricks_path(monkeypa
     assert result["bronze_generation_results"][0]["source_table"] == "insurance.dbo.Claims"
     assert result["bronze_generation_results"][0]["target_table"] == "ATHENA_DB.BRONZE.bronze_Claims"
     assert script_path.suffix == ".sql"
-    assert script_path.parts[-3:] == ("snowflake", "bronze", script_path.name)
+    assert script_path.parts[-4:] == ("snowflake", "run-snowflake", "bronze", script_path.name)
     assert "Expected runtime: Snowflake SQL" in script_path.read_text(encoding="utf-8")
     assert bundle["target_warehouse"] == "snowflake"
+
+
+def test_snowflake_dbt_bronze_generation_writes_dbt_model(monkeypatch):
+    monkeypatch.setenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "false")
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", "*")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
+    monkeypatch.setattr(bronze_gen, "ai_store_db_writer", lambda **_: None)
+    workdir = Path.cwd() / ".tmp-tests" / f"bronze_dbt_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    result = bronze_gen.bronze_code_generation_node(
+        {
+            "run_id": "run-snowflake-dbt",
+            "target_warehouse": "snowflake",
+            "execution_engine": "dbt",
+            "certified_tables": [{"database_name": "insurance", "schema_name": "dbo", "table_name": "Claims"}],
+            "discovered_metadata": {
+                "tables": [
+                    {
+                        "table_name": "Claims",
+                        "columns": [{"column_name": "ClaimID", "data_type": "int"}],
+                    }
+                ]
+            },
+        }
+    )
+
+    item = result["bronze_generation_results"][0]
+    model_sql = Path(item["script_path"]).read_text(encoding="utf-8")
+    project_dir = Path(result["snowflake_dbt_artifact_path"])
+
+    assert result["bronze_generation_status"] == "COMPLETED"
+    assert item["code_generation_format"] == "dbt"
+    assert item["dbt_model_name"] == "bronze_claims"
+    assert item["target_table"] == "ATHENA_DB.BRONZE.bronze_claims"
+    assert project_dir.parts[-3:] == ("snowflake", "run-snowflake-dbt", "dbt")
+    assert Path(item["script_path"]).parts[-3:] == ("models", "bronze", "bronze_claims.sql")
+    assert "{{ config(" in model_sql
+    assert "{{ source('insurance_dbo', 'claims') }}" in model_sql
+    assert "CREATE TABLE" not in model_sql
+    assert "INSERT INTO" not in model_sql
+    assert "DELETE FROM" not in model_sql
+    assert (project_dir / "models" / "sources.yml").exists()
+    assert (project_dir / "models" / "bronze" / "schema.yml").exists()
 
 
 def test_bronze_generation_copies_security_helper_when_enabled(monkeypatch):

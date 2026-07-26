@@ -72,7 +72,12 @@ def test_snowflake_gold_generation_writes_sql_from_contract(monkeypatch):
     assert script["source_table"] == "ATHENA_DB.SILVER.silver_claim_information"
     assert script["target_table"] == "ATHENA_DB.GOLD.fact_total_claims"
     assert script["dimension_script_path"]
-    assert Path(script["script_path"]).parts[-3:] == ("snowflake", "gold", Path(script["script_path"]).name)
+    assert Path(script["script_path"]).parts[-4:] == (
+        "snowflake",
+        "run-snowflake-gold",
+        "gold",
+        Path(script["script_path"]).name,
+    )
     dim_sql = Path(script["dimension_script_path"]).read_text(encoding="utf-8")
     assert "CREATE SCHEMA IF NOT EXISTS \"ATHENA_DB\".\"GOLD\"" in sql
     assert "MERGE INTO \"ATHENA_DB\".\"GOLD\".\"fact_total_claims\" AS target" in sql
@@ -152,6 +157,7 @@ def test_snowflake_dbt_gold_generation_writes_model_artifact(monkeypatch):
     assert result["gold_generation_status"] == "COMPLETED"
     assert result["snowflake_dbt_deploy_status"] == "NOT_APPLICABLE_CODEGEN_ONLY"
     assert Path(result["snowflake_dbt_artifact_path"]).joinpath("dbt_project.yml").exists()
+    assert Path(result["snowflake_dbt_artifact_path"]).parts[-3:] == ("snowflake", "run-snowflake-dbt", "dbt")
     assert script["code_generation_format"] == "dbt"
     assert script["generation_mode"] == "SNOWFLAKE_DBT_SQL"
     assert script["dbt_model_name"] == "gold_total_claims"
@@ -160,7 +166,7 @@ def test_snowflake_dbt_gold_generation_writes_model_artifact(monkeypatch):
     assert "{{ config(" in model_sql
     assert "MERGE INTO" not in model_sql
     assert "CREATE TABLE" not in model_sql
-    assert 'FROM "ATHENA_DB"."SILVER"."silver_claim_information"' in model_sql
+    assert "FROM {{ ref('silver_claim_information') }}" in model_sql
     assert 'SUM(TRY_TO_DECIMAL(TO_VARCHAR("claimamount")))' in model_sql
     assert loaded["scripts"][0]["script_body"] == model_sql
 

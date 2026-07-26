@@ -16,9 +16,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Dict, List, TypedDict
 
+from services import dbt_snowflake_runtime
 from state import Stage01State
 from utilis.db import ai_store_db_writer
-from utilis.generated_code_paths import generated_code_dir
+from utilis.generated_code_paths import generated_code_dir, generated_run_dir
 from utilis.llm_usage import LLMUsage, MeteredUsageError, combine_llm_usage, metered_invoke
 from utilis.logger import logger
 
@@ -35,6 +36,7 @@ class SilverTableRef(TypedDict):
     table_name: str
     bronze_table: str
     silver_table: str
+    bronze_model_name: str | None
     existing_script_path: str | None
     source_columns: List[Dict[str, Any]]
 
@@ -43,9 +45,11 @@ def _silver_output_dir() -> str:
     return str(generated_code_dir("silver"))
 
 
-def _silver_output_dir_for(target_warehouse: str = "databricks") -> str:
+def _silver_output_dir_for(target_warehouse: str = "databricks", run_id: str | None = None) -> str:
     warehouse = str(target_warehouse or "databricks").lower()
     if warehouse == "snowflake":
+        if run_id:
+            return str(generated_run_dir("snowflake", run_id, "silver"))
         return str(generated_code_dir("snowflake", "silver"))
     return _silver_output_dir()
 
@@ -62,24 +66,34 @@ def _file_slug(value: str, max_length: int = 64) -> str:
     return f"{slug[: max_length - 9].rstrip('_')}_{digest}"
 
 
-def _gold_output_dir() -> str:
+def _gold_output_dir(target_warehouse: str = "databricks", run_id: str | None = None) -> str:
+    if str(target_warehouse or "").lower() == "snowflake" and run_id:
+        return str(generated_run_dir("snowflake", run_id, "gold"))
     return str(generated_code_dir("gold"))
 
 
-def _bronze_bundle_path(target_warehouse: str = "databricks") -> str:
+def _bronze_bundle_paths(target_warehouse: str = "databricks", run_id: str | None = None) -> List[str]:
+    paths: List[str] = []
     if str(target_warehouse or "").lower() == "snowflake":
-        snowflake_path = str(generated_code_dir("snowflake", "bronze", "bronze_scripts.json"))
-        if os.path.exists(snowflake_path):
-            return snowflake_path
-    return str(generated_code_dir("bronze", "bronze_scripts.json"))
+        if run_id:
+            run_dir = generated_run_dir("snowflake", run_id, "bronze")
+            paths.extend(
+                [
+                    str(run_dir / f"{_run_slug(run_id)}_bronze_scripts.json"),
+                    str(run_dir / "bronze_scripts.json"),
+                ]
+            )
+        paths.append(str(generated_code_dir("snowflake", "bronze", "bronze_scripts.json")))
+    paths.append(str(generated_code_dir("bronze", "bronze_scripts.json")))
+    return paths
 
 
-def _silver_readme_path(target_warehouse: str = "databricks") -> str:
-    return os.path.join(_silver_output_dir_for(target_warehouse), "README.md")
+def _silver_readme_path(target_warehouse: str = "databricks", run_id: str | None = None) -> str:
+    return os.path.join(_silver_output_dir_for(target_warehouse, run_id), "README.md")
 
 
-def _silver_ui_path(target_warehouse: str = "databricks") -> str:
-    return os.path.join(_silver_output_dir_for(target_warehouse), "index.html")
+def _silver_ui_path(target_warehouse: str = "databricks", run_id: str | None = None) -> str:
+    return os.path.join(_silver_output_dir_for(target_warehouse, run_id), "index.html")
 
 
 def _validate_python(code: str) -> None:
@@ -263,9 +277,9 @@ def _validate_generated_silver_code(
         _validate_python(code)
 
 
-def _load_bronze_bundle(target_warehouse: str = "databricks") -> Dict[str, Any]:
-    path = _bronze_bundle_path(target_warehouse)
-    if not os.path.exists(path):
+def _load_bronze_bundle(target_warehouse: str = "databricks", run_id: str | None = None) -> Dict[str, Any]:
+    path = next((candidate for candidate in _bronze_bundle_paths(target_warehouse, run_id) if os.path.exists(candidate)), "")
+    if not path:
         return {"scripts": []}
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -289,6 +303,7 @@ def _existing_silver_script_refs(silver_schema: str) -> List[SilverTableRef]:
                 "table_name": table_name,
                 "bronze_table": f"bronze.bronze_{table_name}",
                 "silver_table": f"{silver_schema}.silver_{table_name}",
+                "bronze_model_name": None,
                 "existing_script_path": os.path.join(output_dir, file_name),
                 "source_columns": [],
             }
@@ -333,9 +348,13 @@ def _snowflake_silver_schema() -> str:
 
 def _resolve_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
     target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
+    dbt_codegen = (
+        target_warehouse == "snowflake"
+        and str(state.get("execution_engine") or "").strip().lower() == "dbt"
+    )
     bronze_results = list(state.get("bronze_generation_results") or [])
     if not bronze_results:
-        bronze_results.extend(_load_bronze_bundle(target_warehouse).get("scripts", []))
+        bronze_results.extend(_load_bronze_bundle(target_warehouse, str(state.get("run_id") or "")).get("scripts", []))
     if not bronze_results:
         bronze_results.extend(state.get("certified_tables") or [])
         discovered = state.get("discovered_metadata") or {}
@@ -360,9 +379,14 @@ def _resolve_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
         if not table_name:
             continue
         extension = "sql" if target_warehouse == "snowflake" else "py"
-        script_path = os.path.join(
-            _silver_output_dir_for(target_warehouse),
-            f"silver_transform_{_run_slug(str(state.get('run_id') or 'run'))}_{_file_slug(table_name)}.{extension}",
+        silver_model_name = dbt_snowflake_runtime.dbt_safe_name(f"silver_{table_name}", prefix="silver")
+        script_path = (
+            str(dbt_snowflake_runtime.dbt_model_path(state.get("run_id"), "silver", silver_model_name))
+            if dbt_codegen
+            else os.path.join(
+                _silver_output_dir_for(target_warehouse, str(state.get("run_id") or "")),
+                f"silver_transform_{_run_slug(str(state.get('run_id') or 'run'))}_{_file_slug(table_name)}.{extension}",
+            )
         )
         bronze_table = (
             str(item.get("target_table") or "").strip()
@@ -375,8 +399,9 @@ def _resolve_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
                 if target_warehouse == "snowflake"
                 else f"{bronze_schema}.bronze_{table_name}"
             )
+        silver_physical_name = silver_model_name if dbt_codegen else f"silver_{table_name}"
         silver_table = (
-            f"{silver_catalog}.{silver_schema}.silver_{table_name}"
+            f"{silver_catalog}.{silver_schema}.{silver_physical_name}"
             if target_warehouse == "snowflake"
             else f"{silver_schema}.silver_{table_name}"
         )
@@ -386,6 +411,10 @@ def _resolve_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
             "table_name": table_name,
             "bronze_table": bronze_table,
             "silver_table": silver_table,
+            "bronze_model_name": str(item.get("dbt_model_name") or "").strip() or (
+                dbt_snowflake_runtime.dbt_safe_name(f"bronze_{table_name}", prefix="bronze")
+                if dbt_codegen else None
+            ),
             "existing_script_path": script_path if os.path.exists(script_path) else None,
             "source_columns": [
                 {
@@ -902,6 +931,105 @@ VALUES (
 """
 
 
+def _require_snowflake_silver_dbt_structure(code: str, table_ref: SilverTableRef) -> None:
+    sql = re.sub(r"\{\{\s*config\([\s\S]*?\)\s*\}\}", "", _sql_without_comments(code), flags=re.IGNORECASE)
+    bronze_model_name = table_ref.get("bronze_model_name") or dbt_snowflake_runtime.dbt_safe_name(
+        f"bronze_{table_ref['table_name']}",
+        prefix="bronze",
+    )
+    expected_ref = dbt_snowflake_runtime.dbt_ref(bronze_model_name)
+    if "{{ config(" not in code:
+        raise ValueError("Snowflake Silver dbt model must define dbt config")
+    if expected_ref not in code:
+        raise ValueError(f"Snowflake Silver dbt model must read the approved Bronze model with {expected_ref}")
+    if not re.search(r"\bSELECT\b", sql, re.IGNORECASE):
+        raise ValueError("Snowflake Silver dbt model must be SELECT-based")
+    forbidden = re.search(
+        r"\b(CREATE|INSERT|DELETE|MERGE|TRUNCATE|UPDATE|ALTER|DROP|COPY|CALL|GRANT|REVOKE|USE)\b",
+        sql,
+        re.IGNORECASE,
+    )
+    if forbidden:
+        raise ValueError(f"Snowflake Silver dbt model contains forbidden statement: {forbidden.group(1).upper()}")
+
+
+def generate_snowflake_silver_dbt_model(
+    *,
+    table_ref: SilverTableRef,
+    enriched_columns: List[Dict[str, Any]],
+    run_id: str,
+    silver_catalog: str = "ATHENA_DB",
+    silver_schema: str = "SILVER",
+) -> str:
+    table_name = table_ref["table_name"]
+    model_name = dbt_snowflake_runtime.dbt_safe_name(f"silver_{table_name}", prefix="silver")
+    bronze_model_name = table_ref.get("bronze_model_name") or dbt_snowflake_runtime.dbt_safe_name(
+        f"bronze_{table_name}",
+        prefix="bronze",
+    )
+    source_ref = dbt_snowflake_runtime.dbt_ref(bronze_model_name)
+
+    business_columns = []
+    seen_columns: set[str] = set()
+    for column in enriched_columns:
+        column_name = _normalized_column_name(column)
+        if column_name and column_name not in seen_columns:
+            business_columns.append(column)
+            seen_columns.add(column_name)
+
+    if not business_columns:
+        business_columns = [{"column_name": table_name, "data_type": "varchar"}]
+
+    business_column_names = [_normalized_column_name(column) for column in business_columns]
+    key_columns = [column for column in _key_columns(business_columns) if column in business_column_names]
+    hash_columns = key_columns or business_column_names
+    business_selects = ",\n        ".join(_snowflake_column_expr(column) for column in business_columns)
+    hash_expr = _snowflake_hash_expr(hash_columns)
+    order_expr = 'COALESCE("ingestion_timestamp", "silver_processed_timestamp") DESC NULLS LAST'
+
+    return f"""{{{{ config(
+    materialized=env_var('ATHENA_SNOWFLAKE_DBT_SILVER_MATERIALIZATION', 'incremental'),
+    database=env_var('SNOWFLAKE_SILVER_CATALOG', '{silver_catalog}'),
+    schema=env_var('SNOWFLAKE_SILVER_SCHEMA', '{silver_schema}'),
+    alias='{model_name}',
+    unique_key='silver_upsert_key',
+    incremental_strategy='merge',
+    on_schema_change='sync_all_columns'
+) }}}}
+
+-- AUTO-GENERATED DBT SILVER TRANSFORMATION MODEL
+-- Source model: {bronze_model_name}
+-- Target alias: {model_name}
+-- Expected runtime: dbt-snowflake
+-- Merge keys: {", ".join(key_columns) if key_columns else "business column hash fallback"}
+-- DO NOT EDIT MANUALLY
+
+WITH normalized AS (
+    SELECT
+        {business_selects},
+        src."run_id" AS "run_id",
+        src."ingestion_timestamp" AS "ingestion_timestamp",
+        src."source_system" AS "source_system",
+        src."source_table" AS "source_table",
+        {_snowflake_string_literal(run_id)} AS "silver_run_id",
+        CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "silver_processed_timestamp"
+    FROM {source_ref} AS src
+),
+keyed AS (
+    SELECT
+        *,
+        {hash_expr} AS "silver_upsert_key"
+    FROM normalized
+)
+SELECT *
+FROM keyed
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY "silver_upsert_key"
+    ORDER BY {order_expr}
+) = 1
+"""
+
+
 def _generate_one_table(
     table_ref: SilverTableRef,
     *,
@@ -910,14 +1038,37 @@ def _generate_one_table(
     silver_catalog: str,
     silver_schema: str,
     target_warehouse: str = "databricks",
+    execution_engine: str = "native",
 ) -> Dict[str, object]:
     table_name = table_ref["table_name"]
     enriched_columns = _columns_for_table(enriched_metadata, table_name)
     if not enriched_columns and str(target_warehouse or "").lower() == "snowflake":
         enriched_columns = table_ref.get("source_columns") or []
     merge_keys = _key_columns(enriched_columns)
+    dbt_codegen = (
+        str(target_warehouse or "").lower() == "snowflake"
+        and str(execution_engine or "").strip().lower() == "dbt"
+    )
+    dbt_model_name = None
+    dbt_alias = None
+    dbt_project_path = None
 
-    if str(target_warehouse or "").lower() == "snowflake":
+    if dbt_codegen:
+        dbt_model_name = dbt_snowflake_runtime.dbt_safe_name(f"silver_{table_name}", prefix="silver")
+        dbt_alias = dbt_model_name
+        dbt_project_path = str(dbt_snowflake_runtime.dbt_project_dir(run_id))
+        code = generate_snowflake_silver_dbt_model(
+            table_ref=table_ref,
+            enriched_columns=enriched_columns,
+            run_id=run_id,
+            silver_catalog=silver_catalog,
+            silver_schema=silver_schema,
+        )
+        _require_snowflake_silver_dbt_structure(code, table_ref)
+        script_language = "sql"
+        extension = "sql"
+        merge_strategy = "dbt incremental merge on silver_upsert_key built from reviewed merge keys"
+    elif str(target_warehouse or "").lower() == "snowflake":
         code = generate_snowflake_silver_script(
             table_ref=table_ref,
             enriched_columns=enriched_columns,
@@ -941,9 +1092,10 @@ def _generate_one_table(
         extension = "py"
         merge_strategy = "Delta MERGE on silver_upsert_key built from reviewed merge keys"
 
-    generation_mode = "DETERMINISTIC"
+    generation_mode = "DETERMINISTIC_DBT" if dbt_codegen else "DETERMINISTIC"
     llm_usage = LLMUsage()
-    if _llm_enabled_for_silver():
+    llm_enabled = _llm_enabled_for_silver() and not dbt_codegen
+    if llm_enabled:
         try:
             candidate, usage = _llm_generate_silver_code(
                 table_ref=table_ref,
@@ -998,9 +1150,15 @@ def _generate_one_table(
                     retry_exc,
                 )
 
-    output_dir = _silver_output_dir_for(target_warehouse)
+    output_dir = (
+        str(dbt_snowflake_runtime.dbt_model_dir(run_id, "silver"))
+        if dbt_codegen else _silver_output_dir_for(target_warehouse, run_id)
+    )
     os.makedirs(output_dir, exist_ok=True)
-    script_path = os.path.join(output_dir, f"silver_transform_{_run_slug(run_id)}_{_file_slug(table_name)}.{extension}")
+    script_path = os.path.join(
+        output_dir,
+        f"{dbt_model_name}.{extension}" if dbt_codegen and dbt_model_name else f"silver_transform_{_run_slug(run_id)}_{_file_slug(table_name)}.{extension}",
+    )
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
 
@@ -1017,8 +1175,14 @@ def _generate_one_table(
         "merge_key_source": "reviewed_gate4" if enriched_metadata.get("gate4_reviewed_merge_keys") else "semantic_enrichment",
         "merge_strategy": merge_strategy,
         "script_language": script_language,
+        "code_generation_format": "dbt" if dbt_codegen else "native",
+        "dbt_project_path": dbt_project_path,
+        "dbt_model_name": dbt_model_name,
+        "dbt_alias": dbt_alias,
+        "bronze_dbt_model_name": table_ref.get("bronze_model_name"),
         "generation_mode": generation_mode,
-        "llm_enabled": _llm_enabled_for_silver(),
+        "llm_enabled": llm_enabled,
+        "llm_skipped_reason": "Snowflake dbt mode uses deterministic dbt models" if dbt_codegen and _llm_enabled_for_silver() else None,
         "llm_usage": llm_usage.to_payload(),
         "target_warehouse": str(target_warehouse or "databricks").lower(),
         "status": "APPROVED",
@@ -1031,6 +1195,7 @@ def _write_silver_readme(
     results: List[Dict[str, object]],
     generated_at: str,
     target_warehouse: str = "databricks",
+    run_id: str | None = None,
 ) -> str:
     lines = [
         "# Silver Scripts",
@@ -1049,7 +1214,7 @@ def _write_silver_readme(
             f"`{item.get('column_count', 0)}` | [{script_name}]({script_path}) | `{item.get('status')}` |"
         )
 
-    readme_path = _silver_readme_path(target_warehouse)
+    readme_path = _silver_readme_path(target_warehouse, run_id)
     with open(readme_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return readme_path
@@ -1060,6 +1225,7 @@ def _write_silver_ui(
     results: List[Dict[str, object]],
     generated_at: str,
     target_warehouse: str = "databricks",
+    run_id: str | None = None,
 ) -> str:
     rows: List[Dict[str, str]] = []
     for item in sorted(results, key=lambda row: str(row.get("table", ""))):
@@ -1129,7 +1295,7 @@ def _write_silver_ui(
 </html>
 """
 
-    ui_path = _silver_ui_path(target_warehouse)
+    ui_path = _silver_ui_path(target_warehouse, run_id)
     with open(ui_path, "w", encoding="utf-8") as f:
         f.write(html)
     return ui_path
@@ -1837,6 +2003,7 @@ def _build_gold_generation_contract(
         "fingerprint": state.get("fingerprint") or state.get("run_id"),
         "generated_at": generated_at,
         "status": status,
+        "target_warehouse": str(state.get("target_warehouse") or "databricks").lower(),
         "silver_tables": [
             {
                 "table": item.get("table"),
@@ -1859,8 +2026,12 @@ def _build_gold_generation_contract(
 
 
 def _write_gold_contract(contract: Dict[str, Any]) -> str:
-    os.makedirs(_gold_output_dir(), exist_ok=True)
-    path = os.path.join(_gold_output_dir(), "gold_generation_contract.json")
+    output_dir = _gold_output_dir(
+        str(contract.get("target_warehouse") or "databricks"),
+        str(contract.get("run_id") or ""),
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "gold_generation_contract.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(contract, f, indent=2)
     return path
@@ -1907,6 +2078,8 @@ def _persist_generation_artifacts(
 def silver_code_generation_node(state: Stage01State) -> Stage01State:
     new_state = state.copy()
     target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
+    execution_engine = str(state.get("execution_engine") or "native").lower()
+    dbt_codegen = target_warehouse == "snowflake" and execution_engine == "dbt"
     table_refs = _resolve_tables_for_silver(state)
 
     if not table_refs:
@@ -1928,6 +2101,9 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
     if target_warehouse == "snowflake":
         silver_catalog = _snowflake_silver_catalog()
         silver_schema = _snowflake_silver_schema()
+    dbt_project_path = None
+    if dbt_codegen:
+        dbt_project_path = str(dbt_snowflake_runtime.write_snowflake_dbt_scaffold(state))
 
     results: List[Dict[str, object]] = []
     with ThreadPoolExecutor(max_workers=SILVER_MAX_WORKERS) as executor:
@@ -1940,6 +2116,7 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
                 silver_catalog=silver_catalog,
                 silver_schema=silver_schema,
                 target_warehouse=target_warehouse,
+                execution_engine=execution_engine,
             )
             for table_ref in table_refs
         ]
@@ -1957,13 +2134,15 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
         "generated_at": generated_at,
         "script_count": len(results),
         "target_warehouse": target_warehouse,
-        "llm_enabled": _llm_enabled_for_silver(),
+        "code_generation_format": "dbt" if dbt_codegen else "native",
+        "dbt_project_path": dbt_project_path,
+        "llm_enabled": _llm_enabled_for_silver() and not dbt_codegen,
         "cost_usd": silver_usage.cost_usd,
         "llm_usage": silver_usage.to_payload(),
         "scripts": results,
     }
 
-    output_dir = _silver_output_dir_for(target_warehouse)
+    output_dir = _silver_output_dir_for(target_warehouse, run_id)
     os.makedirs(output_dir, exist_ok=True)
     bundle_path = os.path.join(output_dir, f"{_run_slug(run_id)}_silver_scripts.json")
     latest_bundle_path = os.path.join(output_dir, "silver_scripts.json")
@@ -1972,15 +2151,39 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
     with open(latest_bundle_path, "w", encoding="utf-8") as f:
         json.dump(bundle, f, indent=2)
 
+    dbt_schema_path = None
+    if dbt_codegen:
+        dbt_schema_path = str(
+            dbt_snowflake_runtime.write_snowflake_dbt_schema(
+                run_id,
+                "silver",
+                [
+                    {
+                        "name": item.get("dbt_model_name"),
+                        "description": f"Athena generated Silver dbt model for {item.get('source_table')}",
+                        "columns": [
+                            {"name": "silver_upsert_key", "description": "Deterministic merge key used by dbt incremental materialization.", "tests": ["not_null", "unique"]},
+                            {"name": "silver_run_id", "description": "Athena pipeline run identifier for Silver materialization.", "tests": ["not_null"]},
+                            {"name": "silver_processed_timestamp", "description": "Timestamp when dbt materialized the Silver model.", "tests": ["not_null"]},
+                        ],
+                    }
+                    for item in results
+                    if isinstance(item, dict) and item.get("dbt_model_name")
+                ],
+            )
+        )
+
     readme_path = _write_silver_readme(
         results=results,
         generated_at=generated_at,
         target_warehouse=target_warehouse,
+        run_id=run_id,
     )
     ui_path = _write_silver_ui(
         results=results,
         generated_at=generated_at,
         target_warehouse=target_warehouse,
+        run_id=run_id,
     )
     gold_contract = _build_gold_generation_contract(
         state=state,
@@ -2001,6 +2204,9 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
     new_state["silver_generation_bundle_path"] = bundle_path
     new_state["silver_generation_readme_path"] = readme_path
     new_state["silver_generation_ui_path"] = ui_path
+    if dbt_codegen:
+        new_state["snowflake_dbt_artifact_path"] = dbt_project_path
+        new_state["snowflake_dbt_silver_schema_path"] = dbt_schema_path
     new_state["gold_contract_status"] = gold_contract["status"]
     new_state["gold_contract_error"] = "; ".join(gold_contract["warnings"]) if gold_contract["warnings"] else None
     new_state["gold_generation_contract"] = gold_contract

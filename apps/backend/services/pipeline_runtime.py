@@ -14,7 +14,7 @@ from fastapi import HTTPException
 
 from services import self_healing
 from utilis.db import ai_store_db_writer, config, get_completed_items, get_connection, get_pending_items, timed_stage, update_hitl_items_batch
-from utilis.generated_code_paths import generated_code_dir
+from utilis.generated_code_paths import generated_code_dir, generated_run_dir
 from utilis.logger import logger
 
 
@@ -1041,21 +1041,23 @@ def _run_slug(run_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", str(run_id or "run")).strip("_")[:48] or "run"
 
 
-def _script_output_dirs(layer: str, target_warehouse: Optional[str] = None) -> List[Path]:
+def _script_output_dirs(layer: str, target_warehouse: Optional[str] = None, run_id: Optional[str] = None) -> List[Path]:
     default_dir = generated_code_dir(layer)
     if layer not in {"bronze", "silver", "gold"}:
         return [default_dir]
 
     snowflake_dir = generated_code_dir("snowflake", layer)
     if str(target_warehouse or "").lower() == "snowflake":
-        return [snowflake_dir, default_dir]
+        dirs = [generated_run_dir("snowflake", run_id, layer)] if run_id else []
+        return dirs + [snowflake_dir, default_dir]
     if target_warehouse is None:
-        return [default_dir, snowflake_dir]
+        dirs = [generated_run_dir("snowflake", run_id, layer)] if run_id else []
+        return dirs + [default_dir, snowflake_dir]
     return [default_dir]
 
 
 def _script_bundle_path(layer: str, run_id: str, target_warehouse: Optional[str] = None) -> Path:
-    output_dirs = _script_output_dirs(layer, target_warehouse)
+    output_dirs = _script_output_dirs(layer, target_warehouse, run_id)
     for output_dir in output_dirs:
         run_scoped = output_dir / f"{_run_slug(run_id)}_{layer}_scripts.json"
         if run_scoped.exists():
@@ -1865,7 +1867,7 @@ def build_pipeline_steps(
                 "label": "Silver Code Execution",
                 "complete": bool(
                     target_warehouse == "snowflake"
-                    and checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
+                    and checkpoint.get("snowflake_silver_execution_status") in {"COMPLETED", "SKIPPED_DBT_CODEGEN_ONLY"}
                 ) or bool(
                     target_warehouse == "databricks"
                     and checkpoint.get("databricks_silver_execution_status") == "COMPLETED"
@@ -1875,7 +1877,9 @@ def build_pipeline_steps(
                 ),
                 "detail": (
                     "Approved Silver scripts are executed in Snowflake before Gold generation."
-                    if target_warehouse == "snowflake"
+                    if target_warehouse == "snowflake" and not dbt_enabled
+                    else "Snowflake dbt-compatible Silver models are reviewed and exported for external dbt execution."
+                    if target_warehouse == "snowflake" and dbt_enabled
                     else "Approved Silver scripts are executed in Databricks before Gold generation."
                     if target_warehouse == "databricks"
                     else "UI-only execution marker; generated Silver code runs outside Athena"
@@ -2014,14 +2018,16 @@ def build_pipeline_steps(
                 "label": "Bronze Code Execution",
                 "complete": bool(
                     target_warehouse == "snowflake"
-                    and checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
+                    and checkpoint.get("snowflake_bronze_execution_status") in {"COMPLETED", "SKIPPED_DBT_CODEGEN_ONLY"}
                 ) or bool(
                     target_warehouse == "databricks"
                     and checkpoint.get("databricks_bronze_execution_status") == "COMPLETED"
                 ),
                 "detail": (
                     "Approved Bronze scripts are executed in Snowflake before Silver generation."
-                    if target_warehouse == "snowflake"
+                    if target_warehouse == "snowflake" and not dbt_enabled
+                    else "Snowflake dbt-compatible Bronze models are reviewed and exported for external dbt execution."
+                    if target_warehouse == "snowflake" and dbt_enabled
                     else "Approved Bronze scripts are executed in Databricks before Silver generation."
                     if target_warehouse == "databricks"
                     else "UI-only execution marker; generated Bronze code runs outside Athena"
@@ -2059,14 +2065,16 @@ def build_pipeline_steps(
                 "label": "Silver Code Execution",
                 "complete": bool(
                     target_warehouse == "snowflake"
-                    and checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
+                    and checkpoint.get("snowflake_silver_execution_status") in {"COMPLETED", "SKIPPED_DBT_CODEGEN_ONLY"}
                 ) or bool(
                     target_warehouse == "databricks"
                     and checkpoint.get("databricks_silver_execution_status") == "COMPLETED"
                 ),
                 "detail": (
                     "Approved Silver scripts are executed in Snowflake before Gold generation."
-                    if target_warehouse == "snowflake"
+                    if target_warehouse == "snowflake" and not dbt_enabled
+                    else "Snowflake dbt-compatible Silver models are reviewed and exported for external dbt execution."
+                    if target_warehouse == "snowflake" and dbt_enabled
                     else "Approved Silver scripts are executed in Databricks before Gold generation."
                     if target_warehouse == "databricks"
                     else "UI-only execution marker; generated Silver code runs outside Athena"
@@ -2500,7 +2508,7 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     if can_promote_to_completed and (
         checkpoint.get("bronze_generation_status") == "COMPLETED"
         or checkpoint.get("databricks_bronze_execution_status") == "COMPLETED"
-        or checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
+        or checkpoint.get("snowflake_bronze_execution_status") in {"COMPLETED", "SKIPPED_DBT_CODEGEN_ONLY"}
     ):
         status = "PIPELINE_COMPLETED"
     if can_promote_to_completed and gate3_payload and bronze_generation_completed:
@@ -2508,7 +2516,7 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     if can_promote_to_completed and (
         silver_generation_completed
         or checkpoint.get("databricks_silver_execution_status") == "COMPLETED"
-        or checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
+        or checkpoint.get("snowflake_silver_execution_status") in {"COMPLETED", "SKIPPED_DBT_CODEGEN_ONLY"}
     ):
         status = "PIPELINE_COMPLETED"
     if can_promote_to_completed and (
@@ -3101,7 +3109,16 @@ def submit_gate4_review(
             final_state["bronze_review_artifact"],
         )
         target_warehouse = str(final_state.get("target_warehouse") or "").lower()
-        if target_warehouse == "snowflake":
+        dbt_codegen = target_warehouse == "snowflake" and str(final_state.get("execution_engine") or "").lower() == "dbt"
+        if dbt_codegen:
+            final_state.update(
+                {
+                    "snowflake_bronze_execution_status": "SKIPPED_DBT_CODEGEN_ONLY",
+                    "snowflake_bronze_execution_results": [],
+                    "resume_message": "Snowflake dbt-compatible Bronze models approved. Silver generation is starting.",
+                }
+            )
+        elif target_warehouse == "snowflake":
             from services.snowflake_bronze_runtime import run_snowflake_bronze_scripts
 
             execution_state = {
@@ -3346,7 +3363,16 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
             selected_silver_results,
         )
         target_warehouse = str(final_state.get("target_warehouse") or "").lower()
-        if target_warehouse == "snowflake":
+        dbt_codegen = target_warehouse == "snowflake" and str(final_state.get("execution_engine") or "").lower() == "dbt"
+        if dbt_codegen:
+            final_state.update(
+                {
+                    "snowflake_silver_execution_status": "SKIPPED_DBT_CODEGEN_ONLY",
+                    "snowflake_silver_execution_results": [],
+                    "resume_message": "Snowflake dbt-compatible Silver models approved. Gold generation is starting.",
+                }
+            )
+        elif target_warehouse == "snowflake":
             from services.snowflake_silver_runtime import run_snowflake_silver_scripts
 
             execution_state = {

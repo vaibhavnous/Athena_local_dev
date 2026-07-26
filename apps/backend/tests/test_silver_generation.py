@@ -127,7 +127,7 @@ def test_silver_table_resolution_ignores_existing_silver_outputs(monkeypatch):
     (output_dir / stale_name).write_text("# stale output\n", encoding="utf-8")
 
     monkeypatch.setattr(silver_gen, "_silver_output_dir", lambda: str(output_dir))
-    monkeypatch.setattr(silver_gen, "_load_bronze_bundle", lambda target_warehouse="databricks": {"scripts": []})
+    monkeypatch.setattr(silver_gen, "_load_bronze_bundle", lambda *_, **__: {"scripts": []})
 
     refs = silver_gen._resolve_tables_for_silver(
         {
@@ -233,7 +233,12 @@ def test_snowflake_silver_generation_reads_bronze_and_uses_reviewed_merge_keys(m
     assert script["source_table"] == "ATHENA_DB.BRONZE.bronze_claim_information"
     assert script["target_table"] == "ATHENA_DB.SILVER.silver_claim_information"
     assert script["merge_keys"] == ["claim_id"]
-    assert Path(script["script_path"]).parts[-3:] == ("snowflake", "silver", Path(script["script_path"]).name)
+    assert Path(script["script_path"]).parts[-4:] == (
+        "snowflake",
+        "run-snowflake-silver",
+        "silver",
+        Path(script["script_path"]).name,
+    )
     assert "-- Expected runtime: Snowflake SQL" in sql
     assert 'FROM "ATHENA_DB"."BRONZE"."bronze_claim_information" AS src' in sql
     assert 'MERGE INTO "ATHENA_DB"."SILVER"."silver_claim_information" AS target' in sql
@@ -241,8 +246,68 @@ def test_snowflake_silver_generation_reads_bronze_and_uses_reviewed_merge_keys(m
     assert "pyspark" not in sql.lower()
 
 
+def test_snowflake_dbt_silver_generation_writes_ref_based_model(monkeypatch):
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
+    monkeypatch.setenv("SNOWFLAKE_SILVER_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_SILVER_SCHEMA", "SILVER")
+    monkeypatch.setattr(silver_gen, "ai_store_db_writer", lambda **_: None)
+    workdir = Path.cwd() / ".tmp-tests" / f"silver_dbt_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    result = silver_gen.silver_code_generation_node(
+        {
+            "run_id": "run-snowflake-dbt-silver",
+            "target_warehouse": "snowflake",
+            "execution_engine": "dbt",
+            "bronze_generation_results": [
+                {
+                    "run_id": "run-snowflake-dbt-silver",
+                    "table": "claim_information",
+                    "target_table": "ATHENA_DB.BRONZE.bronze_claim_information",
+                    "target_warehouse": "snowflake",
+                    "code_generation_format": "dbt",
+                    "dbt_model_name": "bronze_claim_information",
+                    "source_columns": [{"target": "claim_id", "type": "NUMBER(38,0)"}],
+                }
+            ],
+            "enriched_metadata": {
+                "gate4_reviewed_merge_keys": {"feeds": []},
+                "columns": [
+                    {
+                        "table_name": "claim_information",
+                        "column_name": "claim_id",
+                        "data_type": "int",
+                        "semantic_type": "ID",
+                        "is_join_key": True,
+                    }
+                ],
+            },
+        }
+    )
+
+    item = result["silver_generation_results"][0]
+    model_sql = Path(item["script_path"]).read_text(encoding="utf-8")
+    project_dir = Path(result["snowflake_dbt_artifact_path"])
+
+    assert result["silver_generation_status"] == "COMPLETED"
+    assert item["code_generation_format"] == "dbt"
+    assert item["dbt_model_name"] == "silver_claim_information"
+    assert item["target_table"] == "ATHENA_DB.SILVER.silver_claim_information"
+    assert project_dir.parts[-3:] == ("snowflake", "run-snowflake-dbt-silver", "dbt")
+    assert Path(item["script_path"]).parts[-3:] == ("models", "silver", "silver_claim_information.sql")
+    assert "{{ config(" in model_sql
+    assert "{{ ref('bronze_claim_information') }}" in model_sql
+    assert "unique_key='silver_upsert_key'" in model_sql
+    assert "MERGE INTO" not in model_sql
+    assert "CREATE TABLE" not in model_sql
+    assert "DELETE FROM" not in model_sql
+    assert (project_dir / "models" / "silver" / "schema.yml").exists()
+
+
 def test_snowflake_silver_uses_state_bronze_results_without_old_bundle_bleed(monkeypatch):
-    monkeypatch.setattr(silver_gen, "_load_bronze_bundle", lambda target_warehouse="databricks": {
+    monkeypatch.setattr(silver_gen, "_load_bronze_bundle", lambda *_, **__: {
         "scripts": [
             {
                 "table": "old_policy_table",
