@@ -559,6 +559,9 @@ def test_snowflake_bronze_generation_can_use_llm_enhancement(monkeypatch):
 
 def test_snowflake_llm_enhancement_falls_back_when_target_drifted(monkeypatch):
     monkeypatch.setenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "true")
+    workdir = Path.cwd() / ".tmp-tests" / f"bronze_llm_target_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
 
     def wrong_target(sql, metadata):
         return sql.replace('"ATHENA_DB"."BRONZE"."bronze_claims"', '"OTHER_DB"."BRONZE"."bronze_claims"')
@@ -621,6 +624,9 @@ def test_snowflake_validator_allows_only_run_scoped_cleanup():
 
 def test_snowflake_bronze_generation_skips_llm_by_default(monkeypatch):
     monkeypatch.delenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", raising=False)
+    workdir = Path.cwd() / ".tmp-tests" / f"bronze_no_llm_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
 
     called = {"enhance": 0}
 
