@@ -84,6 +84,7 @@ STAGE_ERROR_FIELDS = {
     "gold": ("gold_generation_error", "gold_contract_error", "error"),
 }
 REQUIRED_STAGE_SKIP_IS_FAILURE = {"bronze", "silver", "gold"}
+ACTIVE_STAGE_LOG_STATUSES = {"RUNNING", "PROCESSING", "PENDING", "SUBMITTED", "IN_PROGRESS"}
 
 
 def _minimum_stage_runtime_seconds() -> float:
@@ -124,6 +125,24 @@ def _stage_failure_message(stage_key: str, state: Dict[str, Any], field: str, st
             return message
     label = DATABASE_STAGE_LABELS.get(stage_key, stage_key)
     return f"{label} returned {field}={status}."
+
+
+def _stage_log_status(stage_key: str, state: Dict[str, Any]) -> str:
+    """Return the completed stage outcome, not the overall pipeline run state."""
+    run_status = str(state.get("status") or "").strip().upper()
+    if run_status == "FAILED":
+        return "FAILED"
+
+    for field in STAGE_STATUS_FIELDS.get(stage_key, ()):
+        status = str(state.get(field) or "").strip().upper()
+        if status:
+            return status
+
+    if run_status in {"HITL_WAIT", "PAUSED_FOR_HITL", "PAUSED_FOR_STAGE_CONFIRMATION"}:
+        return run_status
+    if run_status in ACTIVE_STAGE_LOG_STATUSES:
+        return "COMPLETED"
+    return run_status or "COMPLETED"
 
 
 def _normalize_stage_failure(stage_key: str, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -493,18 +512,23 @@ def continue_database_pipeline(
 
         working_state = {**working_state, **result, "run_id": run_id}
         working_state = _normalize_stage_failure(current_stage_key, working_state)
+        stage_elapsed = time.monotonic() - stage_started_at
+        stage_status = _stage_log_status(current_stage_key, working_state)
         logger.info(
-            "END %s stage=%s status=%s duration_seconds=%.3f",
+            "END %s stage=%s stage_status=%s pipeline_status=%s duration_seconds=%.3f",
             DATABASE_STAGE_LABELS.get(current_stage_key, current_stage_key),
             current_stage_key,
+            stage_status,
             working_state.get("status"),
-            time.monotonic() - stage_started_at,
+            stage_elapsed,
             extra={
                 "run_id": run_id,
                 "node": current_stage_key,
                 "stage": current_stage_key,
                 "event_type": "stage_end",
-                "duration_seconds": round(time.monotonic() - stage_started_at, 3),
+                "stage_status": stage_status,
+                "pipeline_status": working_state.get("status"),
+                "duration_seconds": round(stage_elapsed, 3),
             },
         )
         if str(working_state.get("status") or "").upper() == "FAILED":

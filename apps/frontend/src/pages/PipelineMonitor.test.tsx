@@ -2,6 +2,7 @@ import React from 'react'
 import { render, waitFor } from '@testing-library/react'
 
 const mockUpdateRun = jest.fn()
+const mockPipelineLogsPanel = jest.fn(() => <div>Pipeline logs</div>)
 
 jest.mock('../api/athenaApi', () => ({
   abortRun: jest.fn(),
@@ -34,7 +35,7 @@ jest.mock('../store/useAthenaStore', () => ({
 }))
 jest.mock('../components/pipeline/PhasedPipelineDag', () => () => <div>Pipeline phases</div>)
 jest.mock('../components/pipeline/StageNode', () => () => <div>Stage node</div>)
-jest.mock('../components/pipeline/PipelineLogsPanel', () => () => <div>Pipeline logs</div>)
+jest.mock('../components/pipeline/PipelineLogsPanel', () => (props: any) => mockPipelineLogsPanel(props))
 jest.mock('../components/shared/PythonCodeDialog', () => () => null)
 jest.mock('../components/shared/DashboardLayout', () => ({ PageHeader: () => <div>Header</div> }))
 
@@ -42,6 +43,7 @@ import PipelineMonitor from './PipelineMonitor'
 import { getRun } from '../api/athenaApi'
 
 test('hydrates detailed stages for the active run', async () => {
+  mockPipelineLogsPanel.mockClear()
   ;(getRun as jest.Mock).mockResolvedValue({
     id: 'run-1',
     status: 'HITL_WAIT',
@@ -54,5 +56,6 @@ test('hydrates detailed stages for the active run', async () => {
     'run-1',
     expect.objectContaining({ status: 'HITL_WAIT', stages: expect.any(Array) }),
   ))
+  expect(mockPipelineLogsPanel.mock.calls.some(([props]) => props.showHeader === false)).toBe(true)
   view.unmount()
 })

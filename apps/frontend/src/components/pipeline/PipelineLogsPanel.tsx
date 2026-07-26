@@ -60,9 +60,10 @@ interface Props {
   runId?: string | null
   isActive?: boolean
   onLogsUpdated?: (logs: PipelineLog[]) => void
+  showHeader?: boolean
 }
 
-export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdated }: Props) {
+export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdated, showHeader = true }: Props) {
   const getRunById = useAthenaStore((s) => s.getRunById)
   const run = getRunById(runId || '')
   const { discoveredRunId, isDiscovering, discoveryError, logs, isLoadingLogs, logsError, logsNotice } =
@@ -103,40 +104,46 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
   if (!isActive) return null
 
   return (
-    <div className="w-full flex flex-col">
+    <div className={`${showHeader ? '' : 'h-full'} w-full flex flex-col`}>
       {/* Panel */}
       <motion.div
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.2 }}
-        className="w-full flex flex-col bg-bg-card border border-bg-border rounded-lg overflow-hidden flex-shrink-0"
-        style={{ height: '350px', minHeight: '350px' }}
+        className={
+          showHeader
+            ? 'w-full flex flex-col bg-bg-card border border-bg-border rounded-lg overflow-hidden flex-shrink-0'
+            : 'h-full w-full flex flex-col bg-bg-card/30 overflow-hidden'
+        }
+        style={showHeader ? { height: '350px', minHeight: '350px' } : undefined}
       >
         {/* Header */}
-        <div className="px-4 py-3 border-b border-bg-border flex items-center justify-between bg-gradient-to-r from-bg-card to-bg-card/50">
-          <div className="flex flex-col gap-1">
-            <h4 className="text-sm font-semibold text-gray-100">Execution Logs</h4>
-            <p className="text-xs text-gray-500">
-              {run?.source === 'sftp' || run?.source === 'adls_gen2'
-                ? `Live file execution for ${run?.brd_filename || runId}`
-                : 'Real-time pipeline execution monitoring'}
-            </p>
+        {showHeader && (
+          <div className="px-4 py-3 border-b border-bg-border flex items-center justify-between bg-gradient-to-r from-bg-card to-bg-card/50">
+            <div className="flex flex-col gap-1">
+              <h4 className="text-sm font-semibold text-gray-100">Execution Logs</h4>
+              <p className="text-xs text-gray-500">
+                {run?.source === 'sftp' || run?.source === 'adls_gen2'
+                  ? `Live file execution for ${run?.brd_filename || runId}`
+                  : 'Real-time pipeline execution monitoring'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {isDiscovering && (
+                <StatusBadge color="blue" pulse label="Loading..." />
+              )}
+              {discoveredRunId && !isDiscovering && (
+                <StatusBadge color="green" label="Live" />
+              )}
+              {discoveryError && (
+                <StatusBadge color="red" label="Error" />
+              )}
+              {!isDiscovering && !discoveryError && !discoveredRunId && (
+                <StatusBadge color="yellow" pulse label="Waiting" />
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            {isDiscovering && (
-              <StatusBadge color="blue" pulse label="Loading..." />
-            )}
-            {discoveredRunId && !isDiscovering && (
-              <StatusBadge color="green" label="Live" />
-            )}
-            {discoveryError && (
-              <StatusBadge color="red" label="Error" />
-            )}
-            {!isDiscovering && !discoveryError && !discoveredRunId && (
-              <StatusBadge color="yellow" pulse label="Waiting" />
-            )}
-          </div>
-        </div>
+        )}
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto flex flex-col bg-bg-card/30">

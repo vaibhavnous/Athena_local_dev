@@ -39,22 +39,29 @@ def _fallback_result_state(status: str, checkpoint: Dict[str, Any]) -> str:
     return result_state
 
 
-def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    checkpoint = checkpoint or {}
-    result_state = _fallback_result_state(status, checkpoint)
-    visible_background_stage = None if result_state == "HITL_WAIT" else checkpoint.get("background_stage")
-    return {
+def _checkpoint_fallback_run(
+    run_id: str,
+    *,
+    result_state: str,
+    checkpoint: Dict[str, Any],
+    visible_background_stage: str | None,
+) -> Dict[str, Any]:
+    detail_checkpoint = {
+        **checkpoint,
         "run_id": run_id,
         "status": result_state,
-        "state": {
-            "life_cycle_state": (
-                "TERMINATED"
-                if result_state in TERMINAL_RUN_STATUSES
-                else "RUNNING"
-            ),
-            "result_state": result_state,
-        },
-        "run": {
+        "background_stage": visible_background_stage,
+    }
+    try:
+        from api.routers.runs_router import _fallback_run_detail
+
+        run = _fallback_run_detail(run_id, detail_checkpoint)
+    except Exception:
+        logger.warning("Failed to build checkpoint fallback run detail", exc_info=True, extra={"run_id": run_id})
+        run = {"id": run_id, "run_id": run_id, "stages": [], "pipeline_steps": []}
+
+    run.update(
+        {
             "id": run_id,
             "run_id": run_id,
             "project_id": checkpoint.get("project_id"),
@@ -63,7 +70,6 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "brd_filename": checkpoint.get("brd_filename") or run_id,
             "provider": checkpoint.get("provider") or "azure_openai",
             "deployment": checkpoint.get("deployment"),
-            "stages": [],
             "background_stage": visible_background_stage,
             "external_execution": checkpoint.get("external_execution"),
             "snowflake_bronze_execution_status": checkpoint.get("snowflake_bronze_execution_status"),
@@ -104,7 +110,33 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "compliance_review_status": checkpoint.get("compliance_review_status"),
             "execution_engine": checkpoint.get("execution_engine") or "native",
             "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or "generate_only",
+        }
+    )
+    return run
+
+
+def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    checkpoint = checkpoint or {}
+    result_state = _fallback_result_state(status, checkpoint)
+    visible_background_stage = None if result_state == "HITL_WAIT" else checkpoint.get("background_stage")
+    run = _checkpoint_fallback_run(
+        run_id,
+        result_state=result_state,
+        checkpoint=checkpoint,
+        visible_background_stage=visible_background_stage,
+    )
+    return {
+        "run_id": run_id,
+        "status": result_state,
+        "state": {
+            "life_cycle_state": (
+                "TERMINATED"
+                if result_state in TERMINAL_RUN_STATUSES
+                else "RUNNING"
+            ),
+            "result_state": result_state,
         },
+        "run": run,
     }
 
 

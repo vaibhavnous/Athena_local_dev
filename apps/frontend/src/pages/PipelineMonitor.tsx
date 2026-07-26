@@ -738,7 +738,7 @@ function PipelineMonitor() {
           </div>
 
           <div className="min-h-0 flex-1">
-            <PipelineLogsPanel runId={activeRun.run_id || activeRun.id} isActive onLogsUpdated={handleLogsUpdated} />
+            <PipelineLogsPanel runId={activeRun.run_id || activeRun.id} isActive showHeader={false} onLogsUpdated={handleLogsUpdated} />
           </div>
         </section>
       </div>

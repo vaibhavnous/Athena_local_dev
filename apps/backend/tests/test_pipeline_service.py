@@ -302,6 +302,20 @@ def test_generation_skipped_is_retryable_failure():
     assert result["error_type"] == "StageFailed"
 
 
+def test_stage_log_status_reports_stage_outcome_not_pipeline_status():
+    from services import pipeline_runtime
+
+    assert pipeline_runtime._stage_log_status(
+        "profiling",
+        {"status": "RUNNING", "column_profiling_status": "COMPLETED"},
+    ) == "COMPLETED"
+    assert pipeline_runtime._stage_log_status(
+        "profiling",
+        {"status": "RUNNING", "column_profiling_status": "COMPLETED_WITH_WARNINGS"},
+    ) == "COMPLETED_WITH_WARNINGS"
+    assert pipeline_runtime._stage_log_status("profiling", {"status": "RUNNING"}) == "COMPLETED"
+
+
 def test_seed_payload_from_checkpoint_heals_legacy_choices():
     checkpoint = {
         "run_id": "run-legacy",

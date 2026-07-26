@@ -447,6 +447,26 @@ def test_pipeline_status_fallback_treats_review_wait_as_hitl_even_with_stale_bac
     assert payload["run"]["background_stage"] is None
 
 
+def test_pipeline_status_fallback_includes_checkpoint_pipeline_steps_for_completed_profiling():
+    from api.routers.pipeline_router import _fallback_status_payload
+
+    payload = _fallback_status_payload(
+        "run-profiling",
+        checkpoint={
+            "run_id": "run-profiling",
+            "status": "RUNNING",
+            "source": "database",
+            "metadata_status": "COMPLETED",
+            "column_profiling_status": "COMPLETED",
+        },
+    )
+
+    by_key = {step["key"]: step for step in payload["run"]["pipeline_steps"]}
+    assert by_key["discovery"]["state"] == "COMPLETED"
+    assert by_key["profiling"]["state"] == "COMPLETED"
+    assert by_key["enrichment"]["state"] == "RUNNING"
+
+
 def test_logs_return_degraded_payload_when_access_verification_is_temporarily_unavailable(monkeypatch):
     from api.routers import logs_router
 
