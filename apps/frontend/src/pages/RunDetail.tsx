@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ArrowLeft, ChevronDown, ChevronUp, CheckCircle2, Loader2, ShieldCheck, XCircle, Code2, Copy, Download } from 'lucide-react'
+import { ArrowLeft, ChevronDown, ChevronUp, CheckCircle2, Code2, Copy, Download } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineDag from '../components/pipeline/PipelineDag'
 import StatusBadge from '../components/shared/StatusBadge'
@@ -12,49 +12,11 @@ import JsonViewer from '../components/shared/JsonViewer'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 import {
   continueStage,
-  getRun,
-  submitBronzeReview,
-  submitEnrichmentReview,
-  submitSilverReview,
-  submitTableReviews
+  getRun
 } from '../api/athenaApi'
 import { formatPipelineStepLabel, getGateDisplayName } from '../utils/pipelinePhases'
 
 const TABS = ['Overview', 'Requirements', 'KPIs', 'Scripts', 'HITL Decisions', 'Cost Log']
-
-const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
-const PIPELINE_ADVANCE_ATTEMPTS = 60
-const PIPELINE_ADVANCE_DELAY_MS = 2000
-
-async function waitForRunGate(runId, targetGate, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
-  let latest = null
-  for (let index = 0; index < attempts; index += 1) {
-    latest = await getRun(runId)
-    if (Number(latest?.next_gate || 0) === targetGate) return latest
-    if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
-    await sleep(PIPELINE_ADVANCE_DELAY_MS)
-  }
-  return latest
-}
-
-function hasGoldScripts(run) {
-  return Boolean(
-    (run?.gold?.scripts || []).length ||
-    run?.gold_generation_completed ||
-    String(run?.gold_generation_status || '').toUpperCase().startsWith('COMPLETED')
-  )
-}
-
-async function waitForGoldScripts(runId, attempts = PIPELINE_ADVANCE_ATTEMPTS) {
-  let latest = null
-  for (let index = 0; index < attempts; index += 1) {
-    latest = await getRun(runId)
-    if (hasGoldScripts(latest)) return latest
-    if (String(latest?.status || '').toUpperCase() === 'FAILED') return latest
-    await sleep(PIPELINE_ADVANCE_DELAY_MS)
-  }
-  return latest
-}
 
 function RunDetail() {
   const { runId } = useParams()
@@ -173,33 +135,15 @@ function RunDetail() {
 }
 
 /** Overview tab */
-function OverviewTab({ run, onRunRefresh, addNotification }) {
-  const [selectedTables, setSelectedTables] = useState({})
-  const [submittingGate2, setSubmittingGate2] = useState(false)
-  const [submittingGate3, setSubmittingGate3] = useState(false)
+function OverviewTab({ run }) {
+  const navigate = useNavigate()
   const currentStatus = (run.status || '').toUpperCase()
-  const reviewableRun = currentStatus === 'HITL_WAIT' || currentStatus === 'PAUSED_FOR_HITL'
+  const reviewableRun = ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(currentStatus)
   const isSftpRun = run.source === 'sftp' || run.source === 'adls_gen2'
   const availableSftpFeeds = getSftpFeeds(run)
-
-  useEffect(() => {
-    setSelectedTables({})
-  }, [run.id, run.source, run.next_gate])
-
-  useEffect(() => {
-    const nominated = isSftpRun
-      ? availableSftpFeeds
-      : (run.nominated_tables || [])
-    if (!nominated.length) return
-    setSelectedTables((prev) => {
-      const next = { ...prev }
-      for (const item of nominated) {
-        const key = isSftpRun ? sftpFeedKey(item) : tableReviewKey(item)
-        if (!(key in next)) next[key] = true
-      }
-      return next
-    })
-  }, [run.nominated_tables, run.candidate_feed, run.candidate_feeds, isSftpRun, availableSftpFeeds])
+  const gate2Name = getGateDisplayName(2, run.source)
+  const gate3Name = getGateDisplayName(3, run.source)
+  const openGateReview = (gate) => navigate(`/app/hitl?runId=${encodeURIComponent(String(run.id || run.run_id || ''))}&gate=${gate}`)
 
   // Build Gantt data
   const ganttData = (run.stages || []).map((s) => {
@@ -222,82 +166,6 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
     FAILED: '#ef4444',
     HITL_WAIT: '#f59e0b',
     PENDING: '#374151'
-  }
-
-  const handleToggleTable = (key) => {
-    setSelectedTables((prev) => ({ ...prev, [key]: !prev[key] }))
-  }
-
-  const handleSubmitGate2 = async () => {
-    const approvedItems = isSftpRun
-      ? (availableSftpFeeds
-          .map((feed) => sftpFeedKey(feed))
-          .filter((key) => selectedTables[key]))
-      : ((run.nominated_tables || [])
-          .map((table) => tableReviewKey(table))
-          .filter((key) => selectedTables[key]))
-
-    if (!approvedItems.length) {
-      addNotification({
-        type: 'amber',
-        title: isSftpRun ? 'No Feeds Selected' : 'No Tables Selected',
-        message: isSftpRun
-          ? `Select at least one discovered feed before submitting ${gate2Name}.`
-          : `Select at least one nominated table before submitting ${gate2Name}.`,
-        duration: 4000
-      })
-      return
-    }
-
-    setSubmittingGate2(true)
-    try {
-      await submitTableReviews(run.id, approvedItems)
-      const refreshed = await getRun(run.id)
-      onRunRefresh(refreshed)
-      addNotification({
-        type: 'success',
-        title: `${gate2Name} Submitted`,
-        message: isSftpRun
-          ? `Approved feeds were submitted for ${gate2Name}.`
-          : 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
-        duration: 5000
-      })
-    } catch (error) {
-      addNotification({
-        type: 'error',
-        title: `${gate2Name} Failed`,
-        message: error.message || 'Unable to submit approved tables.',
-        duration: 5000
-      })
-    } finally {
-      setSubmittingGate2(false)
-    }
-  }
-
-  const handleSubmitGate3 = async (approve) => {
-    setSubmittingGate3(true)
-    try {
-      await submitEnrichmentReview(run.id, approve)
-      const refreshed = await getRun(run.id)
-      onRunRefresh(refreshed)
-      addNotification({
-        type: 'success',
-        title: approve ? `${gate3Name} Approved` : `${gate3Name} Rejected`,
-        message: approve
-          ? 'Enrichment was approved. Bronze generation is running in the background.'
-          : 'Enrichment was rejected and the run remains paused for rework.',
-        duration: 5000
-      })
-    } catch (error) {
-      addNotification({
-        type: 'error',
-        title: `${gate3Name} Failed`,
-        message: error.message || 'Unable to submit enrichment review.',
-        duration: 5000
-      })
-    } finally {
-      setSubmittingGate3(false)
-    }
   }
 
   return (
@@ -381,27 +249,15 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
                 ? (availableSftpFeeds.map((feed) => {
                     const key = sftpFeedKey(feed)
                     return (
-                      <label key={key} className="flex items-start gap-3 p-3 rounded-lg border border-bg-border hover:border-gray-600 transition-colors cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={!!selectedTables[key]}
-                          onChange={() => handleToggleTable(key)}
-                          className="mt-1 accent-accent-blue"
-                        />
+                      <div key={key} className="flex items-start gap-3 p-3 rounded-lg border border-bg-border bg-bg-base/40">
                         <SftpFeedReviewBody feed={feed} />
-                      </label>
+                      </div>
                     )
                   }))
                 : ((run.nominated_tables || []).map((table) => {
                     const key = tableReviewKey(table)
                     return (
-                      <label key={key} className="flex items-start gap-3 p-3 rounded-lg border border-bg-border hover:border-gray-600 transition-colors cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={!!selectedTables[key]}
-                          onChange={() => handleToggleTable(key)}
-                          className="mt-1 accent-accent-blue"
-                        />
+                      <div key={key} className="flex items-start gap-3 p-3 rounded-lg border border-bg-border bg-bg-base/40">
                         <div className="min-w-0 flex-1">
                           <div className="text-sm text-gray-200 font-medium break-all">{key}</div>
                           <div className="flex gap-3 flex-wrap mt-1 text-[11px] text-gray-500">
@@ -416,7 +272,7 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
                             <p className="text-xs text-gray-400 mt-1">{table.nomination_reason}</p>
                           )}
                         </div>
-                      </label>
+                      </div>
                     )
                   })))}
             </div>
@@ -424,18 +280,15 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
             <div className="flex items-center justify-between mt-4 gap-3">
               <p className="text-xs text-gray-500">
                 {isSftpRun
-                  ? (availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length)
-                  : ((run.nominated_tables || []).filter((table) => selectedTables[tableReviewKey(table)]).length)} of {isSftpRun
-                  ? (availableSftpFeeds.length)
-                  : ((run.nominated_tables || []).length)} selected
+                  ? `${availableSftpFeeds.length} feed${availableSftpFeeds.length !== 1 ? 's' : ''} ready for review`
+                  : `${(run.nominated_tables || []).length} table${(run.nominated_tables || []).length !== 1 ? 's' : ''} ready for review`}
               </p>
               <button
-                onClick={handleSubmitGate2}
-                disabled={submittingGate2}
+                onClick={() => openGateReview(2)}
                 className="flex items-center gap-2 px-4 py-2 bg-accent-blue hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-lg transition-colors"
               >
-                {submittingGate2 ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                {isSftpRun ? 'Certify Feeds' : 'Certify Tables'}
+                <CheckCircle2 size={14} />
+                Open {gate2Name}
               </button>
             </div>
           </div>
@@ -467,20 +320,11 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
 
             <div className="flex items-center justify-end gap-2">
               <button
-                onClick={() => handleSubmitGate3(false)}
-                disabled={submittingGate3}
-                className="flex items-center gap-2 px-4 py-2 border border-accent-red/25 text-accent-red hover:bg-accent-red/10 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold rounded-lg transition-colors"
-              >
-                {submittingGate3 ? <Loader2 size={14} className="animate-spin" /> : <XCircle size={14} />}
-                Reject
-              </button>
-              <button
-                onClick={() => handleSubmitGate3(true)}
-                disabled={submittingGate3}
+                onClick={() => openGateReview(3)}
                 className="flex items-center gap-2 px-4 py-2 bg-accent-blue hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-lg transition-colors"
               >
-                {submittingGate3 ? <Loader2 size={14} className="animate-spin" /> : <ShieldCheck size={14} />}
-                Approve and Generate
+                <CheckCircle2 size={14} />
+                Open {gate3Name}
               </button>
             </div>
           </div>
@@ -831,7 +675,7 @@ function KpisTab({ run }) {
 function ScriptsTab({ run, addNotification, onRunRefresh }) {
   const navigate = useNavigate()
   const [layer, setLayer] = useState('gold')
-  const [submitting, setSubmitting] = useState(null)
+  const [continuingStage, setContinuingStage] = useState(false)
   const currentGate = Number(run?.next_gate || 0)
   const stageConfirmation = run?.stage_confirmation || null
   const stageConfirmationLayer =
@@ -842,6 +686,7 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
   const isStageScriptConfirmation = Boolean(stageConfirmationLayer)
   const gate4Name = getGateDisplayName(4)
   const gate5Name = getGateDisplayName(5)
+  const reviewGate = reviewLayer === 'bronze' ? 4 : reviewLayer === 'silver' ? 5 : null
   const scripts = useMemo(() => {
     const rows = []
     const seen = new Set()
@@ -990,55 +835,33 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
     }
   }
 
-  const handleReviewAction = async (action) => {
+  const handleOpenReview = () => {
+    if (!reviewGate) return
+    navigate(`/app/hitl?runId=${encodeURIComponent(String(run.id || run.run_id || ''))}&gate=${reviewGate}`)
+  }
+
+  const handleContinueStage = async () => {
     if (!reviewLayer) return
-    setSubmitting(action)
+    setContinuingStage(true)
     try {
-      if (isStageScriptConfirmation) {
-        await continueStage(run.id, false)
-      } else if (reviewLayer === 'bronze') {
-        await submitBronzeReview(run.id, action)
-      } else {
-        await submitSilverReview(run.id, action)
-      }
-
-      const refreshed =
-        !isStageScriptConfirmation && reviewLayer === 'bronze' && action === 'APPROVED'
-          ? await waitForRunGate(run.id, 5)
-          : !isStageScriptConfirmation && reviewLayer === 'silver' && action === 'APPROVED'
-          ? await waitForGoldScripts(run.id)
-          : await getRun(run.id)
-
+      await continueStage(run.id, false)
+      const refreshed = await getRun(run.id)
       onRunRefresh(refreshed)
-
       addNotification({
         type: 'success',
-        title: isStageScriptConfirmation
-          ? `${capitalize(reviewLayer)} review continued`
-          : reviewLayer === 'bronze'
-          ? `${gate4Name} submitted`
-          : `${gate5Name} submitted`,
-        message:
-          isStageScriptConfirmation
-            ? `Continuing to ${stageConfirmation?.next_stage_label || 'the next stage'}.`
-            : reviewLayer === 'bronze' && action === 'APPROVED' && Number(refreshed?.next_gate || 0) === 5
-            ? `Bronze approved. Silver scripts are now ready.`
-            : reviewLayer === 'silver' && action === 'APPROVED' && hasGoldScripts(refreshed)
-            ? 'Silver approved. Gold scripts are now ready.'
-            : reviewLayer === 'silver' && action === 'APPROVED'
-            ? 'Silver approved. Gold generation is still processing.'
-            : 'Script review decision submitted.',
+        title: `${capitalize(reviewLayer)} review continued`,
+        message: `Continuing to ${stageConfirmation?.next_stage_label || 'the next stage'}.`,
         duration: 4500
       })
     } catch (error) {
       addNotification({
         type: 'error',
-        title: 'Script review failed',
-        message: error?.message || 'Unable to submit the review action.',
+        title: 'Unable to continue stage',
+        message: error?.message || 'Unable to continue to the next stage.',
         duration: 5000
       })
     } finally {
-      setSubmitting(null)
+      setContinuingStage(false)
     }
   }
 
@@ -1068,36 +891,18 @@ function ScriptsTab({ run, addNotification, onRunRefresh }) {
                 View Lineage
               </button>
               <button
-                onClick={() => handleReviewAction('APPROVED')}
-                disabled={!!submitting}
+                onClick={isStageScriptConfirmation ? handleContinueStage : handleOpenReview}
+                disabled={continuingStage}
                 className="btn-primary text-sm"
               >
-                {submitting === 'APPROVED'
-                  ? 'Submitting...'
+                {continuingStage
+                  ? 'Continuing...'
                   : isStageScriptConfirmation
                   ? `Continue to ${stageConfirmation?.next_stage_label || 'Next Stage'}`
                   : reviewLayer === 'bronze'
-                  ? 'Approve Bronze'
-                  : 'Approve Silver'}
+                  ? `Open ${gate4Name}`
+                  : `Open ${gate5Name}`}
               </button>
-              {!isStageScriptConfirmation && (
-                <>
-                  <button
-                    onClick={() => handleReviewAction('REJECTED')}
-                    disabled={!!submitting}
-                    className="btn-secondary text-sm"
-                  >
-                    Reject
-                  </button>
-                  <button
-                    onClick={() => handleReviewAction('REGENERATE')}
-                    disabled={!!submitting}
-                    className="btn-secondary text-sm"
-                  >
-                    Regenerate
-                  </button>
-                </>
-              )}
             </div>
           ) : (
             <div className="flex items-center gap-2">

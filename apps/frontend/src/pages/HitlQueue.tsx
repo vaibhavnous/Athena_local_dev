@@ -1092,6 +1092,7 @@ function HitlQueue({ onClose = null }) {
     [goldReviewItems]
   )
   const activeCodeReviewItems = isGate4 ? bronzeCodeReviewItems : isSilverMergeKeyReview ? silverMergeKeyReviewItems : isGate5 ? silverCodeReviewItems : isGoldReview ? goldCodeReviewItems : []
+  const isCodeReview = isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview
   const reviewedCodeReviewCount = activeCodeReviewItems.filter((item) => codeReviewDecisions[item.key]).length
   const codeReviewGateDecision = getCodeReviewGateDecision(activeCodeReviewItems, codeReviewDecisions)
   const semanticReviewSource = useMemo(
@@ -2090,7 +2091,7 @@ function HitlQueue({ onClose = null }) {
           >
             {reviewRuns.map((run) => (
               <option key={run.id} value={run.id}>
-                {run.id.slice(0, 14)} - {run.brd_filename} ({run.next_review_key === 'silver_merge_key_review' ? 'Silver Merge Key Review' : `Gate ${run.next_gate}`})
+                {run.id.slice(0, 14)} - {run.brd_filename} ({run.next_review_key === 'silver_merge_key_review' ? 'Silver Merge Key Review' : run.next_review_key === 'gold_review' ? 'Gold Code Review' : `Gate ${run.next_gate}`})
               </option>
             ))}
           </select>
@@ -2131,7 +2132,9 @@ function HitlQueue({ onClose = null }) {
                 Action Required: {activeReviewName}
               </h1>
               <p className="mt-1 text-[18px] font-medium leading-snug text-[#b9c1cf]">
-                {isGate5
+                {isGoldReview
+                  ? (goldReview?.resume_message || 'Gold Review is pending. Review generated Gold scripts before final deployment or execution.')
+                  : isGate5
                   ? (silverReview?.resume_message || 'Stage 05 completed. Review generated Silver scripts before the pipeline continues.')
                   : isSilverMergeKeyReview
                   ? (silverMergeKeyReview?.resume_message || 'Review merge keys before Silver generation continues.')
@@ -2147,7 +2150,7 @@ function HitlQueue({ onClose = null }) {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            {!isGate2 && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5 && (
+            {!isGate2 && !isGate3 && !isCodeReview && (
             <button
               type="button"
               onClick={() => setAddingKpi(true)}
@@ -2159,7 +2162,7 @@ function HitlQueue({ onClose = null }) {
             )}
 
             <button
-              onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isSilverMergeKeyReview || isGate5) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
+              onClick={isGate3 ? handleAutoApproveSemanticItems : isCodeReview ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
               className="inline-flex h-12 items-center gap-2 rounded-[10px] bg-[#202b3a] px-5 text-[17px] font-bold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
             >
               <CheckCircle size={18} className="text-[#12b886]" />
@@ -2168,7 +2171,7 @@ function HitlQueue({ onClose = null }) {
           </div>
         </div>
 
-        {(reviewRuns.length > 0 || (!isGate2 && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5)) && (
+        {(reviewRuns.length > 0 || (!isGate2 && !isGate3 && !isCodeReview)) && (
           <div className="flex flex-wrap items-center gap-3 border-t border-[#1d2940] px-8 py-4">
           {reviewRuns.length > 0 && (
             <select
@@ -2178,13 +2181,13 @@ function HitlQueue({ onClose = null }) {
             >
               {reviewRuns.map((run) => (
                 <option key={run.id} value={run.id}>
-                  {run.id.slice(0, 14)} - {run.brd_filename} ({run.next_review_key === 'silver_merge_key_review' ? 'Silver Merge Key Review' : `Gate ${run.next_gate}`})
+                  {run.id.slice(0, 14)} - {run.brd_filename} ({run.next_review_key === 'silver_merge_key_review' ? 'Silver Merge Key Review' : run.next_review_key === 'gold_review' ? 'Gold Code Review' : `Gate ${run.next_gate}`})
                 </option>
               ))}
             </select>
           )}
 
-          {!isGate2 && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5 && (
+          {!isGate2 && !isGate3 && !isCodeReview && (
             <select
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value)}
@@ -2471,7 +2474,7 @@ function HitlQueue({ onClose = null }) {
             <div className="flex items-center justify-center h-40 rounded-2xl border border-dashed border-bg-border bg-bg-card/40 text-center px-6">
               <div>
                 <p className="text-sm font-semibold text-gray-300">No pending gate review</p>
-                <p className="text-xs text-gray-500 mt-1">This page shows runs paused at KPI, table/feed, enrichment, bronze, and silver review.</p>
+                <p className="text-xs text-gray-500 mt-1">This page shows runs paused at KPI, table/feed, enrichment, bronze, silver, and gold review.</p>
               </div>
             </div>
           )}
@@ -2512,6 +2515,12 @@ function HitlQueue({ onClose = null }) {
                   <CountRow label="Reviewed" value={reviewedCodeReviewCount} color="text-accent-green" pulse={reviewedCodeReviewCount > 0} />
                   <CountRow label="Pending" value={Math.max(0, silverCodeReviewItems.length - reviewedCodeReviewCount)} color="text-accent-amber" />
                 </>
+                ) : isGoldReview ? (
+                <>
+                  <CountRow label="Gold Scripts" value={goldReviewItems.length} color="text-gray-300" />
+                  <CountRow label="Reviewed" value={reviewedCodeReviewCount} color="text-accent-green" pulse={reviewedCodeReviewCount > 0} />
+                  <CountRow label="Pending" value={Math.max(0, goldCodeReviewItems.length - reviewedCodeReviewCount)} color="text-accent-amber" />
+                </>
                 ) : (
                 <>
                   <CountRow label="Total" value={kpiCounts.total} color="text-gray-300" />
@@ -2533,7 +2542,7 @@ function HitlQueue({ onClose = null }) {
                   style={{
                     width: `${isGate3
                       ? 100
-                      : isGate4 || isSilverMergeKeyReview || isGate5
+                      : isCodeReview
                       ? (activeCodeReviewItems.length > 0 ? (reviewedCodeReviewCount / activeCodeReviewItems.length) * 100 : (gateReviewReady ? 100 : 0))
                       : isGate2
                       ? (isSftpRun
@@ -2556,11 +2565,11 @@ function HitlQueue({ onClose = null }) {
           </div>
 
           <button
-            onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isSilverMergeKeyReview || isGate5) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
+            onClick={isGate3 ? handleAutoApproveSemanticItems : isCodeReview ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
             className="flex items-center justify-center gap-2 px-4 py-3 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/25 text-accent-green text-sm font-semibold rounded-xl transition-colors"
           >
             <CheckCircle size={15} />
-            {isGate3 ? 'Auto-Approve Pending' : isGate4 || isSilverMergeKeyReview || isGate5 ? 'Auto-Approve Pending' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
+            {isGate3 ? 'Auto-Approve Pending' : isCodeReview ? 'Auto-Approve Pending' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
           </button>
 
           <div className="rounded-[20px] border border-[#22304b] bg-[#0d1729] p-3">
@@ -2579,6 +2588,8 @@ function HitlQueue({ onClose = null }) {
                   ? 'Approving Silver Merge Key Review accepts the merge keys and starts Silver generation.'
                   : isGate5
                   ? `Approving ${gate5Name} accepts the Silver scripts and continues downstream validation.`
+                  : isGoldReview
+                  ? 'Approving Gold Review accepts the generated Gold artifacts and starts final execution, or completes Snowflake dbt code generation.'
                   : 'Approvals are final once submitted. Rejected KPIs will be excluded from the final export.'}
               </p>
             </div>
@@ -2586,7 +2597,7 @@ function HitlQueue({ onClose = null }) {
         </div>
       </div>
 
-      {canSubmitReview && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5 && (
+      {canSubmitReview && !isGate3 && !isCodeReview && (
         <motion.div
           initial={{ y: 80, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
@@ -2595,12 +2606,12 @@ function HitlQueue({ onClose = null }) {
           style={{ background: 'rgba(17,24,39,0.95)', backdropFilter: 'blur(10px)' }}
         >
           <div className="flex items-center gap-4 text-sm">
-            {isGate4 || isSilverMergeKeyReview || isGate5 ? (
+            {isCodeReview ? (
               <>
                 <span className={gateDecision === 'APPROVED' ? 'text-accent-green font-semibold' : gateDecision === 'REJECTED' ? 'text-accent-red font-semibold' : 'text-accent-blue font-semibold'}>
                   {gateDecision === 'APPROVED' ? 'Approve selected' : gateDecision === 'REJECTED' ? 'Reject selected' : 'Regenerate selected'}
                 </span>
-                <span className="text-gray-500">{isGate4 ? `${bronzeReviewFeeds.length} Bronze plan(s)` : isSilverMergeKeyReview ? `${silverMergeKeyReviewFeeds.length} merge-key set(s)` : `${silverReviewItems.length} Silver script(s)`}</span>
+                <span className="text-gray-500">{isGate4 ? `${bronzeReviewFeeds.length} Bronze plan(s)` : isSilverMergeKeyReview ? `${silverMergeKeyReviewFeeds.length} merge-key set(s)` : isGoldReview ? `${goldReviewItems.length} Gold script(s)` : `${silverReviewItems.length} Silver script(s)`}</span>
               </>
             ) : isGate3 ? (
               <>
@@ -2636,8 +2647,8 @@ function HitlQueue({ onClose = null }) {
               </>
             ) : (
               <>
-                {isGate3 || isGate2 || isGate4 || isSilverMergeKeyReview || isGate5 ? <CheckCircle2 size={14} /> : <Send size={14} />}
-                {isGate5 ? `Submit ${gate5Name} & Continue Pipeline ->` : isSilverMergeKeyReview ? 'Submit Silver Merge Key Review & Generate Silver ->' : isGate4 ? `Submit ${gate4Name} & Review Merge Keys ->` : isGate3 ? `Submit ${gate3Name} & Generate Bronze ->` : isGate2 ? `Submit ${gate2Name} & Resume Pipeline ->` : 'Submit All Decisions & Resume Pipeline ->'}
+                {isGate3 || isGate2 || isCodeReview ? <CheckCircle2 size={14} /> : <Send size={14} />}
+                {isGoldReview ? 'Submit Gold Review & Execute Gold ->' : isGate5 ? `Submit ${gate5Name} & Continue Pipeline ->` : isSilverMergeKeyReview ? 'Submit Silver Merge Key Review & Generate Silver ->' : isGate4 ? `Submit ${gate4Name} & Review Merge Keys ->` : isGate3 ? `Submit ${gate3Name} & Generate Bronze ->` : isGate2 ? `Submit ${gate2Name} & Resume Pipeline ->` : 'Submit All Decisions & Resume Pipeline ->'}
               </>
             )}
           </button>

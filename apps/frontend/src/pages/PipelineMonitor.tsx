@@ -465,6 +465,10 @@ function PipelineMonitor() {
       navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=silver_merge_key_review`)
       return
     }
+    if (step?.key === 'gold_code_execution' && activeRun.next_review_key === 'gold_review') {
+      navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=gold_review`)
+      return
+    }
     const stepGate = /^gate([1-5])$/.exec(String(step?.key || ''))?.[1]
     if (!stepGate && activeRun.next_review_key) {
       navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=${encodeURIComponent(activeRun.next_review_key)}`)
@@ -910,6 +914,8 @@ function buildCurrentStepSummary(run) {
   const nextGate = Number(run.next_gate || 0)
   const gateLabel = run.next_review_key === 'silver_merge_key_review'
     ? 'Silver Merge Key Review'
+    : run.next_review_key === 'gold_review'
+    ? 'Gold Review'
     : nextGate ? getGateDisplayName(nextGate, run.source) : label
 
   if (runStatus === 'HITL_WAIT' || state === 'HITL_WAIT') {
@@ -1039,7 +1045,7 @@ function StepRow({ step, index = 0, onOpenReview }) {
   const running = state === 'RUNNING'
   const failed = state === 'FAILED'
   const isGate = /^gate[1-5]$/.test(String(step.key || ''))
-  const isNamedReview = step.key === 'silver_merge_key_review'
+  const isNamedReview = step.key === 'silver_merge_key_review' || step.key === 'gold_code_execution'
   const canOpenReview = waiting && (isGate || isNamedReview) && onOpenReview
 
   return (
