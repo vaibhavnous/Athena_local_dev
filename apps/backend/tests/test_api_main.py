@@ -556,6 +556,51 @@ def test_run_lineage_endpoint_returns_payload(monkeypatch):
     assert response.json()["nodes"][0]["id"] == "n1"
 
 
+def test_run_scripts_endpoint_returns_layer_bundles(monkeypatch):
+    checkpoint = {"run_id": "run-code", "owner_email": "test@example.com"}
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_bronze_scripts",
+        lambda run_id, checkpoint=None: {"generated_at": "2026-07-26T00:00:00Z", "scripts": [{"script_body": "bronze"}]},
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_silver_scripts",
+        lambda run_id, checkpoint=None: {"generated_at": "2026-07-26T00:01:00Z", "scripts": [{"script_body": "silver"}]},
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_gold_scripts",
+        lambda run_id, checkpoint=None: {"generated_at": "2026-07-26T00:02:00Z", "scripts": [{"script_body": "gold"}]},
+    )
+
+    response = client.get("/run-scripts/run-code")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_id"] == "run-code"
+    assert payload["bronze"]["scripts"][0]["script_body"] == "bronze"
+    assert payload["silver"]["scripts"][0]["script_body"] == "silver"
+    assert payload["gold"]["scripts"][0]["script_body"] == "gold"
+
+
+def test_run_scripts_rejects_foreign_client_run(monkeypatch):
+    override = app.dependency_overrides[get_current_user]
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="client-user", username="Client User", email="client@example.com", userType="Client"
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "owner_email": "other@example.com"},
+    )
+
+    try:
+        response = client.get("/run-scripts/run-private")
+    finally:
+        app.dependency_overrides[get_current_user] = override
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Run access denied"
+
+
 def test_bronze_review_submit_uses_checkpoint_artifact_when_payload_empty(monkeypatch):
     recorded = {}
     checkpoint_artifact = {"feeds": [{"entity": "claims", "review_status": "APPROVED"}]}
@@ -825,6 +870,30 @@ def test_runs_uses_fast_checkpoint_summary_by_default(monkeypatch):
     assert payload[0]["brd_filename"] == "fast-summary.docx"
     assert payload[0]["next_gate"] == 2
     assert payload[0]["resume_message"] == "Table Review is pending."
+
+
+def test_runs_accepts_history_limit_query(monkeypatch):
+    recorded = {}
+
+    def fake_list_runs(limit):
+        recorded["limit"] = limit
+        return [{"run_id": "run-limit", "last_activity": "2026-07-26T00:00:00Z"}]
+
+    monkeypatch.setattr("services.pipeline_runtime.list_runs", fake_list_runs)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "brd_filename": "history-limit.docx",
+            "status": "SUCCESS",
+        },
+    )
+
+    response = client.get("/runs?limit=250")
+
+    assert response.status_code == 200
+    assert recorded["limit"] == 250
+    assert response.json()[0]["id"] == "run-limit"
 
 
 def test_run_detail_returns_fallback_on_failure(monkeypatch):

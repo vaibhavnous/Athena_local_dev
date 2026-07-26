@@ -137,7 +137,7 @@ export const getPipelineKpis = (runId: string) => api.get(`/kpi-reviews/${runId}
 export const createKpiReview = (runId: string, payload: { name: string; definition: string }) =>
   api.post(`/kpi-reviews/${runId}`, payload, { timeout: WRITE_TIMEOUT })
 
-export const getRuns = () => api.get('/runs', { timeout: RUNS_LIST_TIMEOUT })
+export const getRuns = (limit?: number) => api.get('/runs', { params: limit ? { limit } : undefined, timeout: RUNS_LIST_TIMEOUT })
 
 export const getRun = (runId: string) => api.get(`/runs/${runId}`, { timeout: RUN_DETAIL_TIMEOUT })
 export const getRunScripts = (runId: string) => api.get(`/run-scripts/${runId}`, { timeout: REVIEW_TIMEOUT })

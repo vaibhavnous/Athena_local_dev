@@ -4,7 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.auth import AuthUser, assert_run_access, filter_runs_for_user, get_current_user
 from api.demo import (
@@ -234,7 +234,10 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
 # ✅ Runs List
 # -------------------------
 @router.get("/runs")
-def runs(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
+def runs(
+    limit: int | None = Query(default=None, ge=1, le=500),
+    user: AuthUser = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
     if demo_enabled():
         return demo_runs()
 
@@ -243,7 +246,9 @@ def runs(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
     try:
         # ✅ configurable timeout with safe minimum
         timeout_seconds = max(1, int(os.getenv("ATHENA_RUNS_ENDPOINT_TIMEOUT_SECONDS", "5")))
-        run_limit = max(1, min(100, int(os.getenv("ATHENA_RUNS_LIST_LIMIT", "10"))))
+        max_limit = max(1, int(os.getenv("ATHENA_RUNS_LIST_MAX_LIMIT", "500")))
+        default_limit = int(os.getenv("ATHENA_RUNS_LIST_LIMIT", "10"))
+        run_limit = max(1, min(max_limit, int(limit if limit is not None else default_limit)))
         fast_summary = str(os.getenv("ATHENA_RUNS_FAST_SUMMARY", "true")).lower() not in {"0", "false", "no"}
         deadline = time.monotonic() + timeout_seconds
 

@@ -5,6 +5,7 @@ import {
   CalendarDays,
   CheckCircle2,
   ChevronDown,
+  Code2,
   Clock,
   FileText,
   History,
@@ -15,9 +16,11 @@ import {
 import useAthenaStore from '../store/useAthenaStore'
 import { getRun, getRuns } from '../api/athenaApi'
 import { PageHeader } from '../components/shared/DashboardLayout'
+import PythonCodeDialog from '../components/shared/PythonCodeDialog'
 import { getPhaseGroups, normalizeState, statusTone } from '../utils/pipelinePhases'
 
 const FILTERS = ['All', 'Running', 'Pending', 'Hitl wait', 'Paused for hitl', 'Pending review', 'Completed', 'Failed', 'Cancelled']
+const RUN_HISTORY_LIMIT = 500
 
 function matchesStatusFilter(statusValue, filterValue) {
   const status = normalizeState(statusValue)
@@ -46,6 +49,7 @@ function RunHistoryPage() {
   const [filter, setFilter] = useState('All')
   const [detailRun, setDetailRun] = useState(null)
   const [runInfoOpen, setRunInfoOpen] = useState(false)
+  const [codeDialog, setCodeDialog] = useState(null)
   const runsRequestInFlightRef = useRef(false)
   const detailRequestInFlightRef = useRef<string | null>(null)
 
@@ -62,6 +66,7 @@ function RunHistoryPage() {
 
   useEffect(() => {
     setRunInfoOpen(false)
+    setCodeDialog(null)
   }, [selectedRunId])
 
   useEffect(() => {
@@ -71,7 +76,7 @@ function RunHistoryPage() {
       if (runsRequestInFlightRef.current) return
       runsRequestInFlightRef.current = true
       try {
-        const data = await getRuns()
+        const data = await getRuns(RUN_HISTORY_LIMIT)
         if (!cancelled && Array.isArray(data)) {
           setRuns(data)
           setServerOnline(true)
@@ -140,6 +145,17 @@ function RunHistoryPage() {
     null
 
   const phases = getPhaseGroups(selectedRun)
+  const openCodeDialog = (layer) => {
+    const runId = selectedRun?.id || selectedRun?.run_id
+    if (!runId) return
+    const layerLabel = `${layer.charAt(0).toUpperCase()}${layer.slice(1)}`
+    setCodeDialog({
+      runId,
+      layer,
+      stageName: `${layerLabel} Code Generation`,
+      title: `${layerLabel} Generated Code - ${selectedRun?.brd_filename || String(runId).slice(0, 8)}`,
+    })
+  }
 
   return (
     <div className="flex min-h-full flex-col gap-4 lg:h-full lg:min-h-0">
@@ -151,7 +167,7 @@ function RunHistoryPage() {
         actions={
           <button
             onClick={async () => {
-              const data = await getRuns()
+              const data = await getRuns(RUN_HISTORY_LIMIT)
               setRuns(Array.isArray(data) ? data : [])
             }}
             className="btn-secondary inline-flex items-center justify-center gap-2 text-xs"
@@ -278,7 +294,7 @@ function RunHistoryPage() {
                 <div className="mb-3 text-xs font-semibold text-[#c4cee0]">Stages by Phase</div>
                 <div className="overflow-hidden rounded-lg border border-[#253044] bg-[#0d1525]">
                   {phases.map((phase, index) => (
-                    <PhaseRow key={phase.id} phase={phase} index={index + 1} run={selectedRun} />
+                    <PhaseRow key={phase.id} phase={phase} index={index + 1} run={selectedRun} onViewCode={openCodeDialog} />
                   ))}
                 </div>
               </div>
@@ -293,6 +309,13 @@ function RunHistoryPage() {
           )}
         </section>
       </div>
+      <PythonCodeDialog
+        isOpen={Boolean(codeDialog)}
+        onClose={() => setCodeDialog(null)}
+        stageName={codeDialog?.stageName || codeDialog?.layer || ''}
+        runId={codeDialog?.runId || ''}
+        title={codeDialog?.title}
+      />
     </div>
   )
 }
@@ -309,7 +332,7 @@ function InfoRow({ icon: Icon, label, value }) {
   )
 }
 
-function PhaseRow({ phase, index, run }) {
+function PhaseRow({ phase, index, run, onViewCode }) {
   const [expanded, setExpanded] = useState(false)
   const displaySteps = getHistoryDisplaySteps(phase, run)
   const completed = displaySteps.filter((step) => isCompletedStep(step.state)).length
@@ -366,7 +389,7 @@ function PhaseRow({ phase, index, run }) {
         <div className="bg-[#080e1d]/50 px-3 pb-2">
           <div>
             {displaySteps.map((step) => (
-              <StageTreeRow key={step.key} step={step} />
+              <StageTreeRow key={step.key} step={step} onViewCode={onViewCode} />
             ))}
           </div>
         </div>
@@ -375,12 +398,14 @@ function PhaseRow({ phase, index, run }) {
   )
 }
 
-function StageTreeRow({ step }) {
+function StageTreeRow({ step, onViewCode }) {
   const state = normalizeState(step.state)
   const done = isCompletedStep(state)
   const running = state === 'RUNNING'
   const review = state === 'HITL_WAIT' || step.key.includes('review') || step.key.startsWith('gate')
   const failed = state === 'FAILED'
+  const codeLayer = codeLayerForStep(step)
+  const canViewCode = done && Boolean(codeLayer && onViewCode)
   const toneClass = failed
     ? 'border-red-400 text-red-400'
     : done
@@ -395,11 +420,30 @@ function StageTreeRow({ step }) {
     <div className="flex min-h-[30px] items-center gap-2 rounded px-2 py-1.5 transition-colors hover:bg-white/[0.03]">
       <span className={`flex h-2 w-2 flex-shrink-0 items-center justify-center rounded-full bg-current ${toneClass} ${running ? 'animate-pulse' : ''}`}>
       </span>
-      <div className={`text-xs ${done || running || review ? 'text-[#c4cee0]' : 'text-[#7f91b4]'}`}>
+      <div className={`min-w-0 flex-1 truncate text-xs ${done || running || review ? 'text-[#c4cee0]' : 'text-[#7f91b4]'}`}>
         {step.label}
       </div>
+      {canViewCode && (
+        <button
+          type="button"
+          onClick={() => onViewCode(codeLayer)}
+          aria-label={`View ${step.label} code`}
+          className="inline-flex h-7 flex-shrink-0 items-center gap-1 rounded-md border border-[#2d4263] px-2 text-[11px] font-semibold text-[#aab8d0] transition-colors hover:border-[#3f82ff] hover:text-white"
+        >
+          <Code2 size={11} />
+          View Code
+        </button>
+      )}
     </div>
   )
+}
+
+function codeLayerForStep(step) {
+  const key = String(step?.key || '')
+  if (key === 'bronze') return 'bronze'
+  if (key === 'silver') return 'silver'
+  if (key === 'gold') return 'gold'
+  return ''
 }
 
 function getHistoryDisplaySteps(phase, run = null) {
@@ -407,20 +451,11 @@ function getHistoryDisplaySteps(phase, run = null) {
   const byKey = new Map(steps.map((step) => [step.key, step]))
   const phaseState = phaseStatusToStepState(phase.status)
   const fileSource = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
-  const dbtRun =
-    String(run?.target_warehouse || '').toLowerCase() === 'snowflake' &&
-    String(run?.execution_engine || '').toLowerCase() === 'dbt'
-  const executionLabels = dbtRun
-    ? {
-        bronze_code_execution: 'Bronze dbt Models Exported',
-        silver_code_execution: 'Silver dbt Models Exported',
-        gold_code_execution: 'Gold dbt Artifacts Finalized',
-      }
-    : {
-        bronze_code_execution: 'Bronze Code Execution',
-        silver_code_execution: 'Silver Code Execution',
-        gold_code_execution: 'Gold Code Execution',
-      }
+  const executionLabels = {
+    bronze_code_execution: 'Bronze Execution',
+    silver_code_execution: 'Silver Execution',
+    gold_code_execution: 'Gold Execution',
+  }
 
   const actual = (key, label, fallbackState = phaseState) => {
     const step = byKey.get(key)
@@ -473,7 +508,7 @@ function getHistoryDisplaySteps(phase, run = null) {
       actual('bronze', 'Bronze Code Generation'),
       actual('gate4', 'Bronze Review', reviewAwareState(byKey.get('gate4'), phase)),
     ]
-    if (byKey.has('bronze_code_execution')) displaySteps.push(actual('bronze_code_execution', 'Bronze Code Execution'))
+    if (byKey.has('bronze_code_execution')) displaySteps.push(actual('bronze_code_execution', executionLabels.bronze_code_execution))
     return clampLinearHistorySteps(displaySteps)
   }
 
@@ -497,7 +532,7 @@ function getHistoryDisplaySteps(phase, run = null) {
       actual('silver', 'Silver Code Generation', silverFlow.codeGeneration),
       actual('gate5', 'Silver Review', silverFlow.reviewGate),
     ]
-    if (byKey.has('silver_code_execution')) displaySteps.push(actual('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution))
+    if (byKey.has('silver_code_execution')) displaySteps.push(actual('silver_code_execution', executionLabels.silver_code_execution, silverFlow.codeExecution))
     return clampLinearHistorySteps(displaySteps)
   }
 

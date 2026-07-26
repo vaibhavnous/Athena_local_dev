@@ -1176,20 +1176,11 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
   const byKey = new Map([...allSteps, ...steps].map((step) => [step.key, step]))
   const phaseState = phaseStatusToStepState(phase.status)
   const fileSource = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
-  const dbtRun =
-    String(run?.target_warehouse || '').toLowerCase() === 'snowflake' &&
-    String(run?.execution_engine || '').toLowerCase() === 'dbt'
-  const executionLabels = dbtRun
-    ? {
-        bronze_code_execution: 'Bronze dbt Models Exported',
-        silver_code_execution: 'Silver dbt Models Exported',
-        gold_code_execution: 'Gold dbt Artifacts Finalized',
-      }
-    : {
-        bronze_code_execution: 'Bronze Code Execution',
-        silver_code_execution: 'Silver Code Execution',
-        gold_code_execution: 'Gold Code Execution',
-      }
+  const executionLabels = {
+    bronze_code_execution: 'Bronze Execution',
+    silver_code_execution: 'Silver Execution',
+    gold_code_execution: 'Gold Execution',
+  }
   const makeStep = (key, label, fallbackState = phaseState, forceState = false) => {
     const step = byKey.get(key)
     const state = normalizeState(forceState ? fallbackState : (step?.state || fallbackState))
@@ -1236,7 +1227,7 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
         makeStep('bronze', 'Bronze Code Generation'),
         makeStep('gate4', 'Bronze Review', gate4State),
       ]
-      displaySteps.push(makeStep('bronze_code_execution', 'Bronze Code Execution'))
+      displaySteps.push(makeStep('bronze_code_execution', executionLabels.bronze_code_execution))
     } else {
       const goldState = byKey.get('gold')?.state
       const goldReviewState = run?.next_review_key === 'gold_review' && normalizeState(run?.status) === 'HITL_WAIT'
@@ -1295,7 +1286,7 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeStep('silver', 'Silver Code Generation', silverFlow.codeGeneration, true),
       makeStep('gate5', 'Silver Review', silverFlow.reviewGate, true),
     ]
-    if (fileSource) displaySteps.push(makeStep('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution, true))
+    if (fileSource) displaySteps.push(makeStep('silver_code_execution', executionLabels.silver_code_execution, silverFlow.codeExecution, true))
     }
   } else if (phase.id === 'phase-5') {
     const goldFlow = buildGoldPhaseStates(
@@ -1309,7 +1300,7 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
     )
     displaySteps = fileSource ? [
       makeStep('gold', 'Gold Code Generation', goldFlow.codeGeneration, true),
-      makeStep('gold_code_execution', 'Gold Code Execution', goldFlow.codeExecution, true),
+      makeStep('gold_code_execution', executionLabels.gold_code_execution, goldFlow.codeExecution, true),
     ] : [
       makeStep('gold', 'Gold Code Generation', goldFlow.codeGeneration, true),
       makeStep('gold_review', 'Gold Review', goldFlow.reviewGate, true),

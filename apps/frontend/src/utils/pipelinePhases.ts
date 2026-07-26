@@ -62,7 +62,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     },
     {
       id: 'phase-4',
-      label: 'Code Execution & Results',
+      label: 'Code Execution & Report Generation',
       keys: ['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'],
     },
   ],
@@ -108,17 +108,16 @@ function isSnowflakeDbtRun(run) {
 
 function labelPhaseForRun(run, sourceType: string, phase: { id: string, label: string }) {
   if (sourceType === 'database' && phase.id === 'phase-4' && isSnowflakeDbtRun(run)) {
-    return 'dbt Artifact Finalization'
+    return 'Code Execution & Report Generation'
   }
   return phase.label
 }
 
 function labelStepForRun(run, key: string, label: string) {
-  if (!isSnowflakeDbtRun(run)) return label
   const labels: Record<string, string> = {
-    bronze_code_execution: 'Bronze dbt Models Exported',
-    silver_code_execution: 'Silver dbt Models Exported',
-    gold_code_execution: 'Gold dbt Artifacts Finalized',
+    bronze_code_execution: 'Bronze Execution',
+    silver_code_execution: 'Silver Execution',
+    gold_code_execution: 'Gold Execution',
   }
   return labels[key] || label
 }
@@ -387,15 +386,15 @@ function fallbackStepLabel(key) {
     gate3: 'Semantic Review',
     bronze: 'Bronze Code Generation',
     gate4: 'Bronze Review',
-    bronze_code_execution: 'Bronze Code Execution',
+    bronze_code_execution: 'Bronze Execution',
     silver_merge_key_resolution: 'Silver Merge Key Resolution',
     silver_merge_key_review: 'Silver Merge Key Review',
     silver: 'Silver Code Generation',
     gate5: 'Silver Review',
-    silver_code_execution: 'Silver Code Execution',
+    silver_code_execution: 'Silver Execution',
     gold: 'Gold Code Generation',
     gold_review: 'Gold Review',
-    gold_code_execution: 'Gold Code Execution',
+    gold_code_execution: 'Gold Execution',
   }
   return labels[key] || key
 }

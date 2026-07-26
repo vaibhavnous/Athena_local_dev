@@ -108,7 +108,7 @@ test('shows Gold review as waiting while generated Gold code is under review', (
     next_review_key: 'gold_review',
     pipeline_steps: [
       { key: 'gold', label: 'Gold Code Generation', state: 'COMPLETED' },
-      { key: 'gold_code_execution', label: 'Gold Code Execution', state: 'PENDING' },
+      { key: 'gold_code_execution', label: 'Gold Execution', state: 'PENDING' },
     ],
   }
 
@@ -142,7 +142,7 @@ test('groups database code lifecycle phases by generation and execution', () => 
     'Discovery & Requirement Intelligence',
     'Source & Metadata Intelligence',
     'Code Generation & Review',
-    'Code Execution & Results',
+    'Code Execution & Report Generation',
   ])
   expect(phases.find((item) => item.id === 'phase-3')?.steps.map((step) => step.key)).toEqual([
     'bronze',
@@ -159,6 +159,11 @@ test('groups database code lifecycle phases by generation and execution', () => 
     'silver_code_execution',
     'gold_code_execution',
   ])
+  expect(phases.find((item) => item.id === 'phase-4')?.steps.map((step) => step.label)).toEqual([
+    'Bronze Execution',
+    'Silver Execution',
+    'Gold Execution',
+  ])
 })
 
 test('does not render Snowflake dbt as a separate Gold phase', () => {
@@ -167,7 +172,7 @@ test('does not render Snowflake dbt as a separate Gold phase', () => {
     target_warehouse: 'snowflake',
     pipeline_steps: [
       { key: 'gold', label: 'Gold Code Generation', state: 'COMPLETED' },
-      { key: 'gold_code_execution', label: 'Gold Code Execution', state: 'COMPLETED' },
+      { key: 'gold_code_execution', label: 'Gold Execution', state: 'COMPLETED' },
     ],
   }
   const dbtRun = {
@@ -185,9 +190,13 @@ test('does not render Snowflake dbt as a separate Gold phase', () => {
   expect(getPhaseGroups(dbtRun, getPipelineSteps(dbtRun)).find((item) => item.id === 'phase-4')?.steps)
     .not.toContainEqual(expect.objectContaining({ key: 'snowflake_dbt_deploy' }))
   expect(getPhaseGroups(dbtRun, getPipelineSteps(dbtRun)).find((item) => item.id === 'phase-4')?.label)
-    .toBe('dbt Artifact Finalization')
+    .toBe('Code Execution & Report Generation')
   expect(getPhaseGroups(dbtRun, getPipelineSteps(dbtRun)).find((item) => item.id === 'phase-4')?.steps)
-    .toContainEqual(expect.objectContaining({ key: 'gold_code_execution', label: 'Gold dbt Artifacts Finalized' }))
+    .toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'bronze_code_execution', label: 'Bronze Execution' }),
+      expect.objectContaining({ key: 'silver_code_execution', label: 'Silver Execution' }),
+      expect.objectContaining({ key: 'gold_code_execution', label: 'Gold Execution' }),
+    ]))
 })
 
 test('labels pending dbt Gold review without execution wording', () => {
@@ -198,7 +207,7 @@ test('labels pending dbt Gold review without execution wording', () => {
     next_review_key: 'gold_review',
     pipeline_steps: [
       { key: 'gold', label: 'Gold Code Generation', state: 'COMPLETED' },
-      { key: 'gold_code_execution', label: 'Gold Code Execution', state: 'PENDING' },
+      { key: 'gold_code_execution', label: 'Gold Execution', state: 'PENDING' },
     ],
   }
 

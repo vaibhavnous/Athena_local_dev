@@ -15,14 +15,19 @@ const normalizeScripts = (payload, layer) => {
   const scripts = payload?.[layer]?.scripts || []
   return scripts.map((script, index) => {
     if (typeof script === 'string') return { filename: `${layer}_${index + 1}.py`, code: script }
+    const pathName = script.script_path || script.path || ''
+    const fileFromPath = pathName ? String(pathName).split(/[\\/]/).pop() : ''
+    const generatedBody = script.generated_bronze_script || script.generated_silver_script || script.generated_gold_script || ''
+    const body = script.script_body || generatedBody || script.code || script.content || script.script || script.sql || script.python_code || ''
+    const dimensionBody = script.dimension_script_body || script.dimension_body || ''
     return {
-      filename: script.filename || script.file_name || script.name || `${layer}_${index + 1}.${script.language === 'sql' ? 'sql' : 'py'}`,
-      code: script.code || script.content || script.script || script.sql || script.python_code || '',
+      filename: script.filename || script.file_name || script.name || fileFromPath || `${layer}_${index + 1}.${script.language === 'sql' ? 'sql' : 'py'}`,
+      code: dimensionBody ? `${body}\n\n# ---------------- Gold dimension script ----------------\n\n${dimensionBody}` : body,
     }
   })
 }
 
-export default function PythonCodeDialog({ isOpen, onClose, stageName, runId, title }) {
+export default function PythonCodeDialog({ isOpen, onClose, stageName, runId, title = '' }) {
   const layer = useMemo(() => layerFromStage(stageName), [stageName])
   const [files, setFiles] = useState([])
   const [activeTab, setActiveTab] = useState(0)

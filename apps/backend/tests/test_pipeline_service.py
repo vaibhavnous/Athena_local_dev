@@ -409,6 +409,7 @@ def test_list_runs_uses_lightweight_checkpoint_index(monkeypatch):
     }]
     assert "full_state_json" not in recorded["query"]
     assert "ai_store" not in recorded["query"]
+    assert "GROUP BY run_id" in recorded["query"]
     assert recorded["closed"] is True
 
 

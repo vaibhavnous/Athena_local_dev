@@ -973,6 +973,7 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
 
 
 def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
+    safe_limit = max(1, min(1000, int(limit or 50)))
     conn = get_connection()
     try:
         cursor = conn.cursor()
@@ -985,9 +986,10 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
         # hint once the metadata database uses snapshot isolation.
         cursor.execute(
             f"""
-            SELECT TOP ({limit}) run_id, checkpoint_at AS last_activity
+            SELECT TOP ({safe_limit}) run_id, MAX(checkpoint_at) AS last_activity
             FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
-            ORDER BY checkpoint_at DESC
+            GROUP BY run_id
+            ORDER BY MAX(checkpoint_at) DESC
             """
         )
         rows = cursor.fetchall()
@@ -1015,7 +1017,7 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
                 pass
             cursor.execute(
                 f"""
-                SELECT TOP ({limit}) run_id, MAX(checkpoint_at) AS last_activity
+                SELECT TOP ({safe_limit}) run_id, MAX(checkpoint_at) AS last_activity
                 FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
                 GROUP BY run_id
                 ORDER BY MAX(checkpoint_at) DESC
