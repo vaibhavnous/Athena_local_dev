@@ -1176,6 +1176,20 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
   const byKey = new Map([...allSteps, ...steps].map((step) => [step.key, step]))
   const phaseState = phaseStatusToStepState(phase.status)
   const fileSource = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
+  const dbtRun =
+    String(run?.target_warehouse || '').toLowerCase() === 'snowflake' &&
+    String(run?.execution_engine || '').toLowerCase() === 'dbt'
+  const executionLabels = dbtRun
+    ? {
+        bronze_code_execution: 'Bronze dbt Models Exported',
+        silver_code_execution: 'Silver dbt Models Exported',
+        gold_code_execution: 'Gold dbt Artifacts Finalized',
+      }
+    : {
+        bronze_code_execution: 'Bronze Code Execution',
+        silver_code_execution: 'Silver Code Execution',
+        gold_code_execution: 'Gold Code Execution',
+      }
   const makeStep = (key, label, fallbackState = phaseState, forceState = false) => {
     const step = byKey.get(key)
     const state = normalizeState(forceState ? fallbackState : (step?.state || fallbackState))
@@ -1217,12 +1231,47 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
     ]
   } else if (phase.id === 'phase-3') {
     const gate4State = reviewAwareStepState(byKey.get('gate4'), phase, run, 4)
-    displaySteps = [
-      makeStep('bronze', 'Bronze Code Generation'),
-      makeStep('gate4', 'Bronze Review', gate4State),
-    ]
-    if (fileSource) displaySteps.push(makeStep('bronze_code_execution', 'Bronze Code Execution'))
+    if (fileSource) {
+      displaySteps = [
+        makeStep('bronze', 'Bronze Code Generation'),
+        makeStep('gate4', 'Bronze Review', gate4State),
+      ]
+      displaySteps.push(makeStep('bronze_code_execution', 'Bronze Code Execution'))
+    } else {
+      const goldState = byKey.get('gold')?.state
+      const goldReviewState = run?.next_review_key === 'gold_review' && normalizeState(run?.status) === 'HITL_WAIT'
+        ? 'HITL_WAIT'
+        : byKey.get('gold_review')?.state
+      const goldExecutionState = byKey.get('gold_code_execution')?.state
+      const hasGoldProgress = ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(normalizeState(goldState)) ||
+        ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(normalizeState(goldReviewState)) ||
+        ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(normalizeState(goldExecutionState))
+      const gate5State = hasGoldProgress
+        ? 'COMPLETED'
+        : reviewAwareStepState(byKey.get('gate5'), phase, run, 5)
+      const rawMergeReviewState = run?.next_review_key === 'silver_merge_key_review'
+        ? 'HITL_WAIT'
+        : byKey.get('silver_merge_key_review')?.state
+      const mergeReviewState = rawMergeReviewState ? normalizeState(rawMergeReviewState) : ''
+      displaySteps = [
+        makeStep('bronze', 'Bronze Code Generation'),
+        makeStep('gate4', 'Bronze Review', gate4State),
+        makeSynthetic('silver_merge_key_resolution', 'Silver Merge Key Resolution', byKey.get('silver_merge_key_resolution')?.state || phaseState, 'Merge keys are resolved before Silver generation.'),
+        makeSynthetic('silver_merge_key_review', 'Silver Merge Key Review', mergeReviewState || byKey.get('silver_merge_key_review')?.state || phaseState, 'Merge keys are reviewed before Silver generation.'),
+        makeStep('silver', 'Silver Code Generation', byKey.get('silver')?.state || phaseState),
+        makeStep('gate5', 'Silver Review', gate5State, true),
+        makeStep('gold', 'Gold Code Generation', byKey.get('gold')?.state || phaseState),
+        makeStep('gold_review', 'Gold Review', goldReviewState || byKey.get('gold_review')?.state || phaseState, true),
+      ]
+    }
   } else if (phase.id === 'phase-4') {
+    if (!fileSource) {
+      displaySteps = [
+        makeStep('bronze_code_execution', executionLabels.bronze_code_execution),
+        makeStep('silver_code_execution', executionLabels.silver_code_execution),
+        makeStep('gold_code_execution', executionLabels.gold_code_execution),
+      ]
+    } else {
     const silverState = normalizeState(byKey.get('silver')?.state || phaseState)
     const silverExecutionState = normalizeState(byKey.get('silver_code_execution')?.state)
     const gate4State = reviewAwareStepState(byKey.get('gate4'), phase, run, 4)
@@ -1247,6 +1296,7 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeStep('gate5', 'Silver Review', silverFlow.reviewGate, true),
     ]
     if (fileSource) displaySteps.push(makeStep('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution, true))
+    }
   } else if (phase.id === 'phase-5') {
     const goldFlow = buildGoldPhaseStates(
       byKey.get('gold')?.state || phaseState,
@@ -1263,9 +1313,9 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
     ] : [
       makeStep('gold', 'Gold Code Generation', goldFlow.codeGeneration, true),
       makeStep('gold_review', 'Gold Review', goldFlow.reviewGate, true),
-      makeStep('bronze_code_execution', 'Bronze Code Execution'),
-      makeStep('silver_code_execution', 'Silver Code Execution'),
-      makeStep('gold_code_execution', 'Gold Code Execution', goldFlow.codeExecution, true),
+      makeStep('bronze_code_execution', executionLabels.bronze_code_execution),
+      makeStep('silver_code_execution', executionLabels.silver_code_execution),
+      makeStep('gold_code_execution', executionLabels.gold_code_execution, goldFlow.codeExecution, true),
     ]
   }
 

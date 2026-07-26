@@ -278,7 +278,7 @@ function RunHistoryPage() {
                 <div className="mb-3 text-xs font-semibold text-[#c4cee0]">Stages by Phase</div>
                 <div className="overflow-hidden rounded-lg border border-[#253044] bg-[#0d1525]">
                   {phases.map((phase, index) => (
-                    <PhaseRow key={phase.id} phase={phase} index={index + 1} />
+                    <PhaseRow key={phase.id} phase={phase} index={index + 1} run={selectedRun} />
                   ))}
                 </div>
               </div>
@@ -309,9 +309,9 @@ function InfoRow({ icon: Icon, label, value }) {
   )
 }
 
-function PhaseRow({ phase, index }) {
+function PhaseRow({ phase, index, run }) {
   const [expanded, setExpanded] = useState(false)
-  const displaySteps = getHistoryDisplaySteps(phase)
+  const displaySteps = getHistoryDisplaySteps(phase, run)
   const completed = displaySteps.filter((step) => isCompletedStep(step.state)).length
   const total = displaySteps.length || phase.total || 0
   const tone = statusTone(phase.status)
@@ -402,10 +402,25 @@ function StageTreeRow({ step }) {
   )
 }
 
-function getHistoryDisplaySteps(phase) {
+function getHistoryDisplaySteps(phase, run = null) {
   const steps = Array.isArray(phase.steps) ? phase.steps : []
   const byKey = new Map(steps.map((step) => [step.key, step]))
   const phaseState = phaseStatusToStepState(phase.status)
+  const fileSource = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
+  const dbtRun =
+    String(run?.target_warehouse || '').toLowerCase() === 'snowflake' &&
+    String(run?.execution_engine || '').toLowerCase() === 'dbt'
+  const executionLabels = dbtRun
+    ? {
+        bronze_code_execution: 'Bronze dbt Models Exported',
+        silver_code_execution: 'Silver dbt Models Exported',
+        gold_code_execution: 'Gold dbt Artifacts Finalized',
+      }
+    : {
+        bronze_code_execution: 'Bronze Code Execution',
+        silver_code_execution: 'Silver Code Execution',
+        gold_code_execution: 'Gold Code Execution',
+      }
 
   const actual = (key, label, fallbackState = phaseState) => {
     const step = byKey.get(key)
@@ -430,7 +445,7 @@ function getHistoryDisplaySteps(phase) {
   if (phase.id === 'phase-2') {
     return clampLinearHistorySteps([
       actual('nomination', 'Table Extraction'),
-      actual('gate2', 'Table Review', reviewAwareState(byKey.get('gate2'), phase)),
+      actual('gate2', byKey.get('gate2')?.label || 'Table Review', reviewAwareState(byKey.get('gate2'), phase)),
       actual('discovery', 'Column Extraction', byKey.get('discovery')?.state || byKey.get('schema')?.state || phaseState),
       actual('profiling', 'Column Profiling', byKey.get('profiling')?.state || phaseState),
       actual('enrichment', 'Semantic Enrichment', byKey.get('enrichment')?.state || phaseState),
@@ -439,6 +454,21 @@ function getHistoryDisplaySteps(phase) {
   }
 
   if (phase.id === 'phase-3') {
+    if (!fileSource) {
+      const goldReviewState = run?.next_review_key === 'gold_review' && normalizeState(run?.status) === 'HITL_WAIT'
+        ? 'HITL_WAIT'
+        : byKey.get('gold_review')?.state
+      return clampLinearHistorySteps([
+        actual('bronze', 'Bronze Code Generation'),
+        actual('gate4', 'Bronze Review', reviewAwareState(byKey.get('gate4'), phase)),
+        actual('silver_merge_key_resolution', 'Silver Merge Key Resolution'),
+        actual('silver_merge_key_review', 'Silver Merge Key Review'),
+        actual('silver', 'Silver Code Generation'),
+        actual('gate5', 'Silver Review', reviewAwareState(byKey.get('gate5'), phase)),
+        actual('gold', 'Gold Code Generation'),
+        actual('gold_review', 'Gold Review', goldReviewState || byKey.get('gold_review')?.state || phaseState),
+      ])
+    }
     const displaySteps = [
       actual('bronze', 'Bronze Code Generation'),
       actual('gate4', 'Bronze Review', reviewAwareState(byKey.get('gate4'), phase)),
@@ -448,6 +478,13 @@ function getHistoryDisplaySteps(phase) {
   }
 
   if (phase.id === 'phase-4') {
+    if (!fileSource) {
+      return clampLinearHistorySteps([
+        actual('bronze_code_execution', executionLabels.bronze_code_execution),
+        actual('silver_code_execution', executionLabels.silver_code_execution),
+        actual('gold_code_execution', executionLabels.gold_code_execution),
+      ])
+    }
     const silverState = normalizeState(byKey.get('silver')?.state || phaseState)
     const silverExecutionState = byKey.get('silver_code_execution')?.state ? normalizeState(byKey.get('silver_code_execution')?.state) : ''
     const gate4State = reviewAwareState(byKey.get('gate4'), phase)
@@ -477,11 +514,11 @@ function getHistoryDisplaySteps(phase) {
     if (byKey.has('gold_review')) {
       displaySteps.push(
         actual('gold_review', 'Gold Review', goldFlow.reviewGate),
-        actual('bronze_code_execution', 'Bronze Code Execution'),
-        actual('silver_code_execution', 'Silver Code Execution'),
+        actual('bronze_code_execution', executionLabels.bronze_code_execution),
+        actual('silver_code_execution', executionLabels.silver_code_execution),
       )
     }
-    displaySteps.push(actual('gold_code_execution', 'Gold Code Execution', goldFlow.codeExecution))
+    displaySteps.push(actual('gold_code_execution', executionLabels.gold_code_execution, goldFlow.codeExecution))
     return clampLinearHistorySteps(displaySteps)
   }
 

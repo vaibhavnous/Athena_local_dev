@@ -14,6 +14,7 @@ export function normalizeState(value: string | undefined) {
   if (state === 'SUCCESS' || state === 'PIPELINE_COMPLETED') return 'COMPLETED'
   if (state === 'EXTERNAL_FAILED') return 'FAILED'
   if (state === 'DEFERRED_UNTIL_GOLD_REVIEW') return 'PENDING'
+  if (state === 'SKIPPED_DBT_CODEGEN_ONLY' || state === 'NOT_APPLICABLE_CODEGEN_ONLY') return 'COMPLETED'
   return state || 'PENDING'
 }
 
@@ -56,18 +57,13 @@ export const PIPELINE_PHASE_TEMPLATES = {
     },
     {
       id: 'phase-3',
-      label: 'Bronze Layer (Ingestion)',
-      keys: ['bronze', 'gate4'],
+      label: 'Code Generation & Review',
+      keys: ['bronze', 'gate4', 'silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'gold', 'gold_review'],
     },
     {
       id: 'phase-4',
-      label: 'Silver Layer (Transformation)',
-      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5'],
-    },
-    {
-      id: 'phase-5',
-      label: 'Gold Layer & Deployment',
-      keys: ['gold', 'gold_review', 'bronze_code_execution', 'silver_code_execution', 'gold_code_execution'],
+      label: 'Code Execution & Results',
+      keys: ['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'],
     },
   ],
   file: [
@@ -103,24 +99,62 @@ export function isFileSource(run) {
   return run?.source === 'sftp' || run?.source === 'adls_gen2'
 }
 
+function isSnowflakeDbtRun(run) {
+  return (
+    String(run?.target_warehouse || '').toLowerCase() === 'snowflake' &&
+    String(run?.execution_engine || '').toLowerCase() === 'dbt'
+  )
+}
+
+function labelPhaseForRun(run, sourceType: string, phase: { id: string, label: string }) {
+  if (sourceType === 'database' && phase.id === 'phase-4' && isSnowflakeDbtRun(run)) {
+    return 'dbt Artifact Finalization'
+  }
+  return phase.label
+}
+
+function labelStepForRun(run, key: string, label: string) {
+  if (!isSnowflakeDbtRun(run)) return label
+  const labels: Record<string, string> = {
+    bronze_code_execution: 'Bronze dbt Models Exported',
+    silver_code_execution: 'Silver dbt Models Exported',
+    gold_code_execution: 'Gold dbt Artifacts Finalized',
+  }
+  return labels[key] || label
+}
+
+function stepState(step: any) {
+  const raw = step?.state ?? step?.status
+  if (raw !== undefined && raw !== null && String(raw || '').trim()) return normalizeState(raw)
+  if (step?.complete === true) return 'COMPLETED'
+  return 'PENDING'
+}
+
 export function getPipelineSteps(run) {
   if (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length) {
-    const steps = run.pipeline_steps.map((step) => ({
-      ...step,
-      label: formatPipelineStepLabel(step.label, step.key),
-      detail: step.detail || buildStepDetail(run, step.key, normalizeState(step.state), step.detail),
-      state: normalizeState(step.state),
-    })) as PipelineStep[]
+    const steps = run.pipeline_steps.map((step) => {
+      const state = stepState(step)
+      return {
+        ...step,
+        label: labelStepForRun(run, step.key, formatPipelineStepLabel(step.label, step.key)),
+        detail: step.detail || buildStepDetail(run, step.key, state, step.detail),
+        state,
+        complete: state === 'COMPLETED',
+      }
+    }) as PipelineStep[]
     return withPendingReviewGate(run, clearStaleWaitingSteps(run, applyExternalExecutionState(run, steps)))
   }
   if (Array.isArray(run?.stages) && run.stages.length) {
-    const steps = run.stages.map((stage) => ({
-      key: stage.key,
-      label: formatPipelineStepLabel(stage.name, stage.key),
-      detail: stage.error || buildStepDetail(run, stage.key, normalizeState(stage.status), ''),
-      state: normalizeState(stage.status),
-      complete: normalizeState(stage.status) === 'COMPLETED',
-    })) as PipelineStep[]
+    const steps = run.stages.map((stage) => {
+      const state = stepState(stage)
+      return {
+        key: stage.key,
+        label: labelStepForRun(run, stage.key, formatPipelineStepLabel(stage.name, stage.key)),
+        detail: stage.error || buildStepDetail(run, stage.key, state, ''),
+        state,
+        complete: state === 'COMPLETED',
+      }
+    }) as PipelineStep[]
     return withPendingReviewGate(run, clearStaleWaitingSteps(run, applyExternalExecutionState(run, steps)))
   }
   return withPendingReviewGate(run, applyExternalExecutionState(run, [] as PipelineStep[]))
@@ -280,9 +314,9 @@ export function getPhaseGroups(run, stepsOverride?) {
     const phaseSteps: PipelineStep[] = keys.map((key) => {
       const step = byKey.get(key)
       return (
-        step || {
+        step ? { ...step, label: labelStepForRun(run, key, step.label) } : {
           key,
-          label: fallbackStepLabel(key),
+          label: labelStepForRun(run, key, fallbackStepLabel(key)),
           detail: '',
           state: syntheticStepState(key, byKey),
           complete: syntheticStepState(key, byKey) === 'COMPLETED',
@@ -303,6 +337,7 @@ export function getPhaseGroups(run, stepsOverride?) {
 
     return {
       ...phase,
+      label: labelPhaseForRun(run, sourceType, phase),
       steps: phaseSteps,
       completed,
       total: phaseSteps.length,
@@ -496,10 +531,19 @@ function buildStepDetail(run, key, state, existingDetail) {
       if (state === 'RUNNING') return 'Generating Gold KPI scripts.'
       return 'Gold generation starts after Silver Review approval.'
     case 'gold_review':
-      if (state === 'HITL_WAIT') return 'Gold Review is ready. Validate generated Gold artifacts before deployment execution starts.'
-      if (state === 'COMPLETED') return 'Gold artifacts were approved for deployment execution.'
+      if (state === 'HITL_WAIT') return isSnowflakeDbtRun(run)
+        ? 'Gold Review is ready. Validate generated dbt artifacts before finalization.'
+        : 'Gold Review is ready. Validate generated Gold artifacts before deployment execution starts.'
+      if (state === 'COMPLETED') return isSnowflakeDbtRun(run)
+        ? 'Gold artifacts were approved for dbt project finalization.'
+        : 'Gold artifacts were approved for deployment execution.'
       return 'Gold Review opens after Gold generation completes.'
     case 'bronze_code_execution':
+      if (isSnowflakeDbtRun(run)) {
+        if (state === 'COMPLETED') return 'Snowflake dbt-compatible Bronze models were exported for external dbt execution.'
+        if (state === 'RUNNING') return 'Finalizing Snowflake dbt-compatible Bronze models.'
+        return 'Bronze dbt model export is finalized after Gold Review approval.'
+      }
       if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
         if (state === 'COMPLETED') return 'Approved Bronze scripts were executed in Snowflake.'
         if (state === 'RUNNING') return 'Executing approved Bronze scripts in Snowflake.'
@@ -507,6 +551,11 @@ function buildStepDetail(run, key, state, existingDetail) {
       }
       return 'Bronze execution starts after Gold Review approval.'
     case 'silver_code_execution':
+      if (isSnowflakeDbtRun(run)) {
+        if (state === 'COMPLETED') return 'Snowflake dbt-compatible Silver models were exported for external dbt execution.'
+        if (state === 'RUNNING') return 'Finalizing Snowflake dbt-compatible Silver models.'
+        return 'Silver dbt model export is finalized after Gold Review approval.'
+      }
       if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
         if (state === 'COMPLETED') return 'Approved Silver scripts were executed in Snowflake.'
         if (state === 'RUNNING') return 'Executing approved Silver scripts in Snowflake.'
@@ -515,9 +564,9 @@ function buildStepDetail(run, key, state, existingDetail) {
       return 'Silver execution starts after Bronze execution completes.'
     case 'gold_code_execution':
       if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake' && String(run?.execution_engine || '').toLowerCase() === 'dbt') {
-        if (state === 'COMPLETED') return 'Generated dbt-compatible Gold artifacts were approved.'
+        if (state === 'COMPLETED') return 'Generated dbt-compatible Gold artifacts were finalized for external dbt execution.'
         if (state === 'RUNNING') return 'Finalizing generated dbt-compatible Gold artifacts.'
-        return 'Gold review starts after dbt-compatible Gold generation.'
+        return 'Gold dbt artifact finalization starts after Gold Review approval.'
       }
       if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
         if (state === 'COMPLETED') return 'Generated Gold scripts were executed in Snowflake.'

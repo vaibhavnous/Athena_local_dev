@@ -23,8 +23,8 @@ test('renders Snowflake bronze execution after Gold review without advancing lat
     ],
   }
 
-  expect(phaseState(run, 'phase-5', 'bronze_code_execution')).toBe('RUNNING')
-  expect(phaseState(run, 'phase-5', 'silver_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-4', 'bronze_code_execution')).toBe('RUNNING')
+  expect(phaseState(run, 'phase-4', 'silver_code_execution')).toBe('PENDING')
 })
 
 test('promotes an existing merge-key step when the backend pauses for review', () => {
@@ -40,9 +40,9 @@ test('promotes an existing merge-key step when the backend pauses for review', (
     ],
   }
 
-  expect(phaseState(run, 'phase-4', 'silver_merge_key_review')).toBe('HITL_WAIT')
-  expect(phaseState(run, 'phase-4', 'silver')).toBe('PENDING')
-  expect(phaseState(run, 'phase-5', 'bronze_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-3', 'silver_merge_key_review')).toBe('HITL_WAIT')
+  expect(phaseState(run, 'phase-3', 'silver')).toBe('PENDING')
+  expect(phaseState(run, 'phase-4', 'bronze_code_execution')).toBe('PENDING')
 })
 
 test('renders ordered execution frontiers after Gold review', () => {
@@ -80,9 +80,9 @@ test('renders ordered execution frontiers after Gold review', () => {
     ],
   }
 
-  expect(phaseState(bronzeRun, 'phase-5', 'bronze_code_execution')).toBe('RUNNING')
-  expect(phaseState(silverRun, 'phase-5', 'silver_code_execution')).toBe('RUNNING')
-  expect(phaseState(goldRun, 'phase-5', 'gold_code_execution')).toBe('RUNNING')
+  expect(phaseState(bronzeRun, 'phase-4', 'bronze_code_execution')).toBe('RUNNING')
+  expect(phaseState(silverRun, 'phase-4', 'silver_code_execution')).toBe('RUNNING')
+  expect(phaseState(goldRun, 'phase-4', 'gold_code_execution')).toBe('RUNNING')
 })
 
 test('does not infer Silver generation or execution from a completed merge-key review', () => {
@@ -97,9 +97,9 @@ test('does not infer Silver generation or execution from a completed merge-key r
     ],
   }
 
-  expect(phaseState(run, 'phase-4', 'silver')).toBe('PENDING')
-  expect(phaseState(run, 'phase-4', 'gate5')).toBe('PENDING')
-  expect(phaseState(run, 'phase-5', 'silver_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-3', 'silver')).toBe('PENDING')
+  expect(phaseState(run, 'phase-3', 'gate5')).toBe('PENDING')
+  expect(phaseState(run, 'phase-4', 'silver_code_execution')).toBe('PENDING')
 })
 
 test('shows Gold review as waiting while generated Gold code is under review', () => {
@@ -116,9 +116,49 @@ test('shows Gold review as waiting while generated Gold code is under review', (
     label: 'Gold Review',
     state: 'HITL_WAIT',
   })
-  expect(phaseState(run, 'phase-5', 'bronze_code_execution')).toBe('PENDING')
-  expect(phaseState(run, 'phase-5', 'silver_code_execution')).toBe('PENDING')
-  expect(phaseState(run, 'phase-5', 'gold_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-4', 'bronze_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-4', 'silver_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-4', 'gold_code_execution')).toBe('PENDING')
+})
+
+test('groups database code lifecycle phases by generation and execution', () => {
+  const phases = getPhaseGroups({
+    source: 'database',
+    pipeline_steps: [
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'HITL_WAIT' },
+    ],
+  }, getPipelineSteps({
+    source: 'database',
+    pipeline_steps: [
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'HITL_WAIT' },
+    ],
+  }))
+
+  expect(phases.map((item) => item.label)).toEqual([
+    'Discovery & Requirement Intelligence',
+    'Source & Metadata Intelligence',
+    'Code Generation & Review',
+    'Code Execution & Results',
+  ])
+  expect(phases.find((item) => item.id === 'phase-3')?.steps.map((step) => step.key)).toEqual([
+    'bronze',
+    'gate4',
+    'silver_merge_key_resolution',
+    'silver_merge_key_review',
+    'silver',
+    'gate5',
+    'gold',
+    'gold_review',
+  ])
+  expect(phases.find((item) => item.id === 'phase-4')?.steps.map((step) => step.key)).toEqual([
+    'bronze_code_execution',
+    'silver_code_execution',
+    'gold_code_execution',
+  ])
 })
 
 test('does not render Snowflake dbt as a separate Gold phase', () => {
@@ -140,10 +180,14 @@ test('does not render Snowflake dbt as a separate Gold phase', () => {
     ],
   }
 
-  expect(getPhaseGroups(nativeRun, getPipelineSteps(nativeRun)).find((item) => item.id === 'phase-5')?.steps)
+  expect(getPhaseGroups(nativeRun, getPipelineSteps(nativeRun)).find((item) => item.id === 'phase-4')?.steps)
     .not.toContainEqual(expect.objectContaining({ key: 'snowflake_dbt_deploy' }))
-  expect(getPhaseGroups(dbtRun, getPipelineSteps(dbtRun)).find((item) => item.id === 'phase-5')?.steps)
+  expect(getPhaseGroups(dbtRun, getPipelineSteps(dbtRun)).find((item) => item.id === 'phase-4')?.steps)
     .not.toContainEqual(expect.objectContaining({ key: 'snowflake_dbt_deploy' }))
+  expect(getPhaseGroups(dbtRun, getPipelineSteps(dbtRun)).find((item) => item.id === 'phase-4')?.label)
+    .toBe('dbt Artifact Finalization')
+  expect(getPhaseGroups(dbtRun, getPipelineSteps(dbtRun)).find((item) => item.id === 'phase-4')?.steps)
+    .toContainEqual(expect.objectContaining({ key: 'gold_code_execution', label: 'Gold dbt Artifacts Finalized' }))
 })
 
 test('labels pending dbt Gold review without execution wording', () => {
