@@ -2,7 +2,7 @@ import React from 'react'
 import { render, waitFor } from '@testing-library/react'
 
 const mockUpdateRun = jest.fn()
-const mockPipelineLogsPanel = jest.fn(() => <div>Pipeline logs</div>)
+const mockPipelineLogsPanel = jest.fn((_props: any) => <div>Pipeline logs</div>)
 
 jest.mock('../api/athenaApi', () => ({
   abortRun: jest.fn(),
