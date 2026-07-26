@@ -47,10 +47,11 @@ def _silver_output_dir() -> str:
 
 def _silver_output_dir_for(target_warehouse: str = "databricks", run_id: str | None = None) -> str:
     warehouse = str(target_warehouse or "databricks").lower()
-    if warehouse == "snowflake":
+    if warehouse in {"databricks", "snowflake"}:
         if run_id:
-            return str(generated_run_dir("snowflake", run_id, "silver"))
-        return str(generated_code_dir("snowflake", "silver"))
+            return str(generated_run_dir(warehouse, run_id, "silver"))
+        if warehouse == "snowflake":
+            return str(generated_code_dir("snowflake", "silver"))
     return _silver_output_dir()
 
 
@@ -67,22 +68,25 @@ def _file_slug(value: str, max_length: int = 64) -> str:
 
 
 def _gold_output_dir(target_warehouse: str = "databricks", run_id: str | None = None) -> str:
-    if str(target_warehouse or "").lower() == "snowflake" and run_id:
-        return str(generated_run_dir("snowflake", run_id, "gold"))
+    warehouse = str(target_warehouse or "databricks").lower()
+    if warehouse in {"databricks", "snowflake"} and run_id:
+        return str(generated_run_dir(warehouse, run_id, "gold"))
     return str(generated_code_dir("gold"))
 
 
 def _bronze_bundle_paths(target_warehouse: str = "databricks", run_id: str | None = None) -> List[str]:
     paths: List[str] = []
-    if str(target_warehouse or "").lower() == "snowflake":
+    warehouse = str(target_warehouse or "databricks").lower()
+    if warehouse in {"databricks", "snowflake"}:
         if run_id:
-            run_dir = generated_run_dir("snowflake", run_id, "bronze")
+            run_dir = generated_run_dir(warehouse, run_id, "bronze")
             paths.extend(
                 [
                     str(run_dir / f"{_run_slug(run_id)}_bronze_scripts.json"),
                     str(run_dir / "bronze_scripts.json"),
                 ]
             )
+    if warehouse == "snowflake":
         paths.append(str(generated_code_dir("snowflake", "bronze", "bronze_scripts.json")))
     paths.append(str(generated_code_dir("bronze", "bronze_scripts.json")))
     return paths

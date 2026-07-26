@@ -287,10 +287,11 @@ def _bronze_output_dir() -> str:
 
 def _bronze_output_dir_for(target_warehouse: str = "databricks", run_id: str | None = None) -> str:
     warehouse = str(target_warehouse or "databricks").lower()
-    if warehouse == "snowflake":
+    if warehouse in {"databricks", "snowflake"}:
         if run_id:
-            return str(generated_run_dir("snowflake", run_id, "bronze"))
-        return str(generated_code_dir("snowflake", "bronze"))
+            return str(generated_run_dir(warehouse, run_id, "bronze"))
+        if warehouse == "snowflake":
+            return str(generated_code_dir("snowflake", "bronze"))
     return _bronze_output_dir()
 
 

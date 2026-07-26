@@ -31,10 +31,12 @@ SILVER_COLUMN_NAME_CORRECTIONS = {
 
 
 def _gold_output_dir_for(target_warehouse: str = "databricks", run_id: Any = None) -> str:
-    if str(target_warehouse or "").lower() == "snowflake":
+    warehouse = str(target_warehouse or "databricks").lower()
+    if warehouse in {"databricks", "snowflake"}:
         if run_id:
-            return str(generated_run_dir("snowflake", run_id, "gold"))
-        return str(generated_code_dir("snowflake", "gold"))
+            return str(generated_run_dir(warehouse, run_id, "gold"))
+        if warehouse == "snowflake":
+            return str(generated_code_dir("snowflake", "gold"))
     return str(generated_code_dir("gold"))
 
 

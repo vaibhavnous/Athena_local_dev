@@ -1072,12 +1072,20 @@ def _script_output_dirs(layer: str, target_warehouse: Optional[str] = None, run_
     if layer not in {"bronze", "silver", "gold"}:
         return [default_dir]
 
+    target = str(target_warehouse or "").lower()
     snowflake_dir = generated_code_dir("snowflake", layer)
-    if str(target_warehouse or "").lower() == "snowflake":
+    databricks_run_dir = generated_run_dir("databricks", run_id, layer) if run_id else None
+    if target == "snowflake":
         dirs = [generated_run_dir("snowflake", run_id, layer)] if run_id else []
         return dirs + [snowflake_dir, default_dir]
+    if target == "databricks":
+        dirs = [databricks_run_dir] if databricks_run_dir else []
+        return dirs + [default_dir]
     if target_warehouse is None:
-        dirs = [generated_run_dir("snowflake", run_id, layer)] if run_id else []
+        dirs = [
+            generated_run_dir("snowflake", run_id, layer),
+            generated_run_dir("databricks", run_id, layer),
+        ] if run_id else []
         return dirs + [default_dir, snowflake_dir]
     return [default_dir]
 
