@@ -9,6 +9,7 @@ fetch_tmp*.json
 *.local.json
 
 # Python cache
+pytest-cache-files-*/
 __pycache__/
 *.py[cod]
 *.pyd
