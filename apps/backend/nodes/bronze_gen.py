@@ -306,11 +306,13 @@ def _bronze_script_filename(
     schema_name: str,
     table_name: str,
     extension: str,
+    include_run_id: bool = True,
 ) -> str:
     table_slug = re.sub(r"[^a-zA-Z0-9_]+", "_", str(table_name or "table")).strip("_")[:80] or "table"
     source_key = f"{database_name}.{schema_name}.{table_name}"
     digest = hashlib.sha1(source_key.encode("utf-8")).hexdigest()[:10]
-    return f"bronze_ingest_{_run_slug(run_id)}_{table_slug}_{digest}.{extension}"
+    prefix = f"bronze_ingest_{_run_slug(run_id)}_" if include_run_id else "bronze_ingest_"
+    return f"{prefix}{table_slug}_{digest}.{extension}"
 
 
 def _bronze_readme_path(target_warehouse: str = "databricks", run_id: str | None = None) -> str:
@@ -1429,16 +1431,70 @@ SOURCE_JDBC_URL_ENV = "ATHENA_SOURCE_JDBC_URL"
 SOURCE_JDBC_URL = os.getenv(SOURCE_JDBC_URL_ENV) or os.getenv("SOURCE_JDBC_URL") or DEFAULT_SOURCE_JDBC_URL
 if not SOURCE_JDBC_URL:
     raise RuntimeError(f"Missing source JDBC URL. Set {{SOURCE_JDBC_URL_ENV}} or SOURCE_JDBC_URL at runtime.")
+
+def _runtime_setting(*names):
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    for name in names:
+        try:
+            value = dbutils.widgets.get(name)
+        except Exception:
+            value = ""
+        if value:
+            return value
+    return ""
+
+def _databricks_secret(scope, key):
+    if not scope or not key:
+        return ""
+    try:
+        return dbutils.secrets.get(scope=scope, key=key)
+    except Exception:
+        return ""
+
+SOURCE_JDBC_SECRET_SCOPE = _runtime_setting(
+    "ATHENA_SOURCE_JDBC_SECRET_SCOPE",
+    "DATABRICKS_SOURCE_SECRET_SCOPE",
+    "AZURE_SQL_SOURCE_SECRET_SCOPE",
+)
+SOURCE_JDBC_USER_SECRET_KEY = (
+    _runtime_setting(
+        "ATHENA_SOURCE_JDBC_USER_SECRET_KEY",
+        "AZURE_SQL_SOURCE_USERNAME_SECRET_KEY",
+        "SOURCE_JDBC_USER_SECRET_KEY",
+    )
+    or "AZURE_SQL_SOURCE_USERNAME"
+)
+SOURCE_JDBC_PASSWORD_SECRET_KEY = (
+    _runtime_setting(
+        "ATHENA_SOURCE_JDBC_PASSWORD_SECRET_KEY",
+        "AZURE_SQL_SOURCE_PASSWORD_SECRET_KEY",
+        "SOURCE_JDBC_PASSWORD_SECRET_KEY",
+    )
+    or "AZURE_SQL_SOURCE_PASSWORD"
+)
 SOURCE_JDBC_USER = (
     os.getenv("ATHENA_SOURCE_JDBC_USER")
     or os.getenv("AZURE_SQL_SOURCE_USERNAME")
     or os.getenv("SOURCE_JDBC_USER")
+    or _databricks_secret(SOURCE_JDBC_SECRET_SCOPE, SOURCE_JDBC_USER_SECRET_KEY)
 )
 SOURCE_JDBC_PASSWORD = (
     os.getenv("ATHENA_SOURCE_JDBC_PASSWORD")
     or os.getenv("AZURE_SQL_SOURCE_PASSWORD")
     or os.getenv("SOURCE_JDBC_PASSWORD")
+    or _databricks_secret(SOURCE_JDBC_SECRET_SCOPE, SOURCE_JDBC_PASSWORD_SECRET_KEY)
 )
+if not SOURCE_JDBC_USER or not SOURCE_JDBC_PASSWORD:
+    raise RuntimeError(
+        "Missing source JDBC credentials for {database}.{schema}.{table}. "
+        "Set ATHENA_SOURCE_JDBC_USER/ATHENA_SOURCE_JDBC_PASSWORD or "
+        "AZURE_SQL_SOURCE_USERNAME/AZURE_SQL_SOURCE_PASSWORD in the Databricks runtime, "
+        "or configure Databricks secrets using ATHENA_SOURCE_JDBC_SECRET_SCOPE with "
+        "ATHENA_SOURCE_JDBC_USER_SECRET_KEY/ATHENA_SOURCE_JDBC_PASSWORD_SECRET_KEY."
+    )
 {security_setup}
 
 TARGET_TABLE = "{bronze_catalog}.{bronze_schema}.bronze_{table}"
@@ -1683,6 +1739,7 @@ def _generate_one_table(
             schema_name=schema_name,
             table_name=table_name,
             extension=extension,
+            include_run_id=target_warehouse != "databricks",
         )
     )
     script_path = os.path.join(output_dir, script_name)

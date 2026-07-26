@@ -60,15 +60,35 @@ def test_databricks_bronze_script_keeps_jdbc_credentials_runtime_only():
         run_id="run-1",
         bronze_catalog="workspace",
         bronze_schema="bronze",
-        source_jdbc_url="jdbc:sqlserver://example;databaseName=insurance;user=leaked;password=secret;PWD=secret;",
+        source_jdbc_url="jdbc:sqlserver://example;databaseName=insurance;user=leaked;password=s3cr3t-value;PWD=pwd-value;",
     )
 
     assert "leaked" not in script
-    assert "secret" not in script
+    assert "s3cr3t-value" not in script
+    assert "pwd-value" not in script
     assert "AZURE_SQL_SOURCE_USERNAME" in script
     assert "AZURE_SQL_SOURCE_PASSWORD" in script
     assert '.option("user", SOURCE_JDBC_USER)' in script
     assert '.option("password", SOURCE_JDBC_PASSWORD)' in script
+
+
+def test_databricks_bronze_script_can_read_jdbc_credentials_from_secrets():
+    script = bronze_gen.generate_bronze_script(
+        table="Claims",
+        schema="dbo",
+        database="insurance",
+        run_id="run-1",
+        bronze_catalog="workspace",
+        bronze_schema="bronze",
+        source_jdbc_url="jdbc:sqlserver://example",
+    )
+
+    assert "ATHENA_SOURCE_JDBC_SECRET_SCOPE" in script
+    assert "ATHENA_SOURCE_JDBC_USER_SECRET_KEY" in script
+    assert "ATHENA_SOURCE_JDBC_PASSWORD_SECRET_KEY" in script
+    assert "dbutils.secrets.get(scope=scope, key=key)" in script
+    assert "Missing source JDBC credentials for insurance.dbo.Claims" in script
+    assert script.index("Missing source JDBC credentials") < script.index("df = reader.load()")
 
 
 def test_databricks_bronze_script_keeps_security_optional():
@@ -159,6 +179,35 @@ def test_databricks_layers_default_to_batch_execution(monkeypatch):
     assert databricks_runtime._databricks_execution_mode("bronze") == "batch"
     assert databricks_runtime._databricks_execution_mode("silver") == "batch"
     assert databricks_runtime._databricks_execution_mode("gold") == "batch"
+
+
+def test_databricks_submit_run_passes_secret_refs_not_source_credentials(monkeypatch):
+    from services import databricks_runtime
+
+    captured = {}
+    monkeypatch.setenv("ATHENA_SOURCE_JDBC_SECRET_SCOPE", "source-scope")
+    monkeypatch.setenv("ATHENA_SOURCE_JDBC_USER_SECRET_KEY", "source-user-key")
+    monkeypatch.setenv("ATHENA_SOURCE_JDBC_PASSWORD_SECRET_KEY", "source-password-key")
+    monkeypatch.setenv("AZURE_SQL_SOURCE_USERNAME", "actual-user")
+    monkeypatch.setenv("AZURE_SQL_SOURCE_PASSWORD", "s3cr3t-value")
+
+    def fake_request(method, path, payload=None):
+        captured.update({"method": method, "path": path, "payload": payload})
+        return {"run_id": 123}
+
+    monkeypatch.setattr(databricks_runtime, "_request_json", fake_request)
+
+    assert databricks_runtime._submit_run("/Workspace/Athena/bronze", run_name="test") == {"run_id": 123}
+
+    notebook_task = captured["payload"]["tasks"][0]["notebook_task"]
+    assert notebook_task["base_parameters"] == {
+        "ATHENA_SOURCE_JDBC_SECRET_SCOPE": "source-scope",
+        "ATHENA_SOURCE_JDBC_USER_SECRET_KEY": "source-user-key",
+        "ATHENA_SOURCE_JDBC_PASSWORD_SECRET_KEY": "source-password-key",
+    }
+    payload_text = json.dumps(captured["payload"])
+    assert "actual-user" not in payload_text
+    assert "s3cr3t-value" not in payload_text
 
 
 def test_databricks_batch_driver_keeps_separate_script_targets(monkeypatch):

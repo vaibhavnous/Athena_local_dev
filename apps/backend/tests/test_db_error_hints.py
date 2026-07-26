@@ -47,6 +47,16 @@ def test_source_jdbc_url_does_not_embed_credentials(monkeypatch):
     assert "pwd=" not in url.lower()
 
 
+def test_source_jdbc_url_honors_trust_server_certificate(monkeypatch):
+    monkeypatch.setitem(db.config["azure_sql"], "source_host", "example.database.windows.net")
+    monkeypatch.setitem(db.config["azure_sql"], "port", 1433)
+    monkeypatch.setitem(db.config["azure_sql"], "trust_server_certificate", "yes")
+
+    url = db.build_source_jdbc_url("insurance")
+
+    assert "trustServerCertificate=true" in url
+
+
 def test_bad_env_helpers_fall_back(monkeypatch):
     monkeypatch.setenv("ATHENA_TEST_BAD_INT", "nope")
 

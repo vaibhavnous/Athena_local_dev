@@ -94,6 +94,40 @@ def _databricks_execution_mode(layer: str) -> str:
     return mode if mode in {"batch", "per_script"} else "batch"
 
 
+def _first_env(*names: str) -> str:
+    for name in names:
+        value = str(os.getenv(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _source_jdbc_notebook_parameters() -> Dict[str, str]:
+    scope = _first_env(
+        "ATHENA_SOURCE_JDBC_SECRET_SCOPE",
+        "DATABRICKS_SOURCE_SECRET_SCOPE",
+        "AZURE_SQL_SOURCE_SECRET_SCOPE",
+    )
+    if not scope:
+        return {}
+
+    return {
+        "ATHENA_SOURCE_JDBC_SECRET_SCOPE": scope,
+        "ATHENA_SOURCE_JDBC_USER_SECRET_KEY": _first_env(
+            "ATHENA_SOURCE_JDBC_USER_SECRET_KEY",
+            "AZURE_SQL_SOURCE_USERNAME_SECRET_KEY",
+            "SOURCE_JDBC_USER_SECRET_KEY",
+        )
+        or "AZURE_SQL_SOURCE_USERNAME",
+        "ATHENA_SOURCE_JDBC_PASSWORD_SECRET_KEY": _first_env(
+            "ATHENA_SOURCE_JDBC_PASSWORD_SECRET_KEY",
+            "AZURE_SQL_SOURCE_PASSWORD_SECRET_KEY",
+            "SOURCE_JDBC_PASSWORD_SECRET_KEY",
+        )
+        or "AZURE_SQL_SOURCE_PASSWORD",
+    }
+
+
 def _workspace_root() -> str:
     return str(os.getenv("DATABRICKS_WORKSPACE_ROOT") or "/Shared/Athena").rstrip("/")
 
@@ -201,9 +235,13 @@ def _cluster_spec() -> Dict[str, Any]:
 
 
 def _submit_run(notebook_path: str, *, run_name: str) -> Dict[str, Any]:
+    notebook_task: Dict[str, Any] = {"notebook_path": notebook_path}
+    base_parameters = _source_jdbc_notebook_parameters()
+    if base_parameters:
+        notebook_task["base_parameters"] = base_parameters
     task: Dict[str, Any] = {
         "task_key": "athena",
-        "notebook_task": {"notebook_path": notebook_path},
+        "notebook_task": notebook_task,
     }
     task.update(_cluster_spec())
     payload = {

@@ -73,6 +73,66 @@ def test_databricks_generation_dirs_are_run_scoped(monkeypatch):
     assert Path(gold_gen._gold_output_dir_for("databricks", "run-1")) == custom_root.resolve() / "databricks" / "run-1" / "gold"
 
 
+def test_databricks_run_scoped_script_names_do_not_repeat_run_id():
+    from nodes import bronze_gen, gold_gen, silver_gen
+
+    run_id = "7cad2fc2-b465-401f-889c-58744f088e4d"
+    run_slug = run_id.replace("-", "_")
+
+    names = [
+        bronze_gen._bronze_script_filename(
+            run_id=run_id,
+            database_name="insurance",
+            schema_name="dbo",
+            table_name="claim_information",
+            extension="py",
+            include_run_id=False,
+        ),
+        silver_gen._silver_script_filename(
+            run_id=run_id,
+            table_name="claim_information",
+            extension="py",
+            target_warehouse="databricks",
+        ),
+        gold_gen._gold_script_filename(
+            prefix="gold_kpi",
+            run_id=run_id,
+            identifier="total_claims",
+            extension="py",
+            target_warehouse="databricks",
+        ),
+        gold_gen._gold_script_filename(
+            prefix="gold_dimensions",
+            run_id=run_id,
+            extension="py",
+            target_warehouse="databricks",
+        ),
+    ]
+
+    assert names[0].startswith("bronze_ingest_claim_information_")
+    assert names[0].endswith(".py")
+    assert names[1:] == [
+        "silver_transform_claim_information.py",
+        "gold_kpi_total_claims.py",
+        "gold_dimensions.py",
+    ]
+    assert all(run_id not in name and run_slug not in name for name in names)
+
+    assert "run_snow" in silver_gen._silver_script_filename(
+        run_id="run-snow",
+        table_name="claim_information",
+        extension="sql",
+        target_warehouse="snowflake",
+    )
+    assert "run_snow" in gold_gen._gold_script_filename(
+        prefix="gold_kpi",
+        run_id="run-snow",
+        identifier="total_claims",
+        extension="sql",
+        target_warehouse="snowflake",
+    )
+
+
 def test_databricks_loader_prefers_run_scoped_bundle_and_keeps_legacy_fallback(monkeypatch):
     from services import pipeline_runtime
 

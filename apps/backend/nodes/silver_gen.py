@@ -67,6 +67,19 @@ def _file_slug(value: str, max_length: int = 64) -> str:
     return f"{slug[: max_length - 9].rstrip('_')}_{digest}"
 
 
+def _silver_script_filename(
+    *,
+    run_id: str,
+    table_name: str,
+    extension: str,
+    target_warehouse: str = "databricks",
+) -> str:
+    table_slug = _file_slug(table_name)
+    if str(target_warehouse or "databricks").lower() == "databricks":
+        return f"silver_transform_{table_slug}.{extension}"
+    return f"silver_transform_{_run_slug(run_id)}_{table_slug}.{extension}"
+
+
 def _gold_output_dir(target_warehouse: str = "databricks", run_id: str | None = None) -> str:
     warehouse = str(target_warehouse or "databricks").lower()
     if warehouse in {"databricks", "snowflake"} and run_id:
@@ -389,7 +402,12 @@ def _resolve_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
             if dbt_codegen
             else os.path.join(
                 _silver_output_dir_for(target_warehouse, str(state.get("run_id") or "")),
-                f"silver_transform_{_run_slug(str(state.get('run_id') or 'run'))}_{_file_slug(table_name)}.{extension}",
+                _silver_script_filename(
+                    run_id=str(state.get("run_id") or "run"),
+                    table_name=table_name,
+                    extension=extension,
+                    target_warehouse=target_warehouse,
+                ),
             )
         )
         bronze_table = (
@@ -1161,7 +1179,12 @@ def _generate_one_table(
     os.makedirs(output_dir, exist_ok=True)
     script_path = os.path.join(
         output_dir,
-        f"{dbt_model_name}.{extension}" if dbt_codegen and dbt_model_name else f"silver_transform_{_run_slug(run_id)}_{_file_slug(table_name)}.{extension}",
+        f"{dbt_model_name}.{extension}" if dbt_codegen and dbt_model_name else _silver_script_filename(
+            run_id=run_id,
+            table_name=table_name,
+            extension=extension,
+            target_warehouse=target_warehouse,
+        ),
     )
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)

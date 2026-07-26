@@ -49,6 +49,22 @@ def _run_slug(run_id: str) -> str:
     return cleaned[:48] or "run"
 
 
+def _gold_script_filename(
+    *,
+    prefix: str,
+    run_id: str,
+    extension: str,
+    identifier: str | None = None,
+    target_warehouse: str = "databricks",
+) -> str:
+    parts = [str(prefix or "gold").strip("_")]
+    if str(target_warehouse or "databricks").lower() != "databricks":
+        parts.append(_run_slug(run_id))
+    if identifier:
+        parts.append(str(identifier).strip("_"))
+    return f"{'_'.join(part for part in parts if part)}.{extension}"
+
+
 def _contract_path(target_warehouse: str = "databricks", run_id: Any = None) -> str:
     return os.path.join(_gold_output_dir_for(target_warehouse, run_id), "gold_generation_contract.json")
 
@@ -2174,13 +2190,31 @@ def _generate_one_mapping(
         output_dir = _gold_output_dir_for(target_warehouse, run_id)
         os.makedirs(output_dir, exist_ok=True)
         extension = "sql" if is_snowflake else "py"
-        script_path = os.path.join(output_dir, f"gold_kpi_{_run_slug(run_id)}_{kpi_id}.{extension}")
+        script_path = os.path.join(
+            output_dir,
+            _gold_script_filename(
+                prefix="gold_kpi",
+                run_id=run_id,
+                identifier=kpi_id,
+                extension=extension,
+                target_warehouse=target_warehouse,
+            ),
+        )
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(code)
     dimension_script_path = None
     if dimension_code:
         dimension_extension = "sql" if is_snowflake else "py"
-        dimension_script_path = os.path.join(output_dir, f"gold_dim_{_run_slug(run_id)}_{kpi_id}.{dimension_extension}")
+        dimension_script_path = os.path.join(
+            output_dir,
+            _gold_script_filename(
+                prefix="gold_dim",
+                run_id=run_id,
+                identifier=kpi_id,
+                extension=dimension_extension,
+                target_warehouse=target_warehouse,
+            ),
+        )
         with open(dimension_script_path, "w", encoding="utf-8") as f:
             f.write(dimension_code)
 
@@ -2489,7 +2523,13 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         os.makedirs(output_dir, exist_ok=True)
         dimension_extension = "sql" if target_warehouse == "snowflake" else "py"
         shared_dimension_path = os.path.join(
-            output_dir, f"gold_dimensions_{_run_slug(run_id)}.{dimension_extension}"
+            output_dir,
+            _gold_script_filename(
+                prefix="gold_dimensions",
+                run_id=run_id,
+                extension=dimension_extension,
+                target_warehouse=target_warehouse,
+            ),
         )
         with open(shared_dimension_path, "w", encoding="utf-8") as f:
             f.write(shared_dimension_code)

@@ -356,12 +356,18 @@ def _connect_with_retry(
 def build_source_jdbc_url(database_name: Optional[str] = None) -> str:
     db_conf = config["azure_sql"]
     db = _normalize_source_db(database_name)
+    trust_server_certificate = str(db_conf.get("trust_server_certificate") or "no").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     parts = [
         f"jdbc:sqlserver://{db_conf['source_host']}:{db_conf['port']};",
         f"databaseName={db};",
         "encrypt=true;",
-        "trustServerCertificate=false;",
+        f"trustServerCertificate={'true' if trust_server_certificate else 'false'};",
     ]
 
     return "".join(parts)
