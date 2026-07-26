@@ -2274,7 +2274,8 @@ def _write_readme(
         script_path = str(item.get("script_path") or "")
         script_name = os.path.basename(script_path) if script_path else "-"
         script_link = f"[{script_name}]({script_path})" if script_path else "-"
-        dimension_path = str(item.get("dimension_script_path") or "")
+        is_dbt_script = str(item.get("code_generation_format") or "").strip().lower() == "dbt"
+        dimension_path = "" if is_dbt_script else str(item.get("dimension_script_path") or "")
         dimension_name = os.path.basename(dimension_path) if dimension_path else "-"
         dimension_link = f"[{dimension_name}]({dimension_path})" if dimension_path else "-"
         lines.append(
@@ -2303,7 +2304,8 @@ def _write_ui(
         if script_path and os.path.exists(script_path):
             with open(script_path, "r", encoding="utf-8") as f:
                 script_body = f.read()
-        dimension_path = str(item.get("dimension_script_path") or "")
+        is_dbt_script = str(item.get("code_generation_format") or "").strip().lower() == "dbt"
+        dimension_path = "" if is_dbt_script else str(item.get("dimension_script_path") or "")
         dimension_body = ""
         if dimension_path and os.path.exists(dimension_path):
             with open(dimension_path, "r", encoding="utf-8") as f:
@@ -2467,7 +2469,7 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
             gold_catalog=gold_catalog,
             gold_schema=gold_schema,
         )
-    elif shared_dimension_mapping.get("grouping_dimensions"):
+    elif not dbt_codegen and shared_dimension_mapping.get("grouping_dimensions"):
         if target_warehouse == "snowflake":
             shared_dimension_code = generate_snowflake_dimension_script(
                 mapping=shared_dimension_mapping,

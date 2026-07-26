@@ -1090,6 +1090,20 @@ def _read_script_body(script_path_value: Any) -> str:
     return ""
 
 
+def _is_dbt_codegen_script(item: Dict[str, Any]) -> bool:
+    return str(item.get("code_generation_format") or "").strip().lower() == "dbt"
+
+
+def _without_dbt_dimension_fields(item: Dict[str, Any]) -> Dict[str, Any]:
+    if not _is_dbt_codegen_script(item):
+        return item
+    row = dict(item)
+    row.pop("dimension_script_path", None)
+    row.pop("dimension_script_body", None)
+    row.pop("dimension_body", None)
+    return row
+
+
 def _dedupe_scripts(scripts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     deduped: List[Dict[str, Any]] = []
     seen = set()
@@ -1148,13 +1162,15 @@ def _scripts_from_checkpoint(
         script_body = str(item.get("script_body") or "")
         if not script_body.strip():
             script_body = _read_script_body(item.get("script_path"))
-        dimension_script_body = _read_script_body(item.get("dimension_script_path"))
+        is_dbt_gold = result_key == "gold_generation_results" and _is_dbt_codegen_script(item)
+        dimension_script_body = "" if is_dbt_gold else _read_script_body(item.get("dimension_script_path"))
+        source_item = _without_dbt_dimension_fields(item) if is_dbt_gold else item
         row = _normalize_bronze_script({
-            **item,
+            **source_item,
             "run_id": item.get("run_id") or checkpoint.get("run_id"),
             "script_body": script_body,
         }) if result_key == "bronze_generation_results" else {
-            **item,
+            **source_item,
             "run_id": item.get("run_id") or checkpoint.get("run_id"),
             "script_body": script_body,
         }
@@ -1262,7 +1278,8 @@ def load_gold_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) 
         script_body = str(item.get("script_body") or "")
         if not script_body.strip():
             script_body = _read_script_body(item.get("script_path"))
-        dimension_script_body = _read_script_body(item.get("dimension_script_path"))
+        is_dbt_script = _is_dbt_codegen_script(item)
+        dimension_script_body = "" if is_dbt_script else _read_script_body(item.get("dimension_script_path"))
         if not _script_matches_run(
             item=item,
             bundle_run_id=bundle_run_id,
@@ -1270,13 +1287,10 @@ def load_gold_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) 
             script_bodies=[script_body, dimension_script_body],
         ):
             continue
-        scripts.append(
-            {
-                **item,
-                "script_body": script_body,
-                "dimension_script_body": dimension_script_body,
-            }
-        )
+        row = {**_without_dbt_dimension_fields(item), "script_body": script_body}
+        if dimension_script_body:
+            row["dimension_script_body"] = dimension_script_body
+        scripts.append(row)
 
     if not scripts and checkpoint:
         return _scripts_from_checkpoint(checkpoint, "gold_generation_results", "gold_generated_at")

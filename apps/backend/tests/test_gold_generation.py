@@ -153,6 +153,9 @@ def test_snowflake_dbt_gold_generation_writes_model_artifact(monkeypatch):
     model_path = Path(script["script_path"])
     model_sql = model_path.read_text(encoding="utf-8")
     loaded = pipeline_runtime.load_gold_scripts("run-snowflake-dbt", result)
+    bundle = json.loads(Path(result["gold_generation_bundle_path"]).read_text(encoding="utf-8"))
+    review_html = Path(result["gold_generation_ui_path"]).read_text(encoding="utf-8")
+    gold_dir = Path("generated_code") / "snowflake" / "run-snowflake-dbt" / "gold"
 
     assert result["gold_generation_status"] == "COMPLETED"
     assert result["snowflake_dbt_deploy_status"] == "NOT_APPLICABLE_CODEGEN_ONLY"
@@ -162,6 +165,11 @@ def test_snowflake_dbt_gold_generation_writes_model_artifact(monkeypatch):
     assert script["generation_mode"] == "SNOWFLAKE_DBT_SQL"
     assert script["dbt_model_name"] == "gold_total_claims"
     assert script["dbt_alias"] == "fact_total_claims"
+    assert not script.get("dimension_script_path")
+    assert bundle["dimension_script_count"] == 0
+    assert bundle["dimension_script_paths"] == []
+    assert "MERGE INTO" not in review_html
+    assert not list(gold_dir.glob("gold_dimensions_*.sql"))
     assert model_path.parts[-3:] == ("models", "gold", "gold_total_claims.sql")
     assert "{{ config(" in model_sql
     assert "MERGE INTO" not in model_sql
@@ -169,6 +177,38 @@ def test_snowflake_dbt_gold_generation_writes_model_artifact(monkeypatch):
     assert "FROM {{ ref('silver_claim_information') }}" in model_sql
     assert 'SUM(TRY_TO_DECIMAL(TO_VARCHAR("claimamount")))' in model_sql
     assert loaded["scripts"][0]["script_body"] == model_sql
+    assert "dimension_script_path" not in loaded["scripts"][0]
+    assert "dimension_script_body" not in loaded["scripts"][0]
+
+
+def test_load_gold_scripts_suppresses_legacy_dbt_dimension_path(monkeypatch):
+    workdir = Path.cwd() / ".tmp-tests" / f"gold_dbt_legacy_dimension_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+    legacy_dimension = workdir / "gold_dimensions_legacy.sql"
+    legacy_dimension.write_text('MERGE INTO "ATHENA_DB"."GOLD"."dim_claims" AS target', encoding="utf-8")
+
+    loaded = pipeline_runtime.load_gold_scripts(
+        "run-stale-dbt",
+        {
+            "run_id": "run-stale-dbt",
+            "gold_generation_results": [
+                {
+                    "run_id": "run-stale-dbt",
+                    "status": "APPROVED",
+                    "code_generation_format": "dbt",
+                    "script_body": "{{ config(materialized='table') }}\nselect 1",
+                    "dimension_script_path": str(legacy_dimension),
+                }
+            ],
+        },
+    )
+
+    script = loaded["scripts"][0]
+
+    assert script["script_body"].startswith("{{ config(")
+    assert "dimension_script_path" not in script
+    assert "dimension_script_body" not in script
 
 
 def test_snowflake_gold_generation_uses_silver_canonical_column_names():

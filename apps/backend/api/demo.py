@@ -1220,7 +1220,10 @@ def demo_scripts(run_id: str) -> Dict[str, Any]:
 
     for item in gold.get("scripts") or []:
         body = _generated_script_body("gold", item.get("script_path"))
-        dimension_body = _generated_script_body("gold", item.get("dimension_script_path"))
+        is_dbt_script = str(item.get("code_generation_format") or "").strip().lower() == "dbt"
+        dimension_body = "" if is_dbt_script else _generated_script_body("gold", item.get("dimension_script_path"))
+        if is_dbt_script:
+            item.pop("dimension_body", None)
         if body:
             item["script_body"] = body
         if dimension_body:

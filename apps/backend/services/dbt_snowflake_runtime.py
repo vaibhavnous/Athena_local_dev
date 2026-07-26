@@ -463,7 +463,11 @@ def build_snowflake_dbt_artifacts(state: Dict[str, Any]) -> Dict[str, Any]:
             updated_gold_results.append(item)
             continue
         model_sql = str(model.get("model_sql") or "").strip()
-        row = {key: value for key, value in item.items() if key not in {"dbt_model_sql", "dbt_model_body"}}
+        row = {
+            key: value
+            for key, value in item.items()
+            if key not in {"dbt_model_sql", "dbt_model_body", "dimension_script_path", "dimension_script_body", "dimension_body"}
+        }
         row.update(
             {
                 "script_path": model.get("path"),
