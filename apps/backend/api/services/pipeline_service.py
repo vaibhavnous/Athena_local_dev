@@ -315,21 +315,11 @@ def continue_file_pipeline_job(run_id: str, state: Dict[str, Any]) -> Dict[str, 
 def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Optional[str]:
     def _pipeline_stage(value: Any) -> Optional[str]:
         raw_stage = str(value or "").strip().lower()
-        if raw_stage == "gold_code_execution":
-            return "gold"
-        if raw_stage == "silver_code_execution":
-            if checkpoint.get("gold_generation_results") or checkpoint.get("gold_generation_completed"):
-                return "gold"
-            return "silver"
+        if raw_stage in {"bronze_code_execution", "silver_code_execution", "gold_code_execution"}:
+            return raw_stage
         stage = api_utils.stage_key(value)
-        if stage == "gold_code_execution":
-            return "gold"
-        if stage == "silver_code_execution":
-            # Gold is already generated only after Silver execution succeeds;
-            # if an older checkpoint points here, retry the Gold stage safely.
-            if checkpoint.get("gold_generation_results") or checkpoint.get("gold_generation_completed"):
-                return "gold"
-            return "silver"
+        if stage in {"bronze_code_execution", "silver_code_execution", "gold_code_execution"}:
+            return stage
         return stage
 
     if checkpoint.get("failed_background_stage"):

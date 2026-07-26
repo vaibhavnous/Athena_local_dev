@@ -629,7 +629,7 @@ def test_gold_review_submit_runs_execution_in_background(monkeypatch):
 
     assert response.status_code == 200
     assert recorded["run_id"] == "run-123"
-    assert recorded["stage"] == "gold_code_execution"
+    assert recorded["stage"] == "bronze_code_execution"
     assert recorded["args"][1] == "APPROVED"
 
 
@@ -690,6 +690,64 @@ def test_retry_failed_stage_submits_file_resume(monkeypatch):
     assert recorded["saved_state"]["status"] == "RUNNING"
     assert recorded["background_stage"] == "file_resume"
     assert recorded["background_fn"] == "continue_file_pipeline_job"
+
+
+def test_retry_failed_execution_stage_uses_ordered_execution_helper(monkeypatch):
+    recorded = {}
+    checkpoint = {
+        "status": "FAILED",
+        "source": "database",
+        "failed_background_stage": "silver_code_execution",
+        "target_warehouse": "snowflake",
+    }
+
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(
+        "api.services.pipeline_service.clean_checkpoint_for_resume",
+        lambda state: {**state, "status": "RUNNING", "failed_background_stage": None},
+    )
+    monkeypatch.setattr("services.pipeline_runtime.save_checkpoint_state", lambda run_id, state: recorded.update({"saved_state": state}))
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update({"stage": stage, "background_fn": fn.__name__, "args": args}),
+    )
+
+    response = client.post("/pipeline/run-123/retry-failed-stage")
+
+    assert response.status_code == 200
+    assert recorded["stage"] == "silver_code_execution"
+    assert recorded["background_fn"] == "execute_approved_database_layers"
+
+
+def test_retry_failed_gold_review_replays_gold_review_submitter(monkeypatch):
+    recorded = {}
+    checkpoint = {
+        "status": "FAILED",
+        "source": "database",
+        "failed_background_stage": "gold_review",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "gold_review_decision": "APPROVED",
+        "gold_review_artifact": {"items": [{"target_table": "ATHENA_DB.GOLD.fact_claims", "review_status": "APPROVED"}]},
+    }
+
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: checkpoint)
+    monkeypatch.setattr(
+        "api.services.pipeline_service.clean_checkpoint_for_resume",
+        lambda state: {**state, "status": "RUNNING", "failed_background_stage": None},
+    )
+    monkeypatch.setattr("services.pipeline_runtime.save_checkpoint_state", lambda run_id, state: recorded.update({"saved_state": state}))
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update({"stage": stage, "background_fn": fn.__name__, "args": args}),
+    )
+
+    response = client.post("/pipeline/run-123/retry-failed-stage")
+
+    assert response.status_code == 200
+    assert recorded["stage"] == "gold_review"
+    assert recorded["background_fn"] == "submit_gold_review"
+    assert recorded["args"][1] == "APPROVED"
 
 
 def test_runs_returns_503_on_timeout(monkeypatch):
@@ -783,6 +841,31 @@ def test_run_detail_returns_fallback_on_failure(monkeypatch):
     assert payload["run_id"] == "run-123"
     assert payload["status"] == "RUNNING"
     assert payload["checkpoint"] == {"status": "RUNNING"}
+
+
+def test_run_detail_fallback_preserves_pending_gold_review(monkeypatch):
+    checkpoint = {
+        "run_id": "run-gold-review",
+        "status": "HITL_WAIT",
+        "source": "database",
+        "target_warehouse": "snowflake",
+        "gold_generation_status": "COMPLETED",
+        "gold_generation_results": [{"kpi_name": "Total Claims", "target_table": "ATHENA_DB.GOLD.fact_total_claims"}],
+        "next_review_key": "gold_review",
+    }
+    monkeypatch.setattr(
+        "api.services.ui_service.ui_run",
+        lambda run_id, include_scripts=True: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: checkpoint)
+
+    response = client.get("/runs/run-gold-review")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "HITL_WAIT"
+    assert payload["next_review_key"] == "gold_review"
+    assert any(step["key"] == "gold_review" and step["state"] == "HITL_WAIT" for step in payload["pipeline_steps"])
 
 
 def test_run_detail_rejects_foreign_client_run(monkeypatch):

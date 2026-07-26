@@ -439,11 +439,12 @@ function getHistoryDisplaySteps(phase) {
   }
 
   if (phase.id === 'phase-3') {
-    return clampLinearHistorySteps([
+    const displaySteps = [
       actual('bronze', 'Bronze Code Generation'),
       actual('gate4', 'Bronze Review', reviewAwareState(byKey.get('gate4'), phase)),
-      actual('bronze_code_execution', 'Bronze Code Execution'),
-    ])
+    ]
+    if (byKey.has('bronze_code_execution')) displaySteps.push(actual('bronze_code_execution', 'Bronze Code Execution'))
+    return clampLinearHistorySteps(displaySteps)
   }
 
   if (phase.id === 'phase-4') {
@@ -453,25 +454,35 @@ function getHistoryDisplaySteps(phase) {
     const gate5State = reviewAwareState(byKey.get('gate5'), phase)
     const mergeReviewState = byKey.get('silver_merge_key_review')?.state ? normalizeState(byKey.get('silver_merge_key_review')?.state) : ''
     const silverFlow = buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phase.status, mergeReviewState, silverExecutionState)
-    return clampLinearHistorySteps([
+    const displaySteps = [
       actual('silver_merge_key_resolution', 'Silver Merge Key Resolution', silverFlow.mergeResolution),
       actual('silver_merge_key_review', 'Silver Merge Key Review', mergeReviewState || silverFlow.mergeReview),
       actual('silver', 'Silver Code Generation', silverFlow.codeGeneration),
       actual('gate5', 'Silver Review', silverFlow.reviewGate),
-      actual('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution),
-    ])
+    ]
+    if (byKey.has('silver_code_execution')) displaySteps.push(actual('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution))
+    return clampLinearHistorySteps(displaySteps)
   }
 
   if (phase.id === 'phase-5') {
     const goldFlow = buildHistoryGoldPhaseStates(
       byKey.get('gold')?.state || phaseState,
+      byKey.get('gold_review')?.state,
       byKey.get('gold_code_execution')?.state,
       phase.status
     )
-    return clampLinearHistorySteps([
+    const displaySteps = [
       actual('gold', 'Gold Code Generation', goldFlow.codeGeneration),
-      actual('gold_code_execution', 'Gold Code Execution', goldFlow.codeExecution),
-    ])
+    ]
+    if (byKey.has('gold_review')) {
+      displaySteps.push(
+        actual('gold_review', 'Gold Review', goldFlow.reviewGate),
+        actual('bronze_code_execution', 'Bronze Code Execution'),
+        actual('silver_code_execution', 'Silver Code Execution'),
+      )
+    }
+    displaySteps.push(actual('gold_code_execution', 'Gold Code Execution', goldFlow.codeExecution))
+    return clampLinearHistorySteps(displaySteps)
   }
 
   return clampLinearHistorySteps(steps.map((step) => ({ ...step, label: step.label || step.key })))
@@ -603,21 +614,32 @@ function buildHistorySilverPhaseStates(silverState, gate4State, gate5State, phas
   }
 }
 
-function buildHistoryGoldPhaseStates(goldState, goldExecutionState, phaseStatus) {
+function buildHistoryGoldPhaseStates(goldState, goldReviewState, goldExecutionState, phaseStatus) {
   const normalizedGold = normalizeState(goldState)
+  const normalizedGoldReview = goldReviewState ? normalizeState(goldReviewState) : ''
   const normalizedGoldExecution = goldExecutionState ? normalizeState(goldExecutionState) : ''
   const normalizedPhase = String(phaseStatus || '').toLowerCase()
 
   if (['RUNNING', 'FAILED', 'COMPLETED'].includes(normalizedGoldExecution)) {
     return {
       codeGeneration: 'COMPLETED',
+      reviewGate: 'COMPLETED',
       codeExecution: normalizedGoldExecution,
+    }
+  }
+
+  if (['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(normalizedGoldReview)) {
+    return {
+      codeGeneration: 'COMPLETED',
+      reviewGate: normalizedGoldReview,
+      codeExecution: 'PENDING',
     }
   }
 
   if (normalizedGold === 'RUNNING') {
     return {
       codeGeneration: 'RUNNING',
+      reviewGate: 'PENDING',
       codeExecution: 'PENDING',
     }
   }
@@ -625,6 +647,7 @@ function buildHistoryGoldPhaseStates(goldState, goldExecutionState, phaseStatus)
   if (normalizedGold === 'FAILED') {
     return {
       codeGeneration: 'FAILED',
+      reviewGate: 'PENDING',
       codeExecution: 'PENDING',
     }
   }
@@ -632,12 +655,14 @@ function buildHistoryGoldPhaseStates(goldState, goldExecutionState, phaseStatus)
   if (normalizedGold === 'COMPLETED') {
     return {
       codeGeneration: 'COMPLETED',
+      reviewGate: normalizedPhase === 'done' ? 'COMPLETED' : 'PENDING',
       codeExecution: normalizedPhase === 'done' ? 'COMPLETED' : 'PENDING',
     }
   }
 
   return {
     codeGeneration: 'PENDING',
+    reviewGate: 'PENDING',
     codeExecution: 'PENDING',
   }
 }

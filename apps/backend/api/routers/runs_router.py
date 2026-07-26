@@ -146,8 +146,8 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
         or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
     )
-    next_gate = None if gold_completed else checkpoint.get("next_gate")
-    next_review_key = None if gold_completed else checkpoint.get("next_review_key")
+    next_review_key = checkpoint.get("next_review_key")
+    next_gate = None if gold_completed and not next_review_key else checkpoint.get("next_gate")
     pipeline_steps = build_pipeline_steps(
         source=str(checkpoint.get("source") or "database"),
         checkpoint=checkpoint,
@@ -176,8 +176,6 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         or str(checkpoint.get("databricks_gold_execution_status") or "").upper() == "COMPLETED"
     ):
         fallback_status = "SUCCESS"
-    elif gold_completed and str(fallback_status or "").upper() == "HITL_WAIT":
-        fallback_status = "RUNNING"
     current_step = next(
         (
             step for step in pipeline_steps

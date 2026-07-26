@@ -4,8 +4,6 @@ import json
 import uuid
 from pathlib import Path
 
-import pytest
-
 from services import pipeline_runtime
 from services import snowflake_bronze_runtime
 
@@ -20,7 +18,7 @@ def test_snowflake_bronze_runtime_is_disabled_by_default(monkeypatch):
     assert result["snowflake_bronze_execution_status"] == "DISABLED"
 
 
-def test_gate4_refuses_silver_when_snowflake_bronze_execution_does_not_complete(monkeypatch):
+def test_gate4_defers_snowflake_bronze_execution_until_gold_review(monkeypatch):
     saved = []
 
     monkeypatch.setattr(
@@ -32,19 +30,25 @@ def test_gate4_refuses_silver_when_snowflake_bronze_execution_does_not_complete(
             "bronze_generation_results": [{"table": "claims"}],
         },
     )
-    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved.append(state))
-    monkeypatch.setattr(pipeline_runtime, "continue_database_pipeline", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("silver should not start")))
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda run_id, state, **_: saved.append(state.copy()))
+    monkeypatch.setattr(pipeline_runtime, "ai_store_db_writer", lambda **_: None)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_pause_for_silver_merge_key_review",
+        lambda run_id, state: {**state, "status": "HITL_WAIT", "next_review_key": "silver_merge_key_review"},
+    )
     monkeypatch.setattr(
         snowflake_bronze_runtime,
         "run_snowflake_bronze_scripts",
-        lambda state, **kwargs: {**state, "snowflake_bronze_execution_status": "DISABLED"},
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Bronze execution should wait for Gold Review approval")),
     )
 
-    with pytest.raises(RuntimeError, match="Snowflake Bronze execution did not complete"):
-        pipeline_runtime.submit_gate4_review("run-1", action="APPROVED", review_artifact={"feeds": [{"table": "claims"}]})
+    result = pipeline_runtime.submit_gate4_review("run-1", action="APPROVED", review_artifact={"feeds": [{"table": "claims"}]})
 
-    assert saved[-1]["status"] == "FAILED"
-    assert saved[-1]["failed_background_stage"] == "bronze_code_execution"
+    assert result["status"] == "HITL_WAIT"
+    assert result["next_review_key"] == "silver_merge_key_review"
+    assert result["snowflake_bronze_execution_status"] == pipeline_runtime.DEFERRED_EXECUTION_STATUS
+    assert saved[-1]["snowflake_bronze_execution_status"] == pipeline_runtime.DEFERRED_EXECUTION_STATUS
 
 
 def test_gate4_snowflake_dbt_skips_native_bronze_execution(monkeypatch):
@@ -80,7 +84,7 @@ def test_gate4_snowflake_dbt_skips_native_bronze_execution(monkeypatch):
         review_artifact={"feeds": [{"table": "claims", "review_status": "APPROVED"}]},
     )
 
-    assert result["snowflake_bronze_execution_status"] == "SKIPPED_DBT_CODEGEN_ONLY"
+    assert result["snowflake_bronze_execution_status"] == pipeline_runtime.DEFERRED_EXECUTION_STATUS
     assert result["next_review_key"] == "silver_merge_key_review"
     assert all(state.get("background_stage") != "bronze_code_execution" for state in saved)
 

@@ -192,9 +192,11 @@ def _resume_failed_run(run_id: str, action_name: str) -> Dict[str, Any]:
         database_failed_stage_key,
     )
     from services.pipeline_runtime import (
+        execute_approved_database_layers,
         load_checkpoint_state,
         save_checkpoint_state,
         submit_background,
+        submit_gold_review,
     )
 
     checkpoint = load_checkpoint_state(run_id) or {}
@@ -214,14 +216,19 @@ def _resume_failed_run(run_id: str, action_name: str) -> Dict[str, Any]:
     if not failed_stage_key:
         raise HTTPException(status_code=400, detail="No failed stage identified.")
 
-    submit_background(
-        run_id,
-        failed_stage_key,
-        continue_database_pipeline_job,
-        run_id,
-        failed_stage_key,
-        resumed_state,
-    )
+    if failed_stage_key in {"bronze_code_execution", "silver_code_execution", "gold_code_execution"}:
+        submit_background(run_id, failed_stage_key, execute_approved_database_layers, run_id, resumed_state)
+    elif failed_stage_key == "gold_review":
+        submit_background(run_id, failed_stage_key, submit_gold_review, run_id, "APPROVED", resumed_state.get("gold_review_artifact"))
+    else:
+        submit_background(
+            run_id,
+            failed_stage_key,
+            continue_database_pipeline_job,
+            run_id,
+            failed_stage_key,
+            resumed_state,
+        )
 
     logger.info("Resuming failed run", extra={"run_id": run_id, "stage": failed_stage_key, "action": action_name})
 
@@ -488,9 +495,11 @@ def retry_failed_stage(run_id: str, user: AuthUser = Depends(get_current_user)) 
         database_failed_stage_key,
     )
     from services.pipeline_runtime import (
+        execute_approved_database_layers,
         load_checkpoint_state,
         save_checkpoint_state,
         submit_background,
+        submit_gold_review,
     )
 
     checkpoint = assert_run_access(run_id, user, checkpoint=load_checkpoint_state(run_id) or {})
@@ -520,14 +529,19 @@ def retry_failed_stage(run_id: str, user: AuthUser = Depends(get_current_user)) 
     resumed_state = clean_checkpoint_for_resume(checkpoint)
     save_checkpoint_state(run_id, resumed_state)
 
-    submit_background(
-        run_id,
-        failed_stage_key,
-        continue_database_pipeline_job,
-        run_id,
-        failed_stage_key,
-        resumed_state,
-    )
+    if failed_stage_key in {"bronze_code_execution", "silver_code_execution", "gold_code_execution"}:
+        submit_background(run_id, failed_stage_key, execute_approved_database_layers, run_id, resumed_state)
+    elif failed_stage_key == "gold_review":
+        submit_background(run_id, failed_stage_key, submit_gold_review, run_id, "APPROVED", resumed_state.get("gold_review_artifact"))
+    else:
+        submit_background(
+            run_id,
+            failed_stage_key,
+            continue_database_pipeline_job,
+            run_id,
+            failed_stage_key,
+            resumed_state,
+        )
 
     logger.info("Retrying failed stage", extra={"run_id": run_id, "stage": failed_stage_key})
 

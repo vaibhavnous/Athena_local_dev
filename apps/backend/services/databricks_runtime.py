@@ -885,5 +885,8 @@ def run_databricks_silver_scripts(
 
 def run_databricks_gold_scripts(
     state: Dict[str, Any],
+    *,
+    review_artifact: Dict[str, Any] | None = None,
+    approved_only: bool = False,
 ) -> Dict[str, Any]:
-    return _execute_databricks_stage(state, layer="gold", review_artifact=None, approved_only=False)
+    return _execute_databricks_stage(state, layer="gold", review_artifact=review_artifact, approved_only=approved_only)

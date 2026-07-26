@@ -113,6 +113,8 @@ def stage_key(value: Any) -> Optional[str]:
         return "pre_bronze"
     if "gate4" in text or "gate 4" in text or "bronze review" in text:
         return "gate4"
+    if "bronze code execution" in text:
+        return "bronze_code_execution"
     if "sftp pull" in text:
         return "pull"
     if "bronze validation" in text:
@@ -121,10 +123,16 @@ def stage_key(value: Any) -> Optional[str]:
         return "bronze"
     if "gate5" in text or "gate 5" in text or "silver review" in text:
         return "gate5"
+    if "silver code execution" in text:
+        return "silver_code_execution"
     if "dq validation" in text:
         return "dq_validation"
     if "silver" in text:
         return "silver"
+    if "gold review" in text:
+        return "gold_review"
+    if "gold code execution" in text:
+        return "gold_code_execution"
     if "gold" in text:
         return "gold"
     return None
@@ -151,11 +159,15 @@ def stage_label_from_key(key: Optional[str], source: Optional[str] = None) -> Op
         "pre_bronze": "Pre-Bronze Readiness",
         "bronze": "Bronze Generation" if not is_file_source(source) else "Bronze Code Generation",
         "gate4": gate_label(4, source=str(source or "database")),
+        "bronze_code_execution": "Bronze Code Execution",
         "pull": "Source Handoff" if str(source or "").lower() == "adls_gen2" else "SFTP Pull",
         "bronze_validation": "Bronze Validation",
         "silver": "Silver Generation" if not is_file_source(source) else "Silver Code Generation",
         "gate5": gate_label(5, source=str(source or "database")),
+        "silver_code_execution": "Silver Code Execution",
         "dq_validation": "DQ Validation",
         "gold": "Gold Generation" if not is_file_source(source) else "Gold Code Generation",
+        "gold_review": "Gold Review",
+        "gold_code_execution": "Gold Code Execution",
     }
     return labels.get(str(key), str(key))

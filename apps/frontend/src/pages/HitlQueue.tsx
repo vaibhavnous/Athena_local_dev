@@ -545,6 +545,9 @@ function HitlQueue({ onClose = null }) {
   const isGate5 = gateToReview === 5
   const runSource = currentRun?.source || selectedRunDetail?.source || ''
   const isSftpRun = runSource === 'sftp' || runSource === 'adls_gen2'
+  const isSnowflakeDbtRun =
+    String(currentRun?.target_warehouse || selectedRunDetail?.target_warehouse || '').toLowerCase() === 'snowflake' &&
+    String(currentRun?.execution_engine || selectedRunDetail?.execution_engine || '').toLowerCase() === 'dbt'
   const gate1Name = getGateDisplayName(1)
   const gate2Name = getGateDisplayName(2, runSource)
   const gate3Name = getGateDisplayName(3)
@@ -1520,9 +1523,9 @@ function HitlQueue({ onClose = null }) {
             next_gate: 0,
             next_review_key: null,
             stage_confirmation: null,
-            background_stage: reviewAction === 'APPROVED' ? 'bronze_code_execution' : undefined,
+            background_stage: reviewAction === 'APPROVED' ? 'silver_merge_key_review' : undefined,
           resume_message: reviewAction === 'APPROVED'
-            ? 'Bronze review submitted. Bronze execution is starting.'
+            ? 'Bronze review submitted. Silver merge-key review is being prepared.'
             : 'Bronze review was submitted.',
         })
         setBronzeReview(null)
@@ -1608,9 +1611,9 @@ function HitlQueue({ onClose = null }) {
             next_gate: 0,
             next_review_key: null,
             stage_confirmation: null,
-            background_stage: reviewAction === 'APPROVED' ? 'silver_code_execution' : undefined,
+            background_stage: reviewAction === 'APPROVED' ? 'gold' : undefined,
           resume_message: reviewAction === 'APPROVED'
-            ? `${gate5Name} submitted. Silver execution is starting.`
+            ? `${gate5Name} submitted. Gold generation is starting.`
             : `${gate5Name} was submitted.`,
         })
         setSilverReview(null)
@@ -1647,10 +1650,12 @@ function HitlQueue({ onClose = null }) {
         await submitGoldReview(selectedRunId, reviewAction, buildCodeReviewArtifact('gold', codeReviewDraftItems, goldReview, codeReviewDecisions))
         updateRun(selectedRunId, {
           id: selectedRunId,
-          status: 'PROCESSING',
+          status: 'RUNNING',
           next_review_key: null,
-          background_stage: reviewAction === 'APPROVED' ? 'gold_code_execution' : undefined,
-          resume_message: reviewAction === 'APPROVED' ? 'Gold review submitted. Gold execution is starting.' : 'Gold review was submitted.',
+          background_stage: reviewAction === 'APPROVED' ? (isSnowflakeDbtRun ? 'gold_review' : 'bronze_code_execution') : undefined,
+          resume_message: reviewAction === 'APPROVED'
+            ? (isSnowflakeDbtRun ? 'Gold review submitted. Snowflake dbt artifacts are being finalized.' : 'Gold review submitted. Approved Bronze, Silver, and Gold execution is starting.')
+            : 'Gold review was submitted.',
         })
         setGoldReview(null)
         setCodeReviewDraftItems([])
@@ -2133,7 +2138,7 @@ function HitlQueue({ onClose = null }) {
               </h1>
               <p className="mt-1 text-[18px] font-medium leading-snug text-[#b9c1cf]">
                 {isGoldReview
-                  ? (goldReview?.resume_message || 'Gold Review is pending. Review generated Gold scripts before final deployment or execution.')
+                  ? (goldReview?.resume_message || 'Gold Review is pending. Review generated Gold scripts before ordered deployment execution.')
                   : isGate5
                   ? (silverReview?.resume_message || 'Stage 05 completed. Review generated Silver scripts before the pipeline continues.')
                   : isSilverMergeKeyReview
@@ -2234,7 +2239,7 @@ function HitlQueue({ onClose = null }) {
             ) : isGoldReview ? (
             <CodeReviewPanel
               title="Gold Code Review"
-              description={`Review ${goldReviewItems.length} generated Gold script${goldReviewItems.length !== 1 ? 's' : ''} before final execution.`}
+              description={`Review ${goldReviewItems.length} generated Gold script${goldReviewItems.length !== 1 ? 's' : ''} before Bronze, Silver, and Gold execution starts.`}
               lineageLabel="View Source -> Bronze -> Silver -> Gold Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
               emptyMessage="Gold scripts are not loaded yet. Keep the monitor open while Gold Code Review is prepared."
@@ -2253,7 +2258,7 @@ function HitlQueue({ onClose = null }) {
               onSubmit={handleSubmit}
               submitting={submitting}
               disabled={submitting || !gateReviewReady}
-              submitLabel="Submit & Execute Gold"
+              submitLabel="Submit & Execute Approved Layers"
             />
             ) : isGate5 ? (
             <CodeReviewPanel
@@ -2589,7 +2594,7 @@ function HitlQueue({ onClose = null }) {
                   : isGate5
                   ? `Approving ${gate5Name} accepts the Silver scripts and continues downstream validation.`
                   : isGoldReview
-                  ? 'Approving Gold Review accepts the generated Gold artifacts and starts final execution, or completes Snowflake dbt code generation.'
+                  ? 'Approving Gold Review accepts the generated Gold artifacts and starts ordered Bronze, Silver, and Gold execution, or completes Snowflake dbt code generation.'
                   : 'Approvals are final once submitted. Rejected KPIs will be excluded from the final export.'}
               </p>
             </div>
@@ -2648,7 +2653,7 @@ function HitlQueue({ onClose = null }) {
             ) : (
               <>
                 {isGate3 || isGate2 || isCodeReview ? <CheckCircle2 size={14} /> : <Send size={14} />}
-                {isGoldReview ? 'Submit Gold Review & Execute Gold ->' : isGate5 ? `Submit ${gate5Name} & Continue Pipeline ->` : isSilverMergeKeyReview ? 'Submit Silver Merge Key Review & Generate Silver ->' : isGate4 ? `Submit ${gate4Name} & Review Merge Keys ->` : isGate3 ? `Submit ${gate3Name} & Generate Bronze ->` : isGate2 ? `Submit ${gate2Name} & Resume Pipeline ->` : 'Submit All Decisions & Resume Pipeline ->'}
+                {isGoldReview ? 'Submit Gold Review & Execute Approved Layers ->' : isGate5 ? `Submit ${gate5Name} & Continue Pipeline ->` : isSilverMergeKeyReview ? 'Submit Silver Merge Key Review & Generate Silver ->' : isGate4 ? `Submit ${gate4Name} & Review Merge Keys ->` : isGate3 ? `Submit ${gate3Name} & Generate Bronze ->` : isGate2 ? `Submit ${gate2Name} & Resume Pipeline ->` : 'Submit All Decisions & Resume Pipeline ->'}
               </>
             )}
           </button>

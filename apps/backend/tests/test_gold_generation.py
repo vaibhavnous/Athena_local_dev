@@ -774,6 +774,56 @@ def test_databricks_gold_submits_approved_scripts_as_one_batch(monkeypatch):
     assert len(result["databricks_gold_execution_results"]) == 2
 
 
+def test_databricks_gold_submits_only_approved_review_items(monkeypatch):
+    monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
+    monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_EXECUTION_MODE", raising=False)
+    monkeypatch.delenv("ATHENA_DATABRICKS_EXECUTION_MODE", raising=False)
+    monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_: None)
+    monkeypatch.setattr(databricks_runtime, "_workspace_import_notebook", lambda *_: {})
+    submitted = []
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_submit_run",
+        lambda path, **kwargs: submitted.append((path, kwargs)) or {"run_id": 42},
+    )
+    monkeypatch.setattr(databricks_runtime, "_wait_for_run", lambda *_: {"run_id": 42, "result_state": "SUCCESS"})
+    monkeypatch.setattr(databricks_runtime, "_task_run_id", lambda *_: 42)
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_get_run_output",
+        lambda *_: {
+            "notebook_output": {
+                "result": json.dumps({
+                    "status": "SUCCESS",
+                    "results": [{"script_name": "gold_fact_one", "status": "SUCCESS"}],
+                })
+            }
+        },
+    )
+    monkeypatch.setattr(databricks_runtime, "save_external_execution_progress", lambda state, **_: state)
+
+    result = databricks_runtime.run_databricks_gold_scripts(
+        {
+            "run_id": "run-batch-gold-review",
+            "target_warehouse": "databricks",
+            "gold_generation_results": [
+                {"status": "APPROVED", "script_body": "print('one')", "kpi_name": "One", "target_table": "gold.fact_one"},
+                {"status": "APPROVED", "script_body": "print('two')", "kpi_name": "Two", "target_table": "gold.fact_two"},
+            ],
+        },
+        review_artifact={
+            "items": [
+                {"kpi_name": "One", "target_table": "gold.fact_one", "review_status": "APPROVED"},
+                {"kpi_name": "Two", "target_table": "gold.fact_two", "review_status": "REJECTED"},
+            ]
+        },
+        approved_only=True,
+    )
+
+    assert len(submitted) == 1
+    assert len(result["databricks_gold_execution_results"]) == 1
+
+
 def test_databricks_gold_batch_success_survives_output_poll_failure(monkeypatch):
     monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
     monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_EXECUTION_MODE", raising=False)

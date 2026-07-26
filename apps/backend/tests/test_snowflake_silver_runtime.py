@@ -313,17 +313,8 @@ def test_snowflake_silver_catalog_preflight_rejects_quoted_case_mismatch():
         raise AssertionError("Quoted Snowflake source identifiers must match catalog case exactly")
 
 
-def test_submit_gate5_review_executes_snowflake_silver_before_gold(monkeypatch):
-    calls = []
+def test_submit_gate5_review_defers_snowflake_silver_execution_before_gold(monkeypatch):
     saved_states = []
-
-    def fake_run(state, *, review_artifact=None, approved_only=False):
-        calls.append((state, review_artifact, approved_only))
-        return {
-            **state,
-            "snowflake_silver_execution_status": "COMPLETED",
-            "snowflake_silver_execution_results": [{"table": "claims"}],
-        }
 
     monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda run_id: {
         "run_id": run_id,
@@ -339,7 +330,7 @@ def test_submit_gate5_review_executes_snowflake_silver_before_gold(monkeypatch):
     )
     monkeypatch.setattr(
         "services.snowflake_silver_runtime.run_snowflake_silver_scripts",
-        fake_run,
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Silver execution should wait for Gold Review approval")),
     )
 
     result = pipeline_runtime.submit_gate5_review(
@@ -348,12 +339,9 @@ def test_submit_gate5_review_executes_snowflake_silver_before_gold(monkeypatch):
         review_artifact={"items": [{"table": "claims", "review_status": "APPROVED"}]},
     )
 
-    assert calls
-    assert calls[0][2] is True
-    assert calls[0][0]["background_stage"] == "silver_code_execution"
     assert result["continued"] == "gold"
-    assert result["snowflake_silver_execution_status"] == "COMPLETED"
-    assert any(state.get("background_stage") == "silver_code_execution" for state in saved_states)
+    assert result["snowflake_silver_execution_status"] == pipeline_runtime.DEFERRED_EXECUTION_STATUS
+    assert all(state.get("background_stage") != "silver_code_execution" for state in saved_states)
 
 
 def test_submit_gate5_snowflake_dbt_skips_native_silver_execution(monkeypatch):
@@ -384,5 +372,5 @@ def test_submit_gate5_snowflake_dbt_skips_native_silver_execution(monkeypatch):
     )
 
     assert result["continued"] == "gold"
-    assert result["snowflake_silver_execution_status"] == "SKIPPED_DBT_CODEGEN_ONLY"
+    assert result["snowflake_silver_execution_status"] == pipeline_runtime.DEFERRED_EXECUTION_STATUS
     assert all(state.get("background_stage") != "silver_code_execution" for state in saved_states)

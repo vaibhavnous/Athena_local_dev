@@ -230,7 +230,7 @@ function AppShell() {
         const detailReviewKey = detail?.next_review_key || ''
         const expectedGate = pausedRunGate
         const expectedReviewKey = pausedRunReviewKey
-        const expectedGateKey = expectedReviewKey === 'gold_review' ? 'gold_code_execution' : expectedReviewKey || (
+        const expectedGateKey = expectedReviewKey || (
           expectedGate === 1 ? 'gate1' :
           expectedGate === 2 ? 'gate2' :
           expectedGate === 3 ? 'gate3' :

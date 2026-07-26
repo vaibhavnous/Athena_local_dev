@@ -54,16 +54,26 @@ function normalizeRunStatus(value: any): string {
   return status
 }
 
-const PIPELINE_PROGRESS_ORDER = [
+const DATABASE_PIPELINE_PROGRESS_ORDER = [
   'ingestion', 'memory', 'requirements', 'kpis', 'gate1',
   'nomination', 'gate2', 'discovery', 'profiling', 'enrichment', 'gate3',
+  'bronze', 'gate4',
+  'silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5',
+  'gold', 'gold_review', 'bronze_code_execution', 'silver_code_execution', 'gold_code_execution',
+]
+
+const FILE_PIPELINE_PROGRESS_ORDER = [
+  'ingestion', 'requirements', 'kpis', 'gate1',
+  'discovery', 'gate2', 'schema', 'profiling', 'enrichment', 'gate3',
   'bronze', 'gate4', 'bronze_code_execution',
   'silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution',
   'gold', 'gold_code_execution',
 ]
 
 function runProgressIndex(run: any): number {
-  const order = new Map(PIPELINE_PROGRESS_ORDER.map((key, index) => [key, index]))
+  const source = String(run?.source || '').toLowerCase()
+  const orderKeys = source === 'sftp' || source === 'adls_gen2' ? FILE_PIPELINE_PROGRESS_ORDER : DATABASE_PIPELINE_PROGRESS_ORDER
+  const order = new Map(orderKeys.map((key, index) => [key, index]))
   const steps = Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length
     ? run.pipeline_steps
     : Array.isArray(run?.stages) ? run.stages : []

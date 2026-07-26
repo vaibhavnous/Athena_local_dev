@@ -39,6 +39,37 @@ test('does not erase stage detail from a sparse hydration fallback', () => {
   expect(useAthenaStore.getState().runs[0].stages).toEqual([{ key: 'gold', status: 'RUNNING' }])
 })
 
+test('accepts ordered execution progress after Gold review', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-gold-review',
+    source: 'database',
+    status: 'HITL_WAIT',
+    next_review_key: 'gold_review',
+    pipeline_steps: [
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'HITL_WAIT' },
+    ],
+  })
+
+  useAthenaStore.getState().updateRun('run-gold-review', {
+    id: 'run-gold-review',
+    source: 'database',
+    status: 'RUNNING',
+    background_stage: 'bronze_code_execution',
+    pipeline_steps: [
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'COMPLETED' },
+      { key: 'bronze_code_execution', state: 'RUNNING' },
+    ],
+  })
+
+  expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    status: 'RUNNING',
+    background_stage: 'bronze_code_execution',
+  })
+})
+
 test('clears the completed-stage dialog when the next stage starts', () => {
   resetStore()
   useAthenaStore.getState().addRun({

@@ -13,6 +13,7 @@ export function normalizeState(value: string | undefined) {
   if (state === 'PAUSED_FOR_HITL' || state === 'PENDING_REVIEW') return 'HITL_WAIT'
   if (state === 'SUCCESS' || state === 'PIPELINE_COMPLETED') return 'COMPLETED'
   if (state === 'EXTERNAL_FAILED') return 'FAILED'
+  if (state === 'DEFERRED_UNTIL_GOLD_REVIEW') return 'PENDING'
   return state || 'PENDING'
 }
 
@@ -56,17 +57,17 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-3',
       label: 'Bronze Layer (Ingestion)',
-      keys: ['bronze', 'gate4', 'bronze_code_execution'],
+      keys: ['bronze', 'gate4'],
     },
     {
       id: 'phase-4',
       label: 'Silver Layer (Transformation)',
-      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution'],
+      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5'],
     },
     {
       id: 'phase-5',
-      label: 'Gold Layer (Analytics)',
-      keys: ['gold', 'gold_code_execution'],
+      label: 'Gold Layer & Deployment',
+      keys: ['gold', 'gold_review', 'bronze_code_execution', 'silver_code_execution', 'gold_code_execution'],
     },
   ],
   file: [
@@ -230,12 +231,21 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
   }
 
   if (run?.next_review_key === 'gold_review') {
-    const dbtGoldReview =
-      String(run?.target_warehouse || '').toLowerCase() === 'snowflake' &&
-      String(run?.execution_engine || '').toLowerCase() === 'dbt'
-    return steps.map((step) => step.key === 'gold_code_execution'
-      ? { ...step, label: dbtGoldReview ? 'Gold Review' : 'Gold Review & Execution', state: 'HITL_WAIT', complete: false }
-      : step)
+    if (steps.some((step) => step.key === 'gold_review')) {
+      return steps.map((step) => step.key === 'gold_review'
+        ? { ...step, label: 'Gold Review', state: 'HITL_WAIT', complete: false }
+        : step)
+    }
+    return [
+      ...steps,
+      {
+        key: 'gold_review',
+        label: 'Gold Review',
+        detail: buildStepDetail(run, 'gold_review', 'HITL_WAIT', ''),
+        state: 'HITL_WAIT',
+        complete: false,
+      },
+    ]
   }
 
   if (gate < 1 || gate > 5) return steps
@@ -349,6 +359,7 @@ function fallbackStepLabel(key) {
     gate5: 'Silver Review',
     silver_code_execution: 'Silver Code Execution',
     gold: 'Gold Code Generation',
+    gold_review: 'Gold Review',
     gold_code_execution: 'Gold Code Execution',
   }
   return labels[key] || key
@@ -356,48 +367,55 @@ function fallbackStepLabel(key) {
 
 function syntheticStepState(key, byKey: Map<string, PipelineStep>) {
   const state = (stepKey: string) => normalizeState(byKey.get(stepKey)?.state)
-  const bronze = state('bronze')
   const bronzeExecution = state('bronze_code_execution')
   const mergeReview = state('silver_merge_key_review')
   const silver = state('silver')
   const gate5 = state('gate5')
   const silverExecution = state('silver_code_execution')
   const gold = state('gold')
+  const goldReview = state('gold_review')
   const goldExecution = state('gold_code_execution')
   const progressed = (...states: string[]) => states.some((item) => ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(item))
-  const silverProgressed = progressed(silver, gate5, silverExecution, gold, goldExecution)
+  const executionProgressed = progressed(bronzeExecution, silverExecution, goldExecution)
+  const silverProgressed = progressed(silver, gate5, gold, goldReview) || executionProgressed
 
   if (key === 'bronze') {
-    if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(mergeReview, silver, gate5, gold, goldReview) || executionProgressed) return 'COMPLETED'
   }
   if (key === 'gate4') {
-    if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(mergeReview, silver, gate5, gold, goldReview) || executionProgressed) return 'COMPLETED'
   }
   if (key === 'bronze_code_execution') {
     if (bronzeExecution === 'COMPLETED') return 'COMPLETED'
-    if (bronze === 'RUNNING') return 'PENDING'
+    if (['RUNNING', 'FAILED'].includes(bronzeExecution)) return bronzeExecution
   }
   if (key === 'silver_merge_key_resolution') {
-    if (bronzeExecution === 'COMPLETED' || mergeReview === 'HITL_WAIT' || mergeReview === 'COMPLETED' || silverProgressed) return 'COMPLETED'
+    if (mergeReview === 'HITL_WAIT' || mergeReview === 'COMPLETED' || silverProgressed) return 'COMPLETED'
   }
   if (key === 'silver_merge_key_review') {
     if (mergeReview === 'HITL_WAIT') return 'HITL_WAIT'
     if (mergeReview === 'COMPLETED' || silverProgressed) return 'COMPLETED'
   }
   if (key === 'silver') {
-    if (progressed(gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(gate5, gold, goldReview) || executionProgressed) return 'COMPLETED'
   }
   if (key === 'gate5') {
-    if (progressed(silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(gold, goldReview) || executionProgressed) return 'COMPLETED'
   }
   if (key === 'silver_code_execution') {
-    if (progressed(gold, goldExecution)) return 'COMPLETED'
+    if (silverExecution === 'COMPLETED') return 'COMPLETED'
+    if (['RUNNING', 'FAILED'].includes(silverExecution)) return silverExecution
   }
   if (key === 'gold') {
-    if (progressed(goldExecution)) return 'COMPLETED'
+    if (progressed(goldReview) || executionProgressed) return 'COMPLETED'
+  }
+  if (key === 'gold_review') {
+    if (['HITL_WAIT', 'COMPLETED', 'RUNNING', 'FAILED'].includes(goldReview)) return goldReview
+    if (executionProgressed) return 'COMPLETED'
   }
   if (key === 'gold_code_execution') {
     if (goldExecution === 'COMPLETED') return 'COMPLETED'
+    if (['RUNNING', 'FAILED'].includes(goldExecution)) return goldExecution
   }
   return 'PENDING'
 }
@@ -441,9 +459,9 @@ function buildStepDetail(run, key, state, existingDetail) {
     case 'silver_merge_key_review':
       if (state === 'HITL_WAIT') return 'Silver Merge Key Review is ready. Approve merge keys before Silver generation starts.'
       if (state === 'COMPLETED') return 'Silver merge keys were approved.'
-      return 'Silver Merge Key Review opens after Bronze execution completes.'
+      return 'Silver Merge Key Review opens after Bronze Review approval.'
     case 'gate5':
-      return readyGateMessage('Silver review', 'Silver review is ready. Validate generated Silver artifacts before downstream validation continues.')
+      return readyGateMessage('Silver review', 'Silver review is ready. Validate generated Silver artifacts before Gold generation starts.')
     case 'discovery':
       if (isFileSource) {
         if (state === 'COMPLETED') return 'The selected ADLS or SFTP source was scanned and feed candidates were identified.'
@@ -476,21 +494,25 @@ function buildStepDetail(run, key, state, existingDetail) {
       }
       if (state === 'COMPLETED') return 'Gold analytics scripts were generated.'
       if (state === 'RUNNING') return 'Generating Gold KPI scripts.'
-      return 'Gold generation starts after Silver processing completes.'
+      return 'Gold generation starts after Silver Review approval.'
+    case 'gold_review':
+      if (state === 'HITL_WAIT') return 'Gold Review is ready. Validate generated Gold artifacts before deployment execution starts.'
+      if (state === 'COMPLETED') return 'Gold artifacts were approved for deployment execution.'
+      return 'Gold Review opens after Gold generation completes.'
     case 'bronze_code_execution':
       if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
         if (state === 'COMPLETED') return 'Approved Bronze scripts were executed in Snowflake.'
         if (state === 'RUNNING') return 'Executing approved Bronze scripts in Snowflake.'
-        return 'Bronze execution starts immediately after Gate 4 approval for Snowflake runs.'
+        return 'Bronze execution starts after Gold Review approval for Snowflake runs.'
       }
-      return 'UI-only marker: Bronze scripts are exported for external execution, not run inside Astra Data.'
+      return 'Bronze execution starts after Gold Review approval.'
     case 'silver_code_execution':
       if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
         if (state === 'COMPLETED') return 'Approved Silver scripts were executed in Snowflake.'
         if (state === 'RUNNING') return 'Executing approved Silver scripts in Snowflake.'
-        return 'Silver execution starts immediately after Gate 5 approval for Snowflake runs.'
+        return 'Silver execution starts after Bronze execution completes for Snowflake runs.'
       }
-      return 'UI-only marker: Silver scripts are exported for external execution, not run inside Astra Data.'
+      return 'Silver execution starts after Bronze execution completes.'
     case 'gold_code_execution':
       if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake' && String(run?.execution_engine || '').toLowerCase() === 'dbt') {
         if (state === 'COMPLETED') return 'Generated dbt-compatible Gold artifacts were approved.'
@@ -500,9 +522,9 @@ function buildStepDetail(run, key, state, existingDetail) {
       if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
         if (state === 'COMPLETED') return 'Generated Gold scripts were executed in Snowflake.'
         if (state === 'RUNNING') return 'Executing generated Gold scripts in Snowflake.'
-        return 'Gold execution starts after Gold generation for Snowflake runs.'
+        return 'Gold execution starts after Bronze and Silver execution complete for Snowflake runs.'
       }
-      return 'UI-only marker: Gold scripts are exported for external execution, not run inside Astra Data.'
+      return 'Gold execution starts after Bronze and Silver execution complete.'
     default:
       return existingDetail || ''
   }

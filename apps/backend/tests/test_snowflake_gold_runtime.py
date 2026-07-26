@@ -283,6 +283,72 @@ def test_snowflake_gold_runtime_executes_generated_scripts(monkeypatch):
     assert fake_conn.closed is True
 
 
+def test_snowflake_gold_runtime_executes_only_approved_review_items(monkeypatch):
+    workdir = Path.cwd() / ".tmp-tests" / f"snowflake_gold_review_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    approved_path = workdir / "gold_total_claims.sql"
+    rejected_path = workdir / "gold_rejected.sql"
+    approved_path.write_text(_gold_sql(), encoding="utf-8")
+    rejected_path.write_text(
+        _gold_sql().replace("fact_total_claims", "fact_rejected_claims"),
+        encoding="utf-8",
+    )
+
+    class FakeSnowflakeConnection:
+        def __init__(self):
+            self.sql = []
+
+        def execute_string(self, sql, return_cursors=True):
+            self.sql.append(sql)
+            return [object()]
+
+        def close(self):
+            pass
+
+    fake_conn = FakeSnowflakeConnection()
+    monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_GOLD", "true")
+    monkeypatch.setattr(snowflake_gold_runtime, "_snowflake_connect", lambda: fake_conn)
+
+    result = snowflake_gold_runtime.run_snowflake_gold_scripts(
+        {
+            "target_warehouse": "snowflake",
+            "gold_generation_results": [
+                {
+                    "kpi_name": "Total Claims",
+                    "source_table": "ATHENA_DB.SILVER.silver_claim_information",
+                    "target_table": "ATHENA_DB.GOLD.fact_total_claims",
+                    "script_path": str(approved_path),
+                },
+                {
+                    "kpi_name": "Rejected Claims",
+                    "source_table": "ATHENA_DB.SILVER.silver_claim_information",
+                    "target_table": "ATHENA_DB.GOLD.fact_rejected_claims",
+                    "script_path": str(rejected_path),
+                },
+            ],
+        },
+        review_artifact={
+            "items": [
+                {"kpi_name": "Total Claims", "target_table": "ATHENA_DB.GOLD.fact_total_claims", "review_status": "APPROVED"},
+                {"kpi_name": "Rejected Claims", "target_table": "ATHENA_DB.GOLD.fact_rejected_claims", "review_status": "REJECTED"},
+            ]
+        },
+        approved_only=True,
+    )
+
+    assert result["snowflake_gold_execution_status"] == "COMPLETED"
+    assert [item["kpi_name"] for item in result["snowflake_gold_execution_results"]] == ["Total Claims"]
+    assert not any("fact_rejected_claims" in sql for sql in fake_conn.sql)
+
+
+def test_ordered_execution_requires_approved_gold_review():
+    with pytest.raises(RuntimeError, match="Gold Review must be approved"):
+        pipeline_runtime.execute_approved_database_layers(
+            "run-no-gold-approval",
+            {"run_id": "run-no-gold-approval", "target_warehouse": "snowflake"},
+        )
+
+
 def test_snowflake_gold_runtime_normalizes_timestamp_parse_for_existing_artifacts():
     sql = _gold_sql().replace(
         'GROUP BY "claim_status"',
@@ -488,8 +554,16 @@ def test_gold_stage_waits_for_review_before_snowflake_execution(monkeypatch):
             "gold_generation_results": [{"kpi_name": "Total Claims", "script_body": _gold_sql()}],
         }
 
-    def fake_gold_execution(state):
-        calls.append(state.copy())
+    def fake_bronze_execution(state, *, review_artifact=None, approved_only=False):
+        calls.append(("bronze", state.copy(), review_artifact, approved_only))
+        return {**state, "snowflake_bronze_execution_status": "COMPLETED"}
+
+    def fake_silver_execution(state, *, review_artifact=None, approved_only=False):
+        calls.append(("silver", state.copy(), review_artifact, approved_only))
+        return {**state, "snowflake_silver_execution_status": "COMPLETED"}
+
+    def fake_gold_execution(state, *, review_artifact=None, approved_only=False):
+        calls.append(("gold", state.copy(), review_artifact, approved_only))
         return {
             **state,
             "snowflake_gold_execution_status": "COMPLETED",
@@ -497,6 +571,8 @@ def test_gold_stage_waits_for_review_before_snowflake_execution(monkeypatch):
         }
 
     monkeypatch.setattr("nodes.gold_gen.gold_code_generation_node", fake_gold_generation)
+    monkeypatch.setattr("services.snowflake_bronze_runtime.run_snowflake_bronze_scripts", fake_bronze_execution)
+    monkeypatch.setattr("services.snowflake_silver_runtime.run_snowflake_silver_scripts", fake_silver_execution)
     monkeypatch.setattr("services.snowflake_gold_runtime.run_snowflake_gold_scripts", fake_gold_execution)
     monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved_states.append(state.copy()))
 
@@ -510,10 +586,19 @@ def test_gold_stage_waits_for_review_before_snowflake_execution(monkeypatch):
     monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: result)
     completed = pipeline_runtime.submit_gold_review("run-gold", "APPROVED", result["gold_review_artifact"])
 
-    assert calls
-    assert calls[0]["background_stage"] == "gold_code_execution"
+    assert [call[0] for call in calls] == ["bronze", "silver", "gold"]
+    assert calls[0][1]["background_stage"] == "bronze_code_execution"
+    assert calls[0][3] is True
+    assert calls[1][1]["background_stage"] == "silver_code_execution"
+    assert calls[1][3] is True
+    assert calls[2][1]["background_stage"] == "gold_code_execution"
+    assert calls[2][3] is True
     assert completed["status"] == "PIPELINE_COMPLETED"
+    assert completed["snowflake_bronze_execution_status"] == "COMPLETED"
+    assert completed["snowflake_silver_execution_status"] == "COMPLETED"
     assert completed["snowflake_gold_execution_status"] == "COMPLETED"
+    assert any(state.get("background_stage") == "bronze_code_execution" for state in saved_states)
+    assert any(state.get("background_stage") == "silver_code_execution" for state in saved_states)
     assert any(state.get("background_stage") == "gold_code_execution" for state in saved_states)
 
 
@@ -545,6 +630,8 @@ def test_gold_review_for_snowflake_dbt_completes_without_execution_stage(monkeyp
 
     assert build_calls
     assert completed["status"] == "PIPELINE_COMPLETED"
+    assert completed["snowflake_bronze_execution_status"] == "SKIPPED_DBT_CODEGEN_ONLY"
+    assert completed["snowflake_silver_execution_status"] == "SKIPPED_DBT_CODEGEN_ONLY"
     assert completed["snowflake_gold_execution_status"] == "SKIPPED_DBT_CODEGEN_ONLY"
     assert completed["snowflake_dbt_deploy_status"] == "NOT_APPLICABLE_CODEGEN_ONLY"
     assert all(state.get("background_stage") != "snowflake_dbt_deploy" for state in saved_states)
@@ -561,7 +648,7 @@ def test_gold_stage_executes_databricks_gold_after_review(monkeypatch):
             "gold_generation_results": [{"kpi_name": "Total Claims", "script_body": _gold_sql()}],
         }
 
-    def fake_gold_execution(state):
+    def fake_gold_execution(state, *, review_artifact=None, approved_only=False):
         calls.append(state.copy())
         return {
             **state,
@@ -570,6 +657,8 @@ def test_gold_stage_executes_databricks_gold_after_review(monkeypatch):
         }
 
     monkeypatch.setattr("nodes.gold_gen.gold_code_generation_node", fake_gold_generation)
+    monkeypatch.setattr("services.databricks_runtime.databricks_bronze_execution_enabled", lambda: False)
+    monkeypatch.setattr("services.databricks_runtime.databricks_silver_execution_enabled", lambda: False)
     monkeypatch.setattr("services.databricks_runtime.databricks_gold_execution_enabled", lambda: True)
     monkeypatch.setattr("services.databricks_runtime.run_databricks_gold_scripts", fake_gold_execution)
     monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: saved_states.append(state.copy()))

@@ -369,7 +369,6 @@ def submit_bronze_reviews(
     from api.services.ui_service import bronze_review_from_scripts
     from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate4_review
     from sftp_nodes.hitl import submit_sftp_gate4_review
-    from services.databricks_runtime import databricks_bronze_execution_enabled
 
     action = _review_action(payload.action)
     logger.info("Submitting bronze review", extra={"run_id": run_id, "action": action})
@@ -385,19 +384,7 @@ def submit_bronze_reviews(
         stage = "bronze_code_execution" if action == "APPROVED" else "gate4"
         submit_background(run_id, stage, submit_sftp_gate4_review, run_id, action, review_artifact)
     else:
-        stage = (
-            "bronze_code_execution"
-            if action == "APPROVED"
-            and (
-                str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-                or (
-                    str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
-                    and databricks_bronze_execution_enabled()
-                )
-            )
-            else "silver_merge_key_review" if action == "APPROVED"
-            else "gate4"
-        )
+        stage = "silver_merge_key_review" if action == "APPROVED" else "gate4"
         submit_background(run_id, stage, submit_gate4_review, run_id, action, review_artifact, checkpoint)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": action}
@@ -492,28 +479,16 @@ def submit_silver_reviews(
 
     from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate5_review
     from sftp_nodes.hitl import submit_sftp_gate5_review
-    from services.databricks_runtime import databricks_silver_execution_enabled
 
     action = _review_action(payload.action)
     logger.info("Submitting silver review", extra={"run_id": run_id, "action": action})
 
     checkpoint = _checkpoint_for_open_gate(run_id, user, load_checkpoint_state(run_id) or {}, gate_number=5)
-    stage = (
-        "silver_code_execution"
-        if action == "APPROVED"
-        and (
-            str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-            or (
-                str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
-                and databricks_silver_execution_enabled()
-            )
-        )
-        else "gold" if action == "APPROVED"
-        else "gate5"
-    )
     if api_utils.is_file_source(checkpoint.get("source")):
+        stage = "silver_code_execution" if action == "APPROVED" else "gate5"
         submit_background(run_id, stage, submit_sftp_gate5_review, run_id, action, payload.review_artifact)
     else:
+        stage = "gold" if action == "APPROVED" else "gate5"
         submit_background(run_id, stage, submit_gate5_review, run_id, action, payload.review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": action}
@@ -546,6 +521,11 @@ def submit_gold_reviews(
 
     action = _review_action(payload.action)
     logger.info("Submitting Gold review", extra={"run_id": run_id, "action": action})
-    _checkpoint_for_open_gate(run_id, user, load_checkpoint_state(run_id) or {}, review_key="gold_review")
-    submit_background(run_id, "gold_code_execution", submit_gold_review, run_id, action, payload.review_artifact)
+    checkpoint = _checkpoint_for_open_gate(run_id, user, load_checkpoint_state(run_id) or {}, review_key="gold_review")
+    dbt_codegen = (
+        str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+        and str(checkpoint.get("execution_engine") or "").lower() == "dbt"
+    )
+    stage = "bronze_code_execution" if action == "APPROVED" and not dbt_codegen else "gold_review"
+    submit_background(run_id, stage, submit_gold_review, run_id, action, payload.review_artifact)
     return {"run_id": run_id, "status": "SUBMITTED", "action": action}

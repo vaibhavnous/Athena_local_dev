@@ -5,7 +5,7 @@ const phaseState = (run: any, phaseId: string, stepKey: string) => {
   return phase?.steps.find((step) => step.key === stepKey)?.state
 }
 
-test('renders Snowflake bronze execution as active without advancing Silver', () => {
+test('renders Snowflake bronze execution after Gold review without advancing later execution', () => {
   const run = {
     status: 'RUNNING',
     target_warehouse: 'snowflake',
@@ -13,15 +13,18 @@ test('renders Snowflake bronze execution as active without advancing Silver', ()
     pipeline_steps: [
       { key: 'bronze', state: 'COMPLETED' },
       { key: 'gate4', state: 'COMPLETED' },
+      { key: 'silver_merge_key_review', state: 'COMPLETED' },
+      { key: 'silver', state: 'COMPLETED' },
+      { key: 'gate5', state: 'COMPLETED' },
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'COMPLETED' },
       { key: 'bronze_code_execution', state: 'RUNNING' },
-      { key: 'silver_merge_key_review', state: 'PENDING' },
-      { key: 'silver', state: 'PENDING' },
+      { key: 'silver_code_execution', state: 'PENDING' },
     ],
   }
 
-  expect(phaseState(run, 'phase-3', 'bronze_code_execution')).toBe('RUNNING')
-  expect(phaseState(run, 'phase-4', 'silver_merge_key_review')).toBe('PENDING')
-  expect(phaseState(run, 'phase-4', 'silver')).toBe('PENDING')
+  expect(phaseState(run, 'phase-5', 'bronze_code_execution')).toBe('RUNNING')
+  expect(phaseState(run, 'phase-5', 'silver_code_execution')).toBe('PENDING')
 })
 
 test('promotes an existing merge-key step when the backend pauses for review', () => {
@@ -29,7 +32,8 @@ test('promotes an existing merge-key step when the backend pauses for review', (
     status: 'HITL_WAIT',
     next_review_key: 'silver_merge_key_review',
     pipeline_steps: [
-      { key: 'bronze_code_execution', state: 'COMPLETED' },
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
       { key: 'silver_merge_key_resolution', state: 'COMPLETED' },
       { key: 'silver_merge_key_review', state: 'PENDING' },
       { key: 'silver', state: 'PENDING' },
@@ -38,33 +42,46 @@ test('promotes an existing merge-key step when the backend pauses for review', (
 
   expect(phaseState(run, 'phase-4', 'silver_merge_key_review')).toBe('HITL_WAIT')
   expect(phaseState(run, 'phase-4', 'silver')).toBe('PENDING')
+  expect(phaseState(run, 'phase-5', 'bronze_code_execution')).toBe('PENDING')
 })
 
-test('renders Silver and Gold execution frontiers independently', () => {
+test('renders ordered execution frontiers after Gold review', () => {
+  const bronzeRun = {
+    status: 'RUNNING',
+    background_stage: 'bronze_code_execution',
+    pipeline_steps: [
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'COMPLETED' },
+      { key: 'bronze_code_execution', state: 'RUNNING' },
+      { key: 'silver_code_execution', state: 'PENDING' },
+      { key: 'gold_code_execution', state: 'PENDING' },
+    ],
+  }
   const silverRun = {
     status: 'RUNNING',
     background_stage: 'silver_code_execution',
     pipeline_steps: [
-      { key: 'silver_merge_key_review', state: 'COMPLETED' },
-      { key: 'silver', state: 'COMPLETED' },
-      { key: 'gate5', state: 'COMPLETED' },
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'COMPLETED' },
+      { key: 'bronze_code_execution', state: 'COMPLETED' },
       { key: 'silver_code_execution', state: 'RUNNING' },
-      { key: 'gold', state: 'PENDING' },
+      { key: 'gold_code_execution', state: 'PENDING' },
     ],
   }
   const goldRun = {
     status: 'RUNNING',
     background_stage: 'gold_code_execution',
     pipeline_steps: [
-      { key: 'silver_code_execution', state: 'COMPLETED' },
       { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'COMPLETED' },
+      { key: 'bronze_code_execution', state: 'COMPLETED' },
+      { key: 'silver_code_execution', state: 'COMPLETED' },
       { key: 'gold_code_execution', state: 'RUNNING' },
     ],
   }
 
-  expect(phaseState(silverRun, 'phase-4', 'silver_code_execution')).toBe('RUNNING')
-  expect(phaseState(silverRun, 'phase-5', 'gold')).toBe('PENDING')
-  expect(phaseState(goldRun, 'phase-4', 'silver_code_execution')).toBe('COMPLETED')
+  expect(phaseState(bronzeRun, 'phase-5', 'bronze_code_execution')).toBe('RUNNING')
+  expect(phaseState(silverRun, 'phase-5', 'silver_code_execution')).toBe('RUNNING')
   expect(phaseState(goldRun, 'phase-5', 'gold_code_execution')).toBe('RUNNING')
 })
 
@@ -77,16 +94,15 @@ test('does not infer Silver generation or execution from a completed merge-key r
       { key: 'silver_merge_key_review', state: 'COMPLETED' },
       { key: 'silver', state: 'PENDING' },
       { key: 'gate5', state: 'PENDING' },
-      { key: 'silver_code_execution', state: 'PENDING' },
     ],
   }
 
   expect(phaseState(run, 'phase-4', 'silver')).toBe('PENDING')
   expect(phaseState(run, 'phase-4', 'gate5')).toBe('PENDING')
-  expect(phaseState(run, 'phase-4', 'silver_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-5', 'silver_code_execution')).toBe('PENDING')
 })
 
-test('shows Gold execution as waiting while generated Gold code is under review', () => {
+test('shows Gold review as waiting while generated Gold code is under review', () => {
   const run = {
     status: 'HITL_WAIT',
     next_review_key: 'gold_review',
@@ -96,10 +112,13 @@ test('shows Gold execution as waiting while generated Gold code is under review'
     ],
   }
 
-  expect(getPipelineSteps(run).find((step) => step.key === 'gold_code_execution')).toMatchObject({
-    label: 'Gold Review & Execution',
+  expect(getPipelineSteps(run).find((step) => step.key === 'gold_review')).toMatchObject({
+    label: 'Gold Review',
     state: 'HITL_WAIT',
   })
+  expect(phaseState(run, 'phase-5', 'bronze_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-5', 'silver_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-5', 'gold_code_execution')).toBe('PENDING')
 })
 
 test('does not render Snowflake dbt as a separate Gold phase', () => {
@@ -139,7 +158,7 @@ test('labels pending dbt Gold review without execution wording', () => {
     ],
   }
 
-  expect(getPipelineSteps(run).find((step) => step.key === 'gold_code_execution')).toMatchObject({
+  expect(getPipelineSteps(run).find((step) => step.key === 'gold_review')).toMatchObject({
     label: 'Gold Review',
     state: 'HITL_WAIT',
   })

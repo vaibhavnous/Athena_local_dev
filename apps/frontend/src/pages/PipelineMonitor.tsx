@@ -465,7 +465,7 @@ function PipelineMonitor() {
       navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=silver_merge_key_review`)
       return
     }
-    if (step?.key === 'gold_code_execution' && activeRun.next_review_key === 'gold_review') {
+    if ((step?.key === 'gold_review' || step?.key === 'gold_code_execution') && activeRun.next_review_key === 'gold_review') {
       navigate(`/app/hitl?runId=${encodeURIComponent(activeRun.id)}&review=gold_review`)
       return
     }
@@ -1045,7 +1045,7 @@ function StepRow({ step, index = 0, onOpenReview }) {
   const running = state === 'RUNNING'
   const failed = state === 'FAILED'
   const isGate = /^gate[1-5]$/.test(String(step.key || ''))
-  const isNamedReview = step.key === 'silver_merge_key_review' || step.key === 'gold_code_execution'
+  const isNamedReview = step.key === 'silver_merge_key_review' || step.key === 'gold_review'
   const canOpenReview = waiting && (isGate || isNamedReview) && onOpenReview
 
   return (
@@ -1175,6 +1175,7 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
   const steps = Array.isArray(phase?.steps) ? phase.steps : []
   const byKey = new Map([...allSteps, ...steps].map((step) => [step.key, step]))
   const phaseState = phaseStatusToStepState(phase.status)
+  const fileSource = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
   const makeStep = (key, label, fallbackState = phaseState, forceState = false) => {
     const step = byKey.get(key)
     const state = normalizeState(forceState ? fallbackState : (step?.state || fallbackState))
@@ -1219,15 +1220,17 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
     displaySteps = [
       makeStep('bronze', 'Bronze Code Generation'),
       makeStep('gate4', 'Bronze Review', gate4State),
-      makeStep('bronze_code_execution', 'Bronze Code Execution'),
     ]
+    if (fileSource) displaySteps.push(makeStep('bronze_code_execution', 'Bronze Code Execution'))
   } else if (phase.id === 'phase-4') {
     const silverState = normalizeState(byKey.get('silver')?.state || phaseState)
     const silverExecutionState = normalizeState(byKey.get('silver_code_execution')?.state)
     const gate4State = reviewAwareStepState(byKey.get('gate4'), phase, run, 4)
     const goldState = byKey.get('gold')?.state
+    const goldReviewState = byKey.get('gold_review')?.state
     const goldExecutionState = byKey.get('gold_code_execution')?.state
     const hasGoldProgress = ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(normalizeState(goldState)) ||
+      ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(normalizeState(goldReviewState)) ||
       ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(normalizeState(goldExecutionState))
     const gate5State = hasGoldProgress
       ? 'COMPLETED'
@@ -1242,17 +1245,26 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeSynthetic('silver_merge_key_review', 'Silver Merge Key Review', mergeReviewState || silverFlow.mergeReview, 'Merge keys are reviewed before Silver generation.'),
       makeStep('silver', 'Silver Code Generation', silverFlow.codeGeneration, true),
       makeStep('gate5', 'Silver Review', silverFlow.reviewGate, true),
-      makeStep('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution, true),
     ]
+    if (fileSource) displaySteps.push(makeStep('silver_code_execution', 'Silver Code Execution', silverFlow.codeExecution, true))
   } else if (phase.id === 'phase-5') {
     const goldFlow = buildGoldPhaseStates(
       byKey.get('gold')?.state || phaseState,
+      run?.next_review_key === 'gold_review' && normalizeState(run?.status) === 'HITL_WAIT'
+        ? 'HITL_WAIT'
+        : byKey.get('gold_review')?.state,
       byKey.get('gold_code_execution')?.state,
       phase.status,
       run?.status
     )
-    displaySteps = [
+    displaySteps = fileSource ? [
       makeStep('gold', 'Gold Code Generation', goldFlow.codeGeneration, true),
+      makeStep('gold_code_execution', 'Gold Code Execution', goldFlow.codeExecution, true),
+    ] : [
+      makeStep('gold', 'Gold Code Generation', goldFlow.codeGeneration, true),
+      makeStep('gold_review', 'Gold Review', goldFlow.reviewGate, true),
+      makeStep('bronze_code_execution', 'Bronze Code Execution'),
+      makeStep('silver_code_execution', 'Silver Code Execution'),
       makeStep('gold_code_execution', 'Gold Code Execution', goldFlow.codeExecution, true),
     ]
   }
@@ -1426,8 +1438,9 @@ function buildSilverPhaseStates(silverState, gate4State, gate5State, phaseStatus
   }
 }
 
-function buildGoldPhaseStates(goldState, goldExecutionState, phaseStatus, runStatus) {
+function buildGoldPhaseStates(goldState, goldReviewState, goldExecutionState, phaseStatus, runStatus) {
   const normalizedGold = normalizeState(goldState)
+  const normalizedGoldReview = goldReviewState ? normalizeState(goldReviewState) : ''
   const normalizedGoldExecution = goldExecutionState ? normalizeState(goldExecutionState) : ''
   const normalizedRun = normalizeState(runStatus)
   const normalizedPhase = String(phaseStatus || '').toLowerCase()
@@ -1435,13 +1448,23 @@ function buildGoldPhaseStates(goldState, goldExecutionState, phaseStatus, runSta
   if (['RUNNING', 'FAILED', 'COMPLETED'].includes(normalizedGoldExecution)) {
     return {
       codeGeneration: 'COMPLETED',
+      reviewGate: 'COMPLETED',
       codeExecution: normalizedGoldExecution,
+    }
+  }
+
+  if (['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(normalizedGoldReview)) {
+    return {
+      codeGeneration: 'COMPLETED',
+      reviewGate: normalizedGoldReview,
+      codeExecution: 'PENDING',
     }
   }
 
   if (normalizedGold === 'RUNNING') {
     return {
       codeGeneration: 'RUNNING',
+      reviewGate: 'PENDING',
       codeExecution: 'PENDING',
     }
   }
@@ -1449,6 +1472,7 @@ function buildGoldPhaseStates(goldState, goldExecutionState, phaseStatus, runSta
   if (normalizedGold === 'FAILED') {
     return {
       codeGeneration: 'FAILED',
+      reviewGate: 'PENDING',
       codeExecution: 'PENDING',
     }
   }
@@ -1456,12 +1480,14 @@ function buildGoldPhaseStates(goldState, goldExecutionState, phaseStatus, runSta
   if (normalizedGold === 'COMPLETED') {
     return {
       codeGeneration: 'COMPLETED',
+      reviewGate: normalizedRun === 'COMPLETED' || normalizedPhase === 'done' ? 'COMPLETED' : 'PENDING',
       codeExecution: normalizedRun === 'COMPLETED' || normalizedPhase === 'done' ? 'COMPLETED' : 'PENDING',
     }
   }
 
   return {
     codeGeneration: 'PENDING',
+    reviewGate: 'PENDING',
     codeExecution: 'PENDING',
   }
 }

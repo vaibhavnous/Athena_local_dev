@@ -244,7 +244,7 @@ def test_active_pipeline_status_uses_checkpoint_snapshot(monkeypatch):
     assert response.json()["run"]["pipeline_steps"]
 
 
-def test_snowflake_bronze_review_submission_reports_execution_stage(monkeypatch):
+def test_snowflake_bronze_review_submission_reports_merge_key_stage(monkeypatch):
     submitted = {}
     monkeypatch.setattr(
         "services.pipeline_runtime.load_checkpoint_state",
@@ -261,7 +261,7 @@ def test_snowflake_bronze_review_submission_reports_execution_stage(monkeypatch)
     )
 
     assert response.status_code == 200
-    assert submitted == {"run_id": "run-bronze-transition", "stage": "bronze_code_execution"}
+    assert submitted == {"run_id": "run-bronze-transition", "stage": "silver_merge_key_review"}
 
 
 def test_databricks_bronze_review_reports_merge_key_stage_when_execution_disabled(monkeypatch):

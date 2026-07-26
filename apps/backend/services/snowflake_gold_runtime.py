@@ -285,7 +285,55 @@ def execute_snowflake_gold_sql(script: Dict[str, Any], snowflake_conn: Any) -> D
     }
 
 
-def run_snowflake_gold_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
+def _review_keys(item: Dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for field in ("kpi_name", "name", "script_name", "target_table", "gold_table", "source_table", "source_silver_table", "script_path", "file_name"):
+        value = str(item.get(field) or "").strip()
+        if not value:
+            continue
+        keys.add(value.casefold())
+        normalized = value.replace("\\", "/")
+        basename = normalized.split("/")[-1].strip('"').casefold()
+        if basename:
+            keys.add(basename)
+            keys.add(basename.rsplit(".", 1)[0])
+        table_name = value.split(".")[-1].strip('"').casefold()
+        if table_name:
+            keys.add(table_name)
+    return keys
+
+
+def _approved_review_scripts(scripts: List[Dict[str, Any]], review_artifact: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    items = [item for item in (review_artifact or {}).get("items") or [] if isinstance(item, dict)]
+    if not items:
+        return scripts
+
+    approved_items = [item for item in items if str(item.get("review_status") or "").upper() == "APPROVED"]
+    rejected_items = [item for item in items if str(item.get("review_status") or "").upper() == "REJECTED"]
+    if not approved_items and not rejected_items:
+        return scripts
+
+    def matches(script: Dict[str, Any], item: Dict[str, Any]) -> bool:
+        return bool(_review_keys(script) & _review_keys(item))
+
+    if approved_items:
+        approved: List[Dict[str, Any]] = []
+        for item in approved_items:
+            script = next((candidate for candidate in scripts if matches(candidate, item)), None)
+            if script is None:
+                raise ValueError(f"Approved Gold review item has no generated script: {item.get('kpi_name') or item.get('target_table') or item.get('script_name')}")
+            approved.append({**script, **item})
+        return approved
+
+    return [script for script in scripts if not any(matches(script, item) for item in rejected_items)]
+
+
+def run_snowflake_gold_scripts(
+    state: Dict[str, Any],
+    *,
+    review_artifact: Dict[str, Any] | None = None,
+    approved_only: bool = False,
+) -> Dict[str, Any]:
     run_id = state.get("run_id")
     target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
     if target_warehouse != "snowflake":
@@ -298,6 +346,8 @@ def run_snowflake_gold_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
         return {**state, "snowflake_gold_execution_status": "DISABLED"}
 
     scripts = [item for item in state.get("gold_generation_results") or [] if isinstance(item, dict) and item.get("script_path")]
+    if approved_only:
+        scripts = _approved_review_scripts(scripts, review_artifact)
     if not scripts:
         raise ValueError("Snowflake gold execution enabled but no generated gold scripts were found.")
 

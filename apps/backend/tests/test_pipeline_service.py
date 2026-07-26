@@ -612,21 +612,21 @@ def test_database_failed_stage_key_uses_context_fallback(monkeypatch):
     assert result == "silver"
 
 
-def test_database_failed_stage_key_maps_external_gold_execution_to_gold():
+def test_database_failed_stage_key_preserves_gold_execution_stage():
     assert pipeline_service.database_failed_stage_key(
         "run-gold-failed",
         {"failed_background_stage": "gold_code_execution"},
-    ) == "gold"
+    ) == "gold_code_execution"
 
 
-def test_database_failed_stage_key_maps_stale_silver_execution_to_gold_when_gold_exists():
+def test_database_failed_stage_key_preserves_silver_execution_stage_when_gold_exists():
     assert pipeline_service.database_failed_stage_key(
         "run-gold-failed",
         {
             "next_stage_key": "silver_code_execution",
             "gold_generation_completed": True,
         },
-    ) == "gold"
+    ) == "silver_code_execution"
 
 
 def test_build_pipeline_steps_keeps_active_ingestion_running():
@@ -657,7 +657,7 @@ def test_build_pipeline_steps_keeps_active_ingestion_running():
     assert by_key["memory"]["state"] == "PENDING"
 
 
-def test_active_bronze_execution_hides_stale_downstream_completion():
+def test_active_bronze_execution_keeps_generation_complete_and_hides_later_execution():
     from services import pipeline_runtime
 
     steps = pipeline_runtime.build_pipeline_steps(
@@ -686,7 +686,9 @@ def test_active_bronze_execution_hides_stale_downstream_completion():
 
     by_key = {step["key"]: step for step in steps}
     assert by_key["bronze_code_execution"]["state"] == "RUNNING"
-    assert by_key["silver"]["state"] == "PENDING"
+    assert by_key["silver"]["state"] == "COMPLETED"
+    assert by_key["gold"]["state"] == "COMPLETED"
+    assert by_key["silver_code_execution"]["state"] == "PENDING"
     assert by_key["gold_code_execution"]["state"] == "PENDING"
 
 
@@ -713,7 +715,7 @@ def test_databricks_gate4_does_not_mark_merge_key_review_complete():
 
     by_key = {step["key"]: step for step in steps}
     assert by_key["silver_merge_key_resolution"]["state"] == "PENDING"
-    assert by_key["silver_merge_key_review"]["state"] == "PENDING"
+    assert by_key["silver_merge_key_review"]["state"] == "HITL_WAIT"
     assert by_key["silver"]["state"] == "PENDING"
 
 
