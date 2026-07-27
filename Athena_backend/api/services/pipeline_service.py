@@ -21,6 +21,7 @@ from services.pipeline_runtime import (
     save_checkpoint_state,
     start_pipeline,
     submit_background,
+    submit_gold_review,
 )
 from services.sftp_runtime import start_sftp_pipeline
 from utilis.db import get_pending_items
@@ -115,6 +116,12 @@ def run_pipeline_background(
     compliance_domain: str = "Insurance",
     compliance_countries: Optional[List[str]] = None,
     target_warehouse: str = "databricks",
+    execution_engine: str = "native",
+    dbt_deployment_mode: str = "generate_only",
+    dbt_target_name: Optional[str] = None,
+    dbt_threads: Optional[int] = None,
+    dbt_command_timeout_secs: Optional[int] = None,
+    force_dbt_deploy: bool = False,
 ) -> None:
     started_at = time.monotonic()
     try:
@@ -145,6 +152,12 @@ def run_pipeline_background(
                 compliance_domain=compliance_domain,
                 compliance_countries=compliance_countries or ["US"],
                 target_warehouse=target_warehouse,
+                execution_engine=execution_engine,
+                dbt_deployment_mode=dbt_deployment_mode,
+                dbt_target_name=dbt_target_name,
+                dbt_threads=dbt_threads,
+                dbt_command_timeout_secs=dbt_command_timeout_secs,
+                force_dbt_deploy=force_dbt_deploy,
             )
         elapsed_seconds = time.monotonic() - started_at
         if elapsed_seconds > _pipeline_timeout_seconds():
@@ -201,6 +214,12 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             compliance_domain=str(payload.compliance_domain or "Insurance"),
             compliance_countries=payload.compliance_countries or ["US"],
             target_warehouse=str(payload.target_warehouse or "databricks").lower(),
+            execution_engine=str(payload.execution_engine or "native").lower(),
+            dbt_deployment_mode=str(payload.dbt_deployment_mode or "generate_only").lower(),
+            dbt_target_name=payload.dbt_target_name,
+            dbt_threads=payload.dbt_threads,
+            dbt_command_timeout_secs=payload.dbt_command_timeout_secs,
+            force_dbt_deploy=bool(payload.force_dbt_deploy),
         )
         BACKGROUND_JOBS[job_key] = future
 
@@ -221,6 +240,7 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
     source_databases = normalized_source_databases(checkpoint)
     database_name = source_databases[0] if source_databases else checkpoint.get("database_name")
     return PipelineRunRequest(
+        project_id=checkpoint.get("project_id"),
         brd_text=str(checkpoint.get("brd_text") or ""),
         brd_filename=checkpoint.get("brd_filename"),
         source=str(checkpoint.get("source") or "database"),
@@ -229,6 +249,12 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
         database_name=database_name,
         database_type=checkpoint.get("database_type"),
         target_warehouse=checkpoint.get("target_warehouse") or "databricks",
+        execution_engine=checkpoint.get("execution_engine") or "native",
+        dbt_deployment_mode=checkpoint.get("dbt_deployment_mode") or "generate_only",
+        dbt_target_name=checkpoint.get("dbt_target_name"),
+        dbt_threads=checkpoint.get("dbt_threads"),
+        dbt_command_timeout_secs=checkpoint.get("dbt_command_timeout_secs"),
+        force_dbt_deploy=bool(checkpoint.get("force_dbt_deploy")),
         source_databases=source_databases,
         sftp_entity=checkpoint.get("sftp_entity") or "transactions",
         use_domain_kb=bool(checkpoint.get("use_domain_kb")),
@@ -262,6 +288,12 @@ def continue_database_pipeline_job(
     state: Dict[str, Any],
     auto_advance: Optional[bool] = None,
 ) -> Dict[str, Any]:
+    if str(start_stage_key or "").strip().lower() == "snowflake_dbt_codegen":
+        return submit_gold_review(
+            run_id,
+            action="APPROVED",
+            review_artifact=state.get("gold_review_artifact") or {},
+        )
     return continue_database_pipeline(
         run_id,
         start_stage_key=start_stage_key,
@@ -282,6 +314,8 @@ def continue_file_pipeline_job(run_id: str, state: Dict[str, Any]) -> Dict[str, 
 def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Optional[str]:
     def _pipeline_stage(value: Any) -> Optional[str]:
         raw_stage = str(value or "").strip().lower()
+        if raw_stage == "snowflake_dbt_codegen":
+            return raw_stage
         if raw_stage == "gold_code_execution":
             return "gold"
         if raw_stage == "silver_code_execution":

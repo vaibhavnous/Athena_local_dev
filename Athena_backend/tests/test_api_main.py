@@ -311,6 +311,29 @@ def test_resume_from_failure_uses_real_resume_path(monkeypatch):
     }
 
 
+def test_resume_unknown_database_failure_does_not_save_running_checkpoint(monkeypatch):
+    from api.routers import pipeline_router
+
+    saved = []
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "FAILED", "source": "database"},
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_checkpoint_state",
+        lambda run_id, state: saved.append((run_id, state)),
+    )
+    monkeypatch.setattr(
+        "api.services.pipeline_service.database_failed_stage_key",
+        lambda run_id, checkpoint: None,
+    )
+
+    with pytest.raises(HTTPException, match="No failed stage identified"):
+        pipeline_router._resume_failed_run("run-unknown-stage", "resume_from_failure")
+
+    assert saved == []
+
+
 def test_restart_creates_new_real_run(monkeypatch):
     from api.routers import pipeline_router
 

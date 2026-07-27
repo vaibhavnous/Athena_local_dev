@@ -29,11 +29,21 @@ def test_project_create_uses_authenticated_owner(monkeypatch):
             "connection_type": "database",
             "db_type": "azure_sql",
             "database_name": "insurance",
+            "execution_engine": "dbt",
+            "dbt_target_name": "astra_snowflake",
+            "dbt_threads": 6,
+            "dbt_command_timeout_secs": 900,
         },
     )
 
     assert response.status_code == 201
     assert captured["owner_email"] == "owner@astra.local"
+    assert captured["execution_engine"] == "dbt"
+    assert captured["dbt_deployment_mode"] == "generate_only"
+    assert captured["dbt_target_name"] == "astra_snowflake"
+    assert captured["dbt_threads"] == 6
+    assert captured["dbt_command_timeout_secs"] == 900
+    assert captured["force_dbt_deploy"] is False
     assert response.json()["id"] == "project-1"
     if previous_override:
         app.dependency_overrides[get_current_user] = previous_override
@@ -95,9 +105,79 @@ def test_project_run_keeps_project_id_in_checkpoint(monkeypatch):
     pipeline_router._seed_run_checkpoint(
         "run-1",
         pipeline_router.PipelineRunRequest(
-            project_id="project-1", brd_text="requirements", source="database", use_domain_kb=True
+            project_id="project-1",
+            brd_text="requirements",
+            source="database",
+            target_warehouse="snowflake",
+            execution_engine="dbt",
+            dbt_target_name="astra_snowflake",
+            dbt_threads=6,
+            dbt_command_timeout_secs=900,
+            use_domain_kb=True,
         ),
     )
 
     assert saved["project_id"] == "project-1"
+    assert saved["execution_engine"] == "dbt"
+    assert saved["dbt_deployment_mode"] == "generate_only"
+    assert saved["dbt_target_name"] == "astra_snowflake"
+    assert saved["dbt_threads"] == 6
+    assert saved["dbt_command_timeout_secs"] == 900
+    assert saved["force_dbt_deploy"] is False
     assert saved["use_domain_kb"] is True
+
+
+def test_project_execution_config_is_server_authoritative():
+    from api.routers import pipeline_router
+
+    stale_payload = pipeline_router.PipelineRunRequest(
+        project_id="project-dbt",
+        brd_text="requirements",
+        source="sftp",
+        target_warehouse="databricks",
+    )
+    dbt_payload = pipeline_router._with_project_execution_config(
+        stale_payload,
+        {
+            "id": "project-dbt",
+            "target": "Snowflake",
+            "connection_type": "database",
+            "database_name": "insurance",
+            "db_type": "azure_sql",
+            "execution_engine": "dbt",
+            "dbt_target_name": "astra_snowflake",
+            "dbt_threads": 6,
+            "dbt_command_timeout_secs": 900,
+        },
+    )
+
+    assert dbt_payload.source == "database"
+    assert dbt_payload.target_warehouse == "snowflake"
+    assert dbt_payload.database_name == "insurance"
+    assert dbt_payload.database_type == "azure_sql"
+    assert dbt_payload.execution_engine == "dbt"
+    assert dbt_payload.dbt_deployment_mode == "generate_only"
+    assert dbt_payload.dbt_target_name == "astra_snowflake"
+    assert dbt_payload.dbt_threads == 6
+    assert dbt_payload.dbt_command_timeout_secs == 900
+    assert dbt_payload.force_dbt_deploy is False
+
+    native_payload = pipeline_router._with_project_execution_config(
+        pipeline_router.PipelineRunRequest(
+            project_id="project-native",
+            brd_text="requirements",
+            source="database",
+            target_warehouse="snowflake",
+            execution_engine="dbt",
+            dbt_target_name="untrusted",
+        ),
+        {
+            "id": "project-native",
+            "target": "Snowflake",
+            "connection_type": "database",
+            "execution_engine": "native",
+        },
+    )
+
+    assert native_payload.execution_engine == "native"
+    assert native_payload.dbt_target_name is None

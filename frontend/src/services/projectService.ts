@@ -17,6 +17,12 @@ export interface AthenaProject {
   useDomainKB?: boolean
   domainProfile?: string
   knowledgeBaseId?: string
+  executionEngine?: 'native' | 'dbt'
+  dbtDeploymentMode?: 'generate_only' | 'generate_and_deploy'
+  dbtTargetName?: string
+  dbtThreads?: number
+  dbtCommandTimeoutSecs?: number
+  forceDbtDeploy?: boolean
   createdAt?: string
   updatedAt?: string
 }
@@ -40,6 +46,12 @@ const fromApi = (raw: any): AthenaProject => ({
   useDomainKB: !!raw.use_domain_knowledge_base,
   domainProfile: raw.domain_profile,
   knowledgeBaseId: raw.knowledge_base_id,
+  executionEngine: raw.execution_engine || 'native',
+  dbtDeploymentMode: raw.dbt_deployment_mode || 'generate_only',
+  dbtTargetName: raw.dbt_target_name,
+  dbtThreads: raw.dbt_threads,
+  dbtCommandTimeoutSecs: raw.dbt_command_timeout_secs,
+  forceDbtDeploy: !!raw.force_dbt_deploy,
   createdAt: raw.created_at,
   updatedAt: raw.updated_at,
 })
@@ -59,6 +71,12 @@ const toApi = (project: ProjectInput) => ({
   use_domain_knowledge_base: project.useDomainKB,
   domain_profile: project.domainProfile,
   knowledge_base_id: project.knowledgeBaseId,
+  execution_engine: project.executionEngine || 'native',
+  dbt_deployment_mode: 'generate_only',
+  dbt_target_name: project.dbtTargetName,
+  dbt_threads: project.dbtThreads,
+  dbt_command_timeout_secs: project.dbtCommandTimeoutSecs,
+  force_dbt_deploy: false,
 })
 
 export const projectService = {

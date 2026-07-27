@@ -19,6 +19,10 @@ def _payload(request: ProjectRequest, owner_email: str) -> dict[str, Any]:
     data["target"] = data["target"].strip().title()
     data["status"] = data["status"].strip().upper()
     data["connection_type"] = data["connection_type"].strip().lower()
+    data["execution_engine"] = str(data.get("execution_engine") or "native").strip().lower()
+    data["dbt_deployment_mode"] = str(
+        data.get("dbt_deployment_mode") or "generate_only"
+    ).strip().lower()
     data["owner_email"] = owner_email.lower()
     if not data["name"] or not data["description"]:
         raise HTTPException(status_code=400, detail="Project name and description are required")
@@ -28,6 +32,17 @@ def _payload(request: ProjectRequest, owner_email: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Unsupported project status")
     if data["connection_type"] not in {"database", "data_lake"}:
         raise HTTPException(status_code=400, detail="Source type must be database or data_lake")
+    if (
+        data["target"] != "Snowflake"
+        or data["connection_type"] != "database"
+        or data["execution_engine"] != "dbt"
+    ):
+        data["execution_engine"] = "native"
+        data["dbt_deployment_mode"] = "generate_only"
+        data["dbt_target_name"] = None
+        data["dbt_threads"] = None
+        data["dbt_command_timeout_secs"] = None
+        data["force_dbt_deploy"] = False
     return data
 
 

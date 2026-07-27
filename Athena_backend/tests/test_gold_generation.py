@@ -9,6 +9,7 @@ import pytest
 from nodes import gold_gen
 from nodes import silver_gen
 from services import databricks_runtime
+from services import dbt_snowflake_runtime
 from services import pipeline_runtime
 
 
@@ -69,6 +70,7 @@ def test_snowflake_gold_generation_writes_sql_from_contract(monkeypatch):
     assert result["gold_generation_status"] == "COMPLETED"
     assert script["script_language"] == "sql"
     assert script["target_warehouse"] == "snowflake"
+    assert script["code_generation_format"] == "native"
     assert script["source_table"] == "ATHENA_DB.SILVER.silver_claim_information"
     assert script["target_table"] == "ATHENA_DB.GOLD.fact_total_claims"
     assert script["dimension_script_path"]
@@ -96,6 +98,92 @@ def test_snowflake_gold_generation_writes_sql_from_contract(monkeypatch):
     assert 'TRY_TO_DECIMAL("ClaimAmount")' not in sql
     assert 'TRY_TO_DECIMAL("claimamount")' not in sql
     assert loaded["scripts"][0]["script_body"] == sql
+
+
+def test_snowflake_dbt_gold_generation_writes_ref_model_without_native_dimensions(monkeypatch):
+    monkeypatch.setenv("SNOWFLAKE_GOLD_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_GOLD_SCHEMA", "GOLD")
+    monkeypatch.setattr(gold_gen, "ai_store_db_writer", lambda **_: None)
+    workdir = Path.cwd() / ".tmp-tests" / f"gold_snowflake_dbt_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    state = {
+        "run_id": "run-snowflake-dbt-gold",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "gold_generation_contract": {
+            "run_id": "run-snowflake-dbt-gold",
+            "status": "READY",
+            "silver_tables": [
+                {
+                    "table": "claim_information",
+                    "target_table": "ATHENA_DB.SILVER.silver_claim_information",
+                    "column_count": 10,
+                }
+            ],
+            "kpi_mappings": [
+                {
+                    "kpi_name": "Total Claims",
+                    "source_silver_table": "ATHENA_DB.SILVER.silver_claim_information",
+                    "measure": {
+                        "table": "claim_information",
+                        "column": "ClaimAmount",
+                        "aggregation": "SUM",
+                    },
+                    "formula": {"status": "PROPOSED"},
+                    "grouping_dimensions": [
+                        {
+                            "table": "claim_information",
+                            "column": "ClaimStatus",
+                            "semantic_type": "DIMENSION",
+                        }
+                    ],
+                    "time": {
+                        "grain": "month",
+                        "column": {"table": "claim_information", "column": "ClaimOpenDate"},
+                    },
+                    "filters": [],
+                    "join_paths": [],
+                    "readiness": "READY",
+                }
+            ],
+        },
+    }
+    dbt_snowflake_runtime.write_snowflake_dbt_scaffold(state)
+    silver_model_path = dbt_snowflake_runtime.dbt_model_path(
+        state["run_id"],
+        "silver",
+        "silver_claim_information",
+    )
+    silver_model_path.parent.mkdir(parents=True, exist_ok=True)
+    silver_model_path.write_text("select 1\n", encoding="utf-8")
+
+    result = gold_gen.gold_code_generation_node(state)
+    script = result["gold_generation_results"][0]
+    model_path = Path(script["script_path"])
+    sql = model_path.read_text(encoding="utf-8")
+    bundle = json.loads(Path(result["gold_generation_bundle_path"]).read_text(encoding="utf-8"))
+
+    assert result["gold_generation_status"] == "COMPLETED"
+    assert result["snowflake_dbt_deploy_status"] == "NOT_APPLICABLE_CODEGEN_ONLY"
+    assert result["snowflake_dbt_model_count"] == 2
+    assert result["snowflake_dbt_validation"]["model_count"] == 2
+    assert result["snowflake_dbt_validation"]["ref_count"] == 1
+    assert Path(result["snowflake_dbt_artifact_path"]).is_dir()
+    assert script["code_generation_format"] == "dbt"
+    assert script["generation_mode"] == "SNOWFLAKE_DBT_SQL"
+    assert script["dbt_model_name"] == "gold_total_claims"
+    assert script["dbt_alias"] == "fact_total_claims"
+    assert not script.get("dimension_script_path")
+    assert bundle["dimension_script_count"] == 0
+    assert model_path.parts[-3:] == ("models", "gold", "gold_total_claims.sql")
+    assert "{{ config(" in sql
+    assert "FROM {{ ref('silver_claim_information') }}" in sql
+    assert "SUM(TRY_TO_DECIMAL(TO_VARCHAR(\"claimamount\"))) AS \"total_claims_value\"" in sql
+    assert "MERGE INTO" not in sql
+    assert "CREATE TABLE" not in sql
+    assert not list(workdir.rglob("gold_dimensions*.sql"))
 
 
 def test_snowflake_gold_generation_uses_silver_canonical_column_names():

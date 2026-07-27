@@ -334,6 +334,27 @@ def _review_item_keys(item: Dict[str, Any]) -> set[str]:
     return keys
 
 
+_REVIEW_EDITABLE_SCRIPT_FIELDS = {
+    "review_status",
+    "reviewer_comments",
+    "script_body",
+    "script_path",
+    "generated_bronze_script",
+    "generated_silver_script",
+    "generated_gold_script",
+    "dbt_model_sql",
+    "dbt_model_body",
+    "dimension_script_body",
+    "dimension_script_path",
+}
+
+
+def _reviewed_script(script: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
+    # Review identifiers select a generated script; they must not replace its execution metadata.
+    review_edits = {key: value for key, value in item.items() if key in _REVIEW_EDITABLE_SCRIPT_FIELDS}
+    return {**script, **review_edits}
+
+
 def _filtered_scripts(scripts: List[Dict[str, Any]], review_artifact: Optional[Dict[str, Any]], layer: str) -> List[Dict[str, Any]]:
     if not review_artifact:
         return scripts
@@ -352,14 +373,14 @@ def _filtered_scripts(scripts: List[Dict[str, Any]], review_artifact: Optional[D
 
     def reviewed(script: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
         item = next((candidate for candidate in candidates if matches(script, candidate)), None)
-        return {**script, **item} if item else script
+        return _reviewed_script(script, item) if item else script
 
     if approved_items:
         filtered = []
         for script in scripts:
             approved_item = next((item for item in approved_items if matches(script, item)), None)
             if approved_item:
-                filtered.append({**script, **approved_item})
+                filtered.append(_reviewed_script(script, approved_item))
         return filtered
     if rejected_items:
         return [

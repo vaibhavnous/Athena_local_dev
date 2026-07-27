@@ -258,6 +258,13 @@ def _target_warehouse(state: Stage01State) -> str:
     return str(state.get("target_warehouse") or "databricks").lower()
 
 
+def _snowflake_dbt_codegen_enabled(state: Stage01State) -> bool:
+    return (
+        _target_warehouse(state) == "snowflake"
+        and str(state.get("execution_engine") or "").strip().lower() == "dbt"
+    )
+
+
 def _load_contract(state: Stage01State) -> Dict[str, Any]:
     
     
@@ -1733,13 +1740,13 @@ WHEN NOT MATCHED THEN INSERT (
     return "\n\n".join(statements) + "\n"
 
 
-def generate_snowflake_gold_script(
+def _snowflake_gold_query_parts(
     *,
     mapping: Dict[str, Any],
     run_id: str,
     gold_catalog: str,
     gold_schema: str,
-) -> str:
+) -> Dict[str, Any]:
     kpi_name = str(mapping.get("kpi_name") or "KPI")
     kpi_id = _safe_identifier(kpi_name, "kpi")
     source_table = str(mapping["source_silver_table"])
@@ -1825,6 +1832,42 @@ def generate_snowflake_gold_script(
     )
     insert_values = [f"source.{column}" for column in insert_columns]
 
+    return {
+        "kpi_name": kpi_name,
+        "kpi_id": kpi_id,
+        "source_table": source_table,
+        "target_table": target_table,
+        "target_qname": target_qname,
+        "source_qname": source_qname,
+        "create_columns": create_columns,
+        "alter_columns": alter_columns,
+        "aggregate_select": aggregate_select,
+        "group_by_clause": group_by_clause,
+        "final_columns": final_columns,
+        "upsert_expr": upsert_expr,
+        "insert_columns": insert_columns,
+        "update_assignments": update_assignments,
+        "insert_values": insert_values,
+    }
+
+
+def generate_snowflake_gold_script(
+    *,
+    mapping: Dict[str, Any],
+    run_id: str,
+    gold_catalog: str,
+    gold_schema: str,
+) -> str:
+    parts = _snowflake_gold_query_parts(
+        mapping=mapping,
+        run_id=run_id,
+        gold_catalog=gold_catalog,
+        gold_schema=gold_schema,
+    )
+    kpi_name = parts["kpi_name"]
+    source_table = parts["source_table"]
+    target_table = parts["target_table"]
+
     return f"""-- AUTO-GENERATED GOLD KPI SCRIPT
 -- KPI: {kpi_name}
 -- Source table: {source_table}
@@ -1834,36 +1877,93 @@ def generate_snowflake_gold_script(
 
 CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(gold_catalog, gold_schema)};
 
-CREATE TABLE IF NOT EXISTS {target_qname} (
-    {create_columns}
+CREATE TABLE IF NOT EXISTS {parts["target_qname"]} (
+    {parts["create_columns"]}
 );
 
-{alter_columns}
+{parts["alter_columns"]}
 
-MERGE INTO {target_qname} AS target
+MERGE INTO {parts["target_qname"]} AS target
 USING (
     WITH aggregate_data AS (
         SELECT
-        {aggregate_select}
-        FROM {source_qname}{group_by_clause}
+        {parts["aggregate_select"]}
+        FROM {parts["source_qname"]}{parts["group_by_clause"]}
     )
     SELECT
-        {", ".join(_snowflake_quote_identifier(name) for name in final_columns)},
+        {", ".join(_snowflake_quote_identifier(name) for name in parts["final_columns"])},
         {_snowflake_string_literal(kpi_name)} AS "kpi_name",
         {_snowflake_string_literal(run_id)} AS "gold_run_id",
         CURRENT_TIMESTAMP() AS "gold_processed_timestamp",
-        {upsert_expr} AS "gold_upsert_key"
+        {parts["upsert_expr"]} AS "gold_upsert_key"
     FROM aggregate_data
 ) AS source
 ON target."gold_upsert_key" = source."gold_upsert_key"
 WHEN MATCHED THEN UPDATE SET
-        {update_assignments}
+        {parts["update_assignments"]}
 WHEN NOT MATCHED THEN INSERT (
-        {", ".join(insert_columns)}
+        {", ".join(parts["insert_columns"])}
     )
     VALUES (
-        {", ".join(insert_values)}
+        {", ".join(parts["insert_values"])}
     );
+"""
+
+
+def generate_snowflake_gold_dbt_model(
+    *,
+    mapping: Dict[str, Any],
+    run_id: str,
+    gold_catalog: str,
+    gold_schema: str,
+) -> str:
+    from services import dbt_snowflake_runtime
+
+    parts = _snowflake_gold_query_parts(
+        mapping=mapping,
+        run_id=run_id,
+        gold_catalog=gold_catalog,
+        gold_schema=gold_schema,
+    )
+    alias = parts["target_table"].split(".")[-1]
+    kpi_name = parts["kpi_name"]
+    source_model = dbt_snowflake_runtime.dbt_safe_name(
+        parts["source_table"].split(".")[-1],
+        prefix="silver",
+    )
+    source_relation = dbt_snowflake_runtime.dbt_ref(source_model)
+    return f"""{{{{ config(
+    materialized=env_var('ATHENA_SNOWFLAKE_DBT_MATERIALIZATION', 'table'),
+    database=env_var('SNOWFLAKE_GOLD_CATALOG', '{gold_catalog}'),
+    schema=env_var('SNOWFLAKE_GOLD_SCHEMA', '{gold_schema}'),
+    alias='{alias}',
+    unique_key='gold_upsert_key',
+    on_schema_change='sync_all_columns'
+) }}}}
+
+-- AUTO-GENERATED DBT GOLD KPI MODEL
+-- KPI: {kpi_name}
+-- Source table: {parts["source_table"]}
+-- Target alias: {alias}
+-- Expected runtime: dbt-snowflake
+-- DO NOT EDIT MANUALLY
+
+WITH aggregate_data AS (
+    SELECT
+        {parts["aggregate_select"]}
+    FROM {source_relation}{parts["group_by_clause"]}
+),
+final AS (
+    SELECT
+        {", ".join(_snowflake_quote_identifier(name) for name in parts["final_columns"])},
+        {_snowflake_string_literal(kpi_name)} AS "kpi_name",
+        {_snowflake_string_literal(run_id)} AS "gold_run_id",
+        CURRENT_TIMESTAMP() AS "gold_processed_timestamp",
+        {parts["upsert_expr"]} AS "gold_upsert_key"
+    FROM aggregate_data
+)
+SELECT *
+FROM final
 """
 
 
@@ -1877,12 +1977,14 @@ def _generate_one_mapping(
     use_domain_kb: bool,
     dimension_contract: List[Dict[str, Any]] | None = None,
     include_dimension: bool = True,
+    dbt_compatible: bool = False,
 ) -> Dict[str, Any]:
     mapping, source_table_guard = _sanitize_gold_mapping(mapping)
     dimension_contract = dimension_contract or []
     kpi_name = str(mapping.get("kpi_name") or "KPI")
     kpi_id = _safe_identifier(kpi_name, "kpi")
     is_snowflake = str(target_warehouse or "").lower() == "snowflake"
+    is_dbt_snowflake = is_snowflake and bool(dbt_compatible)
     target_table = (
         _snowflake_target_fact_table(gold_catalog, gold_schema, kpi_id)
         if is_snowflake
@@ -1919,6 +2021,7 @@ def _generate_one_mapping(
             "dimension_script_path": None,
             "script_language": "sql" if is_snowflake else "python",
             "target_warehouse": str(target_warehouse or "databricks").lower(),
+            "code_generation_format": "dbt" if is_dbt_snowflake else "native",
             "source_table_guard": source_table_guard,
             "domain_knowledge_base": {
                 "enabled": use_domain_kb,
@@ -1931,7 +2034,15 @@ def _generate_one_mapping(
     llm_requested = _llm_enabled_for_gold()
     generation_mode = "LLM" if llm_requested else "DETERMINISTIC"
     fallback_reason = None
-    if is_snowflake and llm_requested:
+    if is_dbt_snowflake:
+        code = generate_snowflake_gold_dbt_model(
+            mapping=mapping,
+            run_id=run_id,
+            gold_catalog=gold_catalog,
+            gold_schema=gold_schema,
+        )
+        generation_mode = "SNOWFLAKE_DBT_SQL"
+    elif is_snowflake and llm_requested:
         try:
             code = llm_generate_snowflake_gold_code(
                 mapping=mapping,
@@ -2014,7 +2125,7 @@ def _generate_one_mapping(
     if not is_snowflake:
         _validate_python(code)
 
-    if include_dimension:
+    if include_dimension and not is_dbt_snowflake:
         if is_snowflake:
             dimension_code = generate_snowflake_dimension_script(
                 mapping=mapping,
@@ -2030,12 +2141,15 @@ def _generate_one_mapping(
         if not is_snowflake:
             _validate_python(dimension_code)
 
-    output_dir = _gold_output_dir_for(target_warehouse)
-    os.makedirs(output_dir, exist_ok=True)
-    extension = "sql" if is_snowflake else "py"
-    script_path = os.path.join(output_dir, f"gold_kpi_{_run_slug(run_id)}_{kpi_id}.{extension}")
-    with open(script_path, "w", encoding="utf-8") as f:
-        f.write(code)
+    if is_dbt_snowflake:
+        script_path = None
+    else:
+        output_dir = _gold_output_dir_for(target_warehouse)
+        os.makedirs(output_dir, exist_ok=True)
+        extension = "sql" if is_snowflake else "py"
+        script_path = os.path.join(output_dir, f"gold_kpi_{_run_slug(run_id)}_{kpi_id}.{extension}")
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(code)
     dimension_script_path = None
     if dimension_code:
         dimension_extension = "sql" if is_snowflake else "py"
@@ -2053,6 +2167,10 @@ def _generate_one_mapping(
         "dimension_script_path": dimension_script_path,
         "script_language": "sql" if is_snowflake else "python",
         "target_warehouse": str(target_warehouse or "databricks").lower(),
+        "code_generation_format": "dbt" if is_dbt_snowflake else "native",
+        "dbt_model_sql": code if is_dbt_snowflake else None,
+        "dbt_model_name": f"gold_{kpi_id}" if is_dbt_snowflake else None,
+        "dbt_alias": target_table.split(".")[-1] if is_dbt_snowflake else None,
         "generation_mode": generation_mode,
         "fallback_reason": fallback_reason,
         "time_grain": (mapping.get("time") or {}).get("grain"),
@@ -2249,6 +2367,7 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
     new_state = state.copy()
     contract = _load_contract(state)
     target_warehouse = _target_warehouse(state)
+    dbt_codegen = _snowflake_dbt_codegen_enabled(state)
     mappings = _normalize_contract_mappings(
         contract,
         canonicalize_columns=target_warehouse == "databricks",
@@ -2287,6 +2406,7 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
             use_domain_kb=bool(state.get("use_domain_kb")),
             dimension_contract=databricks_dimension_contract,
             include_dimension=False,
+            dbt_compatible=dbt_codegen,
         )
         for mapping in mappings
         if isinstance(mapping, dict)
@@ -2303,14 +2423,14 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         enriched_metadata = enriched_metadata.get("enrichment_artifact") or {}
     source_table_grain_specs = _source_table_grain_specs(contract, mappings, enriched_metadata)
     shared_dimension_code = ""
-    if target_warehouse == "snowflake" and source_table_grain_specs:
+    if not dbt_codegen and target_warehouse == "snowflake" and source_table_grain_specs:
         shared_dimension_code = generate_snowflake_source_table_mart_script(
             specs=source_table_grain_specs,
             run_id=run_id,
             gold_catalog=gold_catalog,
             gold_schema=gold_schema,
         )
-    elif shared_dimension_mapping.get("grouping_dimensions"):
+    elif not dbt_codegen and shared_dimension_mapping.get("grouping_dimensions"):
         if target_warehouse == "snowflake":
             shared_dimension_code = generate_snowflake_dimension_script(
                 mapping=shared_dimension_mapping,
@@ -2343,6 +2463,26 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
                 item["dimension_contract"] = dimension_contract
                 item["kimball_dimension_count"] = len(dimension_contract)
                 break
+
+    dbt_state: Dict[str, Any] = {}
+    if dbt_codegen:
+        from services.dbt_snowflake_runtime import build_snowflake_dbt_artifacts
+
+        dbt_state = build_snowflake_dbt_artifacts(
+            {
+                **state,
+                "run_id": run_id,
+                "target_warehouse": target_warehouse,
+                "gold_catalog": gold_catalog,
+                "gold_schema": gold_schema,
+                "gold_generation_results": results,
+            }
+        )
+        results = [
+            item
+            for item in dbt_state.get("gold_generation_results") or results
+            if isinstance(item, dict)
+        ]
 
     bundle = {
         "generated_at": generated_at,
@@ -2389,13 +2529,28 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
     new_state["gold_generation_readme_path"] = readme_path
     new_state["gold_generation_ui_path"] = ui_path
     new_state["gold_catalog"] = gold_catalog
+    if dbt_state:
+        for key in (
+            "snowflake_dbt_artifact_path",
+            "snowflake_dbt_artifact_set_hash",
+            "snowflake_dbt_idempotency_key",
+            "snowflake_dbt_model_count",
+            "snowflake_dbt_models",
+            "snowflake_dbt_validation",
+            "snowflake_dbt_validation_status",
+            "snowflake_dbt_generated_at",
+        ):
+            if key in dbt_state:
+                new_state[key] = dbt_state[key]
+        new_state["snowflake_dbt_deploy_status"] = "NOT_APPLICABLE_CODEGEN_ONLY"
     new_state["status"] = "PIPELINE_COMPLETED" if status != "FAILED" else "FAILED"
 
     logger.info(
-        "Gold generation completed: %d scripts, %d blocked target_warehouse=%s",
+        "Gold generation completed: %d scripts, %d blocked target_warehouse=%s code_format=%s",
         generated_count,
         blocked_count,
         target_warehouse,
+        "dbt" if dbt_codegen else "native",
         extra={"run_id": run_id, "node": "gold_generation"},
     )
     return new_state

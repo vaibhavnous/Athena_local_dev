@@ -31,6 +31,8 @@ def test_clients_cannot_submit_executable_review_code():
             "review_status": "APPROVED",
             "script_body": "UPDATE secrets SET value = 'pwned'",
             "script_path": "other-run.sql",
+            "dbt_model_sql": "select * from secrets",
+            "dbt_model_body": "select * from other_secrets",
         }]
     }
 

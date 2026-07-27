@@ -22,6 +22,8 @@ EXECUTABLE_REVIEW_FIELDS = {
     "generated_bronze_script",
     "generated_silver_script",
     "generated_gold_script",
+    "dbt_model_sql",
+    "dbt_model_body",
     "dimension_script_body",
     "dimension_script_path",
 }

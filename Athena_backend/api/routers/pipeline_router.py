@@ -22,6 +22,36 @@ router = APIRouter()
 RUN_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_STATUS_WORKERS", "2"))))
 
 
+def _with_project_execution_config(
+    payload: PipelineRunRequest,
+    project: Dict[str, Any],
+) -> PipelineRunRequest:
+    is_dbt_project = (
+        str(project.get("target") or "").strip().lower() == "snowflake"
+        and str(project.get("connection_type") or "").strip().lower() == "database"
+        and str(project.get("execution_engine") or "native").strip().lower() == "dbt"
+    )
+    data = payload.model_dump()
+    data.update(
+        execution_engine="dbt" if is_dbt_project else "native",
+        dbt_deployment_mode="generate_only",
+        dbt_target_name=project.get("dbt_target_name") if is_dbt_project else None,
+        dbt_threads=project.get("dbt_threads") if is_dbt_project else None,
+        dbt_command_timeout_secs=(
+            project.get("dbt_command_timeout_secs") if is_dbt_project else None
+        ),
+        force_dbt_deploy=False,
+    )
+    if is_dbt_project:
+        data.update(
+            target_warehouse="snowflake",
+            source="database",
+            database_name=project.get("database_name") or payload.database_name,
+            database_type=project.get("db_type") or payload.database_type,
+        )
+    return PipelineRunRequest.model_validate(data)
+
+
 def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
     checkpoint = checkpoint or {}
     result_state = str(checkpoint.get("status") or status or "RUNNING")
@@ -54,6 +84,12 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "brd_filename": checkpoint.get("brd_filename") or run_id,
             "provider": checkpoint.get("provider") or "azure_openai",
             "deployment": checkpoint.get("deployment"),
+            "execution_engine": checkpoint.get("execution_engine") or "native",
+            "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or "generate_only",
+            "dbt_target_name": checkpoint.get("dbt_target_name"),
+            "dbt_threads": checkpoint.get("dbt_threads"),
+            "dbt_command_timeout_secs": checkpoint.get("dbt_command_timeout_secs"),
+            "force_dbt_deploy": bool(checkpoint.get("force_dbt_deploy")),
             "stages": [],
             "background_stage": checkpoint.get("background_stage"),
             "external_execution": checkpoint.get("external_execution"),
@@ -123,6 +159,23 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest, owner_email: 
             "provider": existing.get("provider") or payload.provider,
             "deployment": existing.get("deployment") or payload.deployment,
             "target_warehouse": existing.get("target_warehouse") or payload.target_warehouse or "databricks",
+            "execution_engine": existing.get("execution_engine") or payload.execution_engine or "native",
+            "dbt_deployment_mode": (
+                existing.get("dbt_deployment_mode")
+                or payload.dbt_deployment_mode
+                or "generate_only"
+            ),
+            "dbt_target_name": existing.get("dbt_target_name") or payload.dbt_target_name,
+            "dbt_threads": existing.get("dbt_threads") or payload.dbt_threads,
+            "dbt_command_timeout_secs": (
+                existing.get("dbt_command_timeout_secs")
+                or payload.dbt_command_timeout_secs
+            ),
+            "force_dbt_deploy": (
+                existing.get("force_dbt_deploy")
+                if existing.get("force_dbt_deploy") is not None
+                else bool(payload.force_dbt_deploy)
+            ),
             "source_databases": existing.get("source_databases")
             or payload.source_databases
             or ([payload.database_name] if payload.database_name else None),
@@ -170,16 +223,19 @@ def _resume_failed_run(run_id: str, action_name: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Only failed runs can be resumed.")
 
     source = str(checkpoint.get("source") or "database").lower()
-    resumed_state = clean_checkpoint_for_resume(checkpoint)
-    save_checkpoint_state(run_id, resumed_state)
 
     if api_utils.is_file_source(source):
+        resumed_state = clean_checkpoint_for_resume(checkpoint)
+        save_checkpoint_state(run_id, resumed_state)
         submit_background(run_id, "file_resume", continue_file_pipeline_job, run_id, resumed_state)
         return {"run_id": run_id, "status": "SUBMITTED", "action": action_name}
 
     failed_stage_key = database_failed_stage_key(run_id, checkpoint)
     if not failed_stage_key:
         raise HTTPException(status_code=400, detail="No failed stage identified.")
+
+    resumed_state = clean_checkpoint_for_resume(checkpoint)
+    save_checkpoint_state(run_id, resumed_state)
 
     submit_background(
         run_id,
@@ -222,13 +278,16 @@ def run_pipeline(payload: PipelineRunRequest, user: AuthUser = Depends(get_curre
     from api.services.pipeline_service import submit_pipeline_start
     from services.pipeline_runtime import background_capacity_snapshot, load_checkpoint_state, save_checkpoint_state
 
-    source = str(payload.source or "database").lower()
-
     if not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
 
     if payload.project_id:
-        load_project_for_user(payload.project_id, user)
+        payload = _with_project_execution_config(
+            payload,
+            load_project_for_user(payload.project_id, user),
+        )
+
+    source = str(payload.source or "database").lower()
 
     capacity = background_capacity_snapshot()
     if capacity["available"] <= 0:

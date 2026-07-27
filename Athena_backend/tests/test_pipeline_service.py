@@ -32,6 +32,37 @@ def test_next_status_derives_database_and_file_source_defaults():
     assert pipeline_service._next_status("done", pending_gate1=False, file_source=True) == "done"
 
 
+def test_start_pipeline_preserves_seeded_identity_before_first_stage(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "project_id": "project-1",
+            "owner_email": "client@example.com",
+            "created_by_email": "client@example.com",
+        },
+    )
+
+    def interrupt_before_completion(run_id, *, start_stage_key, state):
+        captured.update(state)
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(pipeline_runtime, "continue_database_pipeline", interrupt_before_completion)
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        pipeline_runtime.start_pipeline(
+            run_id="run-owned",
+            brd_text="BRD",
+            source="database",
+        )
+
+    assert captured["project_id"] == "project-1"
+    assert captured["owner_email"] == "client@example.com"
+    assert captured["created_by_email"] == "client@example.com"
+
+
 def test_gate2_scope_keeps_lookup_and_fk_dimension_tables():
     tables = [
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "claim_information", "nomination_reason": "Dual Match (Keyword + Semantic)"},
@@ -482,6 +513,11 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
         brd_filename="Claims BRD",
         source="database",
         database_name="db1",
+        target_warehouse="snowflake",
+        execution_engine="dbt",
+        dbt_target_name="astra_snowflake",
+        dbt_threads=6,
+        dbt_command_timeout_secs=900,
         compliance_enabled=True,
         compliance_domain="Insurance",
         compliance_countries=["US", "AU"],
@@ -493,11 +529,47 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
     assert recorded["kwargs"]["brd_filename"] == "Claims BRD"
     assert recorded["kwargs"]["source_databases"] == ["db1"]
     assert recorded["kwargs"]["stage_confirmation_enabled"] is False
+    assert recorded["kwargs"]["target_warehouse"] == "snowflake"
+    assert recorded["kwargs"]["execution_engine"] == "dbt"
+    assert recorded["kwargs"]["dbt_deployment_mode"] == "generate_only"
+    assert recorded["kwargs"]["dbt_target_name"] == "astra_snowflake"
+    assert recorded["kwargs"]["dbt_threads"] == 6
+    assert recorded["kwargs"]["dbt_command_timeout_secs"] == 900
+    assert recorded["kwargs"]["force_dbt_deploy"] is False
     assert recorded["kwargs"]["compliance_enabled"] is True
     assert recorded["kwargs"]["compliance_domain"] == "Insurance"
     assert recorded["kwargs"]["compliance_countries"] == ["US", "AU"]
     assert callable(recorded["callback"])
     pipeline_service.BACKGROUND_JOBS.pop("run-submit:pipeline", None)
+
+
+def test_seed_payload_from_checkpoint_restores_dbt_generation_config():
+    payload = pipeline_service.seed_payload_from_checkpoint(
+        {
+            "run_id": "run-restart",
+            "project_id": "project-dbt",
+            "brd_text": "requirements",
+            "source": "database",
+            "source_databases": ["insurance"],
+            "target_warehouse": "snowflake",
+            "execution_engine": "dbt",
+            "dbt_deployment_mode": "generate_only",
+            "dbt_target_name": "astra_snowflake",
+            "dbt_threads": 6,
+            "dbt_command_timeout_secs": 900,
+            "force_dbt_deploy": False,
+        }
+    )
+
+    assert payload.project_id == "project-dbt"
+    assert payload.database_name == "insurance"
+    assert payload.target_warehouse == "snowflake"
+    assert payload.execution_engine == "dbt"
+    assert payload.dbt_deployment_mode == "generate_only"
+    assert payload.dbt_target_name == "astra_snowflake"
+    assert payload.dbt_threads == 6
+    assert payload.dbt_command_timeout_secs == 900
+    assert payload.force_dbt_deploy is False
 
 
 def test_continue_file_pipeline_job_rejects_invalid_state(monkeypatch):
@@ -509,6 +581,42 @@ def test_continue_file_pipeline_job_rejects_invalid_state(monkeypatch):
 
     with pytest.raises(ValueError, match="invalid state"):
         pipeline_service.continue_file_pipeline_job("run-4", {"foo": "bar"})
+
+
+def test_continue_database_dbt_codegen_reuses_saved_gold_review(monkeypatch):
+    recorded = {}
+    review_artifact = {"items": [{"script_key": "gold-model", "review_status": "APPROVED"}]}
+
+    monkeypatch.setattr(
+        pipeline_service,
+        "submit_gold_review",
+        lambda run_id, action, review_artifact: recorded.update(
+            {
+                "run_id": run_id,
+                "action": action,
+                "review_artifact": review_artifact,
+            }
+        )
+        or {"status": "COMPLETED"},
+    )
+    monkeypatch.setattr(
+        pipeline_service,
+        "continue_database_pipeline",
+        lambda *args, **kwargs: pytest.fail("dbt finalization must not rerun Gold generation"),
+    )
+
+    result = pipeline_service.continue_database_pipeline_job(
+        "run-dbt-retry",
+        "snowflake_dbt_codegen",
+        {"gold_review_artifact": review_artifact},
+    )
+
+    assert result == {"status": "COMPLETED"}
+    assert recorded == {
+        "run_id": "run-dbt-retry",
+        "action": "APPROVED",
+        "review_artifact": review_artifact,
+    }
 
 
 def test_database_failed_stage_key_uses_context_fallback(monkeypatch):
@@ -528,6 +636,13 @@ def test_database_failed_stage_key_maps_external_gold_execution_to_gold():
         "run-gold-failed",
         {"failed_background_stage": "gold_code_execution"},
     ) == "gold"
+
+
+def test_database_failed_stage_key_preserves_snowflake_dbt_codegen():
+    assert pipeline_service.database_failed_stage_key(
+        "run-dbt-failed",
+        {"failed_background_stage": "snowflake_dbt_codegen"},
+    ) == "snowflake_dbt_codegen"
 
 
 def test_database_failed_stage_key_maps_stale_silver_execution_to_gold_when_gold_exists():

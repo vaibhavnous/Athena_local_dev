@@ -15,6 +15,7 @@ from typing import Any, Dict, List, TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from nodes.req_extraction import get_llm
+from services import dbt_snowflake_runtime
 from state import Stage01State
 from utilis.db import build_source_jdbc_url
 from utilis.generated_code_paths import generated_code_dir
@@ -274,6 +275,31 @@ def _bronze_output_dir_for(target_warehouse: str = "databricks") -> str:
     if warehouse == "snowflake":
         return str(generated_code_dir("snowflake", "bronze"))
     return _bronze_output_dir()
+
+
+def _refresh_snowflake_dbt_models(run_id: str) -> None:
+    model_dir = dbt_snowflake_runtime.dbt_model_dir(run_id, "bronze")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    for model_path in model_dir.glob("*.sql"):
+        model_path.unlink()
+
+
+def _assert_unique_dbt_model_names(model_names: List[str], *, layer: str) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for model_name in model_names:
+        normalized = dbt_snowflake_runtime.dbt_safe_name(
+            model_name,
+            prefix=layer,
+        )
+        if normalized in seen:
+            duplicates.add(normalized)
+        seen.add(normalized)
+    if duplicates:
+        raise ValueError(
+            f"Snowflake dbt {layer} model names must be unique after sanitization: "
+            f"{', '.join(sorted(duplicates))}."
+        )
 
 
 def _run_slug(run_id: str) -> str:
@@ -1089,6 +1115,263 @@ DELETE FROM {target_table} WHERE "run_id" = {_snowflake_string_literal(run_id)};
 """
 
 
+def validate_snowflake_bronze_dbt_model(
+    sql: str,
+    *,
+    source_name: str,
+    source_table_name: str,
+) -> None:
+    body = re.sub(r"--[^\n]*|/\*.*?\*/", "", str(sql or ""), flags=re.DOTALL)
+    expected_source = dbt_snowflake_runtime.dbt_source_ref(source_name, source_table_name)
+    for required in ("{{ config(", expected_source, "SELECT", '"run_id"', '"ingestion_timestamp"'):
+        if required.lower() not in body.lower():
+            raise ValueError(f"Snowflake Bronze dbt model is missing required token: {required}")
+    forbidden = re.search(
+        r"\b(CREATE|INSERT|DELETE|MERGE|TRUNCATE|UPDATE|ALTER|DROP|COPY|CALL|GRANT|REVOKE|USE)\b",
+        body,
+        re.IGNORECASE,
+    )
+    if forbidden:
+        raise ValueError(f"Snowflake Bronze dbt model contains forbidden statement: {forbidden.group(1).upper()}")
+
+
+def generate_snowflake_bronze_dbt_model(
+    *,
+    table: str,
+    schema: str,
+    database: str,
+    run_id: str,
+    bronze_catalog: str,
+    bronze_schema: str,
+    cast_rules: Dict[str, str] | None = None,
+    table_metadata: Dict[str, Any] | None = None,
+) -> str:
+    columns = _snowflake_columns(table_metadata=table_metadata, cast_rules=cast_rules)
+    physical_alias = f"bronze_{table}"
+    source_name = dbt_snowflake_runtime.dbt_source_name(database, schema)
+    source_table_name = dbt_snowflake_runtime.dbt_source_table_name(table)
+    source_ref = dbt_snowflake_runtime.dbt_source_ref(source_name, source_table_name)
+    business_columns = (
+        ",\n    ".join(
+            f"TRY_CAST(src.{_snowflake_quote_identifier(column['source'])} AS {column['type']}) "
+            f"AS {_snowflake_quote_identifier(column['target'])}"
+            for column in columns
+        )
+        if columns
+        else "src.*"
+    )
+    return f"""{{{{ config(
+    materialized=env_var('ATHENA_SNOWFLAKE_DBT_BRONZE_MATERIALIZATION', 'table'),
+    database=env_var('SNOWFLAKE_BRONZE_CATALOG', {json.dumps(bronze_catalog)}),
+    schema=env_var('SNOWFLAKE_BRONZE_SCHEMA', {json.dumps(bronze_schema)}),
+    alias={json.dumps(physical_alias)},
+    on_schema_change='sync_all_columns'
+) }}}}
+
+-- AUTO-GENERATED BRONZE DBT MODEL
+-- Source: {database}.{schema}.{table}
+-- Target alias: {physical_alias}
+SELECT
+    {business_columns},
+    {_snowflake_string_literal(run_id)} AS "run_id",
+    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
+    {_snowflake_string_literal(database)} AS "source_system",
+    {_snowflake_string_literal(table)} AS "source_table"
+FROM {source_ref} AS src
+"""
+
+
+def _write_snowflake_bronze_dbt_metadata(
+    run_id: str,
+    results: List[Dict[str, Any]],
+) -> tuple[Path, Path]:
+    sources_path = dbt_snowflake_runtime.write_snowflake_dbt_sources(
+        run_id,
+        [
+            {
+                "source_name": result.get("dbt_source_name"),
+                "database": result.get("database_name"),
+                "schema": result.get("schema_name"),
+                "table_name": result.get("dbt_source_table_name"),
+                "identifier": result.get("table"),
+            }
+            for result in results
+        ],
+    )
+    audit_columns = [
+        {"name": "run_id", "description": "Athena pipeline run identifier"},
+        {"name": "ingestion_timestamp", "description": "Bronze ingestion timestamp"},
+        {"name": "source_system", "description": "Source database name"},
+        {"name": "source_table", "description": "Source table name"},
+    ]
+    schema_path = dbt_snowflake_runtime.write_snowflake_dbt_schema(
+        run_id,
+        "bronze",
+        [
+            {
+                "name": result.get("dbt_model_name"),
+                "description": f"Bronze model for {result.get('source_table')}",
+                "columns": [
+                    {
+                        "name": (
+                            column.get("target")
+                            or column.get("column_name")
+                            or column.get("name")
+                            or column.get("source")
+                        ),
+                        "description": (
+                            column.get("description")
+                            or f"Normalized source column {column.get('source') or column.get('column_name') or column.get('name')}"
+                        ),
+                    }
+                    for column in result.get("source_columns") or []
+                    if isinstance(column, dict)
+                    and (
+                        column.get("target")
+                        or column.get("column_name")
+                        or column.get("name")
+                        or column.get("source")
+                    )
+                ]
+                + audit_columns,
+            }
+            for result in results
+            if result.get("dbt_model_name")
+        ],
+    )
+    return sources_path, schema_path
+
+
+def sync_snowflake_dbt_bronze_review(
+    run_id: str,
+    bronze_results: List[Dict[str, Any]],
+    review_artifact: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Replace generated Bronze dbt files with the final Gate 4 review scope."""
+    feeds = [
+        feed
+        for feed in (review_artifact or {}).get("feeds") or []
+        if isinstance(feed, dict)
+    ]
+    dbt_results = [
+        result
+        for result in bronze_results
+        if str(result.get("code_generation_format") or "").lower() == "dbt"
+    ]
+    if not feeds or not dbt_results:
+        return bronze_results
+
+    def key(item: Dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(item.get("database_name") or "").strip().casefold(),
+            str(item.get("schema_name") or "").strip().casefold(),
+            str(
+                item.get("table")
+                or item.get("table_name")
+                or item.get("entity")
+                or ""
+            ).strip().casefold(),
+        )
+
+    approved = [
+        feed
+        for feed in feeds
+        if str(feed.get("review_status") or "").upper() == "APPROVED"
+    ]
+    rejected = [
+        feed
+        for feed in feeds
+        if str(feed.get("review_status") or "").upper() == "REJECTED"
+    ]
+    if not approved and not rejected:
+        return bronze_results
+
+    def match(result: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+        result_key = key(result)
+        return next(
+            (
+                candidate
+                for candidate in candidates
+                if key(candidate) == result_key
+                or (result_key[2] and key(candidate)[2] == result_key[2])
+            ),
+            None,
+        )
+
+    final_results: List[Dict[str, Any]] = []
+    models_to_write: List[tuple[Dict[str, Any], str]] = []
+    for result in bronze_results:
+        if str(result.get("code_generation_format") or "").lower() != "dbt":
+            final_results.append(result)
+            continue
+        review = match(result, approved if approved else rejected)
+        if approved and review is None:
+            continue
+        if not approved and review is not None:
+            continue
+
+        updated = dict(result)
+        if review:
+            updated["review_status"] = "APPROVED"
+            updated["status"] = "APPROVED"
+            if "approved_schema" in review and isinstance(review["approved_schema"], list):
+                updated["source_columns"] = review["approved_schema"]
+            for field in ("primary_keys", "watermark_column"):
+                if field in review:
+                    updated[field] = review[field]
+
+        code = str(
+            (review or {}).get("generated_bronze_script")
+            or (review or {}).get("script_body")
+            or ""
+        )
+        if not code.strip():
+            script_path = Path(str(result.get("script_path") or ""))
+            if not script_path.is_file():
+                raise FileNotFoundError(
+                    f"Approved Bronze dbt model is missing: {script_path}"
+                )
+            code = script_path.read_text(encoding="utf-8")
+
+        source_name = str(updated.get("dbt_source_name") or "")
+        source_table_name = str(updated.get("dbt_source_table_name") or "")
+        validate_snowflake_bronze_dbt_model(
+            code,
+            source_name=source_name,
+            source_table_name=source_table_name,
+        )
+        model_name = str(updated.get("dbt_model_name") or "")
+        model_path = dbt_snowflake_runtime.dbt_model_path(
+            run_id,
+            "bronze",
+            model_name,
+        )
+        updated["script_path"] = str(model_path)
+        final_results.append(updated)
+        models_to_write.append((updated, code))
+
+    _assert_unique_dbt_model_names(
+        [
+            str(result.get("dbt_model_name") or "")
+            for result in final_results
+            if str(result.get("code_generation_format") or "").lower() == "dbt"
+        ],
+        layer="bronze",
+    )
+    _refresh_snowflake_dbt_models(run_id)
+    for result, code in models_to_write:
+        Path(str(result["script_path"])).write_text(code, encoding="utf-8")
+    _write_snowflake_bronze_dbt_metadata(
+        run_id,
+        [
+            result
+            for result in final_results
+            if str(result.get("code_generation_format") or "").lower() == "dbt"
+        ],
+    )
+    return final_results
+
+
 def generate_bronze_script(
     *,
     assessment_id: str | None = None,
@@ -1427,14 +1710,44 @@ def _generate_one_table(
     cast_rules: Dict[str, str] | None = None,
     table_metadata: Dict[str, Any] | None = None,
     target_warehouse: str = "databricks",
+    execution_engine: str = "native",
 ) -> Dict[str, object]:
     database_name = table_ref["database_name"]
     schema_name = table_ref["schema_name"]
     table_name = table_ref["table_name"]
     target_warehouse = str(target_warehouse or "databricks").lower()
+    execution_engine = str(execution_engine or "native").lower()
+    dbt_codegen = target_warehouse == "snowflake" and execution_engine == "dbt"
     file_source_config = file_source_config or {}
+    dbt_model_name: str | None = None
+    dbt_alias: str | None = None
+    dbt_source_name: str | None = None
+    dbt_source_table_name: str | None = None
 
-    if target_warehouse == "snowflake":
+    if dbt_codegen:
+        dbt_model_name = dbt_snowflake_runtime.dbt_safe_name(f"bronze_{table_name}", prefix="bronze")
+        dbt_alias = f"bronze_{table_name}"
+        dbt_source_name = dbt_snowflake_runtime.dbt_source_name(database_name, schema_name)
+        dbt_source_table_name = dbt_snowflake_runtime.dbt_source_table_name(table_name)
+        code = generate_snowflake_bronze_dbt_model(
+            table=table_name,
+            schema=schema_name,
+            database=database_name,
+            run_id=run_id,
+            bronze_catalog=bronze_catalog,
+            bronze_schema=bronze_schema,
+            cast_rules=cast_rules or {},
+            table_metadata=table_metadata or {},
+        )
+        validate_snowflake_bronze_dbt_model(
+            code,
+            source_name=dbt_source_name,
+            source_table_name=dbt_source_table_name,
+        )
+        llm_enhanced = False
+        llm_error = None
+        extension = "sql"
+    elif target_warehouse == "snowflake":
         code = generate_snowflake_bronze_script(
             table=table_name,
             schema=schema_name,
@@ -1496,17 +1809,20 @@ def _generate_one_table(
         _detect_dangerous_sql(code)
         extension = "py"
 
-    output_dir = _bronze_output_dir_for(target_warehouse)
-    os.makedirs(output_dir, exist_ok=True)
-
-    script_name = _bronze_script_filename(
-        run_id=run_id,
-        database_name=database_name,
-        schema_name=schema_name,
-        table_name=table_name,
-        extension=extension,
-    )
-    script_path = os.path.join(output_dir, script_name)
+    if dbt_codegen:
+        script_path = str(dbt_snowflake_runtime.dbt_model_path(run_id, "bronze", dbt_model_name))
+        os.makedirs(os.path.dirname(script_path), exist_ok=True)
+    else:
+        output_dir = _bronze_output_dir_for(target_warehouse)
+        os.makedirs(output_dir, exist_ok=True)
+        script_name = _bronze_script_filename(
+            run_id=run_id,
+            database_name=database_name,
+            schema_name=schema_name,
+            table_name=table_name,
+            extension=extension,
+        )
+        script_path = os.path.join(output_dir, script_name)
 
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
@@ -1539,6 +1855,15 @@ def _generate_one_table(
         "target_warehouse": target_warehouse,
         "script_language": "sql" if target_warehouse == "snowflake" else "python",
         "script_path": script_path,
+        "execution_engine": execution_engine,
+        "code_generation_format": "dbt" if dbt_codegen else "native",
+        "dbt_project_path": (
+            str(dbt_snowflake_runtime.dbt_project_dir(run_id)) if dbt_codegen else None
+        ),
+        "dbt_model_name": dbt_model_name,
+        "dbt_alias": dbt_alias,
+        "dbt_source_name": dbt_source_name,
+        "dbt_source_table_name": dbt_source_table_name,
     }
 # ------------------------------------------------------------------------------
 # LANGGRAPH NODE
@@ -1557,10 +1882,16 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
     bronze_catalog = state.get("bronze_catalog") or "main"
     bronze_schema = state.get("bronze_schema") or "bronze"
     target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
+    execution_engine = dbt_snowflake_runtime.resolve_execution_engine(state)
+    dbt_codegen = dbt_snowflake_runtime.snowflake_dbt_enabled(state)
     if target_warehouse == "snowflake":
         bronze_catalog = _snowflake_bronze_catalog()
         bronze_schema = _snowflake_bronze_schema()
     assessment_id = _security_assessment_id(state)
+    dbt_project_path: Path | None = None
+    if dbt_codegen:
+        dbt_project_path = dbt_snowflake_runtime.write_snowflake_dbt_scaffold(state)
+        _refresh_snowflake_dbt_models(run_id)
 
     table_refs = _resolve_tables_for_bronze(state)
     skipped_by_allowlist: List[BronzeTableRef] = []
@@ -1577,7 +1908,21 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
                 extra={**log_context, "step_name": "snowflake_bronze_allowlist"},
             )
 
+    if dbt_codegen:
+        _assert_unique_dbt_model_names(
+            [f"bronze_{table_ref['table_name']}" for table_ref in table_refs],
+            layer="bronze",
+        )
+
     if not table_refs:
+        if dbt_codegen:
+            dbt_sources_path, dbt_schema_path = _write_snowflake_bronze_dbt_metadata(
+                run_id,
+                [],
+            )
+            new_state["snowflake_dbt_artifact_path"] = str(dbt_project_path)
+            new_state["snowflake_dbt_sources_path"] = str(dbt_sources_path)
+            new_state["snowflake_dbt_bronze_schema_path"] = str(dbt_schema_path)
         new_state["bronze_generation_status"] = "SKIPPED"
         if skipped_by_allowlist:
             new_state["bronze_generation_error"] = "No tables matched ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST."
@@ -1621,6 +1966,7 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
                 cast_rules=_cast_rules_for_table(state, table_ref["table_name"]),
                 table_metadata=_metadata_for_table(state, table_ref["table_name"]),
                 target_warehouse=target_warehouse,
+                execution_engine=execution_engine,
             )
             for table_ref in table_refs
         ]
@@ -1658,9 +2004,17 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
         "generated_at": datetime.utcnow().isoformat(),
         "source_database": table_refs[0]["database_name"],
         "target_warehouse": target_warehouse,
+        "execution_engine": execution_engine,
+        "code_generation_format": "dbt" if dbt_codegen else "native",
         "script_count": len(results),
         "scripts": results,
     }
+
+    if dbt_codegen:
+        dbt_sources_path, dbt_schema_path = _write_snowflake_bronze_dbt_metadata(
+            run_id,
+            results,
+        )
 
     output_dir = _bronze_output_dir_for(target_warehouse)
     os.makedirs(output_dir, exist_ok=True)
@@ -1696,6 +2050,10 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
     new_state["bronze_generation_bundle_path"] = bundle_path
     new_state["bronze_generation_readme_path"] = readme_path
     new_state["bronze_generation_ui_path"] = ui_path
+    if dbt_codegen:
+        new_state["snowflake_dbt_artifact_path"] = str(dbt_project_path)
+        new_state["snowflake_dbt_sources_path"] = str(dbt_sources_path)
+        new_state["snowflake_dbt_bronze_schema_path"] = str(dbt_schema_path)
     new_state["status"] = "PIPELINE_COMPLETED"
     logger.info(
         "Bronze generation completed: generated=%d skipped=%d target_warehouse=%s",
