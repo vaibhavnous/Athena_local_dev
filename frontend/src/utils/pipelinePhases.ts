@@ -84,24 +84,21 @@ export const PIPELINE_PHASE_TEMPLATES = {
         'feed_nomination',
         'gate2',
         'column_extraction',
-        'freshness_check',
         'column_profiling',
         'semantic_enrichment',
         'gate3',
-        'plan_seal',
       ],
     },
     {
       id: 'phase-3',
-      label: 'Metadata Bootstrap & Source Validation',
+      label: 'Metadata Preparation & Bronze Review',
       keys: [
         'metadata_bootstrap',
+        'plan_seal',
+        'freshness_check',
         'metadata_codegen',
-        'gate4_metadata',
-        'runtime_config',
-        'validate_source',
-        'discover_source_objects',
-        'stage_to_landing',
+        'bronze_codegen',
+        'gate4',
       ],
     },
     {
@@ -112,7 +109,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-5',
       label: 'Silver Layer (Transformation & DQ)',
-      keys: ['bronze_to_silver', 'silver_dq'],
+      keys: ['silver_merge_key_resolution', 'silver_merge_key_review', 'bronze_to_silver', 'silver_dq'],
     },
     {
       id: 'phase-6',
@@ -137,15 +134,14 @@ const FILE_VISIBLE_STEP_GROUPS = [
   { key: 'gate3', label: 'Semantic Review', components: ['gate3'] },
   { key: 'plan_seal', label: 'Plan Seal Check', components: ['plan_seal'] },
   { key: 'metadata_bootstrap', label: 'Bootstrap Metadata', components: ['metadata_bootstrap', 'pre_bronze_bootstrap_metadata'] },
-  { key: 'metadata_codegen', label: 'Metadata Codegen', components: ['metadata_codegen', 'pre_bronze_metadata_codegen', 'bronze'] },
-  { key: 'gate4_metadata', label: 'Metadata Codegen Review', components: ['gate4_metadata', 'pre_bronze_metadata_codegen_review', 'gate4', 'runtime_bundle_handoff'] },
-  { key: 'runtime_config', label: 'Load Runtime Config', components: ['runtime_config', 'pre_bronze_runtime_config'] },
-  { key: 'validate_source', label: 'Validate Source', components: ['validate_source', 'pre_bronze_validate_source'] },
-  { key: 'discover_source_objects', label: 'Discover Source Objects', components: ['discover_source_objects', 'pre_bronze_discover_source_objects'] },
-  { key: 'stage_to_landing', label: 'Stage To Landing', components: ['stage_to_landing', 'pre_bronze_stage_to_landing'] },
-  { key: 'bronze_autoloader', label: 'Bronze Ingestion', components: ['bronze_autoloader', 'bronze_code_execution'] },
+  { key: 'metadata_codegen', label: 'Metadata Codegen', components: ['metadata_codegen', 'pre_bronze_metadata_codegen'] },
+  { key: 'bronze_codegen', label: 'Bronze Code Generation', components: ['bronze_codegen', 'bronze'] },
+  { key: 'gate4', label: 'Bronze Review', components: ['gate4'] },
+  { key: 'bronze_autoloader', label: 'Bronze Target Execution', components: ['bronze_autoloader', 'bronze_code_execution'] },
   { key: 'bronze_dq', label: 'Bronze Data Quality', components: ['bronze_dq', 'bronze_runtime_validation'] },
-  { key: 'bronze_to_silver', label: 'Silver Transformation', components: ['bronze_to_silver', 'silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'silver_code_execution'] },
+  { key: 'silver_merge_key_resolution', label: 'Silver Merge Key Resolution', components: ['silver_merge_key_resolution'] },
+  { key: 'silver_merge_key_review', label: 'Silver Merge Key Review', components: ['silver_merge_key_review'] },
+  { key: 'bronze_to_silver', label: 'Silver Transformation', components: ['bronze_to_silver', 'silver', 'silver_code_execution'] },
   { key: 'silver_dq', label: 'Silver Data Quality', components: ['silver_dq', 'silver_runtime_validation'] },
   { key: 'silver_to_gold', label: 'Gold Model Build', components: ['silver_to_gold', 'gold', 'gold_code_execution'] },
   { key: 'gold_dq', label: 'Gold Data Quality', components: ['gold_dq', 'gold_runtime_validation'] },
@@ -192,6 +188,12 @@ export function fileVisibleStepKey(key: string): string {
 
 function resolvePipelineSteps(run, steps: PipelineStep[]): PipelineStep[] {
   const visibleSteps = isFileSource(run) ? collapseFileSteps(steps) : steps
+  if (isFileSource(run)) {
+    return withPendingReviewGate(
+      run,
+      clearStaleWaitingSteps(run, applyExternalExecutionState(run, visibleSteps)),
+    )
+  }
   return withPendingReviewGate(
     run,
     clearStaleWaitingSteps(run, applyExternalExecutionState(run, visibleSteps)),
@@ -249,7 +251,7 @@ function applyExternalExecutionState(run, steps: PipelineStep[]) {
         complete: false,
       }
     }
-    if (stepIndex >= 0 && stepIndex < targetIndex && state !== 'FAILED') {
+    if (!isFileSource(run) && stepIndex >= 0 && stepIndex < targetIndex && state !== 'FAILED') {
       return {
         ...step,
         state: 'COMPLETED',
@@ -299,7 +301,7 @@ function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
       stepIndex >= 0 &&
       stepIndex < furthestProgressIndex &&
       !executionKeys.has(step.key) &&
-      ['PENDING', 'HITL_WAIT', 'RUNNING'].includes(state)
+      (sourceType === 'file' ? state === 'RUNNING' : ['PENDING', 'HITL_WAIT', 'RUNNING'].includes(state))
     ) {
       return {
         ...step,
@@ -319,9 +321,9 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
 
   if (isFileSource(run)) {
     const visibleReviewKey =
-      run?.next_review_key === 'silver_merge_key_review' ? 'bronze_to_silver' :
+      run?.next_review_key === 'silver_merge_key_review' ? 'silver_merge_key_review' :
       run?.next_review_key === 'gold_review' ? 'gate5_publish' :
-      gate === 4 ? 'gate4_metadata' :
+      gate === 4 ? 'gate4' :
       gate === 5 ? 'gate5_publish' :
       gate >= 1 && gate <= 3 ? `gate${gate}` :
       ''
@@ -396,7 +398,9 @@ export function getPhaseGroups(run, stepsOverride?) {
   return templates.map((phase) => {
     const phaseSteps: PipelineStep[] = phase.keys.map((key) => {
       const step = byKey.get(key)
-      const syntheticState = syntheticStepState(key, byKey, indexByKey, furthestProgressIndex)
+      const syntheticState = sourceType === 'file'
+        ? 'PENDING'
+        : syntheticStepState(key, byKey, indexByKey, furthestProgressIndex)
       return (
         step || {
           key,
@@ -474,7 +478,6 @@ function fallbackStepLabel(key, sourceType = 'database') {
     plan_seal: 'Seal Approved Plan',
     plan_freshness: 'Validate Plan Freshness',
     pre_bronze_metadata_codegen: 'Metadata Code Generation',
-    pre_bronze_metadata_codegen_review: 'Metadata Code Review',
     runtime_bundle_handoff: 'Runtime Bundle Handoff',
     pre_bronze_runtime_config: 'Prepare Runtime Configuration',
     pre_bronze_validate_source: 'Validate Source Access',
@@ -627,27 +630,22 @@ function buildStepDetail(run, key, state, existingDetail) {
       if (state === 'RUNNING') return 'Generating Gold KPI scripts.'
       return 'Gold generation starts after Silver processing completes.'
     case 'bronze_code_execution':
-      if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
-        if (state === 'COMPLETED') return 'Approved Bronze scripts were executed in Snowflake.'
-        if (state === 'RUNNING') return 'Executing approved Bronze scripts in Snowflake.'
-        return 'Bronze execution starts immediately after Gate 4 approval for Snowflake runs.'
-      }
-      return 'UI-only marker: Bronze scripts are exported for external execution, not run inside Astra Data.'
+      if (state === 'COMPLETED') return `Approved Bronze scripts were executed in ${targetName(run)}.`
+      if (state === 'RUNNING') return `Executing approved Bronze scripts in ${targetName(run)}.`
+      return `Bronze execution starts in ${targetName(run)} immediately after Bronze Review approval.`
     case 'silver_code_execution':
-      if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
-        if (state === 'COMPLETED') return 'Approved Silver scripts were executed in Snowflake.'
-        if (state === 'RUNNING') return 'Executing approved Silver scripts in Snowflake.'
-        return 'Silver execution starts immediately after Gate 5 approval for Snowflake runs.'
-      }
-      return 'UI-only marker: Silver scripts are exported for external execution, not run inside Astra Data.'
+      if (state === 'COMPLETED') return `Approved Silver scripts were executed in ${targetName(run)}.`
+      if (state === 'RUNNING') return `Executing approved Silver scripts in ${targetName(run)}.`
+      return `Silver execution starts in ${targetName(run)} immediately after Silver Review approval.`
     case 'gold_code_execution':
-      if (String(run?.target_warehouse || '').toLowerCase() === 'snowflake') {
-        if (state === 'COMPLETED') return 'Generated Gold scripts were executed in Snowflake.'
-        if (state === 'RUNNING') return 'Executing generated Gold scripts in Snowflake.'
-        return 'Gold execution starts after Gold generation for Snowflake runs.'
-      }
-      return 'UI-only marker: Gold scripts are exported for external execution, not run inside Astra Data.'
+      if (state === 'COMPLETED') return `Approved Gold scripts were executed in ${targetName(run)}.`
+      if (state === 'RUNNING') return `Executing approved Gold scripts in ${targetName(run)}.`
+      return `Gold execution starts in ${targetName(run)} after Gold Review approval.`
     default:
       return existingDetail || ''
   }
+}
+
+function targetName(run) {
+  return String(run?.target_warehouse || '').toLowerCase() === 'snowflake' ? 'Snowflake' : 'Databricks'
 }

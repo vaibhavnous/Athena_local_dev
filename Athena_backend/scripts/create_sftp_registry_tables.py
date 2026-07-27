@@ -203,6 +203,9 @@ def main() -> None:
                     [checksum] NVARCHAR(128) NULL,
                     [digest_algorithm] NVARCHAR(50) NOT NULL CONSTRAINT [DF_file_feed_manifest_digest_algorithm] DEFAULT 'SHA256',
                     [state] NVARCHAR(50) NOT NULL CONSTRAINT [DF_file_feed_manifest_state] DEFAULT 'PENDING',
+                    [staged_run_id] NVARCHAR(255) NULL,
+                    [bronze_status] NVARCHAR(50) NULL,
+                    [bronze_loaded_at] DATETIME2(7) NULL,
                     [found_at] DATETIME2(7) NOT NULL,
                     [downloaded_at] DATETIME2(7) NULL,
                     [created_at] DATETIME2(7) NOT NULL CONSTRAINT [DF_file_feed_manifest_created_at] DEFAULT SYSUTCDATETIME()
@@ -213,9 +216,15 @@ def main() -> None:
 
                 CREATE INDEX [IX_file_feed_manifest_state]
                     ON [{schema}].[file_feed_manifest] ([state]);
+
+                CREATE INDEX [IX_file_feed_manifest_bronze_status]
+                    ON [{schema}].[file_feed_manifest] ([feed_id], [staged_run_id], [bronze_status]);
             END
             """,
         )
+        _exec(cur, f"IF COL_LENGTH(N'[{schema}].[file_feed_manifest]', 'staged_run_id') IS NULL ALTER TABLE [{schema}].[file_feed_manifest] ADD [staged_run_id] NVARCHAR(255) NULL;")
+        _exec(cur, f"IF COL_LENGTH(N'[{schema}].[file_feed_manifest]', 'bronze_status') IS NULL ALTER TABLE [{schema}].[file_feed_manifest] ADD [bronze_status] NVARCHAR(50) NULL;")
+        _exec(cur, f"IF COL_LENGTH(N'[{schema}].[file_feed_manifest]', 'bronze_loaded_at') IS NULL ALTER TABLE [{schema}].[file_feed_manifest] ADD [bronze_loaded_at] DATETIME2(7) NULL;")
 
         # bronze_execution_plan
         _exec(

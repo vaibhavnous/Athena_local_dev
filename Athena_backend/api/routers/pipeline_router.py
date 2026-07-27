@@ -47,6 +47,7 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "brd_filename": checkpoint.get("brd_filename") or run_id,
             "provider": checkpoint.get("provider") or "azure_openai",
             "deployment": checkpoint.get("deployment"),
+            "target_warehouse": checkpoint.get("target_warehouse"),
             "stages": [],
             "background_stage": checkpoint.get("background_stage"),
             "external_execution": checkpoint.get("external_execution"),
@@ -214,9 +215,16 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
     from services.pipeline_runtime import background_capacity_snapshot, load_checkpoint_state, save_checkpoint_state
 
     source = str(payload.source or "database").lower()
+    target_warehouse = str(payload.target_warehouse or "").strip().lower()
 
     if not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
+    if target_warehouse not in {"databricks", "snowflake"}:
+        raise HTTPException(
+            status_code=400,
+            detail="target_warehouse must be Databricks or Snowflake; this run will not use a simulated target.",
+        )
+    payload.target_warehouse = target_warehouse
 
     capacity = background_capacity_snapshot()
     if capacity["available"] <= 0:

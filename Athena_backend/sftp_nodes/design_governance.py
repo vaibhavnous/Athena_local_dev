@@ -42,11 +42,17 @@ def _approved_feeds(state: Stage01State) -> List[Dict[str, Any]]:
         return [dict(feed) for feed in reviewed if isinstance(feed, dict)]
 
     candidates = state.get("candidate_feeds") or []
+    gate2_approved = str(
+        state.get("gate2_decision") or (state.get("gate2") or {}).get("decision") or ""
+    ).upper() == "APPROVED"
     return [
         dict(feed)
         for feed in candidates
         if isinstance(feed, dict)
-        and str(feed.get("status") or "APPROVED").upper() in {"APPROVED", "CERTIFIED", "ENABLED"}
+        and (
+            gate2_approved
+            or str(feed.get("status") or "APPROVED").upper() in {"APPROVED", "CERTIFIED", "ENABLED"}
+        )
     ]
 
 
@@ -78,6 +84,7 @@ def _schema_contract(feeds: Iterable[Dict[str, Any]], state: Stage01State) -> Li
         columns = (
             feed.get("approved_schema")
             or feed.get("schema")
+            or feed.get("columns")
             or registry.get("schema")
             or registry.get("schema_json")
             or []
@@ -308,12 +315,12 @@ def sftp_metadata_codegen_node(state: Stage01State) -> Stage01State:
                     "transform": enriched.get("transform") or "identity",
                 }
             )
-        if not mappings or not merge_keys:
+        if not mappings:
             return {
                 **state,
                 "status": "FAILED",
                 "metadata_codegen_status": "FAILED",
-                "error": f"Metadata code generation blocked for {feed_id}: mapping coverage or merge keys are missing.",
+                "error": f"Metadata code generation blocked for {feed_id}: mapping coverage is missing.",
             }
         source_mappings.append({"feed_id": feed_id, "columns": mappings})
         target_rules.append(

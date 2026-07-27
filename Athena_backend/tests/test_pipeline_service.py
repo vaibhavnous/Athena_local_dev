@@ -116,6 +116,44 @@ def test_silver_merge_key_resolution_derives_certified_keys_and_candidates():
     assert artifact["review_required_count"] == 1
 
 
+def test_file_merge_key_resolution_matches_semantic_entity():
+    from nodes.silver_merge_key_resolution import silver_merge_key_resolution_node
+
+    result = silver_merge_key_resolution_node({
+        "run_id": "run-file-merge-keys",
+        "source": "adls_gen2",
+        "bronze_review_artifact": {
+            "feeds": [{"feed_id": "insurance_claims", "entity": "claims"}],
+        },
+        "enriched_metadata": {
+            "columns": [
+                {"feed_id": "insurance_claims", "entity": "claims", "column_name": "ClaimID", "is_primary_key": True},
+                {"feed_id": "insurance_claims", "entity": "claims", "column_name": "PolicyID", "is_join_key": True},
+            ],
+        },
+    })
+
+    feed = result["silver_merge_key_resolution_artifact"]["feeds"][0]
+    assert feed["merge_keys"] == ["ClaimID"]
+    assert feed["merge_key_candidates"] == ["ClaimID", "PolicyID"]
+
+
+def test_reviewed_file_merge_keys_update_bronze_config():
+    from services import pipeline_runtime
+
+    results = pipeline_runtime._apply_reviewed_keys_to_bronze_results(
+        [{
+            "feed_id": "insurance_claims",
+            "entity": "claims",
+            "bronze_config": {"primary_keys": ["OldID"]},
+        }],
+        {"feeds": [{"entity": "claims", "merge_keys": ["ClaimID", "LineID"]}]},
+    )
+
+    assert results[0]["primary_keys"] == ["ClaimID", "LineID"]
+    assert results[0]["bronze_config"]["primary_keys"] == ["ClaimID", "LineID"]
+
+
 def test_silver_merge_key_review_rebuilds_legacy_empty_artifact():
     from services import pipeline_runtime
 
@@ -612,7 +650,7 @@ def test_merge_key_resolution_completes_only_after_resolver_artifact_exists():
     assert by_key["silver_merge_key_review"]["state"] == "HITL_WAIT"
 
 
-def test_merge_key_resolution_auto_approves_and_continues_without_hitl(monkeypatch):
+def test_merge_key_resolution_pauses_with_reviewable_artifact(monkeypatch):
     from nodes import silver_merge_key_resolution
 
     monkeypatch.setattr(
@@ -636,11 +674,11 @@ def test_merge_key_resolution_auto_approves_and_continues_without_hitl(monkeypat
         },
     )
 
-    assert result["status"] == "RUNNING"
-    assert result["next_review_key"] is None
-    assert result["silver_merge_key_review_decision"] == "APPROVED"
-    assert result["gate_silver_merge_key_review"]["status"] == "COMPLETED"
-    assert result["enriched_metadata"]["columns"][0]["is_join_key"] is True
+    assert result["status"] == "HITL_WAIT"
+    assert result["next_review_key"] == "silver_merge_key_review"
+    assert result["silver_merge_key_review_decision"] is None
+    assert result["gate_silver_merge_key_review"]["status"] == "PENDING"
+    assert result["silver_merge_key_review_artifact"]["feeds"][0]["merge_keys"] == ["claim_id"]
 
 
 def test_databricks_gold_generation_does_not_imply_execution_completion():
@@ -698,9 +736,7 @@ def test_file_source_pipeline_steps_match_the_six_ui_phases():
         "ingestion", "memory", "requirements", "kpis", "gate1",
         "discovery", "nomination", "gate2", "schema", "profiling", "enrichment", "gate3",
         "pre_bronze_bootstrap_metadata", "plan_seal", "plan_freshness",
-        "pre_bronze_metadata_codegen", "pre_bronze_metadata_codegen_review", "bronze", "gate4",
-        "runtime_bundle_handoff", "pre_bronze_runtime_config", "pre_bronze_validate_source",
-        "pre_bronze_discover_source_objects", "pre_bronze_stage_to_landing",
+        "pre_bronze_metadata_codegen", "bronze", "gate4",
         "bronze_code_execution", "bronze_runtime_validation",
         "silver_merge_key_resolution", "silver_merge_key_review", "silver", "gate5",
         "silver_code_execution", "silver_runtime_validation",
@@ -1352,7 +1388,7 @@ def test_gate4_review_filters_rejected_bronze_results_before_silver():
     assert [item["table"] for item in filtered] == ["claim_information"]
 
 
-def test_databricks_gate4_continues_to_silver_after_automatic_merge_key_resolution(monkeypatch):
+def test_databricks_gate4_pauses_for_merge_key_review_after_execution(monkeypatch):
     from services import databricks_runtime
 
     saved = []
@@ -1365,29 +1401,45 @@ def test_databricks_gate4_continues_to_silver_after_automatic_merge_key_resoluti
             "bronze_generation_results": [{"table": "claims"}],
         },
     )
-    monkeypatch.setattr(databricks_runtime, "databricks_bronze_execution_enabled", lambda: False)
+    monkeypatch.setattr(databricks_runtime, "databricks_bronze_execution_enabled", lambda: True)
+    monkeypatch.setattr(
+        databricks_runtime,
+        "run_databricks_bronze_scripts",
+        lambda state, **_: {**state, "databricks_bronze_execution_status": "COMPLETED"},
+    )
     monkeypatch.setattr(
         pipeline_runtime,
         "_pause_for_silver_merge_key_review",
-        lambda run_id, state: {**state, "status": "RUNNING", "next_review_key": None},
+        lambda run_id, state: {**state, "status": "HITL_WAIT", "next_review_key": "silver_merge_key_review"},
     )
     monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda run_id, state, **_: saved.append(dict(state)))
     monkeypatch.setattr(pipeline_runtime, "ai_store_db_writer", lambda **_: None)
-    monkeypatch.setattr(
-        pipeline_runtime,
-        "continue_database_pipeline",
-        lambda run_id, start_stage_key, state: {**state, "continued_to": start_stage_key},
-    )
-
     result = pipeline_runtime.submit_gate4_review(
         "run-databricks-merge-review",
         action="APPROVED",
         review_artifact={"feeds": [{"table": "claims", "merge_keys": ["claim_id"]}]},
     )
 
-    assert result["continued_to"] == "silver"
-    assert result["next_review_key"] is None
-    assert saved[-1]["next_review_key"] is None
+    assert result["next_review_key"] == "silver_merge_key_review"
+    assert saved[-1]["next_review_key"] == "silver_merge_key_review"
+
+
+def test_database_databricks_gate4_refuses_disabled_execution(monkeypatch):
+    from services import databricks_runtime
+
+    monkeypatch.setattr(databricks_runtime, "databricks_bronze_execution_enabled", lambda: False)
+
+    with pytest.raises(RuntimeError, match="execution is disabled"):
+        pipeline_runtime.submit_gate4_review(
+            "run-databricks-disabled",
+            action="APPROVED",
+            review_artifact={"feeds": [{"table": "claims", "merge_keys": ["claim_id"]}]},
+            checkpoint_state={
+                "run_id": "run-databricks-disabled",
+                "target_warehouse": "databricks",
+                "bronze_generation_results": [{"table": "claims"}],
+            },
+        )
 
 
 def test_gate4_review_uses_provided_checkpoint_snapshot(monkeypatch):
@@ -1407,16 +1459,16 @@ def test_gate4_review_uses_provided_checkpoint_snapshot(monkeypatch):
     monkeypatch.setattr(
         pipeline_runtime,
         "_pause_for_silver_merge_key_review",
-        lambda run_id, state: {**state, "status": "RUNNING", "next_review_key": None},
+        lambda run_id, state: {**state, "status": "HITL_WAIT", "next_review_key": "silver_merge_key_review"},
     )
-    monkeypatch.setattr(databricks_runtime, "databricks_bronze_execution_enabled", lambda: False)
+    monkeypatch.setattr(databricks_runtime, "databricks_bronze_execution_enabled", lambda: True)
+    monkeypatch.setattr(
+        databricks_runtime,
+        "run_databricks_bronze_scripts",
+        lambda state, **_: {**state, "databricks_bronze_execution_status": "COMPLETED"},
+    )
     monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline_runtime, "ai_store_db_writer", lambda **_: None)
-    monkeypatch.setattr(
-        pipeline_runtime,
-        "continue_database_pipeline",
-        lambda run_id, start_stage_key, state: {**state, "continued_to": start_stage_key},
-    )
 
     result = pipeline_runtime.submit_gate4_review(
         "run-gate4-snapshot",
@@ -1425,8 +1477,7 @@ def test_gate4_review_uses_provided_checkpoint_snapshot(monkeypatch):
         checkpoint_state=checkpoint,
     )
 
-    assert result["continued_to"] == "silver"
-    assert result["next_review_key"] is None
+    assert result["next_review_key"] == "silver_merge_key_review"
 
 
 def test_gate4_review_uses_selected_bronze_subset_before_silver():

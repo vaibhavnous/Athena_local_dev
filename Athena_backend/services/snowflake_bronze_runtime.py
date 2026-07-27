@@ -27,7 +27,10 @@ def snowflake_bronze_execution_enabled() -> bool:
 
 
 def snowflake_bronze_source_load_enabled() -> bool:
-    return _env_bool("ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE", False)
+    return _env_bool(
+        "ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE",
+        _env_bool("ATHENA_SNOWFLAKE_BRONZE_SOURCE_LOAD", False),
+    )
 
 
 def _source_mode() -> str:

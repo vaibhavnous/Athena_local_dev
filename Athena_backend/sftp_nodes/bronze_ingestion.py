@@ -9,6 +9,74 @@ from utilis.db import config, get_pipeline_connection
 from utilis.logger import logger
 
 
+def _manifest_ready_rows(feed_id: str, run_id: str) -> List[Dict[str, Any]]:
+    schema = config["azure_sql"]["pipeline_schema"]
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT id, file_path, file_name, file_size, remote_path, modified_time
+            FROM [{schema}].[file_feed_manifest]
+            WHERE feed_id = ?
+              AND staged_run_id = ?
+              AND state = 'SYNCED'
+              AND ISNULL(bronze_status, 'PENDING_BRONZE') = 'PENDING_BRONZE'
+            ORDER BY found_at ASC, id ASC
+            """,
+            feed_id,
+            run_id,
+        )
+        return [
+            {
+                "manifest_id": row.id,
+                "file_path": row.file_path,
+                "file_name": row.file_name,
+                "file_size": row.file_size,
+                "remote_path": row.remote_path,
+                "modified_time": row.modified_time,
+            }
+            for row in cursor.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def _update_manifest_bronze_status(manifest_ids: List[int], status: str) -> None:
+    if not manifest_ids:
+        return
+    schema = config["azure_sql"]["pipeline_schema"]
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        for manifest_id in manifest_ids:
+            cursor.execute(
+                f"""
+                UPDATE [{schema}].[file_feed_manifest]
+                SET bronze_status = ?,
+                    bronze_loaded_at = CASE WHEN ? = 'LOADED_TO_BRONZE' THEN SYSUTCDATETIME() ELSE bronze_loaded_at END
+                WHERE id = ?
+                """,
+                status,
+                status,
+                manifest_id,
+            )
+        conn.commit()
+    except Exception as exc:
+        logger.warning("Manifest bronze status update skipped: %s", exc)
+    finally:
+        conn.close()
+
+
+def mark_manifest_loaded_to_bronze(state: Stage01State) -> None:
+    manifest_ids = [
+        int(item["manifest_id"])
+        for item in state.get("bronze_ready_manifest") or []
+        if isinstance(item, dict) and item.get("manifest_id") is not None
+    ]
+    _update_manifest_bronze_status(manifest_ids, "LOADED_TO_BRONZE")
+
+
 def _log_bronze_file_ingestion(
     feed_id: str,
     target_table: str,
@@ -109,15 +177,20 @@ def sftp_bronze_ingestion_node(state: Stage01State) -> Stage01State:
         new_state["status"] = "FAILED"
         return new_state
 
-    # Prefer explicit pulled_files from state
-    pulled_files: List[str] = new_state.get("pulled_files") or []
-    files_pulled = int(new_state.get("files_pulled") or 0)
-
     candidate = new_state.get("candidate_feed", {})
     feed_id = str(candidate.get("feed_id") or new_state.get("feed_id") or new_state.get("run_id", "unknown"))
     vendor = str(candidate.get("vendor") or new_state.get("vendor") or "unknown")
     entity = str(candidate.get("entity") or new_state.get("entity") or "unknown")
     target_table = f"bronze.{vendor}_{entity}_raw"
+
+    run_id = str(new_state.get("run_id") or "").strip()
+    manifest_rows = _manifest_ready_rows(feed_id, run_id) if feed_id and run_id else []
+
+    # Prefer manifest rows. The pulled_files list is a compatibility fallback for older checkpoints/tests.
+    pulled_files: List[str] = [str(row.get("file_path") or "") for row in manifest_rows if row.get("file_path")]
+    if not pulled_files:
+        pulled_files = new_state.get("pulled_files") or []
+    files_pulled = int(new_state.get("files_pulled") or 0)
 
     ready_files: List[str] = []
 
@@ -207,12 +280,24 @@ def sftp_bronze_ingestion_node(state: Stage01State) -> Stage01State:
         except Exception:
             logger.warning("Failed to persist ready file log for %s", rf, extra=log_context)
 
+    ready_manifest_ids = [
+        int(row["manifest_id"])
+        for row in manifest_rows
+        if row.get("manifest_id") is not None and str(row.get("file_path") or "") in set(ready_files)
+    ]
+    _update_manifest_bronze_status(ready_manifest_ids, "READY_FOR_BRONZE")
+
     # Update state
     new_state["bronze_ingestion_status"] = "READY_FOR_BRONZE"
     new_state["bronze_target_table"] = target_table
     new_state["bronze_landing_path"] = landing_path
     new_state["bronze_file_count"] = len(ready_files)
     new_state["bronze_ready_files"] = ready_files
+    new_state["bronze_ready_manifest"] = [
+        {**row, "bronze_status": "READY_FOR_BRONZE"}
+        for row in manifest_rows
+        if str(row.get("file_path") or "") in set(ready_files)
+    ]
     logger.info(
         "SFTP Bronze ingestion ready: landing_path=%s ready_files=%d",
         landing_path,

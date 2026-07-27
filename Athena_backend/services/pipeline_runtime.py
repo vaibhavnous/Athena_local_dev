@@ -1618,7 +1618,7 @@ def build_pipeline_steps(
             {
                 "key": "plan_freshness",
                 "label": "Validate Plan Freshness",
-                "complete": checkpoint.get("plan_freshness_status") == "COMPLETED",
+                "complete": checkpoint.get("freshness_check_status") == "COMPLETED",
                 "detail": "Current backend plan checked against its approved seal",
             },
             {
@@ -1626,12 +1626,6 @@ def build_pipeline_steps(
                 "label": "Metadata Code Generation",
                 "complete": checkpoint.get("metadata_codegen_status") == "COMPLETED",
                 "detail": "Canonical feed metadata and runtime manifest generated",
-            },
-            {
-                "key": "pre_bronze_metadata_codegen_review",
-                "label": "Metadata Code Review",
-                "complete": checkpoint.get("metadata_codegen_review_status") == "COMPLETED",
-                "detail": "Generated schema, keys, watermarks, and paths validated",
             },
             {
                 "key": "bronze",
@@ -1644,36 +1638,6 @@ def build_pipeline_steps(
                 "label": _gate_label(4, source=source),
                 "complete": gate4_decision == "APPROVED",
                 "detail": "Bronze review and merge-key resolution",
-            },
-            {
-                "key": "runtime_bundle_handoff",
-                "label": "Runtime Bundle Handoff",
-                "complete": checkpoint.get("runtime_bundle_handoff_status") == "COMPLETED",
-                "detail": "Runtime manifest prepared for the selected target",
-            },
-            {
-                "key": "pre_bronze_runtime_config",
-                "label": "Prepare Runtime Configuration",
-                "complete": checkpoint.get("runtime_config_status") == "COMPLETED",
-                "detail": "Landing, Bronze output, and checkpoint paths loaded",
-            },
-            {
-                "key": "pre_bronze_validate_source",
-                "label": "Validate Source Access",
-                "complete": checkpoint.get("source_validation_status") == "COMPLETED",
-                "detail": "Approved file feeds confirmed in the source registry",
-            },
-            {
-                "key": "pre_bronze_discover_source_objects",
-                "label": "Discover Source Objects",
-                "complete": checkpoint.get("source_object_discovery_status") == "COMPLETED",
-                "detail": "Approved source feeds and entities enumerated",
-            },
-            {
-                "key": "pre_bronze_stage_to_landing",
-                "label": "Stage Files to Landing",
-                "complete": checkpoint.get("stage_to_landing_status") == "COMPLETED",
-                "detail": "SFTP files staged or ADLS landing paths registered",
             },
             {
                 "key": "bronze_code_execution",
@@ -2730,7 +2694,10 @@ def _apply_gate4_merge_keys_to_metadata(metadata: Dict[str, Any], review_artifac
         return metadata
 
     keys_by_table = {
-        str(feed.get("table") or feed.get("entity") or feed.get("table_name") or feed.get("target_table") or "").split(".")[-1].strip().lower(): {
+        str(
+            feed.get("table") or feed.get("entity") or feed.get("table_name")
+            or feed.get("feed_id") or feed.get("target_table") or ""
+        ).split(".")[-1].strip().lower(): {
             str(key).strip().lower()
             for key in (feed.get("primary_keys") or feed.get("merge_keys") or [])
             if str(key).strip()
@@ -2742,7 +2709,9 @@ def _apply_gate4_merge_keys_to_metadata(metadata: Dict[str, Any], review_artifac
         if not isinstance(column, dict):
             columns.append(column)
             continue
-        table_name = str(column.get("table_name") or "").strip().lower()
+        table_name = str(
+            column.get("table_name") or column.get("table") or column.get("entity") or column.get("feed_id") or ""
+        ).split(".")[-1].strip().lower()
         column_name = str(column.get("column_name") or "").strip().lower()
         reviewed_keys = keys_by_table.get(table_name) or set()
         if reviewed_keys and column_name in reviewed_keys:
@@ -2752,6 +2721,43 @@ def _apply_gate4_merge_keys_to_metadata(metadata: Dict[str, Any], review_artifac
         else:
             columns.append(column)
     return {**metadata, "columns": columns, "gate4_reviewed_merge_keys": review_artifact}
+
+
+def _apply_reviewed_keys_to_bronze_results(
+    bronze_results: List[Dict[str, Any]],
+    review_artifact: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    reviewed = {
+        str(
+            feed.get("table") or feed.get("table_name") or feed.get("entity")
+            or feed.get("feed_id") or feed.get("target_table") or ""
+        ).split(".")[-1].strip().casefold(): [
+            str(key).strip()
+            for key in (feed.get("merge_keys") or feed.get("primary_keys") or [])
+            if str(key).strip()
+        ]
+        for feed in (review_artifact.get("feeds") or [])
+        if isinstance(feed, dict)
+    }
+    results = []
+    for result in bronze_results:
+        table_key = str(
+            result.get("table") or result.get("table_name") or result.get("entity")
+            or result.get("feed_id") or result.get("target_table") or ""
+        ).split(".")[-1].strip().casefold()
+        if table_key not in reviewed:
+            results.append(result)
+            continue
+        bronze_config = dict(result.get("bronze_config") or result.get("generated_bronze_config") or {})
+        bronze_config["primary_keys"] = reviewed[table_key]
+        results.append({
+            **result,
+            "primary_keys": reviewed[table_key],
+            "merge_keys": reviewed[table_key],
+            "bronze_config": bronze_config,
+            "generated_bronze_config": bronze_config,
+        })
+    return results
 
 
 def _silver_merge_key_review_artifact(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
@@ -2804,27 +2810,21 @@ def _pause_for_silver_merge_key_review(run_id: str, state: Dict[str, Any]) -> Di
             "duration_seconds": round(time.monotonic() - started_at, 3),
         },
     )
-    enriched = resolved_state.get("enrichment_review_artifact") or resolved_state.get("enriched_metadata") or {}
-    if isinstance(enriched, dict) and "enrichment_artifact" in enriched:
-        enriched = enriched.get("enrichment_artifact") or {}
-    reviewed_metadata = _apply_gate4_merge_keys_to_metadata(enriched, artifact)
     return {
         **resolved_state,
         "run_id": run_id,
-        "status": "RUNNING",
+        "status": "HITL_WAIT",
         "background_stage": None,
         "next_gate": None,
-        "next_review_key": None,
-        "silver_merge_key_review_decision": "APPROVED",
+        "next_review_key": "silver_merge_key_review",
+        "silver_merge_key_review_decision": None,
         "silver_merge_key_review_artifact": artifact,
         "gate_silver_merge_key_review": {
             "gate": "silver_merge_key_review",
-            "status": "COMPLETED",
-            "decision": "APPROVED",
+            "status": "PENDING",
+            "decision": None,
         },
-        "enriched_metadata": reviewed_metadata,
-        "enrichment_review_artifact": reviewed_metadata,
-        "resume_message": "Merge keys generated and applied automatically. Silver generation is starting.",
+        "resume_message": "Silver Merge Key Review is pending. Review selected keys and candidates before Silver generation.",
     }
 
 
@@ -3022,36 +3022,39 @@ def submit_gate4_review(
         elif target_warehouse == "databricks":
             from services.databricks_runtime import databricks_bronze_execution_enabled, run_databricks_bronze_scripts
 
-            if databricks_bronze_execution_enabled():
-                execution_state = {
-                    **final_state,
-                    "status": "RUNNING",
-                    "background_stage": "bronze_code_execution",
-                    "next_gate": None,
-                    "resume_message": "Executing approved Bronze scripts in Databricks.",
-                }
-                save_checkpoint_state_timed(run_id, execution_state, context="bronze_code_execution:running")
-                try:
-                    final_state = run_databricks_bronze_scripts(
-                        execution_state,
-                        review_artifact=execution_state["bronze_review_artifact"],
-                        approved_only=True,
+            if not databricks_bronze_execution_enabled():
+                raise RuntimeError(
+                    "Databricks Bronze execution is disabled; refusing to continue to merge-key review or Silver."
+                )
+            execution_state = {
+                **final_state,
+                "status": "RUNNING",
+                "background_stage": "bronze_code_execution",
+                "next_gate": None,
+                "resume_message": "Executing approved Bronze scripts in Databricks.",
+            }
+            save_checkpoint_state_timed(run_id, execution_state, context="bronze_code_execution:running")
+            try:
+                final_state = run_databricks_bronze_scripts(
+                    execution_state,
+                    review_artifact=execution_state["bronze_review_artifact"],
+                    approved_only=True,
+                )
+                if final_state.get("databricks_bronze_execution_status") != "COMPLETED":
+                    raise RuntimeError(
+                        "Databricks Bronze execution did not complete; refusing to continue to Silver."
                     )
-                    if final_state.get("databricks_bronze_execution_status") != "COMPLETED":
-                        raise RuntimeError(
-                            "Databricks Bronze execution did not complete; refusing to continue to Silver."
-                        )
-                except Exception as exc:
-                    failed_state = {
-                        **execution_state,
-                        "status": "FAILED",
-                        "background_stage": "bronze_code_execution",
-                        "failed_background_stage": "bronze_code_execution",
-                        "error": str(exc),
-                    }
-                    save_checkpoint_state_timed(run_id, failed_state, context="bronze_code_execution:failed")
-                    raise
-                final_state["background_stage"] = None
+            except Exception as exc:
+                failed_state = {
+                    **execution_state,
+                    "status": "FAILED",
+                    "background_stage": "bronze_code_execution",
+                    "failed_background_stage": "bronze_code_execution",
+                    "error": str(exc),
+                }
+                save_checkpoint_state_timed(run_id, failed_state, context="bronze_code_execution:failed")
+                raise
+            final_state["background_stage"] = None
         final_state = _pause_for_silver_merge_key_review(run_id, final_state)
         ai_store_db_writer(
             run_id=run_id,
@@ -3109,6 +3112,10 @@ def submit_silver_merge_key_review(run_id: str, action: str = "APPROVED", review
         reviewed_metadata = _apply_gate4_merge_keys_to_metadata(enriched, artifact)
         final_state["enriched_metadata"] = reviewed_metadata
         final_state["enrichment_review_artifact"] = reviewed_metadata
+        final_state["bronze_generation_results"] = _apply_reviewed_keys_to_bronze_results(
+            [item for item in final_state.get("bronze_generation_results") or [] if isinstance(item, dict)],
+            artifact,
+        )
         final_state["status"] = "RUNNING"
         final_state["next_gate"] = None
         final_state["resume_message"] = "Silver Merge Key Review approved. Silver generation is starting."
@@ -3132,6 +3139,25 @@ def submit_silver_merge_key_review(run_id: str, action: str = "APPROVED", review
     )
     save_checkpoint_state(run_id, final_state)
     if decision == "APPROVED":
+        if str(final_state.get("source") or "").lower() in {"sftp", "adls_gen2"}:
+            from sftp_nodes.review_gates import sftp_gate5_node
+            from sftp_nodes.silver_code_generation import sftp_silver_code_generation_node
+
+            silver_state = sftp_silver_code_generation_node(final_state)
+            silver_status = str(silver_state.get("silver_generation_status") or "").upper()
+            silver_items = ((silver_state.get("silver_review_artifact") or {}).get("items") or [])
+            if silver_status not in {"COMPLETED", "PARTIAL"} or not silver_items:
+                blocked_state = {
+                    **silver_state,
+                    "status": "FAILED",
+                    "error": silver_state.get("silver_generation_error")
+                    or "Silver generation did not produce a review artifact after merge-key approval.",
+                }
+                save_checkpoint_state(run_id, blocked_state)
+                return blocked_state
+            gate5_state = sftp_gate5_node(silver_state)
+            save_checkpoint_state(run_id, gate5_state)
+            return gate5_state
         return continue_database_pipeline(run_id, start_stage_key="silver", state=final_state)
     return final_state
 

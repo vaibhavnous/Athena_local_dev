@@ -49,14 +49,23 @@ def silver_merge_key_resolution_node(state: Stage01State) -> Stage01State:
     bronze_artifact = state.get("bronze_review_artifact") or state.get("gate4_reviewed_merge_keys") or {}
     columns_by_table: Dict[str, List[Dict[str, Any]]] = {}
     for column in _enriched_columns(state):
-        columns_by_table.setdefault(_table_name(column.get("table_name") or column.get("table")), []).append(column)
+        for value in (
+            column.get("table_name"),
+            column.get("table"),
+            column.get("entity"),
+            column.get("feed_id"),
+        ):
+            key = _table_name(value)
+            if key:
+                columns_by_table.setdefault(key, []).append(column)
 
     feeds = []
     for feed in (bronze_artifact.get("feeds") if isinstance(bronze_artifact, dict) else []) or []:
         if not isinstance(feed, dict):
             continue
         table = _table_name(
-            feed.get("table") or feed.get("table_name") or feed.get("entity") or feed.get("target_table")
+            feed.get("table") or feed.get("table_name") or feed.get("entity")
+            or feed.get("feed_id") or feed.get("target_table")
         )
         table_columns = columns_by_table.get(table) or []
         primary_candidates = _dedupe([

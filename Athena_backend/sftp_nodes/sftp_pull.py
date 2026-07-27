@@ -40,6 +40,12 @@ def _ensure_manifest_columns() -> None:
                 ALTER TABLE [{_pipeline_schema()}].[file_feed_manifest] ADD [file_name] NVARCHAR(1024) NULL;
             IF COL_LENGTH('{_pipeline_schema()}.file_feed_manifest', 'modified_time') IS NULL
                 ALTER TABLE [{_pipeline_schema()}].[file_feed_manifest] ADD [modified_time] DATETIME2(7) NULL;
+            IF COL_LENGTH('{_pipeline_schema()}.file_feed_manifest', 'staged_run_id') IS NULL
+                ALTER TABLE [{_pipeline_schema()}].[file_feed_manifest] ADD [staged_run_id] NVARCHAR(255) NULL;
+            IF COL_LENGTH('{_pipeline_schema()}.file_feed_manifest', 'bronze_status') IS NULL
+                ALTER TABLE [{_pipeline_schema()}].[file_feed_manifest] ADD [bronze_status] NVARCHAR(50) NULL;
+            IF COL_LENGTH('{_pipeline_schema()}.file_feed_manifest', 'bronze_loaded_at') IS NULL
+                ALTER TABLE [{_pipeline_schema()}].[file_feed_manifest] ADD [bronze_loaded_at] DATETIME2(7) NULL;
             """
         )
         conn.commit()
@@ -105,7 +111,16 @@ def _manifest_exists(feed_id: str, file_name: str, file_size: int, modified_time
         conn.close()
 
 
-def _insert_manifest(feed_id: str, file_name: str, file_path: str, remote_path: str, file_size: int, modified_time: str, state: str) -> Optional[int]:
+def _insert_manifest(
+    feed_id: str,
+    file_name: str,
+    file_path: str,
+    remote_path: str,
+    file_size: int,
+    modified_time: str,
+    state: str,
+    run_id: str,
+) -> Optional[int]:
     _ensure_manifest_columns()
     conn = get_pipeline_connection()
     try:
@@ -113,8 +128,9 @@ def _insert_manifest(feed_id: str, file_name: str, file_path: str, remote_path: 
         cursor.execute(
             f"""
             INSERT INTO [{_pipeline_schema()}].[file_feed_manifest]
-            (feed_id, file_name, file_path, remote_path, file_size, checksum, digest_algorithm, state, found_at, downloaded_at, modified_time)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (feed_id, file_name, file_path, remote_path, file_size, checksum, digest_algorithm,
+             state, found_at, downloaded_at, modified_time, staged_run_id, bronze_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             feed_id,
             file_name,
@@ -127,6 +143,8 @@ def _insert_manifest(feed_id: str, file_name: str, file_path: str, remote_path: 
             datetime.now(timezone.utc).isoformat(),
             datetime.now(timezone.utc).isoformat() if state == "SYNCED" else None,
             modified_time,
+            run_id,
+            "PENDING_BRONZE" if state == "SYNCED" else "FAILED",
         )
         cursor.execute("SELECT CAST(SCOPE_IDENTITY() AS int)")
         row = cursor.fetchone()
@@ -242,7 +260,9 @@ def sftp_pull_node(state: Dict[str, Any]) -> Dict[str, Any]:
     landing_path.mkdir(parents=True, exist_ok=True)
 
     client = SFTPPullClient()
+    run_id = str(new_state.get("run_id") or "").strip()
     pulled_files: List[str] = []
+    landing_manifest: List[Dict[str, Any]] = []
     files_pulled = 0
     sftp = client.connect()
     try:
@@ -266,9 +286,22 @@ def sftp_pull_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     file_size=file_size,
                     modified_time=modified_time,
                     state="SYNCED",
+                    run_id=run_id,
                 )
                 _insert_sync_log(feed_id, manifest_id, "SUCCESS", started_at, datetime.now(timezone.utc).isoformat(), None)
                 pulled_files.append(str(destination))
+                landing_manifest.append(
+                    {
+                        "manifest_id": manifest_id,
+                        "feed_id": feed_id,
+                        "file_name": file_name,
+                        "file_path": str(destination),
+                        "remote_path": remote_path,
+                        "file_size": file_size,
+                        "modified_time": modified_time,
+                        "bronze_status": "PENDING_BRONZE",
+                    }
+                )
                 files_pulled += 1
             except Exception as exc:
                 manifest_id = _insert_manifest(
@@ -279,6 +312,7 @@ def sftp_pull_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     file_size=file_size,
                     modified_time=modified_time,
                     state="FAILED",
+                    run_id=run_id,
                 )
                 _insert_sync_log(feed_id, manifest_id, "FAILED", started_at, datetime.now(timezone.utc).isoformat(), str(exc))
                 raise
@@ -295,5 +329,7 @@ def sftp_pull_node(state: Dict[str, Any]) -> Dict[str, Any]:
     new_state["landing_path"] = str(landing_path)
     new_state["files_pulled"] = files_pulled
     new_state["pulled_files"] = pulled_files
+    new_state["landing_manifest"] = landing_manifest
+    new_state["stage_to_landing_status"] = "COMPLETED"
     new_state["sftp_pull_status"] = "COMPLETED"
     return new_state

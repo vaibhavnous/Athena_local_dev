@@ -1118,7 +1118,6 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeStep('plan_seal', 'Seal Approved Plan'),
       makeStep('plan_freshness', 'Validate Plan Freshness'),
       makeStep('pre_bronze_metadata_codegen', 'Metadata Code Generation'),
-      makeStep('pre_bronze_metadata_codegen_review', 'Metadata Code Review'),
       makeStep('bronze', 'Bronze Code Generation'),
       makeStep('gate4', 'Bronze Review', reviewAwareStepState(byKey.get('gate4'), phase, run, 4)),
     ]
@@ -1131,12 +1130,7 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
     ]
   } else if (fileFlow && phase.id === 'phase-4') {
     displaySteps = [
-      makeStep('runtime_bundle_handoff', 'Runtime Bundle Handoff'),
-      makeStep('pre_bronze_runtime_config', 'Prepare Runtime Configuration'),
-      makeStep('pre_bronze_validate_source', 'Validate Source Access'),
-      makeStep('pre_bronze_discover_source_objects', 'Discover Source Objects'),
-      makeStep('pre_bronze_stage_to_landing', 'Stage Files to Landing'),
-      makeStep('bronze_code_execution', 'Bronze Code Execution'),
+      makeStep('bronze_code_execution', 'Bronze Target Execution'),
       makeStep('bronze_runtime_validation', 'Bronze Runtime Validation'),
     ]
   } else if (!fileFlow && phase.id === 'phase-4') {

@@ -35,6 +35,7 @@ def _map_bronze_feed(item: Dict[str, Any], checkpoint: Dict[str, Any]) -> Dict[s
         )
     return {
         "feed_summary": item.get("feed_summary") or f"{item.get('vendor') or 'Vendor'}.{item.get('entity') or 'Feed'}",
+        "feed_id": item.get("feed_id"),
         "source_type": item.get("source_type") or config_payload.get("source_type") or checkpoint.get("source"),
         "vendor": item.get("vendor") or config_payload.get("vendor"),
         "entity": item.get("entity") or config_payload.get("entity") or item.get("table"),
@@ -42,8 +43,10 @@ def _map_bronze_feed(item: Dict[str, Any], checkpoint: Dict[str, Any]) -> Dict[s
         "database_name": item.get("database_name"),
         "schema_name": item.get("schema_name"),
         "script_path": item.get("script_path"),
-        "target_warehouse": item.get("target_warehouse"),
-        "script_language": item.get("script_language"),
+        "target_warehouse": item.get("target_warehouse") or checkpoint.get("target_warehouse"),
+        "script_language": item.get("script_language") or (
+            "sql" if str(checkpoint.get("target_warehouse") or "").lower() == "snowflake" else "python"
+        ),
         "source_columns": item.get("source_columns") or [],
         "file_format": item.get("file_format") or config_payload.get("file_format"),
         "approved_schema": config_payload.get("schema_columns") or item.get("approved_schema") or [],

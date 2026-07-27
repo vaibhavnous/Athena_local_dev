@@ -65,12 +65,11 @@ const DATABASE_PROGRESS_ORDER = [
 
 const FILE_PROGRESS_ORDER = [
   'ingestion', 'memory', 'requirements', 'kpis', 'gate1',
-  'feed_discovery', 'feed_nomination', 'gate2', 'column_extraction', 'freshness_check',
-  'column_profiling', 'semantic_enrichment', 'gate3', 'plan_seal',
-  'metadata_bootstrap', 'metadata_codegen', 'gate4_metadata', 'runtime_config',
-  'validate_source', 'discover_source_objects', 'stage_to_landing',
+  'feed_discovery', 'feed_nomination', 'gate2', 'column_extraction',
+  'column_profiling', 'semantic_enrichment', 'gate3',
+  'metadata_bootstrap', 'plan_seal', 'freshness_check', 'metadata_codegen', 'bronze_codegen', 'gate4',
   'bronze_autoloader', 'bronze_dq',
-  'bronze_to_silver', 'silver_dq',
+  'silver_merge_key_resolution', 'silver_merge_key_review', 'bronze_to_silver', 'silver_dq',
   'silver_to_gold', 'gold_dq', 'gate5_publish', 'finalize',
 ]
 

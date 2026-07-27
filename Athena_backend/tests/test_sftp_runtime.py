@@ -24,12 +24,16 @@ def test_start_sftp_pipeline_normalizes_entity_and_invokes_graph(monkeypatch):
         brd_filename="SFTP Upload",
         sftp_entity="invalid",
         source="sftp",
+        project_id="project-1",
+        target_warehouse="snowflake",
     )
 
     assert result["run_id"] == "run-sftp"
     assert result["result"]["status"] == "COMPLETED"
     assert captured["state"]["brd_filename"] == "SFTP Upload"
     assert captured["state"]["sftp_entity"] == "transactions"
+    assert captured["state"]["project_id"] == "project-1"
+    assert captured["state"]["target_warehouse"] == "snowflake"
 
 
 def test_start_sftp_pipeline_uses_auto_entity_for_adls(monkeypatch):

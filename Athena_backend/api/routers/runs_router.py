@@ -26,8 +26,10 @@ def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": run_id,
         "run_id": run_id,
+        "project_id": row.get("project_id"),
         "brd_filename": row.get("brd_filename") or run_id,
         "source": row.get("source") or "database",
+        "target_warehouse": row.get("target_warehouse"),
         "status": row.get("status") or "UNKNOWN",
         "provider": row.get("provider") or "azure_openai",
         "deployment": row.get("deployment"),
@@ -87,6 +89,8 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         **_fallback_run_summary(row),
         "brd_filename": checkpoint.get("brd_filename") or checkpoint.get("display_name") or row.get("brd_filename") or run_id,
         "source": checkpoint.get("source") or row.get("source") or "database",
+        "project_id": checkpoint.get("project_id") or row.get("project_id"),
+        "target_warehouse": checkpoint.get("target_warehouse") or row.get("target_warehouse"),
         "status": _status_from_checkpoint(checkpoint),
         "provider": checkpoint.get("provider") or row.get("provider") or "azure_openai",
         "deployment": checkpoint.get("deployment") or row.get("deployment"),
@@ -180,8 +184,10 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         **_fallback_run_summary(
             {
                 "run_id": run_id,
+                "project_id": checkpoint.get("project_id"),
                 "brd_filename": checkpoint.get("brd_filename"),
                 "source": checkpoint.get("source"),
+                "target_warehouse": checkpoint.get("target_warehouse"),
                 "status": fallback_status,
                 "provider": checkpoint.get("provider"),
                 "deployment": checkpoint.get("deployment"),

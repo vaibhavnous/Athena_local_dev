@@ -106,6 +106,7 @@ def run_pipeline_background(
     compliance_domain: str = "Insurance",
     compliance_countries: Optional[List[str]] = None,
     target_warehouse: str = "databricks",
+    project_id: Optional[str] = None,
 ) -> None:
     started_at = time.monotonic()
     try:
@@ -118,6 +119,8 @@ def run_pipeline_background(
                 brd_filename=brd_filename,
                 sftp_entity=sftp_entity,
                 source=str(source or "sftp").lower(),
+                project_id=project_id,
+                target_warehouse=target_warehouse,
             )
         else:
             result = start_pipeline(
@@ -185,6 +188,7 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             compliance_domain=str(payload.compliance_domain or "Insurance"),
             compliance_countries=payload.compliance_countries or ["US"],
             target_warehouse=str(payload.target_warehouse or "databricks").lower(),
+            project_id=payload.project_id,
         )
         BACKGROUND_JOBS[job_key] = future
 

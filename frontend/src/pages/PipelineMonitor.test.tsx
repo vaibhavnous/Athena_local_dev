@@ -80,7 +80,6 @@ test('renders the SFTP metadata-bootstrap phase in the latest monitor UI', () =>
       { key: 'plan_seal', state: 'RUNNING' },
       { key: 'plan_freshness', state: 'PENDING' },
       { key: 'pre_bronze_metadata_codegen', state: 'PENDING' },
-      { key: 'pre_bronze_metadata_codegen_review', state: 'PENDING' },
       { key: 'bronze', state: 'PENDING' },
       { key: 'gate4', state: 'PENDING' },
     ],
@@ -93,7 +92,6 @@ test('renders the SFTP metadata-bootstrap phase in the latest monitor UI', () =>
     'Seal Approved Plan',
     'Validate Plan Freshness',
     'Metadata Code Generation',
-    'Metadata Code Review',
     'Bronze Code Generation',
     'Bronze Review',
   ])

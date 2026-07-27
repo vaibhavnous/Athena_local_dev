@@ -3609,7 +3609,7 @@ function CodeReviewSummary({ item, onMergeKeysChange }) {
         <div>
           <div className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-[#9ca9bd]">
             <KeyRound size={13} className="text-[#69a0ff]" />
-            {item.type === 'BRONZE' ? 'Resolve Merge Keys' : 'Resolved Merge Keys'}
+            {item.type === 'BRONZE' ? 'Resolve Merge Keys' : 'Review Merge Keys'}
           </div>
           {canEditMergeKeys ? (
             <>

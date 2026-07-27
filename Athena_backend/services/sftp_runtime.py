@@ -341,6 +341,8 @@ def start_sftp_pipeline(
     brd_filename: Optional[str] = None,
     sftp_entity: Optional[str] = None,
     source: str = "sftp",
+    project_id: Optional[str] = None,
+    target_warehouse: str = "databricks",
 ) -> Dict[str, Any]:
     logger.info("Starting file-source pipeline run_id=%s source=%s", run_id, source)
     source_value = str(source or "sftp").lower()
@@ -358,6 +360,8 @@ def start_sftp_pipeline(
         "status": "PENDING",
         "source": source_value,
         "sftp_entity": entity,
+        "project_id": project_id,
+        "target_warehouse": str(target_warehouse or "databricks").lower(),
     }
     graph_app = _get_graph()
     try:
