@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from api.auth import AuthUser, get_current_user
 from api.models import ProjectRequest
@@ -41,8 +41,10 @@ def _owned_project(project_id: str, user: AuthUser) -> dict[str, Any]:
 
 
 @router.get("")
-def list_projects(_: AuthUser = Depends(get_current_user)) -> list[dict[str, Any]]:
-    return repository.list_projects()
+def list_projects(user: AuthUser = Depends(get_current_user)) -> list[dict[str, Any]]:
+    if user.user_type == "Admin":
+        return repository.list_projects()
+    return repository.list_projects(owner_email=user.email)
 
 
 @router.get("/{project_id}")
@@ -64,11 +66,12 @@ def update_project(project_id: str, request: ProjectRequest, user: AuthUser = De
     return project
 
 
-@router.delete("/{project_id}", status_code=204)
-def delete_project(project_id: str, user: AuthUser = Depends(get_current_user)) -> None:
+@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_project(project_id: str, user: AuthUser = Depends(get_current_user)) -> Response:
     _owned_project(project_id, user)
     if not repository.delete(project_id):
         raise HTTPException(status_code=404, detail="Project not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{project_id}/runs")
@@ -77,7 +80,7 @@ def project_runs(project_id: str, user: AuthUser = Depends(get_current_user)) ->
     from services.pipeline_runtime import list_runs, load_checkpoint_state
 
     matches = []
-    for item in list_runs(limit=200):
+    for item in list_runs(limit=200, project_id=project_id):
         run_id = str(item.get("run_id") or "")
         checkpoint = load_checkpoint_state(run_id) or {}
         if str(checkpoint.get("project_id") or "") == project_id:

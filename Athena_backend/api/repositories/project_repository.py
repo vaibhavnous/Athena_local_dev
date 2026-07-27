@@ -67,7 +67,12 @@ class ProjectRepository:
             finally:
                 connection.close()
 
-    def list_projects(self) -> list[dict[str, Any]]:
+    def list_projects(self, owner_email: str | None = None) -> list[dict[str, Any]]:
+        if owner_email:
+            return self._query(
+                f"{self._select()} WHERE LOWER(owner_email) = LOWER(?) ORDER BY updated_at DESC, created_at DESC",
+                owner_email,
+            )
         return self._query(f"{self._select()} ORDER BY updated_at DESC, created_at DESC")
 
     def find(self, project_id: str) -> dict[str, Any] | None:

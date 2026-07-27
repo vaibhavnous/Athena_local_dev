@@ -737,6 +737,7 @@ def test_databricks_gold_batch_success_survives_output_poll_failure(monkeypatch)
 
     assert result["databricks_gold_execution_status"] == "COMPLETED"
     assert [item["status"] for item in result["databricks_gold_execution_results"]] == ["SUCCESS", "SUCCESS"]
+    assert [item["verification_status"] for item in result["databricks_gold_execution_results"]] == ["UNVERIFIED", "UNVERIFIED"]
     assert "output unavailable" in result["databricks_gold_execution_results"][0]["warning"]
 
 

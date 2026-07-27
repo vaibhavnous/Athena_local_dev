@@ -496,13 +496,29 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
         _script_globals["__name__"] = f"__athena_{{_name}}"
         _script_globals["__file__"] = _item.get("script_path") or f"<athena:{{_name}}>"
         exec(compile(_item.get("script_text") or "", f"<athena:{{_name}}>", "exec"), _script_globals)
-        _RESULTS.append({{
+        _target = str(_item.get("target_table") or "").strip()
+        _verification_status = "UNVERIFIED"
+        _verification_warning = None
+        if _target and _target.casefold() != "gold_dimensions":
+            try:
+                _target_exists = spark.catalog.tableExists(_target)
+            except Exception as _verify_exc:
+                _verification_warning = f"Target verification unavailable for {{_target}}: {{_verify_exc}}"
+            else:
+                if not _target_exists:
+                    raise RuntimeError(f"Expected Databricks target table was not created: {{_target}}")
+                _verification_status = "VERIFIED"
+        _result = {{
             "script_name": _name,
             "script_path": _item.get("script_path"),
-            "target_table": _item.get("target_table"),
+            "target_table": _target or None,
             "status": "SUCCESS",
+            "verification_status": _verification_status,
             "elapsed_seconds": round(time.time() - _started, 2),
-        }})
+        }}
+        if _verification_warning:
+            _result["verification_warning"] = _verification_warning
+        _RESULTS.append(_result)
     except Exception as _exc:
         _RESULTS.append({{
             "script_name": _name,
@@ -594,6 +610,7 @@ def _successful_batch_results_from_scripts(
             "script_path": str(script.get("script_path") or "").strip(),
             "target_table": script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
             "status": "SUCCESS",
+            "verification_status": "UNVERIFIED",
             "workspace_path": notebook_path,
             "databricks_run_id": run_state.get("run_id"),
             "run_page_url": run_state.get("run_page_url"),

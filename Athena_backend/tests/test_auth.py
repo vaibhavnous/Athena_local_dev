@@ -5,7 +5,7 @@ import uuid
 import pytest
 from fastapi import HTTPException
 
-from api.auth import AuthService, AuthUser, CreateUserRequest
+from api.auth import AuthService, AuthUser, CreateUserRequest, UpdateUserRequest, assert_run_access
 
 
 class FakeAuthRepository:
@@ -125,22 +125,43 @@ def test_only_primary_admin_can_create_accounts(auth):
     assert exc.value.status_code == 403
 
 
-def test_legacy_primary_admin_password_can_bootstrap(monkeypatch):
+def test_existing_account_email_cannot_change(auth):
+    service, repository = auth
+    admin = service.login("admin@astra.local", "AdminPass!234").user
+    client = service.create_user(
+        CreateUserRequest(
+            username="Client User",
+            email="client@example.com",
+            password="ClientPass!234",
+            userType="Client",
+        ),
+        admin,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        service.update_user(client.uid, UpdateUserRequest(email="new-client@example.com"), admin)
+
+    assert exc.value.status_code == 400
+    assert repository.find_by_uid(client.uid)["email"] == "client@example.com"
+
+
+def test_weak_primary_admin_password_cannot_bootstrap(monkeypatch):
     monkeypatch.setenv("ASTRA_AUTH_EMAIL", "admin@astra.local")
     monkeypatch.setenv("ASTRA_AUTH_USERNAME", "Primary Admin")
     monkeypatch.setenv("ASTRA_AUTH_PASSWORD", "admin123")
     monkeypatch.setenv("ASTRA_JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
     service = AuthService(FakeAuthRepository())
 
-    session = service.login("admin@astra.local", "admin123")
+    with pytest.raises(HTTPException) as exc:
+        service.login("admin@astra.local", "admin123")
 
-    assert session.user.can_manage_accounts is True
+    assert exc.value.status_code == 400
 
 
-def test_existing_primary_admin_password_syncs_from_env(monkeypatch):
+def test_existing_primary_admin_password_is_not_reset_from_env(monkeypatch):
     monkeypatch.setenv("ASTRA_AUTH_EMAIL", "admin@astra.local")
     monkeypatch.setenv("ASTRA_AUTH_USERNAME", "Primary Admin")
-    monkeypatch.setenv("ASTRA_AUTH_PASSWORD", "NewAdminPass!234")
+    monkeypatch.setenv("ASTRA_AUTH_PASSWORD", "admin123")
     monkeypatch.setenv("ASTRA_JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
     repository = FakeAuthRepository()
     repository.create_user(
@@ -152,6 +173,23 @@ def test_existing_primary_admin_password_syncs_from_env(monkeypatch):
     )
     service = AuthService(repository)
 
-    session = service.login("admin@astra.local", "NewAdminPass!234")
+    session = service.login("admin@astra.local", "OldAdminPass!234")
 
     assert session.user.can_manage_accounts is True
+    with pytest.raises(HTTPException) as exc:
+        service.login("admin@astra.local", "admin123")
+    assert exc.value.status_code == 401
+
+
+def test_client_cannot_access_another_users_run():
+    client = AuthUser(
+        uid=str(uuid.uuid4()),
+        username="Client",
+        email="client@example.com",
+        userType="Client",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        assert_run_access("run-1", client, checkpoint={"run_id": "run-1", "owner_email": "other@example.com"})
+
+    assert exc.value.status_code == 403

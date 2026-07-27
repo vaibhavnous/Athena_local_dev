@@ -118,7 +118,7 @@ def test_submit_edited_kpi_persists_full_content(monkeypatch):
 
     updates = []
     monkeypatch.setattr(kpi_router, "demo_enabled", lambda: False)
-    monkeypatch.setattr("utilis.db.update_hitl_item", lambda *args, **kwargs: updates.append((args, kwargs)))
+    monkeypatch.setattr("utilis.db.update_hitl_items_batch", lambda items: updates.extend(items))
     monkeypatch.setattr("api.services.kpi_service.maybe_resume_gate1", lambda run_id: None)
 
     kpi_router.submit_hitl_decisions(
@@ -130,8 +130,34 @@ def test_submit_edited_kpi_persists_full_content(monkeypatch):
         )]),
     )
 
-    assert updates[0][0][:2] == ("run-edit-kpi:1:0", "APPROVED")
-    assert '"name": "Edited KPI"' in updates[0][1]["edited_content"]
+    assert updates[0]["item_id"] == "run-edit-kpi:1:0"
+    assert updates[0]["status"] == "APPROVED"
+    assert '"name": "Edited KPI"' in updates[0]["edited_content"]
+
+
+def test_bulk_kpi_action_persists_pending_items_in_one_batch(monkeypatch):
+    from api.routers import kpi_router
+
+    batches = []
+    monkeypatch.setattr(kpi_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "api.services.kpi_service.fetch_hitl_rows",
+        lambda run_id: [
+            {"queue_id": f"{run_id}:1:pending", "decision": None},
+            {"queue_id": f"{run_id}:1:done", "decision": "APPROVED"},
+        ],
+    )
+    monkeypatch.setattr("api.services.kpi_service.maybe_resume_gate1", lambda run_id: None)
+    monkeypatch.setattr("utilis.db.update_hitl_items_batch", lambda items: batches.append(items))
+
+    result = kpi_router.bulk_kpi_action("run-bulk", {"action": "APPROVED"})
+
+    assert result["updated_count"] == 1
+    assert batches == [[{
+        "item_id": "run-bulk:1:pending",
+        "status": "APPROVED",
+        "rejection_reason": None,
+    }]]
 
 
 def test_sql_tcp_probe_failure_is_cached(monkeypatch):
@@ -266,6 +292,10 @@ def test_resume_from_failure_uses_real_resume_path(monkeypatch):
 
     monkeypatch.setattr(pipeline_router, "demo_enabled", lambda: False)
     monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "FAILED"},
+    )
+    monkeypatch.setattr(
         pipeline_router,
         "_resume_failed_run",
         lambda run_id, action_name: {"run_id": run_id, "status": "SUBMITTED", "action": action_name},
@@ -307,7 +337,9 @@ def test_restart_creates_new_real_run(monkeypatch):
     monkeypatch.setattr(
         pipeline_router,
         "_seed_run_checkpoint",
-        lambda run_id, payload: recorded.update({"run_id": run_id, "payload": payload}),
+        lambda run_id, payload, owner_email=None: recorded.update(
+            {"run_id": run_id, "payload": payload, "owner_email": owner_email}
+        ),
     )
     monkeypatch.setattr(
         "api.services.pipeline_service.submit_pipeline_start",
@@ -371,6 +403,7 @@ def test_upload_brd_rejects_large_file(monkeypatch):
 
 
 def test_pipeline_status_returns_404_for_missing_run(monkeypatch):
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {})
     monkeypatch.setattr("api.services.ui_service.ui_run", lambda run_id: {"status": "NOT_FOUND"})
 
     response = client.get("/pipeline/run-123/status")
@@ -380,6 +413,10 @@ def test_pipeline_status_returns_404_for_missing_run(monkeypatch):
 
 
 def test_pipeline_status_shapes_running_response(monkeypatch):
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "RUNNING"},
+    )
     monkeypatch.setattr(
         "api.services.ui_service.ui_run",
         lambda run_id: {"status": "RUNNING", "run_id": run_id},
@@ -424,7 +461,10 @@ def test_abort_run_persists_aborted_status(monkeypatch):
 
 
 def test_continue_stage_requires_pending_stage(monkeypatch):
-    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {})
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "RUNNING"},
+    )
 
     response = client.post("/pipeline/run-123/continue-stage", json={"auto_advance": False})
 
@@ -532,6 +572,10 @@ def test_bronze_review_submit_rejects_when_artifact_not_ready(monkeypatch):
 
 def test_gold_review_submit_runs_execution_in_background(monkeypatch):
     recorded = {}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "HITL_WAIT", "next_review_key": "gold_review"},
+    )
     monkeypatch.setattr(
         "services.pipeline_runtime.submit_background",
         lambda run_id, stage, fn, *args: recorded.update({"run_id": run_id, "stage": stage, "args": args}),

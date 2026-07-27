@@ -21,6 +21,7 @@ BACKGROUND_WORKER_COUNT = max(1, int(os.getenv("ATHENA_BACKGROUND_WORKERS", "2")
 BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=BACKGROUND_WORKER_COUNT)
 BACKGROUND_JOBS: Dict[str, Future] = {}
 BACKGROUND_JOB_LOCK = threading.Lock()
+ABORTED_RUNS: set[str] = set()
 SCRIPT_BUNDLE_CACHE_LOCK = threading.Lock()
 SCRIPT_BUNDLE_CACHE: Dict[str, Dict[str, Any]] = {}
 ACTIVE_CHECKPOINT_STATUSES = {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
@@ -58,6 +59,35 @@ MINIMUM_RUNTIME_STAGE_KEYS = {
     "schema",
     "enrichment",
 }
+
+
+def is_run_aborted(run_id: str, state: Optional[Dict[str, Any]] = None) -> bool:
+    return (
+        run_id in ABORTED_RUNS
+        or bool((state or {}).get("abort_requested"))
+        or str((state or {}).get("status") or "").upper() == "ABORTED"
+    )
+
+
+def aborted_run_state(run_id: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return {
+        **(state or {}),
+        "run_id": run_id,
+        "status": "ABORTED",
+        "abort_requested": True,
+        "background_stage": None,
+        "next_gate": None,
+        "next_review_key": None,
+        "stage_confirmation": None,
+        "awaiting_stage_confirmation": False,
+        "resume_message": "Run stopped by user.",
+    }
+
+
+def clear_run_abort(run_id: str) -> None:
+    if run_id:
+        with BACKGROUND_JOB_LOCK:
+            ABORTED_RUNS.discard(run_id)
 
 
 def _minimum_stage_runtime_seconds() -> float:
@@ -316,6 +346,8 @@ def continue_database_pipeline(
 
     current_stage_key = start_stage_key
     while current_stage_key:
+        if is_run_aborted(run_id, working_state):
+            return aborted_run_state(run_id, working_state)
         stage_started_at = time.monotonic()
         running_state = {
             **working_state,
@@ -346,6 +378,8 @@ def continue_database_pipeline(
         result = runner(working_state)
         if not isinstance(result, dict):
             raise ValueError(f"Stage {current_stage_key} returned an invalid state.")
+        if is_run_aborted(run_id):
+            return aborted_run_state(run_id, working_state)
 
         working_state = {**working_state, **result, "run_id": run_id}
         logger.info(
@@ -547,6 +581,26 @@ def save_checkpoint_state(run_id: str, state: Dict[str, Any]) -> None:
         conn.close()
 
 
+def abort_background_run(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    aborted = aborted_run_state(run_id, checkpoint or load_checkpoint_state(run_id) or {})
+    aborted["aborted_at"] = time.time()
+    with BACKGROUND_JOB_LOCK:
+        ABORTED_RUNS.add(run_id)
+        futures = [
+            future
+            for job_key, future in BACKGROUND_JOBS.items()
+            if job_key == run_id or job_key.startswith(f"{run_id}:")
+        ]
+        save_checkpoint_state(run_id, aborted)
+
+    cancelled = sum(1 for future in futures if future.cancel())
+    logger.warning(
+        "Pipeline abort requested",
+        extra={"run_id": run_id, "jobs_found": len(futures), "jobs_cancelled": cancelled},
+    )
+    return aborted
+
+
 def _checkpoint_slow_seconds() -> float:
     raw = os.getenv("ATHENA_CHECKPOINT_SLOW_SECONDS", "2")
     try:
@@ -652,6 +706,8 @@ def mark_interrupted_background_runs_on_startup() -> int:
 
 def mark_run_processing(run_id: str, stage: str) -> None:
     checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+    if is_run_aborted(run_id, checkpoint):
+        raise HTTPException(status_code=409, detail="Run has been aborted.")
     checkpoint.update(
         {
             "run_id": run_id,
@@ -696,6 +752,8 @@ def ensure_background_capacity_locked() -> None:
 def submit_background(run_id: str, stage: str, fn, *args) -> Future:
     job_key = f"{run_id}:{stage}"
     with BACKGROUND_JOB_LOCK:
+        if is_run_aborted(run_id):
+            raise HTTPException(status_code=409, detail="Run has been aborted.")
         existing = BACKGROUND_JOBS.get(job_key)
         if existing and not existing.done():
             logger.info("Background %s already running for run_id=%s", stage, run_id)
@@ -709,33 +767,49 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
     def _record_background_result(done: Future) -> None:
         try:
             result = done.result()
-            checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
-            if isinstance(result, dict):
-                checkpoint.update(result)
-            checkpoint.update({"run_id": run_id, "background_stage": None})
-            if checkpoint.get("status") == "PROCESSING":
-                checkpoint["status"] = checkpoint.get("semantic_enrichment_status") or checkpoint.get("table_nomination_status") or "COMPLETED"
-            save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_complete")
+            with BACKGROUND_JOB_LOCK:
+                checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+                if is_run_aborted(run_id, checkpoint):
+                    save_checkpoint_state_timed(
+                        run_id,
+                        aborted_run_state(run_id, checkpoint),
+                        context=f"{stage}:background_aborted",
+                    )
+                else:
+                    if isinstance(result, dict):
+                        checkpoint.update(result)
+                    checkpoint.update({"run_id": run_id, "background_stage": None})
+                    if checkpoint.get("status") == "PROCESSING":
+                        checkpoint["status"] = checkpoint.get("semantic_enrichment_status") or checkpoint.get("table_nomination_status") or "COMPLETED"
+                    save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_complete")
         except Exception as exc:
             logger.exception("Background %s failed for run_id=%s", stage, run_id)
-            try:
-                checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
-            except Exception:
-                logger.exception("Failed to load checkpoint while recording background failure run_id=%s stage=%s", run_id, stage)
-                checkpoint = {"run_id": run_id}
-            checkpoint.update(
-                {
-                    "run_id": run_id,
-                    "status": "FAILED",
-                    "background_stage": None,
-                    "failed_background_stage": checkpoint.get("failed_background_stage") or stage,
-                    "error": str(exc),
-                }
-            )
-            try:
-                save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_failed")
-            except Exception:
-                logger.exception("Failed to save background failure checkpoint run_id=%s stage=%s", run_id, stage)
+            with BACKGROUND_JOB_LOCK:
+                try:
+                    checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+                except Exception:
+                    logger.exception("Failed to load checkpoint while recording background failure run_id=%s stage=%s", run_id, stage)
+                    checkpoint = {"run_id": run_id}
+                if is_run_aborted(run_id, checkpoint):
+                    save_checkpoint_state_timed(
+                        run_id,
+                        aborted_run_state(run_id, checkpoint),
+                        context=f"{stage}:background_aborted",
+                    )
+                else:
+                    checkpoint.update(
+                        {
+                            "run_id": run_id,
+                            "status": "FAILED",
+                            "background_stage": None,
+                            "failed_background_stage": checkpoint.get("failed_background_stage") or stage,
+                            "error": str(exc),
+                        }
+                    )
+                    try:
+                        save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_failed")
+                    except Exception:
+                        logger.exception("Failed to save background failure checkpoint run_id=%s stage=%s", run_id, stage)
         finally:
             with BACKGROUND_JOB_LOCK:
                 if BACKGROUND_JOBS.get(job_key) is done:
@@ -745,7 +819,40 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
     return future
 
 
-def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
+def list_runs(
+    limit: int = 50,
+    *,
+    owner_email: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    safe_limit = max(1, min(1000, int(limit or 50)))
+    filters: List[str] = []
+    parameters: List[str] = []
+    if owner_email:
+        filters.append(
+            """LOWER(COALESCE(
+                NULLIF(JSON_VALUE(full_state_json, '$.owner_email'), ''),
+                NULLIF(JSON_VALUE(full_state_json, '$.created_by_email'), ''),
+                NULLIF(JSON_VALUE(full_state_json, '$.submitted_by_email'), ''),
+                NULLIF(JSON_VALUE(full_state_json, '$.user_email'), '')
+            )) = ?"""
+        )
+        parameters.append(str(owner_email).strip().lower())
+    if project_id:
+        filters.append("JSON_VALUE(full_state_json, '$.project_id') = ?")
+        parameters.append(str(project_id).strip())
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    query = f"""
+        SELECT TOP ({safe_limit}) run_id, MAX(checkpoint_at) AS last_activity
+        FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
+        {where_clause}
+        GROUP BY run_id
+        ORDER BY MAX(checkpoint_at) DESC
+    """
+
+    def execute_index_query(cursor: Any) -> None:
+        cursor.execute(query, *parameters)
+
     conn = get_connection()
     try:
         cursor = conn.cursor()
@@ -756,13 +863,7 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
             pass
         # ponytail: history may briefly show an in-flight checkpoint; remove the
         # hint once the metadata database uses snapshot isolation.
-        cursor.execute(
-            f"""
-            SELECT TOP ({limit}) run_id, checkpoint_at AS last_activity
-            FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
-            ORDER BY checkpoint_at DESC
-            """
-        )
+        execute_index_query(cursor)
         rows = cursor.fetchall()
         # ponytail: current runs are checkpoint-backed; querying four legacy
         # stores when this table is empty made an empty history wait for timeout.
@@ -786,14 +887,7 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
                 cursor.timeout = max(1, int(os.getenv("ATHENA_SQL_QUERY_TIMEOUT_SECONDS", "5")))
             except Exception:
                 pass
-            cursor.execute(
-                f"""
-                SELECT TOP ({limit}) run_id, MAX(checkpoint_at) AS last_activity
-                FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
-                GROUP BY run_id
-                ORDER BY MAX(checkpoint_at) DESC
-                """
-            )
+            execute_index_query(cursor)
             rows = cursor.fetchall()
             return [
                 {"run_id": row[0], "last_activity": row[1]}
@@ -2821,6 +2915,8 @@ def submit_gate4_review(
     checkpoint_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     checkpoint_state = checkpoint_state or load_checkpoint_state(run_id) or {"run_id": run_id}
+    if is_run_aborted(run_id, checkpoint_state):
+        return aborted_run_state(run_id, checkpoint_state)
     decision = str(action or "APPROVED").upper()
     final_state = {
         **checkpoint_state,
@@ -2864,6 +2960,8 @@ def submit_gate4_review(
                     review_artifact=execution_state["bronze_review_artifact"],
                     approved_only=True,
                 )
+                if is_run_aborted(run_id, final_state):
+                    return aborted_run_state(run_id, final_state)
                 if final_state.get("snowflake_bronze_execution_status") != "COMPLETED":
                     raise RuntimeError(
                         "Snowflake Bronze execution did not complete; refusing to continue to Silver."
@@ -2897,6 +2995,8 @@ def submit_gate4_review(
                         review_artifact=execution_state["bronze_review_artifact"],
                         approved_only=True,
                     )
+                    if is_run_aborted(run_id, final_state):
+                        return aborted_run_state(run_id, final_state)
                     if final_state.get("databricks_bronze_execution_status") != "COMPLETED":
                         raise RuntimeError(
                             "Databricks Bronze execution did not complete; refusing to continue to Silver."
@@ -3063,6 +3163,8 @@ def submit_silver_generation(run_id: str) -> Dict[str, Any]:
 
 def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
+    if is_run_aborted(run_id, checkpoint_state):
+        return aborted_run_state(run_id, checkpoint_state)
     decision = str(action or "APPROVED").upper()
     final_state = {
         **checkpoint_state,
@@ -3105,6 +3207,8 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
                     review_artifact=execution_state["silver_review_artifact"],
                     approved_only=True,
                 )
+                if is_run_aborted(run_id, final_state):
+                    return aborted_run_state(run_id, final_state)
             except Exception as exc:
                 failed_state = {
                     **execution_state,
@@ -3133,6 +3237,8 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
                         review_artifact=execution_state["silver_review_artifact"],
                         approved_only=True,
                     )
+                    if is_run_aborted(run_id, final_state):
+                        return aborted_run_state(run_id, final_state)
                     if final_state.get("databricks_silver_execution_status") != "COMPLETED":
                         raise RuntimeError(
                             "Databricks Silver execution did not complete; refusing to continue to Gold."
@@ -3212,6 +3318,8 @@ def submit_gold_generation(run_id: str) -> Dict[str, Any]:
 
 def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+    if is_run_aborted(run_id, checkpoint):
+        return aborted_run_state(run_id, checkpoint)
     decision = str(action or "APPROVED").upper()
     final_state = {
         **checkpoint,
@@ -3237,6 +3345,8 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
         save_checkpoint_state(run_id, execution_state)
         try:
             final_state = run_snowflake_gold_scripts(execution_state)
+            if is_run_aborted(run_id, final_state):
+                return aborted_run_state(run_id, final_state)
         except Exception as exc:
             failed_state = {
                 **execution_state,
@@ -3264,6 +3374,8 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
                     review_artifact=execution_state["gold_review_artifact"],
                     approved_only=True,
                 )
+                if is_run_aborted(run_id, final_state):
+                    return aborted_run_state(run_id, final_state)
             except Exception as exc:
                 failed_state = {
                     **execution_state,

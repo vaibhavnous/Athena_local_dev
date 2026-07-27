@@ -259,6 +259,35 @@ def test_list_runs_uses_lightweight_checkpoint_index(monkeypatch):
     assert recorded["closed"] is True
 
 
+def test_list_runs_filters_owner_before_top_limit(monkeypatch):
+    recorded = {}
+
+    class StubCursor:
+        timeout = None
+
+        def execute(self, query, *parameters):
+            recorded["query"] = query
+            recorded["parameters"] = parameters
+
+        def fetchall(self):
+            return [("owned-run", "2026-07-27T10:00:00")]
+
+    class StubConnection:
+        def cursor(self):
+            return StubCursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pipeline_runtime, "get_connection", lambda: StubConnection())
+
+    runs = pipeline_runtime.list_runs(10, owner_email=" Client@Example.com ")
+
+    assert runs[0]["run_id"] == "owned-run"
+    assert recorded["query"].index("WHERE") < recorded["query"].index("GROUP BY")
+    assert recorded["parameters"] == ("client@example.com",)
+
+
 def test_run_pipeline_background_database_flow_saves_completed(monkeypatch):
     saved = {}
 
@@ -291,6 +320,41 @@ def test_run_pipeline_background_database_flow_saves_completed(monkeypatch):
     assert saved["state"]["status"] == "COMPLETED"
     assert saved["state"]["payload"] == "ok"
     assert saved["state"]["brd_filename"] == "Customer BRD"
+
+
+def test_run_pipeline_background_does_not_overwrite_abort(monkeypatch):
+    saved = {}
+
+    monkeypatch.setattr(pipeline_service, "load_checkpoint_state", lambda run_id: {"run_id": run_id, "status": "RUNNING"})
+
+    def finish_after_abort(**kwargs):
+        pipeline_runtime.ABORTED_RUNS.add(kwargs["run_id"])
+        return {"result": {"status": "COMPLETED", "source": "database"}}
+
+    monkeypatch.setattr(pipeline_service, "start_pipeline", finish_after_abort)
+    monkeypatch.setattr(pipeline_service.api_utils, "is_file_source", lambda source: False)
+    monkeypatch.setattr(
+        pipeline_service,
+        "save_checkpoint_state",
+        lambda run_id, state: saved.update({"run_id": run_id, "state": state}),
+    )
+
+    try:
+        pipeline_service.run_pipeline_background(
+            run_id="run-abort-finished",
+            brd_text="brd",
+            brd_filename="Abort BRD",
+            source="database",
+            source_databases=None,
+            sftp_entity="transactions",
+            use_domain_kb=False,
+            stage_confirmation_enabled=False,
+        )
+    finally:
+        pipeline_runtime.clear_run_abort("run-abort-finished")
+
+    assert saved["state"]["status"] == "ABORTED"
+    assert saved["state"]["abort_requested"] is True
 
 
 def test_run_pipeline_background_file_source_keeps_completed(monkeypatch):
@@ -1005,7 +1069,7 @@ def test_run_context_suppresses_stage_confirmation_when_background_stage_active(
     assert context["current_pipeline_step"]["key"] == "enrichment"
 
 
-def test_run_context_advances_stale_silver_stage_confirmation(monkeypatch):
+def test_run_context_routes_stale_silver_stage_confirmation_to_missing_gate4(monkeypatch):
     from services import pipeline_runtime
 
     checkpoint = {
@@ -1046,13 +1110,13 @@ def test_run_context_advances_stale_silver_stage_confirmation(monkeypatch):
 
     context = pipeline_runtime.get_run_context("run-silver-ready")
 
-    assert context["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
-    assert context["stage_confirmation"]["last_completed_stage_key"] == "silver"
-    assert context["stage_confirmation"]["next_stage_key"] == "gold"
+    assert context["status"] == "HITL_WAIT"
+    assert context["next_gate"] == 4
+    assert context["stage_confirmation"] is None
     assert context["silver"]["scripts"][0]["script_body"] == "print('silver')"
 
 
-def test_run_context_clears_stale_stage_confirmation_when_gold_complete(monkeypatch):
+def test_run_context_keeps_gate5_review_required_when_gold_artifact_exists(monkeypatch):
     from services import pipeline_runtime
 
     checkpoint = {
@@ -1093,7 +1157,8 @@ def test_run_context_clears_stale_stage_confirmation_when_gold_complete(monkeypa
 
     context = pipeline_runtime.get_run_context("run-gold-ready")
 
-    assert context["status"] == "PIPELINE_COMPLETED"
+    assert context["status"] == "HITL_WAIT"
+    assert context["next_gate"] == 5
     assert context["stage_confirmation"] is None
     assert context["gold"]["scripts"][0]["script_body"] == "print('gold')"
 
@@ -1137,6 +1202,67 @@ def test_database_continue_skips_stage_confirmation_before_review_gates(monkeypa
     assert all(state.get("status") != "PAUSED_FOR_STAGE_CONFIRMATION" for state in saved_states)
     assert any(state.get("background_stage") == start_stage for state in saved_states)
     assert any(state.get("background_stage") == expected_gate for state in saved_states)
+
+
+def test_database_continue_stops_before_next_stage_when_aborted(monkeypatch):
+    visited = []
+
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_database_stage_runner",
+        lambda stage_key: lambda state: visited.append(stage_key) or {"status": "RUNNING"},
+    )
+    pipeline_runtime.ABORTED_RUNS.add("run-aborted")
+    try:
+        result = pipeline_runtime.continue_database_pipeline(
+            "run-aborted",
+            start_stage_key="ingestion",
+            state={"run_id": "run-aborted", "status": "RUNNING"},
+        )
+    finally:
+        pipeline_runtime.clear_run_abort("run-aborted")
+
+    assert visited == []
+    assert result["status"] == "ABORTED"
+    assert result["abort_requested"] is True
+
+
+def test_background_completion_callback_preserves_abort(monkeypatch):
+    saved = []
+
+    class CompletedAfterAbortExecutor:
+        def submit(self, fn, *args):
+            future = Future()
+            pipeline_runtime.ABORTED_RUNS.add("run-callback-abort")
+            future.set_result(fn(*args))
+            return future
+
+    monkeypatch.setattr(pipeline_runtime, "BACKGROUND_EXECUTOR", CompletedAfterAbortExecutor())
+    monkeypatch.setattr(pipeline_runtime, "ensure_background_capacity_locked", lambda: None)
+    monkeypatch.setattr(pipeline_runtime, "mark_run_processing", lambda run_id, stage: None)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "PROCESSING", "background_stage": "gate2"},
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state_timed",
+        lambda run_id, state, context: saved.append((dict(state), context)),
+    )
+
+    try:
+        pipeline_runtime.submit_background(
+            "run-callback-abort",
+            "gate2",
+            lambda: {"status": "COMPLETED"},
+        )
+    finally:
+        pipeline_runtime.clear_run_abort("run-callback-abort")
+        pipeline_runtime.BACKGROUND_JOBS.pop("run-callback-abort:gate2", None)
+
+    assert saved[-1][0]["status"] == "ABORTED"
+    assert saved[-1][1] == "gate2:background_aborted"
 
 
 def test_database_continue_clears_stale_failure_when_retrying(monkeypatch):

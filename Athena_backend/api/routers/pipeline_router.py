@@ -4,9 +4,16 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from api import utils as api_utils
+from api.auth import (
+    AuthUser,
+    assert_run_access,
+    checkpoint_owner_email,
+    get_current_user,
+    load_project_for_user,
+)
 from api.demo import demo_action, demo_enabled, demo_start_progress, demo_status, new_demo_run_id
 from api.models import PipelineRunRequest, StageContinueRequest
 from utilis.logger import logger
@@ -95,16 +102,15 @@ def _status_response(run_id: str, run: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest) -> None:
+def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest, owner_email: str | None = None) -> None:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
 
     source = str(payload.source or "database").lower()
     sftp_entity = api_utils.normalize_file_entity(source, payload.sftp_entity)
     existing = load_checkpoint_state(run_id) or {"run_id": run_id}
+    owner = str(existing.get("owner_email") or owner_email or "").strip().lower()
 
-    save_checkpoint_state(
-        run_id,
-        {
+    state = {
             **existing,
             "run_id": run_id,
             "project_id": existing.get("project_id") or payload.project_id,
@@ -138,8 +144,11 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest) -> None:
             ),
             "compliance_domain": existing.get("compliance_domain") or payload.compliance_domain or "Insurance",
             "compliance_countries": existing.get("compliance_countries") or payload.compliance_countries or ["US"],
-        },
-    )
+        }
+    if owner:
+        state["owner_email"] = owner
+        state["created_by_email"] = existing.get("created_by_email") or owner
+    save_checkpoint_state(run_id, state)
 
 
 def _resume_failed_run(run_id: str, action_name: str) -> Dict[str, Any]:
@@ -203,7 +212,7 @@ def health() -> Dict[str, str]:
 # ✅ Run Pipeline
 # -------------------------
 @router.post("/pipeline/run")
-def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
+def run_pipeline(payload: PipelineRunRequest, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         run_id = new_demo_run_id()
         demo_start_progress(run_id, "start")
@@ -217,6 +226,9 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
 
     if not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
+
+    if payload.project_id:
+        load_project_for_user(payload.project_id, user)
 
     capacity = background_capacity_snapshot()
     if capacity["available"] <= 0:
@@ -238,7 +250,7 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
     )
 
     try:
-        _seed_run_checkpoint(run_id, payload)
+        _seed_run_checkpoint(run_id, payload, owner_email=user.email)
     except Exception:
         logger.error("Failed to initialize checkpoint", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to initialize run checkpoint")
@@ -290,7 +302,7 @@ async def upload_brd(file: UploadFile = File(...)) -> Dict[str, Any]:
 # ✅ Pipeline Status
 # -------------------------
 @router.get("/pipeline/{run_id}/status")
-def pipeline_status(run_id: str) -> Dict[str, Any]:
+def pipeline_status(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_status(run_id)
 
@@ -300,9 +312,9 @@ def pipeline_status(run_id: str) -> Dict[str, Any]:
     try:
         try:
             checkpoint = load_checkpoint_state(run_id) or {}
-        except Exception:
-            # Preserve the existing UI hydration path when the checkpoint store is unavailable.
-            checkpoint = {}
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Failed to verify run access") from exc
+        checkpoint = assert_run_access(run_id, user, checkpoint=checkpoint)
         # Active polling must use the checkpoint snapshot. Full UI hydration reads
         # multiple artifact/log tables and can take longer than the 1.5s UI poll.
         # Falling back to it here caused alternating stale and current stage payloads.
@@ -314,6 +326,8 @@ def pipeline_status(run_id: str) -> Dict[str, Any]:
         timeout_seconds = max(1, int(os.getenv("ATHENA_STATUS_ENDPOINT_TIMEOUT_SECONDS", "5")))
         future = RUN_STATUS_EXECUTOR.submit(ui_run, run_id)
         run = future.result(timeout=timeout_seconds)
+    except HTTPException:
+        raise
     except FutureTimeoutError:
         logger.warning("Pipeline status hydration timed out; returning fallback status", extra={"run_id": run_id})
         try:
@@ -337,15 +351,18 @@ def pipeline_status(run_id: str) -> Dict[str, Any]:
 # ✅ Abort Pipeline
 # -------------------------
 @router.post("/pipeline/{run_id}/abort")
-def abort_run(run_id: str) -> Dict[str, Any]:
+def abort_run(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, status="ABORTED")
 
-    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+    from services.pipeline_runtime import abort_background_run, load_checkpoint_state, save_checkpoint_state
 
-    checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
-    checkpoint["status"] = "ABORTED"
-    save_checkpoint_state(run_id, checkpoint)
+    checkpoint = assert_run_access(run_id, user, checkpoint=load_checkpoint_state(run_id) or {})
+    if api_utils.is_file_source(checkpoint.get("source")):
+        checkpoint["status"] = "ABORTED"
+        save_checkpoint_state(run_id, checkpoint)
+    else:
+        abort_background_run(run_id, checkpoint)
 
     logger.warning("Pipeline aborted", extra={"run_id": run_id})
 
@@ -356,7 +373,11 @@ def abort_run(run_id: str) -> Dict[str, Any]:
 # ✅ Continue Stage
 # -------------------------
 @router.post("/pipeline/{run_id}/continue-stage")
-def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]:
+def continue_stage(
+    run_id: str,
+    payload: StageContinueRequest,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
     if demo_enabled():
         gate = int((demo_status(run_id).get("run") or {}).get("next_gate") or 1)
         segment_by_gate = {1: "kpi", 2: "table", 3: "enrichment", 4: "bronze", 5: "silver"}
@@ -374,7 +395,7 @@ def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]
         submit_background,
     )
 
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = assert_run_access(run_id, user, checkpoint=load_checkpoint_state(run_id) or {})
     next_stage_key = checkpoint.get("next_stage_key")
 
     if not next_stage_key:
@@ -426,7 +447,7 @@ def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]
 # ✅ Retry Failed Stage
 # -------------------------
 @router.post("/pipeline/{run_id}/retry-failed-stage")
-def retry_failed_stage(run_id: str) -> Dict[str, Any]:
+def retry_failed_stage(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, action="retry_failed_stage")
 
@@ -442,7 +463,7 @@ def retry_failed_stage(run_id: str) -> Dict[str, Any]:
         submit_background,
     )
 
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = assert_run_access(run_id, user, checkpoint=load_checkpoint_state(run_id) or {})
 
     if str(checkpoint.get("status") or "").upper() != "FAILED":
         raise HTTPException(status_code=400, detail="Only failed runs can retry a failed stage.")
@@ -489,22 +510,21 @@ def retry_failed_stage(run_id: str) -> Dict[str, Any]:
 
 
 @router.post("/pipeline/{run_id}/resume-from-failure")
-def resume_from_failure(run_id: str) -> Dict[str, Any]:
+def resume_from_failure(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, action="resume_from_failure")
 
+    assert_run_access(run_id, user)
     return _resume_failed_run(run_id, "resume_from_failure")
 
 
 @router.post("/pipeline/{run_id}/restart")
-def restart_run(run_id: str) -> Dict[str, Any]:
+def restart_run(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, action="restart")
 
     from api.services.pipeline_service import seed_payload_from_checkpoint, submit_pipeline_start
-    from services.pipeline_runtime import load_checkpoint_state
-
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = assert_run_access(run_id, user)
 
     if not str(checkpoint.get("brd_text") or "").strip():
         raise HTTPException(status_code=400, detail="Cannot restart a run without saved BRD text.")
@@ -513,7 +533,7 @@ def restart_run(run_id: str) -> Dict[str, Any]:
     new_run_id = str(uuid.uuid4())
 
     try:
-        _seed_run_checkpoint(new_run_id, payload)
+        _seed_run_checkpoint(new_run_id, payload, owner_email=checkpoint_owner_email(checkpoint) or user.email)
     except Exception:
         logger.error("Failed to initialize restarted run checkpoint", exc_info=True, extra={"run_id": new_run_id})
         raise HTTPException(status_code=503, detail="Failed to initialize restarted run checkpoint")

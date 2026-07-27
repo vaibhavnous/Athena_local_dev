@@ -41,6 +41,50 @@ def test_project_create_uses_authenticated_owner(monkeypatch):
         app.dependency_overrides.pop(get_current_user, None)
 
 
+def test_project_list_is_scoped_to_client_owner(monkeypatch):
+    captured = {}
+    previous_override = app.dependency_overrides.get(get_current_user)
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="owner", username="Owner", email="owner@astra.local", userType="Client"
+    )
+    monkeypatch.setattr(
+        projects_router.repository,
+        "list_projects",
+        lambda owner_email=None: captured.update({"owner_email": owner_email}) or [],
+    )
+
+    response = client.get("/projects")
+
+    assert response.status_code == 200
+    assert captured["owner_email"] == "owner@astra.local"
+    if previous_override:
+        app.dependency_overrides[get_current_user] = previous_override
+    else:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_project_delete_returns_empty_204(monkeypatch):
+    previous_override = app.dependency_overrides.get(get_current_user)
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="owner", username="Owner", email="owner@astra.local", userType="Client"
+    )
+    monkeypatch.setattr(
+        projects_router.repository,
+        "find",
+        lambda project_id: {"id": project_id, "owner_email": "owner@astra.local"},
+    )
+    monkeypatch.setattr(projects_router.repository, "delete", lambda project_id: True)
+
+    response = client.delete("/projects/project-1")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    if previous_override:
+        app.dependency_overrides[get_current_user] = previous_override
+    else:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
 def test_project_run_keeps_project_id_in_checkpoint(monkeypatch):
     from api.routers import pipeline_router
 
