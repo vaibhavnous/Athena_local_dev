@@ -531,6 +531,7 @@ def test_snowflake_dbt_bronze_to_silver_dependency_and_rejected_cleanup(monkeypa
     assert silver_item["bronze_model_name"] == "bronze_claiminformation"
     assert silver_item["dbt_alias"] == "silver_ClaimInformation"
     assert "{{ ref('bronze_claiminformation') }}" in silver_sql
+    assert """unique_key='"silver_upsert_key"'""" in silver_sql
     assert "MERGE INTO" not in silver_sql
     assert "CREATE TABLE" not in silver_sql
 
@@ -553,9 +554,9 @@ def test_snowflake_dbt_bronze_to_silver_dependency_and_rejected_cleanup(monkeypa
     assert len(reviewed) == 1
     assert silver_model.read_text(encoding="utf-8") == reviewed_sql
     assert reviewed[0]["primary_keys"] == ["claimid"]
-    assert "silver_claiminformation" in Path(
-        silver_result["snowflake_dbt_silver_schema_path"]
-    ).read_text(encoding="utf-8")
+    silver_schema = Path(silver_result["snowflake_dbt_silver_schema_path"]).read_text(encoding="utf-8")
+    assert "silver_claiminformation" in silver_schema
+    assert "quote: true" in silver_schema
 
     rejected_review = silver_gen.sync_snowflake_dbt_silver_review(
         "run-dbt-chain",

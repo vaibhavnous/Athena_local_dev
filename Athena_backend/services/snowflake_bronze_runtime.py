@@ -102,6 +102,11 @@ def _snowflake_quote_identifier(value: str) -> str:
     return '"' + cleaned.replace('"', '""') + '"'
 
 
+def _use_existing_database(cursor: Any, database_name: str) -> None:
+    # ponytail: deployment roles intentionally cannot create account-level databases.
+    cursor.execute(f"USE DATABASE {_snowflake_quote_identifier(database_name)}")
+
+
 def _snowflake_qualified_name(*parts: str) -> str:
     return ".".join(_snowflake_quote_identifier(part) for part in parts if str(part or "").strip())
 
@@ -167,6 +172,14 @@ def _schema_name(script: Dict[str, Any]) -> str:
     return str(script.get("schema_name") or "dbo").strip() or "dbo"
 
 
+def _landing_relation(script: Dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(script.get("snowflake_landing_database") or _database_name(script)).strip(),
+        str(script.get("snowflake_landing_schema") or _schema_name(script)).strip(),
+        str(script.get("snowflake_landing_table") or _table_name(script)).strip(),
+    )
+
+
 def _log_context(run_id: Any, *, table: str | None = None, step_name: str = "snowflake_bronze") -> Dict[str, Any]:
     context = {
         "run_id": str(run_id or ""),
@@ -200,7 +213,8 @@ def load_azure_sql_table_to_snowflake(
         if not columns:
             raise ValueError(f"Azure SQL returned no columns for {database_name}.{schema_name}.{table_name}.")
 
-        landing_table = _snowflake_qualified_name(database_name, schema_name, table_name)
+        landing_database, landing_schema, landing_name = _landing_relation(script)
+        landing_table = _snowflake_qualified_name(landing_database, landing_schema, landing_name)
         column_defs = ", ".join(f"{_snowflake_quote_identifier(column)} VARCHAR" for column in columns)
         column_list = ", ".join(_snowflake_quote_identifier(column) for column in columns)
         placeholders = ", ".join(["%s"] * len(columns))
@@ -208,9 +222,9 @@ def load_azure_sql_table_to_snowflake(
         # ponytail: source landing is raw VARCHAR; generated bronze SQL owns all typing via TRY_CAST.
         snowflake_cursor = snowflake_conn.cursor()
         try:
-            snowflake_cursor.execute(f"CREATE DATABASE IF NOT EXISTS {_snowflake_quote_identifier(database_name)}")
+            _use_existing_database(snowflake_cursor, landing_database)
             snowflake_cursor.execute(
-                f"CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(database_name, schema_name)}"
+                f"CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(landing_database, landing_schema)}"
             )
             snowflake_cursor.execute(f"CREATE OR REPLACE TABLE {landing_table} ({column_defs})")
 
@@ -237,7 +251,7 @@ def load_azure_sql_table_to_snowflake(
 
     return {
         "source_table": f"{database_name}.{schema_name}.{table_name}",
-        "snowflake_landing_table": f"{database_name}.{schema_name}.{table_name}",
+        "snowflake_landing_table": f"{landing_database}.{landing_schema}.{landing_name}",
         "rows_loaded": inserted_rows,
     }
 
@@ -299,7 +313,7 @@ def ensure_adls_stage(snowflake_conn: Any) -> Dict[str, Any]:
     )
     cursor = snowflake_conn.cursor()
     try:
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {_snowflake_quote_identifier(_adls_stage_database())}")
+        _use_existing_database(cursor, _adls_stage_database())
         cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {stage_schema}")
         cursor.execute(
             f"""
@@ -354,9 +368,7 @@ def _landing_columns(script: Dict[str, Any]) -> List[str]:
 
 
 def load_adls_table_to_snowflake(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
-    database_name = _database_name(script)
-    schema_name = _schema_name(script)
-    table_name = _table_name(script)
+    database_name, schema_name, table_name = _landing_relation(script)
     landing_table = _snowflake_qualified_name(database_name, schema_name, table_name)
     columns = _landing_columns(script)
     adls_file = _adls_file_for_script(script)
@@ -364,7 +376,7 @@ def load_adls_table_to_snowflake(script: Dict[str, Any], snowflake_conn: Any) ->
 
     cursor = snowflake_conn.cursor()
     try:
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {_snowflake_quote_identifier(database_name)}")
+        _use_existing_database(cursor, database_name)
         cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(database_name, schema_name)}")
         if columns:
             column_defs = ", ".join(f"{_snowflake_quote_identifier(column)} VARCHAR" for column in columns)
@@ -518,9 +530,7 @@ def _insert_rows(cursor: Any, insert_sql: str, rows: List[tuple[Any, ...]], inse
 
 
 def load_adls_python_table_to_snowflake(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
-    database_name = _database_name(script)
-    schema_name = _schema_name(script)
-    table_name = _table_name(script)
+    database_name, schema_name, table_name = _landing_relation(script)
     landing_table = _snowflake_qualified_name(database_name, schema_name, table_name)
     folder = _adls_python_folder_for_script(script)
     file_system_client = _get_adls_file_system_client()
@@ -531,7 +541,7 @@ def load_adls_python_table_to_snowflake(script: Dict[str, Any], snowflake_conn: 
     inserted_rows = 0
     created_table = False
     try:
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {_snowflake_quote_identifier(database_name)}")
+        _use_existing_database(cursor, database_name)
         cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(database_name, schema_name)}")
 
         for path in paths:
@@ -669,12 +679,13 @@ def run_snowflake_bronze_scripts(
     *,
     review_artifact: Dict[str, Any] | None = None,
     approved_only: bool = False,
+    load_only: bool = False,
 ) -> Dict[str, Any]:
     run_id = state.get("run_id")
     target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
     if target_warehouse != "snowflake":
         return state
-    if not snowflake_bronze_execution_enabled():
+    if not load_only and not snowflake_bronze_execution_enabled():
         logger.info(
             "Snowflake Bronze execution disabled; generated scripts remain review artifacts",
             extra=_log_context(run_id, step_name="bronze_execution_disabled"),
@@ -687,10 +698,16 @@ def run_snowflake_bronze_scripts(
     if not scripts:
         raise ValueError("Snowflake bronze execution enabled but no approved generated bronze scripts were found.")
 
-    for script in scripts:
-        validate_snowflake_bronze_script(script)
+    if not load_only:
+        for script in scripts:
+            validate_snowflake_bronze_script(script)
 
     load_source = snowflake_bronze_source_load_enabled()
+    if load_only and not load_source:
+        raise RuntimeError(
+            "Native Snowflake dbt execution requires ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE=true "
+            "so source data is landed before dbt build."
+        )
     source_mode = _source_mode()
     loaded_sources: List[Dict[str, Any]] = []
     executed_scripts: List[Dict[str, Any]] = []
@@ -766,6 +783,21 @@ def run_snowflake_bronze_scripts(
                     load_elapsed_seconds,
                     extra=_log_context(run_id, table=table_name, step_name="source_load_complete"),
                 )
+                if load_only:
+                    state = save_external_execution_progress(
+                        state,
+                        run_id=run_id,
+                        layer="bronze",
+                        stage_key=stage_key,
+                        status="RUNNING",
+                        total_count=len(scripts),
+                        completed_count=len(loaded_sources),
+                        current_index=index,
+                        current_name=table_name,
+                        current_target=source_table,
+                        message=f"Snowflake source landing progress: {len(loaded_sources)}/{len(scripts)} completed.",
+                    )
+                    continue
             target_table = f"{script.get('bronze_catalog') or os.getenv('BRONZE_CATALOG', 'main')}.{script.get('bronze_schema') or os.getenv('BRONZE_SCHEMA', 'bronze')}.bronze_{table_name}"
             state = save_external_execution_progress(
                 state,
@@ -818,16 +850,19 @@ def run_snowflake_bronze_scripts(
     finally:
         snowflake_conn.close()
 
+    completed_count = len(loaded_sources) if load_only else len(executed_scripts)
     logger.info(
-        "Completed Snowflake Bronze external execution: completed_tables=%d total_tables=%d",
-        len(executed_scripts),
+        "Completed Snowflake Bronze external %s: completed_tables=%d total_tables=%d",
+        "source landing" if load_only else "execution",
+        completed_count,
         len(scripts),
         extra=_log_context(run_id, step_name="bronze_execution_complete"),
     )
 
     final_state = {
         **state,
-        "snowflake_bronze_execution_status": "COMPLETED",
+        "snowflake_bronze_execution_status": "SKIPPED_DBT_CODEGEN_ONLY" if load_only else "COMPLETED",
+        "snowflake_bronze_source_load_status": "COMPLETED" if load_only else None,
         "snowflake_bronze_load_source_enabled": load_source,
         "snowflake_bronze_source_mode": source_mode,
         "snowflake_bronze_source_load_results": loaded_sources,
@@ -841,6 +876,10 @@ def run_snowflake_bronze_scripts(
         stage_key=stage_key,
         status="COMPLETED",
         total_count=len(scripts),
-        completed_count=len(executed_scripts),
-        message=f"Snowflake Bronze execution completed: {len(executed_scripts)}/{len(scripts)} scripts finished.",
+        completed_count=completed_count,
+        message=(
+            f"Snowflake source landing completed: {completed_count}/{len(scripts)} tables loaded for dbt."
+            if load_only
+            else f"Snowflake Bronze execution completed: {completed_count}/{len(scripts)} scripts finished."
+        ),
     )

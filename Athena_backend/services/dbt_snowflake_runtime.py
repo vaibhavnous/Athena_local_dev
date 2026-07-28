@@ -4,7 +4,11 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import subprocess
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -17,10 +21,16 @@ DBT_STAGE_KEY = "snowflake_dbt_codegen"
 DBT_ARTIFACT_TYPE = "SNOWFLAKE_DBT_ARTIFACTS"
 DBT_SCHEMA_VERSION = "1.0"
 _VALID_ENGINES = {"native", "dbt"}
+_VALID_DEPLOYMENT_MODES = {"generate_only", "generate_and_deploy"}
+_EXECUTION_RECEIPT = "snowflake_dbt_execution.json"
+# ponytail: process-local serialization is sufficient for the current single backend process;
+# use a distributed project lock before scaling dbt deployment across backend instances.
+_NATIVE_DBT_DEPLOY_LOCK = threading.Lock()
 _REF_PATTERN = re.compile(r"\{\{\s*ref\(\s*['\"]([^'\"]+)['\"]\s*\)\s*\}\}")
 _SOURCE_PATTERN = re.compile(
     r"\{\{\s*source\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)\s*\}\}"
 )
+_CONFIG_ALIAS_PATTERN = re.compile(r"\balias\s*=\s*(['\"])([^'\"]+)\1", re.IGNORECASE)
 
 
 def _choice(value: Any, allowed: set[str], default: str) -> str:
@@ -54,6 +64,11 @@ def _safe_name(value: Any, *, prefix: str = "model") -> str:
 
 def dbt_safe_name(value: Any, *, prefix: str = "model") -> str:
     return _safe_name(value, prefix=prefix)
+
+
+def dbt_project_object_name(project_name: Any) -> str:
+    base_name = _safe_name(project_name, prefix="athena_project")
+    return f"{base_name[:76]}_DBT".upper()
 
 
 def dbt_project_dir(run_id: Any) -> Path:
@@ -144,6 +159,26 @@ def _default_dbt_database() -> str:
 
 def _default_dbt_schema() -> str:
     return os.getenv("SNOWFLAKE_DBT_SCHEMA") or os.getenv("SNOWFLAKE_GOLD_SCHEMA") or "GOLD"
+
+
+def _native_dbt_role() -> str:
+    return os.getenv("SNOWFLAKE_DBT_ROLE") or os.getenv("SNOWFLAKE_ROLE") or "ATHENA_DBT_ROLE"
+
+
+def _native_project_database() -> str:
+    return os.getenv("SNOWFLAKE_DBT_PROJECT_DATABASE") or _default_dbt_database()
+
+
+def _native_project_schema() -> str:
+    return os.getenv("SNOWFLAKE_DBT_PROJECT_SCHEMA") or "PUBLIC"
+
+
+def _native_project_name(state: Dict[str, Any]) -> str:
+    configured_name = str(state.get("dbt_project_object_name") or "").strip()
+    if configured_name:
+        return _safe_name(configured_name, prefix="athena_dbt").upper()
+    identity = state.get("project_id") or f"run_{state.get('run_id') or 'manual'}"
+    return _safe_name(f"athena_{identity}", prefix="athena_project").upper()
 
 
 def _dbt_threads(state: Dict[str, Any]) -> int:
@@ -279,13 +314,10 @@ def _render_profiles_yml(state: Dict[str, Any]) -> str:
   outputs:
     {target_name}:
       type: snowflake
-      account: "{{{{ env_var('SNOWFLAKE_ACCOUNT') }}}}"
-      user: "{{{{ env_var('SNOWFLAKE_USER') }}}}"
-      password: "{{{{ env_var('SNOWFLAKE_PASSWORD') }}}}"
-      role: "{{{{ env_var('SNOWFLAKE_ROLE', '') }}}}"
-      database: "{{{{ env_var('SNOWFLAKE_DBT_DATABASE', '{_default_dbt_database()}') }}}}"
-      warehouse: "{{{{ env_var('SNOWFLAKE_WAREHOUSE') }}}}"
-      schema: "{{{{ env_var('SNOWFLAKE_DBT_SCHEMA', '{_default_dbt_schema()}') }}}}"
+      role: {json.dumps(_native_dbt_role())}
+      database: {json.dumps(_default_dbt_database())}
+      warehouse: {json.dumps(os.getenv("SNOWFLAKE_WAREHOUSE") or "COMPUTE_WH")}
+      schema: {json.dumps(_default_dbt_schema())}
       threads: {_dbt_threads(state)}
       client_session_keep_alive: false
 """
@@ -408,6 +440,8 @@ def write_snowflake_dbt_schema(run_id: Any, layer: str, models: List[Dict[str, A
                     f"        description: {json.dumps(str(column.get('description') or ''))}",
                 ]
             )
+            if column.get("quote") is True:
+                lines.append("        quote: true")
             tests = [str(test).strip() for test in column.get("tests") or [] if str(test).strip()]
             if tests:
                 lines.append("        tests:")
@@ -420,7 +454,7 @@ def write_snowflake_dbt_schema(run_id: Any, layer: str, models: List[Dict[str, A
 
 def _hash_project_files(project_dir: Path) -> Dict[str, Any]:
     excluded_dirs = {"target", "logs", "dbt_packages"}
-    excluded_files = {"snowflake_dbt_summary.json"}
+    excluded_files = {"snowflake_dbt_summary.json", _EXECUTION_RECEIPT}
     hasher = hashlib.sha256()
     files: List[Dict[str, str]] = []
     for path in sorted(project_dir.rglob("*")):
@@ -456,6 +490,11 @@ def _declared_sources(path: Path) -> set[tuple[str, str]]:
     return declared
 
 
+def _configured_alias(sql: str) -> str | None:
+    match = _CONFIG_ALIAS_PATTERN.search(sql)
+    return match.group(2).strip() if match else None
+
+
 def _validate_project_dependencies(project_dir: Path) -> Dict[str, Any]:
     model_paths = sorted((project_dir / "models").rglob("*.sql"))
     if not model_paths:
@@ -463,6 +502,8 @@ def _validate_project_dependencies(project_dir: Path) -> Dict[str, Any]:
 
     models: Dict[str, Path] = {}
     duplicate_names: set[str] = set()
+    physical_targets: Dict[tuple[str, str], Path] = {}
+    duplicate_targets: Dict[tuple[str, str], set[str]] = {}
     referenced_models: set[str] = set()
     referenced_sources: set[tuple[str, str]] = set()
     for model_path in model_paths:
@@ -473,11 +514,31 @@ def _validate_project_dependencies(project_dir: Path) -> Dict[str, Any]:
         sql = model_path.read_text(encoding="utf-8").strip()
         if not sql:
             raise ValueError(f"Snowflake dbt model is empty: {model_path.relative_to(project_dir).as_posix()}")
+        relative = model_path.relative_to(project_dir)
+        layer = relative.parts[1] if len(relative.parts) > 2 else "models"
+        alias = _configured_alias(sql) or model_name
+        physical_key = (layer.casefold(), alias.casefold())
+        existing_path = physical_targets.get(physical_key)
+        if existing_path and existing_path != model_path:
+            duplicate_targets.setdefault(physical_key, set()).update(
+                {
+                    existing_path.relative_to(project_dir).as_posix(),
+                    relative.as_posix(),
+                }
+            )
+        else:
+            physical_targets[physical_key] = model_path
         referenced_models.update(_REF_PATTERN.findall(sql))
         referenced_sources.update(_SOURCE_PATTERN.findall(sql))
 
     if duplicate_names:
         raise ValueError(f"Snowflake dbt model names must be unique: {', '.join(sorted(duplicate_names))}.")
+    if duplicate_targets:
+        details = "; ".join(
+            f"{layer}.{alias}: {', '.join(sorted(paths))}"
+            for (layer, alias), paths in sorted(duplicate_targets.items())
+        )
+        raise ValueError(f"Snowflake dbt project has duplicate physical targets: {details}.")
 
     missing_models = sorted(referenced_models.difference(models))
     if missing_models:
@@ -508,6 +569,12 @@ def build_snowflake_dbt_artifacts(state: Dict[str, Any]) -> Dict[str, Any]:
     for model in models:
         model_path = model_dir / f"{model['model_name']}.sql"
         model_sql = _render_model(model)
+        configured_alias = _configured_alias(model_sql)
+        if configured_alias and configured_alias.casefold() != str(model["alias"]).casefold():
+            raise ValueError(
+                f"Snowflake dbt model {model['model_name']} configures alias {configured_alias!r}, "
+                f"but its approved target requires {model['alias']!r}."
+            )
         _write_text(model_path, model_sql)
         model["path"] = str(model_path)
         model["sha256"] = hashlib.sha256(model_sql.encode("utf-8")).hexdigest()
@@ -617,6 +684,231 @@ def _write_ai_store_summary(state: Dict[str, Any], payload: Dict[str, Any]) -> N
         )
 
 
+def _dbt_command_timeout(state: Dict[str, Any]) -> int:
+    raw = state.get("dbt_command_timeout_secs") or os.getenv("ATHENA_SNOWFLAKE_DBT_COMMAND_TIMEOUT_SECS") or 1800
+    try:
+        return min(86_400, max(60, int(raw)))
+    except (TypeError, ValueError):
+        return 1800
+
+
+def _redact_output(value: Any) -> str:
+    text = str(value or "")
+    for key in ("SNOWFLAKE_PASSWORD", "SNOWFLAKE_PRIVATE_KEY", "SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"):
+        secret = os.getenv(key)
+        if secret:
+            text = text.replace(secret, "***")
+    return text[-12_000:]
+
+
+def _run_dbt_command(
+    command: List[str],
+    *,
+    project_dir: Path,
+    timeout: int,
+    env: Dict[str, str],
+) -> Dict[str, Any]:
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = _redact_output(f"{exc.stdout or ''}\n{exc.stderr or ''}")
+        raise TimeoutError(f"dbt command timed out after {timeout}s. Output: {output}") from exc
+
+    output = _redact_output(f"{completed.stdout or ''}\n{completed.stderr or ''}")
+    if completed.returncode != 0:
+        raise RuntimeError(f"dbt command failed with exit code {completed.returncode}. Output: {output}")
+    dbt_index = command.index("dbt") if "dbt" in command else 0
+    return {
+        "command": " ".join(command[dbt_index : dbt_index + 2]),
+        "duration_secs": round(time.monotonic() - started, 3),
+        "output_tail": output,
+    }
+
+
+def _read_json(path: Path, *, label: str) -> Dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"dbt {label} artifact was not created: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"dbt {label} artifact is invalid JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"dbt {label} artifact must contain a JSON object: {path}")
+    return payload
+
+
+def _execution_state_from_receipt(state: Dict[str, Any], receipt: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        **state,
+        "snowflake_dbt_status": "EXECUTED",
+        "snowflake_dbt_deploy_status": "COMPLETED",
+        "snowflake_dbt_validation_status": "DBT_VALIDATED",
+        "snowflake_dbt_execution": receipt,
+        "snowflake_dbt_project_name": receipt.get("project_name"),
+        "snowflake_dbt_project_fqn": receipt.get("project_fqn"),
+        "completion_mode": "dbt_executed",
+    }
+
+
+def _snowflake_cli_command() -> List[str]:
+    configured_command = str(os.getenv("ATHENA_SNOWFLAKE_CLI_COMMAND") or "").strip()
+    if configured_command:
+        command = shlex.split(configured_command, posix=os.name != "nt")
+        if not command:
+            raise RuntimeError("ATHENA_SNOWFLAKE_CLI_COMMAND cannot be empty.")
+        command[0] = command[0].strip("\"'")
+        executable = shutil.which(command[0])
+        if not executable:
+            raise RuntimeError(f"Snowflake CLI command executable was not found: {command[0]}")
+        command[0] = executable
+        return command
+
+    executable_name = str(os.getenv("ATHENA_SNOWFLAKE_CLI_EXECUTABLE") or "snow").strip()
+    executable = shutil.which(executable_name)
+    if not executable:
+        raise RuntimeError("Native Snowflake dbt execution requires Snowflake CLI 3.21 or later.")
+    return [executable]
+
+
+def _execute_snowflake_dbt(state: Dict[str, Any], project_dir: Path) -> Dict[str, Any]:
+    required_env = ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PASSWORD", "SNOWFLAKE_WAREHOUSE")
+    missing = [key for key in required_env if not str(os.getenv(key) or "").strip()]
+    if missing:
+        raise ValueError(f"Snowflake dbt execution requires environment variables: {', '.join(missing)}.")
+
+    cli_command = _snowflake_cli_command()
+
+    receipt_path = project_dir / _EXECUTION_RECEIPT
+    idempotency_key = str(state.get("snowflake_dbt_idempotency_key") or "")
+    existing = _read_json(receipt_path, label="execution receipt") if receipt_path.exists() else {}
+    if existing.get("idempotency_key") == idempotency_key and not state.get("force_dbt_deploy"):
+        if existing.get("status") == "COMPLETED":
+            return _execution_state_from_receipt(state, existing)
+        if existing.get("status") in {"RUNNING", "FAILED"}:
+            raise RuntimeError(
+                "This exact dbt project has an unfinished or failed execution receipt. "
+                "Review Snowflake state before retrying with force_dbt_deploy=true."
+            )
+
+    target = _dbt_target_name(state)
+    project_name = _native_project_name(state)
+    project_database = _native_project_database()
+    project_schema = _native_project_schema()
+    project_fqn = f"{project_database}.{project_schema}.{project_name}"
+    role = _native_dbt_role()
+    warehouse = str(os.getenv("SNOWFLAKE_WAREHOUSE") or "").strip()
+    command_env = os.environ.copy()
+    command_env.update(
+        {
+            "SNOWFLAKE_ROLE": role,
+            "SNOWFLAKE_WAREHOUSE": warehouse,
+            "SNOWFLAKE_DATABASE": project_database,
+            "SNOWFLAKE_SCHEMA": project_schema,
+        }
+    )
+    connection_args = [
+        "--temporary-connection",
+        "--database",
+        project_database,
+        "--schema",
+        project_schema,
+        "--role",
+        role,
+        "--warehouse",
+        warehouse,
+    ]
+    started_at = datetime.now(timezone.utc).isoformat()
+    receipt = {
+        "status": "RUNNING",
+        "idempotency_key": idempotency_key,
+        "artifact_set_hash": state.get("snowflake_dbt_artifact_set_hash"),
+        "target": target,
+        "project_name": project_name,
+        "project_fqn": project_fqn,
+        "started_at": started_at,
+    }
+    _write_text(receipt_path, json.dumps(receipt, indent=2, sort_keys=True))
+
+    timeout = _dbt_command_timeout(state)
+    deadline = time.monotonic() + timeout
+    commands: List[Dict[str, Any]] = []
+    try:
+        commands.append(
+            _run_dbt_command(
+                [
+                    *cli_command,
+                    "dbt",
+                    "deploy",
+                    *connection_args,
+                    "--format",
+                    "JSON",
+                    "--source",
+                    str(project_dir),
+                    "--profiles-dir",
+                    str(project_dir),
+                    "--default-target",
+                    target,
+                    "--no-force",
+                    project_name,
+                ],
+                project_dir=project_dir,
+                timeout=max(1, int(deadline - time.monotonic())),
+                env=command_env,
+            )
+        )
+        commands.append(
+            _run_dbt_command(
+                [
+                    *cli_command,
+                    "dbt",
+                    "execute",
+                    *connection_args,
+                    "--format",
+                    "JSON",
+                    project_fqn,
+                    "build",
+                    "--target",
+                    target,
+                    "--threads",
+                    str(_dbt_threads(state)),
+                    "--fail-fast",
+                ],
+                project_dir=project_dir,
+                timeout=max(1, int(deadline - time.monotonic())),
+                env=command_env,
+            )
+        )
+        receipt.update(
+            {
+                "status": "COMPLETED",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "commands": commands,
+            }
+        )
+        _write_text(receipt_path, json.dumps(receipt, indent=2, sort_keys=True))
+        return _execution_state_from_receipt(state, receipt)
+    except Exception as exc:
+        receipt.update(
+            {
+                "status": "FAILED",
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+                "commands": commands,
+                "error": _redact_output(exc),
+            }
+        )
+        _write_text(receipt_path, json.dumps(receipt, indent=2, sort_keys=True))
+        raise
+
+
 def run_snowflake_dbt(state: Dict[str, Any]) -> Dict[str, Any]:
     if not snowflake_dbt_enabled(state):
         return state
@@ -624,6 +916,31 @@ def run_snowflake_dbt(state: Dict[str, Any]) -> Dict[str, Any]:
     run_id = state.get("run_id")
     state = build_snowflake_dbt_artifacts(state)
     project_dir = Path(str(state["snowflake_dbt_artifact_path"]))
+    deployment_mode = _choice(state.get("dbt_deployment_mode"), _VALID_DEPLOYMENT_MODES, "generate_only")
+    if deployment_mode == "generate_and_deploy":
+        with _NATIVE_DBT_DEPLOY_LOCK:
+            final_state = _execute_snowflake_dbt(state, project_dir)
+        _write_ai_store_summary(
+            final_state,
+            {
+                "status": "COMPLETED",
+                "mode": "dbt_executed",
+                "project_dir": str(project_dir),
+                "model_count": state.get("snowflake_dbt_model_count"),
+                "artifact_set_hash": state.get("snowflake_dbt_artifact_set_hash"),
+                "idempotency_key": state.get("snowflake_dbt_idempotency_key"),
+                "execution": final_state.get("snowflake_dbt_execution"),
+            },
+        )
+        logger.info(
+            "Snowflake dbt build completed run_id=%s models=%s artifact_hash=%s",
+            run_id,
+            state.get("snowflake_dbt_model_count"),
+            state.get("snowflake_dbt_artifact_set_hash"),
+            extra={"run_id": str(run_id or ""), "node": "gold_execution", "stage": "gold", "step_name": "dbt_build_complete"},
+        )
+        return final_state
+
     artifact_payload = {
         "status": "GENERATED",
         "mode": "codegen_only",

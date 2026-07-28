@@ -1,6 +1,2 @@
--r requirements.txt
-
-# Optional Snowflake dbt deployment support. Do not install in runtimes that only
-# generate native Snowflake SQL.
-dbt-core>=1.8,<2
-dbt-snowflake>=1.8,<2
+# Snowflake-native dbt project deployment and execution.
+snowflake-cli>=3.21,<4

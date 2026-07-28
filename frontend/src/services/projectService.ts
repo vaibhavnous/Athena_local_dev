@@ -56,7 +56,12 @@ const fromApi = (raw: any): AthenaProject => ({
   updatedAt: raw.updated_at,
 })
 
-const toApi = (project: ProjectInput) => ({
+const toApi = (project: ProjectInput) => {
+  const snowflakeDatabaseTarget =
+    String(project.target || '').toLowerCase() === 'snowflake' &&
+    project.connectionType === 'database'
+  const executionEngine = snowflakeDatabaseTarget && project.executionEngine === 'dbt' ? 'dbt' : 'native'
+  return ({
   name: project.name,
   description: project.description,
   target: project.target,
@@ -71,13 +76,14 @@ const toApi = (project: ProjectInput) => ({
   use_domain_knowledge_base: project.useDomainKB,
   domain_profile: project.domainProfile,
   knowledge_base_id: project.knowledgeBaseId,
-  execution_engine: project.executionEngine || 'native',
-  dbt_deployment_mode: 'generate_only',
+  execution_engine: executionEngine,
+  dbt_deployment_mode: executionEngine === 'dbt' ? 'generate_and_deploy' : 'generate_only',
   dbt_target_name: project.dbtTargetName,
   dbt_threads: project.dbtThreads,
   dbt_command_timeout_secs: project.dbtCommandTimeoutSecs,
   force_dbt_deploy: false,
-})
+  })
+}
 
 export const projectService = {
   getAll: async () => ((await (getProjects() as unknown as Promise<any[]>))).map(fromApi),

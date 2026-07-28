@@ -515,6 +515,7 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
         database_name="db1",
         target_warehouse="snowflake",
         execution_engine="dbt",
+        dbt_project_object_name="CLAIMS_DBT",
         dbt_target_name="astra_snowflake",
         dbt_threads=6,
         dbt_command_timeout_secs=900,
@@ -532,6 +533,7 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
     assert recorded["kwargs"]["target_warehouse"] == "snowflake"
     assert recorded["kwargs"]["execution_engine"] == "dbt"
     assert recorded["kwargs"]["dbt_deployment_mode"] == "generate_only"
+    assert recorded["kwargs"]["dbt_project_object_name"] == "CLAIMS_DBT"
     assert recorded["kwargs"]["dbt_target_name"] == "astra_snowflake"
     assert recorded["kwargs"]["dbt_threads"] == 6
     assert recorded["kwargs"]["dbt_command_timeout_secs"] == 900
@@ -554,6 +556,7 @@ def test_seed_payload_from_checkpoint_restores_dbt_generation_config():
             "target_warehouse": "snowflake",
             "execution_engine": "dbt",
             "dbt_deployment_mode": "generate_only",
+            "dbt_project_object_name": "CLAIMS_DBT",
             "dbt_target_name": "astra_snowflake",
             "dbt_threads": 6,
             "dbt_command_timeout_secs": 900,
@@ -566,6 +569,7 @@ def test_seed_payload_from_checkpoint_restores_dbt_generation_config():
     assert payload.target_warehouse == "snowflake"
     assert payload.execution_engine == "dbt"
     assert payload.dbt_deployment_mode == "generate_only"
+    assert payload.dbt_project_object_name == "CLAIMS_DBT"
     assert payload.dbt_target_name == "astra_snowflake"
     assert payload.dbt_threads == 6
     assert payload.dbt_command_timeout_secs == 900

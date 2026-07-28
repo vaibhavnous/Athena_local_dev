@@ -61,7 +61,7 @@ function buildInitialForm(settings, seedRun, project) {
           databaseName: seedRun.database_name || DEFAULT_FORM.databaseName,
           targetWarehouse: seedRun.target_warehouse || DEFAULT_FORM.targetWarehouse,
           executionEngine: seedRun.execution_engine || DEFAULT_FORM.executionEngine,
-          dbtDeploymentMode: 'generate_only',
+          dbtDeploymentMode: seedRun.dbt_deployment_mode || 'generate_only',
           dbtTargetName: seedRun.dbt_target_name || '',
           dbtThreads: seedRun.dbt_threads ?? null,
           dbtCommandTimeoutSecs: seedRun.dbt_command_timeout_secs ?? null,
@@ -85,7 +85,7 @@ function buildInitialForm(settings, seedRun, project) {
         project.executionEngine === 'dbt'
           ? 'dbt'
           : 'native',
-      dbtDeploymentMode: 'generate_only',
+      dbtDeploymentMode: project.dbtDeploymentMode || 'generate_only',
       dbtTargetName: project.dbtTargetName || '',
       dbtThreads: project.dbtThreads ?? null,
       dbtCommandTimeoutSecs: project.dbtCommandTimeoutSecs ?? null,
@@ -146,10 +146,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
   const sourceValue = String(form.source || DEFAULT_FORM.source).trim().toLowerCase()
   const targetWarehouseValue = String(form.targetWarehouse || DEFAULT_FORM.targetWarehouse).trim().toLowerCase()
   const snowflakeDatabaseTarget = targetWarehouseValue === 'snowflake' && sourceValue === 'database'
-  const executionEngineValue =
-    snowflakeDatabaseTarget && String(form.executionEngine || 'native').toLowerCase() === 'dbt'
-      ? 'dbt'
-      : 'native'
+  const executionEngineValue = snowflakeDatabaseTarget && form.executionEngine === 'dbt' ? 'dbt' : 'native'
+  const dbtDeploymentModeValue = executionEngineValue === 'dbt' ? 'generate_and_deploy' : 'generate_only'
 
   const resetState = () => {
     setForm(buildInitialForm(settings, initialSeedRun, project))
@@ -286,7 +284,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         database_name: form.databaseName,
         target_warehouse: targetWarehouseValue,
         execution_engine: executionEngineValue,
-        dbt_deployment_mode: 'generate_only',
+        dbt_deployment_mode: dbtDeploymentModeValue,
         dbt_target_name: form.dbtTargetName || undefined,
         dbt_threads: form.dbtThreads || undefined,
         dbt_command_timeout_secs: form.dbtCommandTimeoutSecs || undefined,
@@ -314,7 +312,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         deployment: form.deployment || null,
         target_warehouse: targetWarehouseValue,
         execution_engine: executionEngineValue,
-        dbt_deployment_mode: 'generate_only',
+        dbt_deployment_mode: dbtDeploymentModeValue,
         dbt_target_name: form.dbtTargetName || null,
         dbt_threads: form.dbtThreads,
         dbt_command_timeout_secs: form.dbtCommandTimeoutSecs,
@@ -540,13 +538,24 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                   <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.databaseName || '-'} readOnly />
                                 </Field>
                                 {snowflakeDatabaseTarget && (
-                                  <Field label="Snowflake Engine" compact>
-                                    <input
-                                      className="input-field h-11 cursor-not-allowed opacity-80"
-                                      value={executionEngineValue === 'dbt' ? 'dbt' : 'Native'}
-                                      readOnly
-                                    />
-                                  </Field>
+                                  <>
+                                    <Field label="Snowflake Engine" compact>
+                                      <input
+                                        className="input-field h-11 cursor-not-allowed opacity-80"
+                                        value={executionEngineValue === 'dbt' ? 'dbt' : 'Native'}
+                                        readOnly
+                                      />
+                                    </Field>
+                                    {executionEngineValue === 'dbt' && (
+                                      <Field label="dbt Run Mode" compact>
+                                        <input
+                                          className="input-field h-11 cursor-not-allowed opacity-80"
+                                          value={dbtDeploymentModeValue === 'generate_and_deploy' ? 'Deploy and build in Snowflake' : 'Generate only'}
+                                          readOnly
+                                        />
+                                      </Field>
+                                    )}
+                                  </>
                                 )}
                                 <div className="rounded-lg border border-bg-border bg-bg-base p-3">
                                   <div className="flex items-center justify-between gap-3">

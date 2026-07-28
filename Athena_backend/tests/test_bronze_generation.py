@@ -622,7 +622,10 @@ def test_snowflake_dbt_bronze_refreshes_models_from_current_tables(monkeypatch, 
     assert first_model.name == "bronze_claiminformation.sql"
     assert first_result["code_generation_format"] == "dbt"
     assert first_result["dbt_alias"] == "bronze_ClaimInformation"
-    assert "{{ source('insurance_dbo', 'claiminformation') }}" in first_sql
+    assert "{{ source('athena_db_bronze', 'raw_claiminformation') }}" in first_sql
+    assert first_result["snowflake_landing_database"] == "ATHENA_DB"
+    assert first_result["snowflake_landing_schema"] == "BRONZE"
+    assert first_result["snowflake_landing_table"] == "raw_ClaimInformation"
     assert "CREATE TABLE" not in first_sql
 
     reviewed_sql = first_sql + "\n-- reviewed bronze\n"

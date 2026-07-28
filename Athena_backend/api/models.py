@@ -9,6 +9,7 @@ DbtDeploymentMode = Literal["generate_only", "generate_and_deploy"]
 
 class PipelineRunRequest(BaseModel):
     project_id: Optional[str] = None
+    dbt_project_object_name: Optional[str] = Field(default=None, max_length=80)
     brd_text: str = Field(default="")
     brd_filename: Optional[str] = None
     source: Optional[str] = "database"
@@ -49,8 +50,8 @@ class PipelineRunRequest(BaseModel):
             raise ValueError("dbt code generation is only supported when target_warehouse='snowflake'")
         if self.source not in {"database", "rdbms"}:
             raise ValueError("Snowflake dbt code generation is only supported for database sources in this branch")
-        self.dbt_deployment_mode = "generate_only"
-        self.force_dbt_deploy = False
+        if self.dbt_deployment_mode != "generate_and_deploy":
+            self.force_dbt_deploy = False
         return self
 
 
@@ -91,8 +92,7 @@ class ProjectRequest(BaseModel):
             raise ValueError("dbt code generation is only supported when target='Snowflake'")
         if str(self.connection_type or "").strip().lower() != "database":
             raise ValueError("Snowflake dbt code generation is only supported for database projects")
-        self.dbt_deployment_mode = "generate_only"
-        self.force_dbt_deploy = False
+        self.dbt_deployment_mode = "generate_and_deploy"
         return self
 
 

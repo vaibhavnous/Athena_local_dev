@@ -2507,6 +2507,7 @@ def start_pipeline(
     target_warehouse: str = "databricks",
     execution_engine: str = "native",
     dbt_deployment_mode: str = "generate_only",
+    dbt_project_object_name: Optional[str] = None,
     dbt_target_name: Optional[str] = None,
     dbt_threads: Optional[int] = None,
     dbt_command_timeout_secs: Optional[int] = None,
@@ -2535,6 +2536,7 @@ def start_pipeline(
         "target_warehouse": str(target_warehouse or "databricks").lower(),
         "execution_engine": str(execution_engine or "native").lower(),
         "dbt_deployment_mode": str(dbt_deployment_mode or "generate_only").lower(),
+        "dbt_project_object_name": dbt_project_object_name,
         "dbt_target_name": dbt_target_name,
         "dbt_threads": dbt_threads,
         "dbt_command_timeout_secs": dbt_command_timeout_secs,
@@ -3009,6 +3011,33 @@ def submit_gate4_review(
             final_state["bronze_review_artifact"],
         )
         if target_warehouse == "snowflake" and snowflake_dbt_enabled(final_state):
+            if str(final_state.get("dbt_deployment_mode") or "generate_only").lower() == "generate_and_deploy":
+                from services.snowflake_bronze_runtime import run_snowflake_bronze_scripts
+
+                landing_state = {
+                    **final_state,
+                    "status": "RUNNING",
+                    "background_stage": "bronze_code_execution",
+                    "resume_message": "Landing approved source data in Snowflake before the native dbt build.",
+                }
+                save_checkpoint_state_timed(run_id, landing_state, context="snowflake_dbt_source_landing:running")
+                try:
+                    final_state = run_snowflake_bronze_scripts(
+                        landing_state,
+                        review_artifact=landing_state["bronze_review_artifact"],
+                        approved_only=True,
+                        load_only=True,
+                    )
+                except Exception as exc:
+                    failed_state = {
+                        **landing_state,
+                        "status": "FAILED",
+                        "failed_background_stage": "bronze_code_execution",
+                        "snowflake_bronze_source_load_status": "FAILED",
+                        "error": str(exc),
+                    }
+                    save_checkpoint_state_timed(run_id, failed_state, context="snowflake_dbt_source_landing:failed")
+                    raise
             final_state.update(
                 {
                     "snowflake_bronze_execution_status": "SKIPPED_DBT_CODEGEN_ONLY",
@@ -3471,8 +3500,16 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
                 "status": "PIPELINE_COMPLETED",
                 "background_stage": None,
                 "next_review_key": None,
-                "snowflake_gold_execution_status": "SKIPPED_DBT_CODEGEN_ONLY",
-                "resume_message": "Snowflake dbt project generated. Execution and deployment are outside Astra.",
+                "snowflake_gold_execution_status": (
+                    "COMPLETED"
+                    if final_state.get("completion_mode") == "dbt_executed"
+                    else "SKIPPED_DBT_CODEGEN_ONLY"
+                ),
+                "resume_message": (
+                    "Snowflake dbt build completed."
+                    if final_state.get("completion_mode") == "dbt_executed"
+                    else "Snowflake dbt project generated. Execution was not requested."
+                ),
             }
         )
     elif decision == "APPROVED" and str(final_state.get("target_warehouse") or "").lower() == "snowflake":

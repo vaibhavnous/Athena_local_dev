@@ -297,41 +297,30 @@ def _script_name(script: Dict[str, Any]) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", target_table).strip("_") or "script"
 
 
-def _script_keys(script: Dict[str, Any]) -> set[str]:
-    keys: set[str] = set()
-    for field in ("table", "table_name", "entity", "target_table", "source_table", "silver_table", "bronze_table", "kpi_name", "script_name"):
-        value = str(script.get(field) or "").strip()
-        if not value:
-            continue
-        folded = value.casefold()
-        keys.add(folded)
-        simple = value.split(".")[-1].strip('"').casefold()
-        if simple:
-            keys.add(simple)
-            for prefix in ("bronze_", "silver_", "gold_"):
-                if simple.startswith(prefix):
-                    keys.add(simple[len(prefix):])
-    script_path = str(script.get("script_path") or "").strip()
-    if script_path:
-        keys.add(script_path.casefold())
-        stem = Path(script_path).stem.casefold()
-        if stem:
-            keys.add(stem)
-    return keys
+_REVIEW_IDENTITY_FIELDS = (
+    "target_table",
+    "dbt_model_name",
+    "dbt_alias",
+    "kpi_name",
+    "script_name",
+    "script_path",
+    "table",
+    "table_name",
+    "entity",
+    "silver_table",
+    "bronze_table",
+)
 
 
-def _review_item_keys(item: Dict[str, Any]) -> set[str]:
-    keys: set[str] = set()
-    for field in ("table", "table_name", "entity", "target_table", "source_table", "bronze_table", "silver_table", "kpi_name", "script_name", "script_path"):
-        value = str(item.get(field) or "").strip()
-        if not value:
-            continue
-        keys.add(value.casefold())
-        keys.add(value.split(".")[-1].strip('"').casefold())
-        stem = Path(value).stem.casefold()
-        if stem:
-            keys.add(stem)
-    return keys
+def _review_match_score(script: Dict[str, Any], item: Dict[str, Any]) -> int:
+    # Prefer the approved target identity over stale secondary metadata such as a
+    # script path copied by an earlier bad review match.
+    for score, field in enumerate(reversed(_REVIEW_IDENTITY_FIELDS), start=1):
+        script_value = str(script.get(field) or "").strip().casefold()
+        item_value = str(item.get(field) or "").strip().casefold()
+        if script_value and script_value == item_value:
+            return score
+    return 0
 
 
 _REVIEW_EDITABLE_SCRIPT_FIELDS = {
@@ -368,17 +357,19 @@ def _filtered_scripts(scripts: List[Dict[str, Any]], review_artifact: Optional[D
     if not approved_items and not rejected_items:
         return scripts
 
-    def matches(script: Dict[str, Any], item: Dict[str, Any]) -> bool:
-        return bool(_script_keys(script) & _review_item_keys(item))
+    def matching_item(script: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        ranked = [(_review_match_score(script, item), item) for item in candidates]
+        score, item = max(ranked, key=lambda pair: pair[0], default=(0, None))
+        return item if score else None
 
     def reviewed(script: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-        item = next((candidate for candidate in candidates if matches(script, candidate)), None)
+        item = matching_item(script, candidates)
         return _reviewed_script(script, item) if item else script
 
     if approved_items:
         filtered = []
         for script in scripts:
-            approved_item = next((item for item in approved_items if matches(script, item)), None)
+            approved_item = matching_item(script, approved_items)
             if approved_item:
                 filtered.append(_reviewed_script(script, approved_item))
         return filtered
@@ -386,7 +377,7 @@ def _filtered_scripts(scripts: List[Dict[str, Any]], review_artifact: Optional[D
         return [
             reviewed(script, review_items)
             for script in scripts
-            if not any(matches(script, item) for item in rejected_items)
+            if matching_item(script, rejected_items) is None
         ]
     return [reviewed(script, review_items) for script in scripts]
 

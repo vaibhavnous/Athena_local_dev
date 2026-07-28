@@ -39,7 +39,8 @@ def test_project_create_uses_authenticated_owner(monkeypatch):
     assert response.status_code == 201
     assert captured["owner_email"] == "owner@astra.local"
     assert captured["execution_engine"] == "dbt"
-    assert captured["dbt_deployment_mode"] == "generate_only"
+    assert captured["dbt_deployment_mode"] == "generate_and_deploy"
+    assert captured["dbt_project_object_name"] == "CLAIMS_DBT"
     assert captured["dbt_target_name"] == "astra_snowflake"
     assert captured["dbt_threads"] == 6
     assert captured["dbt_command_timeout_secs"] == 900
@@ -49,6 +50,26 @@ def test_project_create_uses_authenticated_owner(monkeypatch):
         app.dependency_overrides[get_current_user] = previous_override
     else:
         app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_native_project_update_does_not_create_dbt_object_name():
+    from api.routers.projects_router import _payload
+
+    payload = _payload(
+        projects_router.ProjectRequest(
+            name="Renamed Claims",
+            description="Claims pipeline",
+            target="Snowflake",
+            connection_type="database",
+            database_name="insurance",
+        ),
+        "owner@astra.local",
+        {
+            "dbt_project_object_name": None,
+        },
+    )
+
+    assert payload["dbt_project_object_name"] is None
 
 
 def test_project_list_is_scoped_to_client_owner(monkeypatch):
@@ -106,6 +127,7 @@ def test_project_run_keeps_project_id_in_checkpoint(monkeypatch):
         "run-1",
         pipeline_router.PipelineRunRequest(
             project_id="project-1",
+            dbt_project_object_name="CLAIMS_DBT",
             brd_text="requirements",
             source="database",
             target_warehouse="snowflake",
@@ -118,6 +140,7 @@ def test_project_run_keeps_project_id_in_checkpoint(monkeypatch):
     )
 
     assert saved["project_id"] == "project-1"
+    assert saved["dbt_project_object_name"] == "CLAIMS_DBT"
     assert saved["execution_engine"] == "dbt"
     assert saved["dbt_deployment_mode"] == "generate_only"
     assert saved["dbt_target_name"] == "astra_snowflake"
@@ -125,6 +148,23 @@ def test_project_run_keeps_project_id_in_checkpoint(monkeypatch):
     assert saved["dbt_command_timeout_secs"] == 900
     assert saved["force_dbt_deploy"] is False
     assert saved["use_domain_kb"] is True
+
+    saved.clear()
+    pipeline_router._seed_run_checkpoint(
+        "run-native",
+        pipeline_router.PipelineRunRequest(
+            project_id="project-native",
+            brd_text="requirements",
+            source="database",
+            target_warehouse="snowflake",
+            execution_engine="native",
+        ),
+    )
+
+    assert saved["project_id"] == "project-native"
+    assert saved["execution_engine"] == "native"
+    assert saved["dbt_deployment_mode"] == "generate_only"
+    assert saved["dbt_project_object_name"] is None
 
 
 def test_project_execution_config_is_server_authoritative():
@@ -145,6 +185,7 @@ def test_project_execution_config_is_server_authoritative():
             "database_name": "insurance",
             "db_type": "azure_sql",
             "execution_engine": "dbt",
+            "dbt_project_object_name": "CLAIMS_DBT",
             "dbt_target_name": "astra_snowflake",
             "dbt_threads": 6,
             "dbt_command_timeout_secs": 900,
@@ -156,7 +197,8 @@ def test_project_execution_config_is_server_authoritative():
     assert dbt_payload.database_name == "insurance"
     assert dbt_payload.database_type == "azure_sql"
     assert dbt_payload.execution_engine == "dbt"
-    assert dbt_payload.dbt_deployment_mode == "generate_only"
+    assert dbt_payload.dbt_deployment_mode == "generate_and_deploy"
+    assert dbt_payload.dbt_project_object_name == "CLAIMS_DBT"
     assert dbt_payload.dbt_target_name == "astra_snowflake"
     assert dbt_payload.dbt_threads == 6
     assert dbt_payload.dbt_command_timeout_secs == 900
@@ -179,5 +221,35 @@ def test_project_execution_config_is_server_authoritative():
         },
     )
 
+    assert native_payload.target_warehouse == "snowflake"
+    assert native_payload.source == "database"
     assert native_payload.execution_engine == "native"
+    assert native_payload.dbt_deployment_mode == "generate_only"
+    assert native_payload.dbt_project_object_name is None
     assert native_payload.dbt_target_name is None
+
+
+def test_snowflake_database_projects_preserve_selected_engine():
+    from api.repositories.project_repository import ProjectRepository
+
+    native_project = ProjectRepository._with_execution_defaults(
+        {
+            "target": "Snowflake",
+            "connection_type": "database",
+            "execution_engine": "native",
+            "dbt_deployment_mode": "generate_only",
+        }
+    )
+    dbt_project = ProjectRepository._with_execution_defaults(
+        {
+            "target": "Snowflake",
+            "connection_type": "database",
+            "execution_engine": "dbt",
+            "dbt_deployment_mode": "generate_only",
+        }
+    )
+
+    assert native_project["execution_engine"] == "native"
+    assert native_project["dbt_deployment_mode"] == "generate_only"
+    assert dbt_project["execution_engine"] == "dbt"
+    assert dbt_project["dbt_deployment_mode"] == "generate_and_deploy"

@@ -60,6 +60,7 @@ class ProjectRepository:
                             knowledge_base_id NVARCHAR(255) NULL,
                             execution_engine NVARCHAR(20) NOT NULL CONSTRAINT DF_astra_projects_execution_engine DEFAULT 'native',
                             dbt_deployment_mode NVARCHAR(40) NOT NULL CONSTRAINT DF_astra_projects_dbt_deployment_mode DEFAULT 'generate_only',
+                            dbt_project_object_name NVARCHAR(80) NULL,
                             dbt_target_name NVARCHAR(80) NULL,
                             dbt_threads INT NULL,
                             dbt_command_timeout_secs INT NULL,
@@ -77,12 +78,26 @@ class ProjectRepository:
                 for column_sql in (
                     f"IF COL_LENGTH(N'{self.table}', N'execution_engine') IS NULL ALTER TABLE {self.table} ADD execution_engine NVARCHAR(20) NOT NULL CONSTRAINT DF_astra_projects_execution_engine DEFAULT 'native'",
                     f"IF COL_LENGTH(N'{self.table}', N'dbt_deployment_mode') IS NULL ALTER TABLE {self.table} ADD dbt_deployment_mode NVARCHAR(40) NOT NULL CONSTRAINT DF_astra_projects_dbt_deployment_mode DEFAULT 'generate_only'",
+                    f"IF COL_LENGTH(N'{self.table}', N'dbt_project_object_name') IS NULL ALTER TABLE {self.table} ADD dbt_project_object_name NVARCHAR(80) NULL",
                     f"IF COL_LENGTH(N'{self.table}', N'dbt_target_name') IS NULL ALTER TABLE {self.table} ADD dbt_target_name NVARCHAR(80) NULL",
                     f"IF COL_LENGTH(N'{self.table}', N'dbt_threads') IS NULL ALTER TABLE {self.table} ADD dbt_threads INT NULL",
                     f"IF COL_LENGTH(N'{self.table}', N'dbt_command_timeout_secs') IS NULL ALTER TABLE {self.table} ADD dbt_command_timeout_secs INT NULL",
                     f"IF COL_LENGTH(N'{self.table}', N'force_dbt_deploy') IS NULL ALTER TABLE {self.table} ADD force_dbt_deploy BIT NOT NULL CONSTRAINT DF_astra_projects_force_dbt_deploy DEFAULT 0",
                 ):
                     cursor.execute(column_sql)
+                cursor.execute(
+                    f"""
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM sys.indexes
+                        WHERE name = N'UX_astra_projects_dbt_project_object_name'
+                          AND object_id = OBJECT_ID(N'{self.table}')
+                    )
+                        CREATE UNIQUE INDEX UX_astra_projects_dbt_project_object_name
+                        ON {self.table}(dbt_project_object_name)
+                        WHERE dbt_project_object_name IS NOT NULL
+                    """
+                )
                 cursor.execute(
                     f"""
                     IF NOT EXISTS (
@@ -131,6 +146,19 @@ class ProjectRepository:
     def create(self, project: dict[str, Any]) -> dict[str, Any]:
         self.ensure_table()
         project_id = str(uuid.uuid4())
+        project = dict(project)
+        project_object_name = str(project.get("dbt_project_object_name") or "").strip()
+        if project_object_name and self._query(
+            f"{self._select()} WHERE UPPER(dbt_project_object_name) = UPPER(?)",
+            project_object_name,
+        ):
+            compact_id = project_id.replace("-", "")[:8].upper()
+            base_name = (
+                project_object_name[:-4]
+                if project_object_name.upper().endswith("_DBT")
+                else project_object_name
+            )
+            project["dbt_project_object_name"] = f"{base_name[:67]}_{compact_id}_DBT"
         fields = self._fields(project)
         connection = get_pipeline_connection()
         try:
@@ -140,9 +168,10 @@ class ProjectRepository:
                   (id, name, description, [target], status, owner_email, connection_type,
                    connection_name, db_type, database_name, integration_type, data_lake_type,
                    data_lake_name, use_domain_knowledge_base, domain_profile, knowledge_base_id,
-                   execution_engine, dbt_deployment_mode, dbt_target_name, dbt_threads,
+                   execution_engine, dbt_deployment_mode, dbt_project_object_name,
+                   dbt_target_name, dbt_threads,
                    dbt_command_timeout_secs, force_dbt_deploy)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 project_id,
                 *fields,
@@ -164,7 +193,8 @@ class ProjectRepository:
                   connection_type = ?, connection_name = ?, db_type = ?, database_name = ?,
                   integration_type = ?, data_lake_type = ?, data_lake_name = ?,
                   use_domain_knowledge_base = ?, domain_profile = ?, knowledge_base_id = ?,
-                  execution_engine = ?, dbt_deployment_mode = ?, dbt_target_name = ?,
+                  execution_engine = ?, dbt_deployment_mode = ?, dbt_project_object_name = ?,
+                  dbt_target_name = ?,
                   dbt_threads = ?, dbt_command_timeout_secs = ?, force_dbt_deploy = ?,
                   updated_at = SYSUTCDATETIME()
                 WHERE id = ?
@@ -191,6 +221,7 @@ class ProjectRepository:
 
     @staticmethod
     def _fields(project: dict[str, Any]) -> tuple[Any, ...]:
+        project = ProjectRepository._with_execution_defaults(project)
         return (
             project["name"], project["description"], project["target"], project["status"],
             project["owner_email"], project["connection_type"], project.get("connection_name"),
@@ -200,9 +231,30 @@ class ProjectRepository:
             project.get("knowledge_base_id"),
             project.get("execution_engine") or "native",
             project.get("dbt_deployment_mode") or "generate_only",
+            project.get("dbt_project_object_name"),
             project.get("dbt_target_name"), project.get("dbt_threads"),
             project.get("dbt_command_timeout_secs"), bool(project.get("force_dbt_deploy")),
         )
+
+    @staticmethod
+    def _with_execution_defaults(project: dict[str, Any]) -> dict[str, Any]:
+        project = dict(project)
+        snowflake_database_target = (
+            str(project.get("target") or "").strip().lower() == "snowflake"
+            and str(project.get("connection_type") or "").strip().lower() == "database"
+        )
+        selected_engine = str(project.get("execution_engine") or "native").strip().lower()
+        project["execution_engine"] = (
+            "dbt" if snowflake_database_target and selected_engine == "dbt" else "native"
+        )
+        project["dbt_deployment_mode"] = (
+            "generate_and_deploy"
+            if project["execution_engine"] == "dbt"
+            else "generate_only"
+        )
+        if project["execution_engine"] != "dbt":
+            project["force_dbt_deploy"] = False
+        return project
 
     def _select(self) -> str:
         return f"""
@@ -211,7 +263,7 @@ class ProjectRepository:
                    integration_type, data_lake_type, data_lake_name,
                    CAST(use_domain_knowledge_base AS BIT) AS use_domain_knowledge_base,
                    domain_profile, knowledge_base_id, execution_engine, dbt_deployment_mode,
-                   dbt_target_name, dbt_threads, dbt_command_timeout_secs,
+                   dbt_project_object_name, dbt_target_name, dbt_threads, dbt_command_timeout_secs,
                    CAST(force_dbt_deploy AS BIT) AS force_dbt_deploy,
                    created_at, updated_at
             FROM {self.table}
@@ -224,6 +276,9 @@ class ProjectRepository:
             cursor = connection.cursor()
             cursor.execute(query, *parameters)
             columns = [column[0] for column in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return [
+                self._with_execution_defaults(dict(zip(columns, row)))
+                for row in cursor.fetchall()
+            ]
         finally:
             connection.close()

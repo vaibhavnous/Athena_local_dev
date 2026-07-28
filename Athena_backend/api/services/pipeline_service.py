@@ -118,6 +118,7 @@ def run_pipeline_background(
     target_warehouse: str = "databricks",
     execution_engine: str = "native",
     dbt_deployment_mode: str = "generate_only",
+    dbt_project_object_name: Optional[str] = None,
     dbt_target_name: Optional[str] = None,
     dbt_threads: Optional[int] = None,
     dbt_command_timeout_secs: Optional[int] = None,
@@ -154,6 +155,7 @@ def run_pipeline_background(
                 target_warehouse=target_warehouse,
                 execution_engine=execution_engine,
                 dbt_deployment_mode=dbt_deployment_mode,
+                dbt_project_object_name=dbt_project_object_name,
                 dbt_target_name=dbt_target_name,
                 dbt_threads=dbt_threads,
                 dbt_command_timeout_secs=dbt_command_timeout_secs,
@@ -216,6 +218,7 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             target_warehouse=str(payload.target_warehouse or "databricks").lower(),
             execution_engine=str(payload.execution_engine or "native").lower(),
             dbt_deployment_mode=str(payload.dbt_deployment_mode or "generate_only").lower(),
+            dbt_project_object_name=payload.dbt_project_object_name,
             dbt_target_name=payload.dbt_target_name,
             dbt_threads=payload.dbt_threads,
             dbt_command_timeout_secs=payload.dbt_command_timeout_secs,
@@ -241,6 +244,7 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
     database_name = source_databases[0] if source_databases else checkpoint.get("database_name")
     return PipelineRunRequest(
         project_id=checkpoint.get("project_id"),
+        dbt_project_object_name=checkpoint.get("dbt_project_object_name"),
         brd_text=str(checkpoint.get("brd_text") or ""),
         brd_filename=checkpoint.get("brd_filename"),
         source=str(checkpoint.get("source") or "database"),

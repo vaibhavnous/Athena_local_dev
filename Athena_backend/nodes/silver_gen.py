@@ -1049,7 +1049,7 @@ def generate_snowflake_silver_dbt_model(
     database=env_var('SNOWFLAKE_SILVER_CATALOG', {json.dumps(silver_catalog)}),
     schema=env_var('SNOWFLAKE_SILVER_SCHEMA', {json.dumps(silver_schema)}),
     alias={json.dumps(physical_alias)},
-    unique_key='silver_upsert_key',
+    unique_key='"silver_upsert_key"',
     incremental_strategy='merge',
     on_schema_change='sync_all_columns'
 ) }}}}
@@ -1098,16 +1098,19 @@ def _write_snowflake_silver_dbt_metadata(
                     {
                         "name": "silver_upsert_key",
                         "description": "Deterministic merge key used by dbt incremental materialization.",
+                        "quote": True,
                         "tests": ["not_null", "unique"],
                     },
                     {
                         "name": "silver_run_id",
                         "description": "Athena pipeline run identifier for Silver materialization.",
+                        "quote": True,
                         "tests": ["not_null"],
                     },
                     {
                         "name": "silver_processed_timestamp",
                         "description": "Timestamp when dbt materialized the Silver model.",
+                        "quote": True,
                         "tests": ["not_null"],
                     },
                 ],

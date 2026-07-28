@@ -26,23 +26,25 @@ def _with_project_execution_config(
     payload: PipelineRunRequest,
     project: Dict[str, Any],
 ) -> PipelineRunRequest:
-    is_dbt_project = (
+    snowflake_database_project = (
         str(project.get("target") or "").strip().lower() == "snowflake"
         and str(project.get("connection_type") or "").strip().lower() == "database"
-        and str(project.get("execution_engine") or "native").strip().lower() == "dbt"
     )
+    selected_engine = str(project.get("execution_engine") or "native").strip().lower()
+    is_dbt_project = snowflake_database_project and selected_engine == "dbt"
     data = payload.model_dump()
     data.update(
         execution_engine="dbt" if is_dbt_project else "native",
-        dbt_deployment_mode="generate_only",
+        dbt_deployment_mode="generate_and_deploy" if is_dbt_project else "generate_only",
+        dbt_project_object_name=project.get("dbt_project_object_name") if is_dbt_project else None,
         dbt_target_name=project.get("dbt_target_name") if is_dbt_project else None,
         dbt_threads=project.get("dbt_threads") if is_dbt_project else None,
         dbt_command_timeout_secs=(
             project.get("dbt_command_timeout_secs") if is_dbt_project else None
         ),
-        force_dbt_deploy=False,
+        force_dbt_deploy=bool(project.get("force_dbt_deploy")) if is_dbt_project else False,
     )
-    if is_dbt_project:
+    if snowflake_database_project:
         data.update(
             target_warehouse="snowflake",
             source="database",
@@ -150,6 +152,10 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest, owner_email: 
             **existing,
             "run_id": run_id,
             "project_id": existing.get("project_id") or payload.project_id,
+            "dbt_project_object_name": (
+                existing.get("dbt_project_object_name")
+                or payload.dbt_project_object_name
+            ),
             "status": existing.get("status") or "RUNNING",
             "background_stage": existing.get("background_stage") or "ingestion",
             "resume_message": existing.get("resume_message") or "BRD Ingest is running.",
@@ -286,6 +292,8 @@ def run_pipeline(payload: PipelineRunRequest, user: AuthUser = Depends(get_curre
             payload,
             load_project_for_user(payload.project_id, user),
         )
+    else:
+        payload = payload.model_copy(update={"dbt_project_object_name": None})
 
     source = str(payload.source or "database").lower()
 

@@ -1143,13 +1143,15 @@ def generate_snowflake_bronze_dbt_model(
     run_id: str,
     bronze_catalog: str,
     bronze_schema: str,
+    landing_table: str | None = None,
     cast_rules: Dict[str, str] | None = None,
     table_metadata: Dict[str, Any] | None = None,
 ) -> str:
     columns = _snowflake_columns(table_metadata=table_metadata, cast_rules=cast_rules)
     physical_alias = f"bronze_{table}"
-    source_name = dbt_snowflake_runtime.dbt_source_name(database, schema)
-    source_table_name = dbt_snowflake_runtime.dbt_source_table_name(table)
+    landing_table = landing_table or table
+    source_name = dbt_snowflake_runtime.dbt_source_name(bronze_catalog, bronze_schema)
+    source_table_name = dbt_snowflake_runtime.dbt_source_table_name(landing_table)
     source_ref = dbt_snowflake_runtime.dbt_source_ref(source_name, source_table_name)
     business_columns = (
         ",\n    ".join(
@@ -1190,10 +1192,10 @@ def _write_snowflake_bronze_dbt_metadata(
         [
             {
                 "source_name": result.get("dbt_source_name"),
-                "database": result.get("database_name"),
-                "schema": result.get("schema_name"),
+                "database": result.get("snowflake_landing_database"),
+                "schema": result.get("snowflake_landing_schema"),
                 "table_name": result.get("dbt_source_table_name"),
-                "identifier": result.get("table"),
+                "identifier": result.get("snowflake_landing_table"),
             }
             for result in results
         ],
@@ -1725,10 +1727,16 @@ def _generate_one_table(
     dbt_source_table_name: str | None = None
 
     if dbt_codegen:
+        snowflake_landing_database = bronze_catalog
+        snowflake_landing_schema = bronze_schema
+        snowflake_landing_table = f"raw_{table_name}"
         dbt_model_name = dbt_snowflake_runtime.dbt_safe_name(f"bronze_{table_name}", prefix="bronze")
         dbt_alias = f"bronze_{table_name}"
-        dbt_source_name = dbt_snowflake_runtime.dbt_source_name(database_name, schema_name)
-        dbt_source_table_name = dbt_snowflake_runtime.dbt_source_table_name(table_name)
+        dbt_source_name = dbt_snowflake_runtime.dbt_source_name(
+            snowflake_landing_database,
+            snowflake_landing_schema,
+        )
+        dbt_source_table_name = dbt_snowflake_runtime.dbt_source_table_name(snowflake_landing_table)
         code = generate_snowflake_bronze_dbt_model(
             table=table_name,
             schema=schema_name,
@@ -1736,6 +1744,7 @@ def _generate_one_table(
             run_id=run_id,
             bronze_catalog=bronze_catalog,
             bronze_schema=bronze_schema,
+            landing_table=snowflake_landing_table,
             cast_rules=cast_rules or {},
             table_metadata=table_metadata or {},
         )
@@ -1864,6 +1873,9 @@ def _generate_one_table(
         "dbt_alias": dbt_alias,
         "dbt_source_name": dbt_source_name,
         "dbt_source_table_name": dbt_source_table_name,
+        "snowflake_landing_database": snowflake_landing_database if dbt_codegen else None,
+        "snowflake_landing_schema": snowflake_landing_schema if dbt_codegen else None,
+        "snowflake_landing_table": snowflake_landing_table if dbt_codegen else None,
     }
 # ------------------------------------------------------------------------------
 # LANGGRAPH NODE
