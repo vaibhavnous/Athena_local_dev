@@ -18,6 +18,8 @@ apps/
 
 Run backend commands from `apps/backend` and frontend commands from `apps/frontend`. Deployment and CI configurations remain at the repository root.
 
+Existing checkouts must copy ignored local configuration from `Athena_backend/.env` to `apps/backend/.env` and from `frontend/.env*` to `apps/frontend/` after pulling this layout change. Verify the copies before removing the old files; Git cannot move ignored local configuration.
+
 ---
 
 ## Product Summary

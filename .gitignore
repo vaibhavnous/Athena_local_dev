@@ -7,6 +7,15 @@ apps/frontend/.pnp.js
 apps/frontend/coverage/
 apps/frontend/.git_disabled/
 
+# Legacy frontend files can remain after pulling the apps/ migration.
+frontend/node_modules/
+frontend/build/
+frontend/.env*
+frontend/.pnp
+frontend/.pnp.js
+frontend/coverage/
+frontend/.git_disabled/
+
 # Git internals / leftovers
 .gitdir/
 .git_bad/
@@ -16,6 +25,7 @@ apps/frontend/.git_disabled/
 # Backend
 apps/backend/.venv/
 apps/backend/.env
+apps/backend/.myenv
 apps/backend/__pycache__/
 apps/backend/**/*.py[cod]
 apps/backend/pipeline_logs.json
@@ -30,6 +40,22 @@ apps/backend/generated_code/**/__pycache__/
 apps/backend/generated_code/
 apps/backend/fetch_tmp*.json
 run_*_persistent_data.json
+
+# Legacy backend files can remain after pulling the apps/ migration.
+Athena_backend/.venv/
+Athena_backend/.env
+Athena_backend/.myenv
+Athena_backend/__pycache__/
+Athena_backend/**/*.py[cod]
+Athena_backend/pipeline_logs.json
+Athena_backend/pipeline_logs.json.localbackup
+Athena_backend/uploads/
+Athena_backend/.pytest_cache/
+Athena_backend/.pytest_tmp/
+Athena_backend/.tmp-tests/
+Athena_backend/.tmp-unit-metadata-driven/
+Athena_backend/generated_code/
+Athena_backend/fetch_tmp*.json
 
 # OS / editor
 .DS_Store
