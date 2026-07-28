@@ -561,6 +561,30 @@ def test_databricks_gold_baseline_has_quality_guards_and_passes_hard_validation(
     assert ".whenMatchedUpdateAll()" in code
 
 
+def test_databricks_gold_resolves_measure_column_case_insensitively():
+    mapping = {
+        "kpi_name": "Average Reserve Estimation Per Claim",
+        "source_silver_table": "silver_schema.silver_indemnity_outstanding_estimates",
+        "measure": {
+            "table": "indemnity_outstanding_estimates",
+            "column": "grossestimate",
+            "aggregation": "AVG",
+        },
+        "grouping_dimensions": [],
+        "time": {},
+        "filters": [],
+        "join_paths": [],
+    }
+
+    code = gold_gen.generate_gold_script(mapping=mapping, run_id="run-column-case", gold_schema="gold_schema")
+
+    assert "source_columns_by_name = {name.casefold(): name for name in df.columns}" in code
+    assert "resolved_measure_column = source_columns_by_name.get(MEASURE_COLUMN.casefold())" in code
+    assert "MEASURE_COLUMN = resolved_measure_column" in code
+    assert "avg(col(MEASURE_COLUMN))" in code
+    assert "if MEASURE_COLUMN not in df.columns:" not in code
+
+
 def test_databricks_gold_hard_validation_rejects_hallucinated_dimension_and_append():
     mapping = {
         "kpi_name": "Total Claims",

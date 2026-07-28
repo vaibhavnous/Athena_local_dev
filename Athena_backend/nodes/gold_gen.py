@@ -295,18 +295,17 @@ def _date_grain_expr(grain: str, source_column: str) -> str:
 
 
 def _measure_expression(measure: Dict[str, Any], value_alias: str) -> str:
-    column = str(measure.get("column") or "").strip()
     aggregation = str(measure.get("aggregation") or "SUM").upper()
     if aggregation == "COUNT":
         return f"count(lit(1)).alias({value_alias!r})"
     if aggregation == "AVG":
-        return f"avg(col({column!r})).alias({value_alias!r})"
+        return f"avg(col(MEASURE_COLUMN)).alias({value_alias!r})"
     if aggregation == "MIN":
-        return f"min(col({column!r})).alias({value_alias!r})"
+        return f"min(col(MEASURE_COLUMN)).alias({value_alias!r})"
     if aggregation == "MAX":
-        return f"max(col({column!r})).alias({value_alias!r})"
+        return f"max(col(MEASURE_COLUMN)).alias({value_alias!r})"
     return (
-        f"sum(coalesce(col({column!r}).cast('decimal(38,10)'), "
+        f"sum(coalesce(col(MEASURE_COLUMN).cast('decimal(38,10)'), "
         f"lit(0).cast('decimal(38,10)'))).alias({value_alias!r})"
     )
 
@@ -1257,8 +1256,11 @@ if "silver_upsert_key" in df.columns:
         raise ValueError(f"Duplicate silver_upsert_key values found in {{SOURCE_TABLE}}")
 
 if MEASURE_AGGREGATION != "COUNT":
-    if MEASURE_COLUMN not in df.columns:
+    source_columns_by_name = {{name.casefold(): name for name in df.columns}}
+    resolved_measure_column = source_columns_by_name.get(MEASURE_COLUMN.casefold())
+    if not resolved_measure_column:
         raise ValueError(f"Gold measure column '{{MEASURE_COLUMN}}' is missing from {{SOURCE_TABLE}}")
+    MEASURE_COLUMN = resolved_measure_column
     measure_field = next(field for field in df.schema.fields if field.name == MEASURE_COLUMN)
     if MEASURE_AGGREGATION in {{"SUM", "AVG"}} and not isinstance(measure_field.dataType, NumericType):
         raise TypeError(
