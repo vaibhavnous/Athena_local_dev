@@ -12,8 +12,8 @@ def test_generated_code_root_uses_workspace_level_dir_when_cwd_is_backend(monkey
     monkeypatch.chdir(backend_dir)
     monkeypatch.delenv("ATHENA_GENERATED_CODE_DIR", raising=False)
 
-    assert generated_code_root() == backend_dir.parent / "generated_code"
-    assert generated_code_dir("snowflake", "bronze") == backend_dir.parent / "generated_code" / "snowflake" / "bronze"
+    assert generated_code_root() == backend_dir.parents[1] / "generated_code"
+    assert generated_code_dir("snowflake", "bronze") == backend_dir.parents[1] / "generated_code" / "snowflake" / "bronze"
 
 
 def test_generated_code_root_honors_explicit_env_override(monkeypatch):

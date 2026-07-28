@@ -9,8 +9,9 @@ from utilis.runtime_paths import runtime_dir
 
 def generated_code_root() -> Path:
     cwd = Path.cwd().resolve()
+    backend_parent = cwd.parents[1] if cwd.parent.name.casefold() == "apps" else cwd.parent
     local_default = (
-        cwd.parent / "generated_code"
+        backend_parent / "generated_code"
         if cwd.name.casefold() in {"athena_backend", "backend"} and cwd.parent.exists()
         else cwd / "generated_code"
     )
