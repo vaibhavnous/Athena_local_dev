@@ -531,7 +531,7 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
 
 _SCRIPTS_OK = builtins.sum(1 for _r in _RESULTS if _r.get("status") == "SUCCESS")
 _SCRIPTS_FAILED = builtins.sum(1 for _r in _RESULTS if _r.get("status") == "FAILED")
-_PARTIAL_SUCCESS = _ALLOW_PARTIAL_SUCCESS and _SCRIPTS_FAILED > 0 and _SCRIPTS_OK > _SCRIPTS_FAILED
+_PARTIAL_SUCCESS = _ALLOW_PARTIAL_SUCCESS and _SCRIPTS_FAILED > 0 and _SCRIPTS_OK >= _SCRIPTS_FAILED
 _SUMMARY = {{
     "status": "COMPLETED_WITH_WARNINGS" if _PARTIAL_SUCCESS else "FAILED" if _SCRIPTS_FAILED else "SUCCESS",
     "scripts_total": builtins.len(_SCRIPT_ITEMS),
@@ -726,7 +726,7 @@ def _execute_databricks_stage_batch(
     )
     failed = [item for item in executed_scripts if str(item.get("status") or "").upper() == "FAILED"]
     succeeded_count = sum(1 for item in executed_scripts if str(item.get("status") or "").upper() == "SUCCESS")
-    partial_success = _gold_partial_success_enabled(layer) and bool(failed) and succeeded_count > len(failed)
+    partial_success = _gold_partial_success_enabled(layer) and bool(failed) and succeeded_count >= len(failed)
     if failed and not partial_success:
         first = failed[0]
         raise RuntimeError(

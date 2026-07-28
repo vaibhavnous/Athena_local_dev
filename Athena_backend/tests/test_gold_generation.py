@@ -799,11 +799,11 @@ def test_databricks_batch_notebook_fails_the_job_when_any_script_fails():
     assert 'if _SUMMARY["status"] == "FAILED":' in notebook
     assert 'exec(compile(_item.get("script_text") or "", f"<athena:{_name}>", "exec"), _script_globals)' in notebook
     assert '_SCRIPTS_OK = builtins.sum(' in notebook
-    assert "_SCRIPTS_OK > _SCRIPTS_FAILED" in notebook
+    assert "_SCRIPTS_OK >= _SCRIPTS_FAILED" in notebook
     assert notebook.index('raise RuntimeError(json.dumps(_SUMMARY') < notebook.index("dbutils.notebook.exit")
 
 
-def test_databricks_gold_batch_majority_success_completes_with_warnings(monkeypatch):
+def test_databricks_gold_batch_fifty_percent_success_completes_with_warnings(monkeypatch):
     monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
     monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_ALLOW_PARTIAL_SUCCESS", raising=False)
     monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_: None)
@@ -825,8 +825,7 @@ def test_databricks_gold_batch_majority_success_completes_with_warnings(monkeypa
                         "status": "COMPLETED_WITH_WARNINGS",
                         "results": [
                             {"script_name": "gold_fact_one", "status": "SUCCESS"},
-                            {"script_name": "gold_fact_two", "status": "SUCCESS"},
-                            {"script_name": "gold_fact_three", "status": "FAILED", "error": "bad generated SQL"},
+                            {"script_name": "gold_fact_two", "status": "FAILED", "error": "bad generated SQL"},
                         ],
                     }
                 )
@@ -848,16 +847,15 @@ def test_databricks_gold_batch_majority_success_completes_with_warnings(monkeypa
             "gold_generation_results": [
                 {"status": "APPROVED", "script_body": "print('one')", "target_table": "gold.fact_one"},
                 {"status": "APPROVED", "script_body": "print('two')", "target_table": "gold.fact_two"},
-                {"status": "APPROVED", "script_body": "print('three')", "target_table": "gold.fact_three"},
             ],
         }
     )
 
     assert result["databricks_gold_execution_status"] == "COMPLETED_WITH_WARNINGS"
-    assert [item["script_name"] for item in result["databricks_gold_execution_failures"]] == ["gold_fact_three"]
+    assert [item["script_name"] for item in result["databricks_gold_execution_failures"]] == ["gold_fact_two"]
     assert saved[-1][1]["status"] == "COMPLETED_WITH_WARNINGS"
-    assert saved[-1][1]["completed_count"] == 2
-    assert "gold_fact_three" in saved[-1][1]["message"]
+    assert saved[-1][1]["completed_count"] == 1
+    assert "gold_fact_two" in saved[-1][1]["message"]
 
 
 def test_gold_measure_scoring_rejects_operational_counters_for_money_kpis():
@@ -932,10 +930,10 @@ def test_databricks_gold_batch_failure_persists_partial_results(monkeypatch):
     )
     summary = {
         "status": "FAILED",
-        "scripts_total": 2,
-        "scripts_executed": 2,
+        "scripts_total": 3,
+        "scripts_executed": 3,
         "scripts_ok": 1,
-        "scripts_failed": 1,
+        "scripts_failed": 2,
         "results": [
             {"script_name": "gold_fact_one", "target_table": "gold.fact_one", "status": "SUCCESS"},
             {
@@ -943,6 +941,12 @@ def test_databricks_gold_batch_failure_persists_partial_results(monkeypatch):
                 "target_table": "gold.fact_two",
                 "status": "FAILED",
                 "error": "missing gold.dim_claims",
+            },
+            {
+                "script_name": "gold_fact_three",
+                "target_table": "gold.fact_three",
+                "status": "FAILED",
+                "error": "missing gold.dim_policy",
             },
         ],
     }
@@ -967,13 +971,14 @@ def test_databricks_gold_batch_failure_persists_partial_results(monkeypatch):
                 "gold_generation_results": [
                     {"status": "APPROVED", "script_body": "print('one')", "target_table": "gold.fact_one"},
                     {"status": "APPROVED", "script_body": "print('two')", "target_table": "gold.fact_two"},
+                    {"status": "APPROVED", "script_body": "print('three')", "target_table": "gold.fact_three"},
                 ],
             }
         )
 
     failed_state, failed_progress = saved[-1]
     results = failed_state["databricks_gold_execution_results"]
-    assert [item["status"] for item in results] == ["SUCCESS", "FAILED"]
+    assert [item["status"] for item in results] == ["SUCCESS", "FAILED", "FAILED"]
     assert failed_progress["completed_count"] == 1
     assert failed_progress["current_name"] == "gold_fact_two"
     assert failed_state["error"].endswith("missing gold.dim_claims")
