@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 import sys
 from pathlib import Path
 
-# Ensure `Athena_backend/` is on sys.path so `import utilis.*` works even when
-# executing from `Athena_backend/scripts/`.
+# Ensure `apps/backend/` is on sys.path so `import utilis.*` works even when
+# executing from `apps/backend/scripts/`.
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))

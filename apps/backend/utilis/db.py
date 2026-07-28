@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from utilis.logger import logger
 from utilis.env import load_backend_env
 
-# Ensure env vars from Athena_backend/.env are available even when the API
+# Ensure env vars from apps/backend/.env are available even when the API
 # server starts without a pre-loaded environment.
 load_backend_env()
 
@@ -343,7 +343,7 @@ def get_pipeline_connection() -> pyodbc.Connection:
         raise RuntimeError(
             "Missing Azure SQL pipeline DB configuration. Set "
             + ", ".join(missing)
-            + " in Athena_backend/.env."
+            + " in apps/backend/.env."
         )
 
     last_exc = None
@@ -396,7 +396,7 @@ def get_client_connection(database_name: Optional[str] = None) -> pyodbc.Connect
         raise RuntimeError(
             "Missing Azure SQL source DB configuration. Set "
             + ", ".join(missing)
-            + " in Athena_backend/.env."
+            + " in apps/backend/.env."
         )
 
     db = _normalize_source_db(database_name)

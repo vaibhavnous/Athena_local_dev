@@ -99,6 +99,7 @@ def _looks_like_local_path(path: str) -> bool:
         "\\Users\\",
         "/Users/",
         "/home/",
+        "apps/backend/uploads",
         "Athena_backend/uploads",
         "uploads\\",
         "uploads/",

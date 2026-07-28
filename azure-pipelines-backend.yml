@@ -4,7 +4,7 @@ trigger:
       - main
   paths:
     include:
-      - Athena_backend/**
+      - apps/backend/**
       - azure-pipelines-backend.yml
 
 pool:
@@ -12,7 +12,7 @@ pool:
 
 variables:
   pythonVersion: '3.10'
-  backendFolder: 'Athena_backend'
+  backendFolder: 'apps/backend'
   artifactName: 'backend-app'
   artifactZip: 'backend-app.zip'
   azureServiceConnection: 'azure-devops-service-connection'

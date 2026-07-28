@@ -176,7 +176,7 @@ az webapp log tail \
 
 ## Environment Variables Reference
 
-### Combined App Service (Athena_backend + React Frontend)
+### Combined App Service (`apps/backend` + React frontend)
 
 - `SQL_CONNECTION_STRING`: Database connection (from Key Vault)
 - `API_KEY`: API authentication key (from Key Vault)
@@ -185,7 +185,7 @@ az webapp log tail \
 - `PYTHONUNBUFFERED`: 1 (for unbuffered Python output)
 - `APPINSIGHTS_INSTRUMENTATIONKEY`: Application Insights key
 
-### Frontend (frontend)
+### Frontend (`apps/frontend`)
 
 - `REACT_APP_API_ENDPOINT`: Backend API base URL
 - `REACT_APP_ENVIRONMENT`: dev/prod

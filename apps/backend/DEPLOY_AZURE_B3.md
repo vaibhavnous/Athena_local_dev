@@ -59,7 +59,7 @@ In **Monitoring > Health check**, use `/health`. Enable Application Insights and
 From the repository root:
 
 ```powershell
-cd Athena_backend
+cd apps/backend
 python -m pytest -q
 cd ..\frontend
 npm ci

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/Athena_logo.png" alt="Athena Logo" width="140" />
+  <img src="apps/frontend/public/Athena_logo.png" alt="Athena Logo" width="140" />
 </p>
 
 # Athena
@@ -7,6 +7,16 @@
 Athena is an agentic data-orchestration product that converts business requirements into governed, reviewable, analytics-ready data pipeline outputs.
 
 It sits between business intent and warehouse execution. Instead of relying on disconnected analyst handoffs, manual source discovery, and late-stage SQL review, Athena turns the full lifecycle into a visible system with AI reasoning, metadata grounding, human approval gates, and layered Bronze, Silver, and Gold outputs.
+
+## Repository layout
+
+```text
+apps/
+├── backend/   FastAPI, pipeline runtimes, nodes, scripts, and tests
+└── frontend/  React application, assets, and UI tests
+```
+
+Run backend commands from `apps/backend` and frontend commands from `apps/frontend`. Deployment and CI configurations remain at the repository root.
 
 ---
 

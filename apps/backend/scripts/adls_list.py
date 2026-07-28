@@ -5,21 +5,21 @@ Usage (PowerShell):
   $env:ADLS_ACCOUNT_URL="https://atheastorage.dfs.core.windows.net"
   $env:ADLS_FILE_SYSTEM="your-container-name"
   $env:ADLS_PREFIX="cash-project/Vendor1"   # optional
-  python Athena_backend/scripts/adls_list.py
+  python apps/backend/scripts/adls_list.py
 
 SAS auth (alternative):
   $env:ADLS_ACCOUNT_URL="https://atheastorage.dfs.core.windows.net"
   $env:ADLS_FILE_SYSTEM="your-container-name"
   $env:ADLS_PREFIX="evention/vendor1/machine1/Deposit"   # optional
   $env:ADLS_SAS_TOKEN="?sv=..."
-  python Athena_backend/scripts/adls_list.py
+  python apps/backend/scripts/adls_list.py
 
 Single-file read (no list permission required):
   $env:ADLS_ACCOUNT_URL="https://atheastorage.dfs.core.windows.net"
   $env:ADLS_FILE_SYSTEM="your-container-name"
   $env:ADLS_FILE_PATH="evention/vendor1/machine1/Deposit/your-file.csv"
   $env:ADLS_SAS_TOKEN="?sv=..."
-  python Athena_backend/scripts/adls_list.py
+  python apps/backend/scripts/adls_list.py
 
 Auth:
   Uses DefaultAzureCredential. Make sure one of these works:

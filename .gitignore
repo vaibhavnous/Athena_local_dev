@@ -1,11 +1,11 @@
 # Frontend
-frontend/node_modules/
-frontend/build/
-frontend/.env
-frontend/.pnp
-frontend/.pnp.js
-frontend/coverage/
-frontend/.git_disabled/
+apps/frontend/node_modules/
+apps/frontend/build/
+apps/frontend/.env
+apps/frontend/.pnp
+apps/frontend/.pnp.js
+apps/frontend/coverage/
+apps/frontend/.git_disabled/
 
 # Git internals / leftovers
 .gitdir/
@@ -14,19 +14,22 @@ frontend/.git_disabled/
 .tmp-update-worktree/
 
 # Backend
-Athena_backend/.venv/
-Athena_backend/.env
-Athena_backend/__pycache__/
-Athena_backend/**/*.py[cod]
-Athena_backend/pipeline_logs.json
-Athena_backend/pipeline_logs.json.localbackup
-Athena_backend/uploads/
-Athena_backend/.pytest_cache/
-Athena_backend/.pytest_tmp/
-Athena_backend/.tmp-tests/
-Athena_backend/generated_code/*.zip
-Athena_backend/generated_code/**/__pycache__/
-Athena_backend/generated_code/
+apps/backend/.venv/
+apps/backend/.env
+apps/backend/__pycache__/
+apps/backend/**/*.py[cod]
+apps/backend/pipeline_logs.json
+apps/backend/pipeline_logs.json.localbackup
+apps/backend/uploads/
+apps/backend/.pytest_cache/
+apps/backend/.pytest_tmp/
+apps/backend/.tmp-tests/
+apps/backend/.tmp-unit-metadata-driven/
+apps/backend/generated_code/*.zip
+apps/backend/generated_code/**/__pycache__/
+apps/backend/generated_code/
+apps/backend/fetch_tmp*.json
+run_*_persistent_data.json
 
 # OS / editor
 .DS_Store
@@ -38,5 +41,5 @@ Thumbs.db
 *.bak
 paramiko_debug.log
 .local_logs/
-.tmp-smoke/ponytail/
+.tmp-smoke/
 generated_code/

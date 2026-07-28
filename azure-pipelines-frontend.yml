@@ -4,7 +4,7 @@ trigger:
     - main
   paths:
     include:
-    - frontend/**
+    - apps/frontend/**
     - azure-pipelines-frontend.yml
 
 pool:
@@ -12,7 +12,7 @@ pool:
 
 variables:
   nodeVersion: '18.x'
-  frontendFolder: 'frontend'
+  frontendFolder: 'apps/frontend'
   buildFolder: '$(frontendFolder)/build'
 
 stages:

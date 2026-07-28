@@ -29,14 +29,16 @@ stages:
 
     - script: npm ci
       displayName: Install dependencies
+      workingDirectory: '$(System.DefaultWorkingDirectory)/apps/frontend'
 
     - script: npm run build
       displayName: Build React App
+      workingDirectory: '$(System.DefaultWorkingDirectory)/apps/frontend'
       env:
         CI: false  # prevents CRA from treating warnings as errors
         REACT_APP_API_BASE_URL: $(REACT_APP_API_BASE_URL)
 
-    - publish: '$(System.DefaultWorkingDirectory)/build'
+    - publish: '$(System.DefaultWorkingDirectory)/apps/frontend/build'
       artifact: drop
 
 
