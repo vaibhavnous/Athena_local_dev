@@ -156,7 +156,7 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
   // Status hydration can return a sparse checkpoint snapshot after its detail query times out.
   // Keep the furthest known stage; a slower response must not move the UI back to an earlier phase.
   const sourceHint = incoming?.source || existing?.source
-  if (runProgressIndex(incoming, sourceHint) < runProgressIndex(existing, sourceHint)) {
+  if (!incomingTerminal && runProgressIndex(incoming, sourceHint) < runProgressIndex(existing, sourceHint)) {
     return preserveProgressFields(existing, merged)
   }
 
@@ -226,6 +226,16 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
   if (hasIncomingStatus && incomingTerminal) {
     if (incoming.next_gate === undefined || incoming.next_gate === null) merged.next_gate = null
     if (incoming.next_review_key === undefined || incoming.next_review_key === null) merged.next_review_key = null
+    if (incomingStatus === 'COMPLETED') {
+      for (const [key, stateKey] of [['stages', 'status'], ['pipeline_steps', 'state']] as const) {
+        if (!Array.isArray(merged[key])) continue
+        merged[key] = merged[key].map((step) =>
+          normalizeRunStatus(step?.[stateKey]) === 'RUNNING'
+            ? { ...step, [stateKey]: 'COMPLETED', ...(key === 'pipeline_steps' ? { complete: true } : {}) }
+            : step
+        )
+      }
+    }
   }
 
   return merged
