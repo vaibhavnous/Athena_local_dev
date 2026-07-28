@@ -20,6 +20,8 @@ Run backend commands from `apps/backend` and frontend commands from `apps/fronte
 
 Existing checkouts must copy ignored local configuration from `Athena_backend/.env` to `apps/backend/.env` and from `frontend/.env*` to `apps/frontend/` after pulling this layout change. Verify the copies before removing the old files; Git cannot move ignored local configuration.
 
+Azure deployment assets and operating notes are documented in [`devops/azure/README.md`](devops/azure/README.md). GitHub Actions remain in `.github/workflows/`, while root Azure Pipeline files are compatibility entry points.
+
 ---
 
 ## Product Summary

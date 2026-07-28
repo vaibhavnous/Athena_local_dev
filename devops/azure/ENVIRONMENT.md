@@ -1,17 +1,16 @@
 # Environment Variables
 
-This project currently deploys as one Azure App Service:
+Production deploys as two Azure resources:
 
-- FastAPI backend serves the API
-- React frontend is built in GitHub Actions
-- React build output is copied into `apps/backend/static`
-- The same App Service serves both UI and API
+- the FastAPI backend runs on Azure App Service
+- the React frontend runs on Azure Static Web Apps
+- GitHub Actions builds and deploys each application independently
 
-Because of that, production configuration is mostly backend App Service settings plus one GitHub Actions secret for deployment.
+Production configuration consists of backend App Service settings plus GitHub deployment secrets for both resources.
 
-## 1. Required For Azure DevOps Deployment
+## 1. Required For GitHub Actions Deployment
 
-Repository secret:
+Backend repository secret:
 
 ```text
 AZURE_WEBAPP_PUBLISH_PROFILE
@@ -23,12 +22,22 @@ Value:
 
 Used by:
 
-- `azure-pipelines-backend.yml`
+- `.github/workflows/main_Astra-data.yml`
 
 Notes:
 
 - Do not split the XML into multiple secrets
 - Do not add `azure/login` when you are using publish profile deployment
+
+Frontend repository secret:
+
+```text
+AZURE_STATIC_WEB_APPS_API_TOKEN_ASTRADATA
+```
+
+Used by:
+
+- `.github/workflows/azure-static-web-apps-black-sand-013f9d900.yml`
 
 ## 2. Required In Azure App Service Configuration
 
@@ -302,20 +311,21 @@ Notes:
 
 - Do not use `REACT_APP_API_ENDPOINT`
 - Current frontend code uses `REACT_APP_API_BASE_URL`
-- In Azure production build, the workflow sets `REACT_APP_API_BASE_URL=''` so the UI uses same-origin API calls
+- The production workflow sets `REACT_APP_API_BASE_URL` to the backend App Service URL
 
-## 10. Current Azure DevOps Production Behavior
+## 10. Current GitHub Actions Production Behavior
 
-Workflow:
+Workflows:
 
-- `azure-pipelines-backend.yml`
+- `.github/workflows/main_Astra-data.yml`
+- `.github/workflows/azure-static-web-apps-black-sand-013f9d900.yml`
 
 Current behavior:
 
-- builds React with `REACT_APP_API_BASE_URL=''`
-- copies frontend build into backend static folder
-- deploys backend + static frontend together to one App Service
-- health check uses:
+- packages and deploys `apps/backend` to Azure App Service
+- tests, builds, and deploys `apps/frontend` to Azure Static Web Apps
+- builds the frontend with the backend App Service URL
+- verifies backend health at:
 
 ```text
 https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net/health
@@ -327,6 +337,7 @@ https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net/health
 
 ```text
 AZURE_WEBAPP_PUBLISH_PROFILE
+AZURE_STATIC_WEB_APPS_API_TOKEN_ASTRADATA
 ```
 
 ### Azure App Service Application Settings

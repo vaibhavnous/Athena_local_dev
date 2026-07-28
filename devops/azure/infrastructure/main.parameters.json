@@ -11,11 +11,14 @@
     "environment": {
       "value": "dev"
     },
-    "sqlConnectionString": {
-      "value": "Server=YOUR_SQL_SERVER;Database=YOUR_DB;User Id=YOUR_USER;Password=YOUR_PASSWORD;"
+    "sqlDatabase": {
+      "value": "metadata"
     },
-    "apiKey": {
-      "value": "YOUR_API_KEY_HERE"
+    "sqlSchema": {
+      "value": "metadata"
+    },
+    "corsSites": {
+      "value": "http://localhost:3000,http://127.0.0.1:3000"
     }
   }
 }

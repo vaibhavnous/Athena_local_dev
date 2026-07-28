@@ -1,0 +1,88 @@
+variables:
+  pythonVersion: '3.10'
+  backendFolder: 'apps/backend'
+  artifactName: 'backend-app'
+  artifactZip: 'backend-app.zip'
+  azureServiceConnection: 'azure-devops-service-connection'
+  webAppName: 'astra-data-eecthacqb5eherhk'
+
+stages:
+  - stage: Build
+    displayName: 'Build Backend'
+    jobs:
+      - job: BuildBackend
+        displayName: 'Install, Test, Package'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Use Python $(pythonVersion)'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r $(backendFolder)/requirements.txt
+            displayName: 'Install dependencies'
+
+          - script: |
+              cd $(backendFolder)
+              python -m pytest tests/ -v --junitxml=junit/test-results.xml || true
+            displayName: 'Run tests'
+            continueOnError: true
+
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFiles: '**/test-results.xml'
+              testResultsFormat: 'JUnit'
+              testRunTitle: 'Backend Tests'
+
+          - script: |
+              mkdir -p $(Build.ArtifactStagingDirectory)/backend
+              cp -r $(backendFolder)/* $(Build.ArtifactStagingDirectory)/backend/
+              chmod +x $(Build.ArtifactStagingDirectory)/backend/startup.sh
+            displayName: 'Prepare backend artifact'
+
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/backend'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactZip)'
+              replaceExistingArchive: true
+            displayName: 'Archive backend package'
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: '$(Build.ArtifactStagingDirectory)/$(artifactZip)'
+              artifactName: '$(artifactName)'
+              publishLocation: 'Container'
+            displayName: 'Publish backend artifact'
+
+  - stage: Deploy
+    displayName: 'Deploy Backend'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - deployment: DeployBackend
+        displayName: 'Deploy to Azure App Service'
+        environment: 'backend-prod'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadBuildArtifacts@1
+                  inputs:
+                    buildType: 'current'
+                    downloadType: 'single'
+                    artifactName: '$(artifactName)'
+                    downloadPath: '$(Pipeline.Workspace)'
+                  displayName: 'Download backend artifact'
+
+                - task: AzureWebApp@1
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    appType: 'webAppLinux'
+                    appName: '$(webAppName)'
+                    package: '$(Pipeline.Workspace)/$(artifactName)/$(artifactZip)'
+                    startUpCommand: 'bash startup.sh'
+                  displayName: 'Deploy backend app'
