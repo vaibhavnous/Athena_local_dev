@@ -287,11 +287,11 @@ def _silver_output_column_name(value: Any) -> str:
     return SILVER_COLUMN_NAME_CORRECTIONS.get(normalized, normalized)
 
 
-def _date_grain_expr(grain: str, source_column: str) -> str:
+def _date_grain_expr(grain: str) -> str:
     grain = str(grain or "month").lower()
     if grain not in {"day", "week", "month", "quarter", "year"}:
         grain = "month"
-    return f"date_trunc('{grain}', col({source_column!r})).alias('period_start')"
+    return f"date_trunc('{grain}', col(TIME_COLUMN)).alias('period_start')"
 
 
 def _measure_expression(measure: Dict[str, Any], value_alias: str) -> str:
@@ -1082,6 +1082,14 @@ def _hash_columns(df, columns):
         return sha2(lit("__ALL__"), 256)
     return sha2(concat_ws("||", *expressions), 256)
 
+def _resolve_columns(df, requested_columns):
+    columns_by_name = {{name.casefold(): name for name in df.columns}}
+    return [
+        columns_by_name[str(name).casefold()]
+        for name in requested_columns
+        if str(name).casefold() in columns_by_name
+    ]
+
 for dim in DIMENSIONS:
     entity = dim["entity"]
     target_table = "{gold_schema}.dim_" + entity
@@ -1093,7 +1101,7 @@ for dim in DIMENSIONS:
         continue
 
     src = spark.table(dim_source_table)
-    natural_columns = [name for name in dim.get("columns", []) if name in src.columns]
+    natural_columns = _resolve_columns(src, dim.get("columns", []))
 
     if not natural_columns:
         print(f"WARNING: Skipping dimension {{target_table}} because no source columns are available")
@@ -1240,6 +1248,20 @@ if not spark.catalog.tableExists(SOURCE_TABLE):
 
 df = spark.table(SOURCE_TABLE)
 
+def _resolve_column(frame, requested_column):
+    if not requested_column:
+        return None
+    columns_by_name = {{name.casefold(): name for name in frame.columns}}
+    return columns_by_name.get(str(requested_column).casefold())
+
+def _resolve_columns(frame, requested_columns):
+    columns_by_name = {{name.casefold(): name for name in frame.columns}}
+    return [
+        columns_by_name[str(name).casefold()]
+        for name in requested_columns
+        if str(name).casefold() in columns_by_name
+    ]
+
 source_row_count = df.count()
 if source_row_count == 0:
     raise ValueError(f"Silver source table has no rows: {{SOURCE_TABLE}}")
@@ -1256,8 +1278,7 @@ if "silver_upsert_key" in df.columns:
         raise ValueError(f"Duplicate silver_upsert_key values found in {{SOURCE_TABLE}}")
 
 if MEASURE_AGGREGATION != "COUNT":
-    source_columns_by_name = {{name.casefold(): name for name in df.columns}}
-    resolved_measure_column = source_columns_by_name.get(MEASURE_COLUMN.casefold())
+    resolved_measure_column = _resolve_column(df, MEASURE_COLUMN)
     if not resolved_measure_column:
         raise ValueError(f"Gold measure column '{{MEASURE_COLUMN}}' is missing from {{SOURCE_TABLE}}")
     MEASURE_COLUMN = resolved_measure_column
@@ -1275,7 +1296,7 @@ if MEASURE_AGGREGATION != "COUNT":
             f"{{DQ_MAX_NULL_RATIO:.2%}} for {{SOURCE_TABLE}}.{{MEASURE_COLUMN}}"
         )
 
-profile_dimensions = list(dict.fromkeys(name for name in DIMENSION_COLUMNS if name in df.columns))
+profile_dimensions = list(dict.fromkeys(_resolve_columns(df, DIMENSION_COLUMNS)))
 if profile_dimensions:
     cardinalities = df.agg(
         *[approx_count_distinct(col(name)).alias(name) for name in profile_dimensions]
@@ -1284,7 +1305,13 @@ if profile_dimensions:
     if oversized:
         raise ValueError(f"Gold dimension cardinality exceeds limit: {{oversized}}")
 
-if TIME_COLUMN and TIME_COLUMN in df.columns:
+requested_time_column = TIME_COLUMN
+if requested_time_column:
+    TIME_COLUMN = _resolve_column(df, requested_time_column)
+    if not TIME_COLUMN:
+        print(f"WARNING: Dropping missing gold time column: {{requested_time_column}}")
+
+if TIME_COLUMN:
     time_field = next(field for field in df.schema.fields if field.name == TIME_COLUMN)
     if not isinstance(time_field.dataType, (DateType, TimestampType)):
         raise TypeError(
@@ -1345,18 +1372,23 @@ for index, path in enumerate(JOIN_PATHS):
     if not spark.catalog.tableExists(other_silver_table):
         print(f"WARNING: Missing join-path table: {{other_silver_table}}")
         continue
-    if base_column not in df.columns:
+    resolved_base_column = _resolve_column(df, base_column)
+    if not resolved_base_column:
         print(f"WARNING: Missing join-path base column: {{base_column}}")
         continue
+    base_column = resolved_base_column
 
     other_df = spark.table(other_silver_table)
-    if other_column not in other_df.columns:
+    resolved_other_column = _resolve_column(other_df, other_column)
+    if not resolved_other_column:
         print(f"WARNING: Missing join-path other column: {{other_column}} in {{other_silver_table}}")
         continue
+    other_column = resolved_other_column
+    df_column_names = {{name.casefold() for name in df.columns}}
     rename_map = {{
         name: f"{{other_table}}__{{name}}"
         for name in other_df.columns
-        if name in df.columns and name != other_column
+        if name.casefold() in df_column_names and name != other_column
     }}
     for old_name, new_name in rename_map.items():
         other_df = other_df.withColumnRenamed(old_name, new_name)
@@ -1372,9 +1404,12 @@ for index, path in enumerate(JOIN_PATHS):
     joined_logical_tables.add(other_table)
 
 available_columns = set(df.columns)
-missing_dimensions = [name for name in DIMENSION_COLUMNS if name not in available_columns]
+resolved_dimension_columns = _resolve_columns(df, DIMENSION_COLUMNS)
+resolved_dimension_names = {{name.casefold() for name in resolved_dimension_columns}}
+missing_dimensions = [name for name in DIMENSION_COLUMNS if str(name).casefold() not in resolved_dimension_names]
 if missing_dimensions:
     print(f"WARNING: Dropping missing gold dimensions: {{missing_dimensions}}")
+DIMENSION_COLUMNS = resolved_dimension_columns
 
 group_columns = []
 dimension_raw_columns = set()
@@ -1382,7 +1417,7 @@ for dim in DIMENSION_SPECS:
     entity = dim["entity"]
     target_dim_table = "{gold_schema}.dim_" + entity
     key_column = entity + "_key"
-    natural_columns = [name for name in dim.get("columns", []) if name in df.columns]
+    natural_columns = _resolve_columns(df, dim.get("columns", []))
     if not natural_columns:
         continue
     dimension_raw_columns.update(natural_columns)
@@ -1405,7 +1440,7 @@ group_columns.extend([
 ])
 
 if TIME_COLUMN and TIME_COLUMN in available_columns:
-    group_columns.append({_date_grain_expr(time_grain, time_column)})
+    group_columns.append({_date_grain_expr(time_grain)})
 elif TIME_COLUMN:
     print(f"WARNING: Gold time column '{{TIME_COLUMN}}' is missing from {{SOURCE_TABLE}}")
 

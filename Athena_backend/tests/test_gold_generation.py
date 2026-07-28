@@ -570,17 +570,42 @@ def test_databricks_gold_resolves_measure_column_case_insensitively():
             "column": "grossestimate",
             "aggregation": "AVG",
         },
-        "grouping_dimensions": [],
-        "time": {},
+        "grouping_dimensions": [
+            {
+                "table": "indemnity_outstanding_estimates",
+                "column": "claimid",
+                "semantic_type": "DIMENSION",
+            }
+        ],
+        "time": {
+            "grain": "month",
+            "column": {
+                "table": "indemnity_outstanding_estimates",
+                "column": "inserteddate",
+            },
+        },
         "filters": [],
-        "join_paths": [],
+        "join_paths": [
+            {
+                "left_table": "indemnity_outstanding_estimates",
+                "left_column": "claimid",
+                "right_table": "claim_information",
+                "right_column": "claimid",
+                "certified": True,
+            }
+        ],
     }
 
     code = gold_gen.generate_gold_script(mapping=mapping, run_id="run-column-case", gold_schema="gold_schema")
 
-    assert "source_columns_by_name = {name.casefold(): name for name in df.columns}" in code
-    assert "resolved_measure_column = source_columns_by_name.get(MEASURE_COLUMN.casefold())" in code
+    assert "columns_by_name = {name.casefold(): name for name in frame.columns}" in code
+    assert "resolved_measure_column = _resolve_column(df, MEASURE_COLUMN)" in code
     assert "MEASURE_COLUMN = resolved_measure_column" in code
+    assert "profile_dimensions = list(dict.fromkeys(_resolve_columns(df, DIMENSION_COLUMNS)))" in code
+    assert "resolved_base_column = _resolve_column(df, base_column)" in code
+    assert "resolved_other_column = _resolve_column(other_df, other_column)" in code
+    assert "TIME_COLUMN = _resolve_column(df, requested_time_column)" in code
+    assert "date_trunc('month', col(TIME_COLUMN))" in code
     assert "avg(col(MEASURE_COLUMN))" in code
     assert "if MEASURE_COLUMN not in df.columns:" not in code
 
