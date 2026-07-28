@@ -103,6 +103,36 @@ test('does not erase stage detail from a sparse hydration fallback', () => {
   expect(useAthenaStore.getState().runs[0].stages).toEqual([{ key: 'gold', status: 'RUNNING' }])
 })
 
+test('accepts sparse completion after the final background stage finishes', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-dbt',
+    status: 'RUNNING',
+    background_stage: 'gold_code_execution',
+    pipeline_steps: [
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_code_execution', state: 'RUNNING' },
+    ],
+  })
+
+  useAthenaStore.getState().updateRun('run-dbt', {
+    id: 'run-dbt',
+    status: 'PIPELINE_COMPLETED',
+    background_stage: null,
+    stages: [],
+    snowflake_gold_execution_status: 'COMPLETED',
+  })
+
+  expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    status: 'PIPELINE_COMPLETED',
+    background_stage: null,
+    pipeline_steps: [
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_code_execution', state: 'COMPLETED', complete: true },
+    ],
+  })
+})
+
 test('clears the completed-stage dialog when the next stage starts', () => {
   resetStore()
   useAthenaStore.getState().addRun({
