@@ -123,6 +123,7 @@ def run_pipeline_background(
     dbt_threads: Optional[int] = None,
     dbt_command_timeout_secs: Optional[int] = None,
     force_dbt_deploy: bool = False,
+    project_id: Optional[str] = None,
 ) -> None:
     started_at = time.monotonic()
     try:
@@ -138,6 +139,8 @@ def run_pipeline_background(
                 brd_filename=brd_filename,
                 sftp_entity=sftp_entity,
                 source=str(source or "sftp").lower(),
+                project_id=project_id,
+                target_warehouse=target_warehouse,
             )
         else:
             result = start_pipeline(
@@ -223,6 +226,7 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             dbt_threads=payload.dbt_threads,
             dbt_command_timeout_secs=payload.dbt_command_timeout_secs,
             force_dbt_deploy=bool(payload.force_dbt_deploy),
+            project_id=payload.project_id,
         )
         BACKGROUND_JOBS[job_key] = future
 

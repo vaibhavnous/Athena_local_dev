@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { fileVisibleStepKey } from '../utils/pipelinePhases'
 
 let notificationIdCounter = 0
 const HITL_SOURCE_RUN_IDS_KEY = 'athena.hitlSourceRunIds'
@@ -54,7 +55,7 @@ function normalizeRunStatus(value: any): string {
   return status
 }
 
-const PIPELINE_PROGRESS_ORDER = [
+const DATABASE_PROGRESS_ORDER = [
   'ingestion', 'memory', 'requirements', 'kpis', 'gate1',
   'nomination', 'gate2', 'discovery', 'profiling', 'enrichment', 'gate3',
   'bronze', 'gate4', 'bronze_code_execution',
@@ -62,20 +63,50 @@ const PIPELINE_PROGRESS_ORDER = [
   'gold', 'gold_code_execution',
 ]
 
-function runProgressIndex(run: any): number {
-  const order = new Map(PIPELINE_PROGRESS_ORDER.map((key, index) => [key, index]))
+const FILE_PROGRESS_ORDER = [
+  'ingestion', 'memory', 'requirements', 'kpis', 'gate1',
+  'feed_discovery', 'feed_nomination', 'gate2', 'column_extraction',
+  'column_profiling', 'semantic_enrichment', 'gate3',
+  'metadata_bootstrap', 'plan_seal', 'freshness_check', 'metadata_codegen', 'bronze_codegen', 'gate4',
+  'bronze_autoloader', 'bronze_dq',
+  'silver_merge_key_resolution', 'silver_merge_key_review', 'bronze_to_silver', 'silver_dq',
+  'silver_to_gold', 'gold_dq', 'gate5_publish', 'finalize',
+]
+
+function runProgressIndex(run: any, sourceHint?: string): number {
+  const source = String(run?.source || sourceHint || '').toLowerCase()
+  const fileSource = ['sftp', 'adls_gen2'].includes(source)
+  const progressOrder = fileSource ? FILE_PROGRESS_ORDER : DATABASE_PROGRESS_ORDER
+  const order = new Map(progressOrder.map((key, index) => [key, index]))
+  const progressKey = (value: any) => fileSource
+    ? fileVisibleStepKey(String(value || ''))
+    : String(value || '')
   const steps = Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length
     ? run.pipeline_steps
     : Array.isArray(run?.stages) ? run.stages : []
-  let furthest = -1
-
-  for (const step of steps) {
-    const state = normalizeRunStatus(step?.state ?? step?.status)
-    if (state !== 'PENDING') furthest = Math.max(furthest, order.get(String(step?.key || '')) ?? -1)
-  }
-
   const backgroundStage = String(run?.external_execution?.stage_key || run?.background_stage || '').trim()
-  return Math.max(furthest, order.get(backgroundStage) ?? -1)
+  const reviewStage = String(
+    run?.next_review_key ||
+    (Number(run?.next_gate || 0) ? `gate${Number(run.next_gate)}` : '')
+  ).trim()
+  const explicitFrontiers = [
+    order.get(progressKey(backgroundStage)) ?? -1,
+    order.get(progressKey(reviewStage)) ?? -1,
+    ...steps
+      .filter((step) => ['RUNNING', 'HITL_WAIT', 'FAILED'].includes(normalizeRunStatus(step?.state ?? step?.status)))
+      .map((step) => order.get(progressKey(step?.key)) ?? -1),
+  ]
+  const explicitFrontier = Math.max(...explicitFrontiers)
+
+  // ponytail: this monitor is a linear pipeline; an explicit running/review
+  // frontier outranks downstream artifacts left by a previous or partial run.
+  if (explicitFrontier >= 0) return explicitFrontier
+
+  return steps.reduce((furthest, step) => (
+    normalizeRunStatus(step?.state ?? step?.status) === 'COMPLETED'
+      ? Math.max(furthest, order.get(progressKey(step?.key)) ?? -1)
+      : furthest
+  ), -1)
 }
 
 function preserveProgressFields(existing: any, merged: any) {
@@ -124,7 +155,8 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
 
   // Status hydration can return a sparse checkpoint snapshot after its detail query times out.
   // Keep the furthest known stage; a slower response must not move the UI back to an earlier phase.
-  if (runProgressIndex(incoming) < runProgressIndex(existing)) {
+  const sourceHint = incoming?.source || existing?.source
+  if (runProgressIndex(incoming, sourceHint) < runProgressIndex(existing, sourceHint)) {
     return preserveProgressFields(existing, merged)
   }
 

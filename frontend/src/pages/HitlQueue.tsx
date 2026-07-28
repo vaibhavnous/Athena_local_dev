@@ -40,7 +40,7 @@ const REVIEW_HYDRATION_DELAY_MS = 1000
 const REVIEW_RUN_POLL_DELAY_MS = 1500
 const ENABLE_DEMO_REVIEW_FALLBACKS = ENABLE_DEMO_FALLBACKS
 
-function hasRenderableReviewData(review, gate, isFileSource) {
+export function hasRenderableReviewData(review, gate, isFileSource) {
   if (!review) return false
 
   if (gate === 1) {
@@ -48,9 +48,7 @@ function hasRenderableReviewData(review, gate, isFileSource) {
     return Boolean((review?.kpis || []).length)
   }
   if (gate === 2) {
-    return isFileSource
-      ? Boolean(review?.candidate_feed) || Boolean((review?.candidate_feeds || []).length) || Number(review?.next_gate || 0) === 2
-      : Boolean((review?.nominated_tables || []).length) || Number(review?.next_gate || 0) === 2
+    return hasGate2ReviewItems(review, isFileSource)
   }
   if (gate === 3) {
     return Boolean(
@@ -71,6 +69,12 @@ function hasRenderableReviewData(review, gate, isFileSource) {
   if (gate === 'gold_review') return Boolean((review?.gold_review_artifact?.items || []).length)
   if (gate === 5) return Boolean((review?.silver_review_artifact?.items || []).length)
   return false
+}
+
+export function hasGate2ReviewItems(review, isFileSource) {
+  return isFileSource
+    ? getSftpFeeds(review).length > 0
+    : Boolean((review?.nominated_tables || []).length)
 }
 
 async function waitForRenderableReview(fetcher, gate, isFileSource = false, attempts = REVIEW_HYDRATION_ATTEMPTS) {
@@ -1026,7 +1030,7 @@ function HitlQueue({ onClose = null }) {
         addNotification({
           type: 'error',
           title: activeReviewName + ' Load Failed',
-          message: error.message || (isGate2 ? 'Unable to load table review data.' : isGate3 ? 'Unable to load column review data.' : isGate4 ? 'Unable to load Bronze review data.' : isSilverMergeKeyReview ? 'Unable to load Silver merge-key review data.' : isGate5 ? 'Unable to load Silver review data.' : 'Unable to load KPI review data.'),
+          message: error.message || (isGate2 ? `Unable to load ${isSftpRun ? 'feed' : 'table'} review data.` : isGate3 ? 'Unable to load column review data.' : isGate4 ? 'Unable to load Bronze review data.' : isSilverMergeKeyReview ? 'Unable to load Silver merge-key review data.' : isGate5 ? 'Unable to load Silver review data.' : 'Unable to load KPI review data.'),
           duration: 5000
         })
       } finally {
@@ -1066,6 +1070,7 @@ function HitlQueue({ onClose = null }) {
   const reviewedTableCount = availableTableReviews.filter((table) => tableReviewDecisions[tableReviewKey(table)]).length
   const selectedFeedCount = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length
   const totalFeedCount = availableSftpFeeds.length
+  const gate2ContentReady = hasGate2ReviewItems(tableReview, isSftpRun)
   const bronzeReviewFeeds = useMemo(
     () => bronzeReview?.bronze_review_artifact?.feeds || [],
     [bronzeReview]
@@ -1745,7 +1750,7 @@ function HitlQueue({ onClose = null }) {
         status: hasQueueIds ? 'PROCESSING' : 'RUNNING',
         next_gate: null,
         kpis: [],
-        resume_message: `${gate1Name} submitted. Table extraction is starting.`,
+        resume_message: `${gate1Name} submitted. ${isSftpRun ? 'Source discovery' : 'Table extraction'} is starting.`,
       })
       setLocalDecisions({})
       setEditedKpis({})
@@ -1887,7 +1892,7 @@ function HitlQueue({ onClose = null }) {
                 <div className="min-w-0">
                   <h2 className="text-xl font-bold text-text-primary">Enrichment Review</h2>
                   <p className="text-sm text-text-secondary">
-                    Review semantic enrichment for {semanticReviewItems.length} table{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
+                    Review semantic enrichment for {semanticReviewItems.length} {isSftpRun ? 'feed' : 'table'}{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
                   </p>
                 </div>
               </div>
@@ -2192,7 +2197,9 @@ function HitlQueue({ onClose = null }) {
                   : isGate3
                   ? (semanticReviewSource?.resume_message || 'Stage 03 completed. Review semantic enrichment before the pipeline continues.')
                   : isGate2
-                  ? (tableReview?.resume_message || (isSftpRun ? 'Stage 02 completed. Review discovered feeds before the pipeline continues.' : 'Stage 02 completed. Review nominated tables before the pipeline continues.'))
+                  ? (isSftpRun
+                    ? `Review ${totalFeedCount || 'the'} discovered feed${totalFeedCount === 1 ? '' : 's'} before metadata extraction continues.`
+                    : 'Review the nominated tables before metadata extraction continues.')
                   : 'Stage 04 completed. Review KPIs before the pipeline continues.'}
               </p>
             </div>
@@ -2211,7 +2218,7 @@ function HitlQueue({ onClose = null }) {
             )}
 
             <button
-              onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isSilverMergeKeyReview || isGate5) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
+              onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
               className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
             >
               <CheckCircle size={18} className="text-[#12b886]" />
@@ -2362,7 +2369,7 @@ function HitlQueue({ onClose = null }) {
                   <div>
                     <h2 className="text-xl font-bold text-text-primary">Enrichment Review</h2>
                     <p className="text-sm text-text-secondary">
-                      Review semantic enrichment for {semanticReviewItems.length} table{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
+                      Review semantic enrichment for {semanticReviewItems.length} {isSftpRun ? 'feed' : 'table'}{semanticReviewItems.length !== 1 ? 's' : ''} before the pipeline continues.
                     </p>
                   </div>
                 </div>
@@ -2443,9 +2450,9 @@ function HitlQueue({ onClose = null }) {
               </div>
             </motion.div>
             ) : isGate2 ? (
-            hydrating ? (
+            hydrating && !gate2ContentReady ? (
               <div className="flex min-h-[180px] items-center justify-center rounded-2xl border border-[#22304b] bg-[#0b1424] p-6 text-sm text-[#9fb0ca]">
-                <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin text-[#4fa3ff]" /> Loading table review artifacts…</span>
+                <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin text-[#4fa3ff]" /> Loading {isSftpRun ? 'feed' : 'table'} review artifacts...</span>
               </div>
             ) : (isSftpRun
               ? (availableSftpFeeds.length === 0)
@@ -2586,7 +2593,7 @@ function HitlQueue({ onClose = null }) {
                   style={{
                     width: `${isGate3
                       ? 100
-                      : isGate4 || isSilverMergeKeyReview || isGate5
+                      : isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview
                       ? (activeCodeReviewItems.length > 0 ? (reviewedCodeReviewCount / activeCodeReviewItems.length) * 100 : (gateReviewReady ? 100 : 0))
                       : isGate2
                       ? (isSftpRun
@@ -2604,16 +2611,16 @@ function HitlQueue({ onClose = null }) {
               <Timer size={14} className="text-accent-amber" />
               <span className="text-xs font-medium text-gray-300">Review State</span>
             </div>
-            <p className="text-2xl font-mono font-bold text-accent-amber">{hydrating ? 'SYNC' : 'READY'}</p>
+            <p className="text-2xl font-mono font-bold text-accent-amber">{hydrating && !(isGate2 && gate2ContentReady) ? 'SYNC' : 'READY'}</p>
             <p className="text-[10px] text-gray-600 mt-1">Pipeline is paused</p>
           </div>
 
           <button
-            onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isSilverMergeKeyReview || isGate5) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
+            onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
             className="flex items-center justify-center gap-2 px-4 py-3 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/25 text-accent-green text-sm font-semibold rounded-xl transition-colors"
           >
             <CheckCircle size={15} />
-            {isGate3 ? 'Auto-Approve Pending' : isGate4 || isSilverMergeKeyReview || isGate5 ? 'Auto-Approve Pending' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
+            {isGate3 ? 'Auto-Approve Pending' : isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview ? 'Auto-Approve Pending' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
           </button>
 
           <div className="rounded-[20px] border border-[#22304b] bg-[#0d1729] p-3">
@@ -2622,7 +2629,7 @@ function HitlQueue({ onClose = null }) {
               <p className="text-[10px] text-gray-600 leading-relaxed">
                 {isGate2
                   ? (isSftpRun
-                    ? `${gate2Name} validates the discovered SFTP feeds. Review entity, source file, sample rows, columns, keys, and measures before approving the feed set.`
+                    ? `${gate2Name} validates the discovered file feeds. Review entity, source file, sample rows, columns, keys, and measures before approving the feed set.`
                     : 'Certified tables become the source set for metadata discovery, profiling, and enrichment.')
                   : isGate3
                   ? `Approving ${gate3Name} generates Bronze review artifacts. Rejecting keeps the run paused for rework.`
@@ -2639,7 +2646,7 @@ function HitlQueue({ onClose = null }) {
         </div>
       </div>
 
-      {canSubmitReview && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5 && (
+      {canSubmitReview && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5 && !isGoldReview && (
         <motion.div
           initial={{ y: 80, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
@@ -3637,7 +3644,7 @@ function CodeReviewSummary({ item, onMergeKeysChange }) {
         <div>
           <div className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-[#9ca9bd]">
             <KeyRound size={13} className="text-[#69a0ff]" />
-            {item.type === 'BRONZE' ? 'Resolve Merge Keys' : 'Resolved Merge Keys'}
+            {item.type === 'BRONZE' ? 'Resolve Merge Keys' : 'Review Merge Keys'}
           </div>
           {canEditMergeKeys ? (
             <>

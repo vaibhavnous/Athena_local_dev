@@ -130,8 +130,6 @@ def _resolve_databricks_source_path(
         feed.get("databricks_source_path"),
         feed.get("landing_path"),
         feed.get("cloud_path"),
-        state.get("databricks_source_path"),
-        state.get("landing_path"),
     ]
 
     for candidate in candidates:
@@ -154,6 +152,13 @@ def _resolve_databricks_source_path(
             if remote_name and "." in remote_name:
                 return abfss_path.rsplit("/", 1)[0].rstrip("/") + "/"
             return abfss_path.rstrip("/") + "/"
+
+    # A run-level path is only a fallback. Choosing it before remote_path makes
+    # every generated entity script read the same ADLS root.
+    for candidate in (state.get("databricks_source_path"), state.get("landing_path")):
+        candidate_str = str(candidate or "").strip()
+        if candidate_str and _is_databricks_readable_path(candidate_str):
+            return candidate_str
 
     if source_type != "sftp":
         root_path = _adls_abfss_from_root(entity)
@@ -737,30 +742,24 @@ def _project_bronze_df(source_df):
     return source_df.select(*(projected + extra_columns)) if projected or extra_columns else source_df
 
 
+reader = (
+    spark.readStream
+    .format("cloudFiles")
+    .option("cloudFiles.format", FILE_FORMAT)
+    .option("cloudFiles.schemaLocation", SCHEMA_LOCATION)
+    .option("cloudFiles.inferColumnTypes", "true")
+)
+
 if FILE_FORMAT == "csv":
-    df = (
-        spark.read
-        .format("csv")
-        .option("header", "true")
-        .option("inferSchema", "true")
-        .load(SOURCE_PATH)
-    )
+    df = reader.option("header", "true").load(SOURCE_PATH)
 elif FILE_FORMAT == "json":
-    df = spark.read.format("json").load(SOURCE_PATH)
+    df = reader.load(SOURCE_PATH)
 elif FILE_FORMAT == "xml":
-    df = (
-        spark.read
-        .format("xml")
-        .option("rowTag", ROW_TAG)
-        .load(SOURCE_PATH)
-    )
+    df = reader.option("rowTag", ROW_TAG).load(SOURCE_PATH)
     flattened_columns = _flatten_columns(df.schema, ROW_TAG, "")
     df = df.select(*flattened_columns) if flattened_columns else df
 else:
     raise ValueError(f"Unsupported FILE_FORMAT: {{FILE_FORMAT}}")
-
-if df.limit(1).count() == 0:
-    raise ValueError(f"No records found in Bronze source path: {{SOURCE_PATH}}")
 
 if DEBUG:
     print("Available columns:", df.columns)
@@ -784,13 +783,15 @@ target_schema = ".".join(TARGET_TABLE.split(".")[:-1])
 if target_schema:
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {{target_schema}}")
 
-(
-    bronze_df.write
+query = (
+    bronze_df.writeStream
     .format("delta")
-    .mode("append")
+    .option("checkpointLocation", CHECKPOINT_PATH)
     .option("mergeSchema", "true")
-    .saveAsTable(TARGET_TABLE)
+    .trigger(availableNow=True)
+    .toTable(TARGET_TABLE)
 )
+query.awaitTermination()
 
 row_count = spark.table(TARGET_TABLE).count()
 print(f"Bronze ingestion completed: {{TARGET_TABLE}}")
@@ -822,6 +823,12 @@ def _validate_plan(plan: Dict[str, Any]) -> List[str]:
     if not cfg.get("target_table"):
         issues.append("target_table_missing")
 
+    if not cfg.get("checkpoint_path"):
+        issues.append("checkpoint_path_missing")
+
+    if not cfg.get("schema_location"):
+        issues.append("schema_location_missing")
+
     if cfg.get("file_format") == "xml" and not cfg.get("row_tag"):
         issues.append("xml_row_tag_missing")
 
@@ -837,6 +844,9 @@ def _validate_plan(plan: Dict[str, Any]) -> List[str]:
     if not script:
         issues.append("script_missing")
         return issues
+
+    if ".readStream" not in script or "cloudFiles" not in script or "checkpointLocation" not in script:
+        issues.append("incremental_autoloader_missing")
 
     try:
         compile(script, "<bronze_script>", "exec")
@@ -894,6 +904,7 @@ def sftp_bronze_code_generation_node(state: Stage01State) -> Stage01State:
         or f"sftp_bronze_{datetime.now(timezone.utc).timestamp()}"
     )
     pipeline_version = str(state.get("pipeline_version") or "v1")
+    target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
 
     approved_feeds = [
         feed
@@ -921,7 +932,26 @@ def sftp_bronze_code_generation_node(state: Stage01State) -> Stage01State:
             return new_state
 
         config_json = _bronze_config(feed, schema, state)
-        script_text = _generate_script(config_json, run_id, pipeline_version)
+        snowflake_result: Dict[str, Any] = {}
+        if target_warehouse == "snowflake":
+            from nodes.bronze_gen import _generate_one_table
+
+            entity = str(config_json.get("entity") or feed.get("entity") or "source")
+            snowflake_result = _generate_one_table(
+                {
+                    "database_name": str(state.get("snowflake_source_database") or os.getenv("SNOWFLAKE_SOURCE_DATABASE") or "insurance"),
+                    "schema_name": str(state.get("snowflake_source_schema") or os.getenv("SNOWFLAKE_SOURCE_SCHEMA") or "dbo"),
+                    "table_name": entity,
+                },
+                run_id=run_id,
+                bronze_catalog=str(state.get("bronze_catalog") or os.getenv("BRONZE_CATALOG") or "main"),
+                bronze_schema=str(state.get("bronze_schema") or os.getenv("BRONZE_SCHEMA") or "bronze"),
+                table_metadata={"columns": schema.get("schema_json") or []},
+                target_warehouse="snowflake",
+            )
+            script_text = Path(str(snowflake_result["script_path"])).read_text(encoding="utf-8")
+        else:
+            script_text = _generate_script(config_json, run_id, pipeline_version)
 
         plan = {
             "run_id": run_id,
@@ -940,6 +970,9 @@ def sftp_bronze_code_generation_node(state: Stage01State) -> Stage01State:
             "bronze_config": config_json,
             "generated_bronze_config": config_json,
             "generated_bronze_script": script_text,
+            "target_warehouse": target_warehouse,
+            "script_language": "sql" if target_warehouse == "snowflake" else "python",
+            **snowflake_result,
             "schema_version": config_json.get("schema_version"),
             "schema_fingerprint": config_json.get("schema_fingerprint"),
             "primary_keys": config_json.get("primary_keys"),
@@ -954,9 +987,10 @@ def sftp_bronze_code_generation_node(state: Stage01State) -> Stage01State:
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        plan["validation_issues"] = _validate_plan(plan)
+        plan["adls_file"] = str(feed.get("remote_path") or "").strip().lstrip("/")
+        plan["validation_issues"] = [] if target_warehouse == "snowflake" else _validate_plan(plan)
         plan["plan_valid"] = len(plan["validation_issues"]) == 0
-        plan["artifact_path"] = _write_plan_artifact(plan)
+        plan["artifact_path"] = str(snowflake_result.get("script_path") or _write_plan_artifact(plan))
 
         persist_bronze_execution_plan(plan)
         plans.append(plan)
@@ -975,6 +1009,8 @@ def sftp_bronze_code_generation_node(state: Stage01State) -> Stage01State:
                 "script_body": plan["generated_bronze_script"],
                 "status": "COMPLETED" if plan["plan_valid"] else "INVALID",
                 "validation_issues": plan["validation_issues"],
+                "target_warehouse": plan["target_warehouse"],
+                "script_language": plan["script_language"],
             }
             for plan in plans
         ],
@@ -1001,6 +1037,7 @@ def sftp_bronze_code_generation_node(state: Stage01State) -> Stage01State:
         "feeds": [
             {
                 "feed_summary": plan["feed_summary"],
+                "feed_id": plan["feed_id"],
                 "source_type": plan["source_type"],
                 "vendor": plan["vendor"],
                 "entity": plan["entity"],
@@ -1017,6 +1054,14 @@ def sftp_bronze_code_generation_node(state: Stage01State) -> Stage01State:
                 "schema_location": plan["schema_location"],
                 "generated_bronze_config": plan["generated_bronze_config"],
                 "generated_bronze_script": plan["generated_bronze_script"],
+                "target_warehouse": plan["target_warehouse"],
+                "script_language": plan["script_language"],
+                "script_path": plan["artifact_path"],
+                "table": plan.get("table") or plan["entity"],
+                "database_name": plan.get("database_name"),
+                "schema_name": plan.get("schema_name"),
+                "source_columns": plan.get("source_columns") or [],
+                "adls_file": plan.get("adls_file"),
                 "validation_checklist": plan["validation_checklist"],
                 "validation_issues": plan["validation_issues"],
                 "plan_valid": plan["plan_valid"],

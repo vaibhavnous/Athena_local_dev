@@ -323,6 +323,61 @@ _REVIEW_IDENTITY_FIELDS = (
 )
 
 
+def _script_target_table(script: Dict[str, Any]) -> str:
+    target = str(
+        script.get("target_table")
+        or script.get("silver_table")
+        or script.get("gold_table")
+        or script.get("bronze_table")
+        or ""
+    ).strip()
+    if target:
+        return target
+    match = re.search(
+        r"(?m)^\s*TARGET_TABLE\s*=\s*r?[\"']([^\"']+)[\"']",
+        _read_script_text(script),
+    )
+    return str(match.group(1)).strip() if match else ""
+
+
+def _target_verification_code(target_table: str) -> str:
+    encoded_target = json.dumps(str(target_table or ""))
+    return f"""
+
+_ATHENA_TARGET_TABLE = {encoded_target}
+if not _ATHENA_TARGET_TABLE:
+    raise RuntimeError("Generated script did not declare a target table.")
+if not spark.catalog.tableExists(_ATHENA_TARGET_TABLE):
+    raise RuntimeError(f"Target table was not created: {{_ATHENA_TARGET_TABLE}}")
+_ATHENA_TARGET_ROW_COUNT = spark.table(_ATHENA_TARGET_TABLE).limit(1).count()
+if _ATHENA_TARGET_ROW_COUNT < 1:
+    raise RuntimeError(f"Target table is empty: {{_ATHENA_TARGET_TABLE}}")
+""".rstrip()
+
+
+def _script_keys(script: Dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for field in ("table", "table_name", "entity", "target_table", "source_table", "silver_table", "bronze_table", "kpi_name", "script_name"):
+        value = str(script.get(field) or "").strip()
+        if not value:
+            continue
+        folded = value.casefold()
+        keys.add(folded)
+        simple = value.split(".")[-1].strip('"').casefold()
+        if simple:
+            keys.add(simple)
+            for prefix in ("bronze_", "silver_", "gold_"):
+                if simple.startswith(prefix):
+                    keys.add(simple[len(prefix):])
+    script_path = str(script.get("script_path") or "").strip()
+    if script_path:
+        keys.add(script_path.casefold())
+        stem = Path(script_path).stem.casefold()
+        if stem:
+            keys.add(stem)
+    return keys
+
+
 def _review_match_score(script: Dict[str, Any], item: Dict[str, Any]) -> int:
     # Prefer the approved target identity over stale secondary metadata such as a
     # script path copied by an earlier bad review match.
@@ -414,7 +469,7 @@ def _scripts_for_layer(state: Dict[str, Any], layer: str, review_artifact: Optio
         approved_scripts = [
             script
             for script in scripts
-            if str(script.get("status") or "APPROVED").upper() == "APPROVED"
+            if str(script.get("status") or "APPROVED").upper() in {"APPROVED", "COMPLETED", "SUCCESS"}
             and (script.get("script_body") or script.get("script_path"))
         ]
         dimension_scripts: List[Dict[str, Any]] = []
@@ -486,7 +541,7 @@ def _build_batch_driver_notebook(layer: str, scripts: List[Dict[str, Any]], *, w
         {
             "script_name": _script_name(script),
             "script_path": str(script.get("script_path") or "").strip(),
-            "target_table": script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
+            "target_table": _script_target_table(script),
             "script_text": _read_script_text(script),
         }
         for script in scripts
@@ -835,7 +890,8 @@ def _execute_databricks_stage(
         script_path = str(script.get("script_path") or "").strip()
         script_name = _script_name(script)
         notebook_path = _workspace_path(layer, run_id, script_name)
-        script_text = _read_script_text(script)
+        target_table = _script_target_table(script)
+        script_text = f"{_read_script_text(script)}\n{_target_verification_code(target_table)}"
         logger.info(
             "Submitting Databricks %s script %d/%d for %s",
             layer,
@@ -857,7 +913,7 @@ def _execute_databricks_stage(
             completed_count=len(executed_scripts),
             current_index=index,
             current_name=script_name,
-            current_target=script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
+            current_target=target_table,
             message=f"Databricks {layer.capitalize()} execution running: table {index}/{len(scripts)} ({script_name}).",
         )
         started_at = time.monotonic()
@@ -883,7 +939,7 @@ def _execute_databricks_stage(
                 completed_count=len(executed_scripts),
                 current_index=index,
                 current_name=script_name,
-                current_target=script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
+                current_target=target_table,
                 message=failure,
             )
             raise RuntimeError(failure)
@@ -900,6 +956,9 @@ def _execute_databricks_stage(
                 "result_state": run_state.get("result_state"),
                 "state_message": run_state.get("state_message"),
                 "elapsed_seconds": elapsed_seconds,
+                "target_table": target_table,
+                "target_verified": True,
+                "target_row_count_at_least": 1,
             }
         )
         state = save_external_execution_progress(
@@ -913,7 +972,7 @@ def _execute_databricks_stage(
             completed_count=len(executed_scripts),
             current_index=index,
             current_name=script_name,
-            current_target=script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
+            current_target=target_table,
             message=f"Databricks {layer.capitalize()} execution progress: {len(executed_scripts)}/{len(scripts)} completed.",
         )
 

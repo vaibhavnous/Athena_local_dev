@@ -106,7 +106,7 @@ test('shows Gold execution as waiting while generated Gold code is under review'
   })
 })
 
-test('does not leave completed Bronze and Silver phases pending after Gold fails', () => {
+test('does not invent Bronze or Silver execution success from later Gold progress', () => {
   const run = {
     status: 'FAILED',
     pipeline_steps: [
@@ -124,9 +124,26 @@ test('does not leave completed Bronze and Silver phases pending after Gold fails
   }
 
   const phases = getPhaseGroups(run, getPipelineSteps(run))
-  expect(phases.find((phase) => phase.id === 'phase-3')?.status).toBe('Done')
-  expect(phases.find((phase) => phase.id === 'phase-4')?.status).toBe('Done')
+  expect(phases.find((phase) => phase.id === 'phase-3')?.status).toBe('Pending')
+  expect(phases.find((phase) => phase.id === 'phase-4')?.status).toBe('Pending')
   expect(phases.find((phase) => phase.id === 'phase-5')?.status).toBe('Failed')
+})
+
+test('keeps the ADLS merge-key review visible as its own Silver-stage gate', () => {
+  const run = {
+    source: 'adls_gen2',
+    status: 'HITL_WAIT',
+    next_review_key: 'silver_merge_key_review',
+    pipeline_steps: [
+      { key: 'silver_merge_key_resolution', state: 'COMPLETED' },
+      { key: 'silver_merge_key_review', state: 'PENDING' },
+      { key: 'silver', state: 'PENDING' },
+    ],
+  }
+
+  expect(phaseState(run, 'phase-5', 'silver_merge_key_resolution')).toBe('COMPLETED')
+  expect(phaseState(run, 'phase-5', 'silver_merge_key_review')).toBe('HITL_WAIT')
+  expect(phaseState(run, 'phase-5', 'bronze_to_silver')).toBe('PENDING')
 })
 
 test('uses the project name instead of rendering a run ID as the pipeline name', () => {
@@ -137,4 +154,107 @@ test('uses the project name instead of rendering a run ID as the pipeline name',
     project_name: 'Vialto',
     source: 'database',
   })).toBe('Vialto')
+})
+
+test('uses the six-phase SFTP and ADLS workflow without changing database phases', () => {
+  const run = {
+    source: 'adls_gen2',
+    status: 'RUNNING',
+    background_stage: 'bronze_code_execution',
+    pipeline_steps: [
+      { key: 'pre_bronze_bootstrap_metadata', state: 'COMPLETED' },
+      { key: 'plan_seal', state: 'COMPLETED' },
+      { key: 'plan_freshness', state: 'COMPLETED' },
+      { key: 'pre_bronze_metadata_codegen', state: 'COMPLETED' },
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
+      { key: 'bronze_code_execution', state: 'RUNNING' },
+    ],
+  }
+
+  const phases = getPhaseGroups(run, getPipelineSteps(run))
+
+  expect(phases.map((phase) => phase.label)).toEqual([
+    'Discovery & Requirement Intelligence',
+    'Feed & Metadata Intelligence',
+    'Metadata Preparation & Bronze Review',
+    'Bronze Layer (Ingestion & DQ)',
+    'Silver Layer (Transformation & DQ)',
+    'Gold Layer & Deployment',
+  ])
+  expect(phases.find((phase) => phase.id === 'phase-2')?.steps.map((step) => step.key)).toEqual([
+    'feed_discovery',
+    'feed_nomination',
+    'gate2',
+    'column_extraction',
+    'column_profiling',
+    'semantic_enrichment',
+    'gate3',
+  ])
+  expect(phases.find((phase) => phase.id === 'phase-3')?.steps.map((step) => step.key)).toEqual([
+    'metadata_bootstrap',
+    'plan_seal',
+    'freshness_check',
+    'metadata_codegen',
+    'bronze_codegen',
+    'gate4',
+  ])
+  expect(phaseState(run, 'phase-4', 'bronze_autoloader')).toBe('RUNNING')
+  expect(phases.find((phase) => phase.id === 'phase-6')?.steps.map((step) => step.key)).toEqual([
+    'silver_to_gold',
+    'gold_dq',
+    'gate5_publish',
+    'finalize',
+  ])
+})
+
+test('shows Gate 4 as Bronze Review without inventing a metadata review gate', () => {
+  const run = {
+    source: 'adls_gen2',
+    status: 'HITL_WAIT',
+    next_gate: 4,
+    pipeline_steps: [
+      { key: 'pre_bronze_metadata_codegen', state: 'COMPLETED' },
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'PENDING' },
+    ],
+  }
+
+  const phases = getPhaseGroups(run, getPipelineSteps(run))
+  const phase = phases.find((item) => item.id === 'phase-3')
+  expect(phase?.steps.find((step) => step.key === 'gate4')?.state).toBe('HITL_WAIT')
+  expect(phase?.steps.some((step) => step.label.includes('Metadata Codegen Review'))).toBe(false)
+})
+
+test('maps the legacy SFTP Gold review onto the visible final publish review', () => {
+  const run = {
+    source: 'sftp',
+    status: 'HITL_WAIT',
+    next_review_key: 'gold_review',
+    pipeline_steps: [
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'PENDING' },
+      { key: 'gold_code_execution', state: 'PENDING' },
+    ],
+  }
+
+  expect(phaseState(run, 'phase-6', 'gate5_publish')).toBe('HITL_WAIT')
+  expect(phaseState(run, 'phase-6', 'silver_to_gold')).toBe('PENDING')
+})
+
+test('shows only the furthest SFTP phase as running for legacy partial snapshots', () => {
+  const run = {
+    source: 'adls_gen2',
+    status: 'RUNNING',
+    pipeline_steps: [
+      { key: 'ingestion', state: 'RUNNING' },
+      { key: 'discovery', state: 'RUNNING' },
+    ],
+  }
+
+  const phases = getPhaseGroups(run, getPipelineSteps(run))
+
+  expect(phases.find((phase) => phase.id === 'phase-1')?.status).not.toBe('Running')
+  expect(phases.find((phase) => phase.id === 'phase-2')?.status).toBe('Running')
+  expect(phases.filter((phase) => phase.status === 'Running')).toHaveLength(1)
 })

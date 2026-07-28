@@ -28,6 +28,10 @@ def configurations() -> List[Dict[str, Any]]:
     from utilis.db import config
 
     db_conf = config["azure_sql"]
+    account_url = os.getenv("ADLS_ACCOUNT_URL", "https://atheastorage.dfs.core.windows.net").strip()
+    account_name = account_url.split("://")[-1].split(".", 1)[0]
+    file_system = os.getenv("ADLS_FILE_SYSTEM", "athena").strip()
+    source_root = os.getenv("ADLS_SOURCE_ROOT", "INSURANCE_SFTP/insurance").strip().strip("/")
     return [
         {
             "id": "azure_sql_default",
@@ -41,7 +45,16 @@ def configurations() -> List[Dict[str, Any]]:
             "username": db_conf.get("source_username"),
             "driverClass": "com.microsoft.sqlserver.jdbc.SQLServerDriver",
             "jdbcUrl": "",
-        }
+        },
+        {
+            "id": "sftp_adls_insurance",
+            "name": "Insurance ADLS Gen2",
+            "sourceType": "data_lake",
+            "integrationType": "SFTP",
+            "dataLakeSourceType": "ADLS",
+            "basePath": f"abfss://{file_system}@{account_name}.dfs.core.windows.net/{source_root}",
+            "directoryName": source_root,
+        },
     ]
 
 

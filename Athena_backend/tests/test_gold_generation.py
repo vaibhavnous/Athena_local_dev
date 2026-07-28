@@ -840,7 +840,7 @@ def test_databricks_gold_submits_approved_scripts_as_one_batch(monkeypatch):
     assert len(result["databricks_gold_execution_results"]) == 2
 
 
-def test_databricks_gold_batch_success_survives_output_poll_failure(monkeypatch):
+def test_databricks_gold_batch_refuses_unverifiable_output(monkeypatch):
     monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
     monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_EXECUTION_MODE", raising=False)
     monkeypatch.delenv("ATHENA_DATABRICKS_EXECUTION_MODE", raising=False)
@@ -889,6 +889,7 @@ def test_databricks_batch_notebook_fails_the_job_when_any_script_fails():
     assert 'exec(compile(_item.get("script_text") or "", f"<athena:{_name}>", "exec"), _script_globals)' in notebook
     assert '_SCRIPTS_OK = builtins.sum(' in notebook
     assert "_SCRIPTS_OK >= _SCRIPTS_FAILED" in notebook
+    assert "spark.catalog.tableExists(_target)" in notebook
     assert notebook.index('raise RuntimeError(json.dumps(_SUMMARY') < notebook.index("dbutils.notebook.exit")
 
 

@@ -24,12 +24,16 @@ def test_start_sftp_pipeline_normalizes_entity_and_invokes_graph(monkeypatch):
         brd_filename="SFTP Upload",
         sftp_entity="invalid",
         source="sftp",
+        project_id="project-1",
+        target_warehouse="snowflake",
     )
 
     assert result["run_id"] == "run-sftp"
     assert result["result"]["status"] == "COMPLETED"
     assert captured["state"]["brd_filename"] == "SFTP Upload"
     assert captured["state"]["sftp_entity"] == "transactions"
+    assert captured["state"]["project_id"] == "project-1"
+    assert captured["state"]["target_warehouse"] == "snowflake"
 
 
 def test_start_sftp_pipeline_uses_auto_entity_for_adls(monkeypatch):
@@ -214,6 +218,24 @@ def test_get_sftp_run_context_does_not_open_gate2_before_source_discovery(monkey
     assert "Feed review will open" in context["resume_message"]
 
 
+def test_sftp_gate2_replaces_running_stage_copy_with_review_state(monkeypatch):
+    monkeypatch.delenv("ATHENA_SFTP_HITL_AUTO", raising=False)
+
+    result = governance.sftp_gate2_node({
+        "run_id": "run-feed-review",
+        "source": "adls_gen2",
+        "status": "RUNNING",
+        "background_stage": "discovery",
+        "resume_message": "Column Extraction is running.",
+        "candidate_feeds": [{"entity": "claims"}, {"entity": "policies"}],
+    })
+
+    assert result["status"] == "HITL_WAIT"
+    assert result["background_stage"] is None
+    assert result["next_gate"] == 2
+    assert result["resume_message"] == "Feed Review is pending. Review 2 discovered feeds before continuing."
+
+
 def test_get_sftp_run_context_handles_script_loader_failure(monkeypatch):
     checkpoint = {
         "run_id": "run-script",
@@ -224,6 +246,8 @@ def test_get_sftp_run_context_handles_script_loader_failure(monkeypatch):
         "gate4": {"decision": "APPROVED"},
         "gate5": {"decision": "APPROVED"},
         "gold_generation_status": "COMPLETED",
+        "target_warehouse": "databricks",
+        "databricks_gold_execution_status": "COMPLETED",
     }
     summary = [{"artifact_type": "GOLD_SCRIPTS", "stage": "gold generation"}]
 

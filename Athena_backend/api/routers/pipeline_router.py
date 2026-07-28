@@ -86,6 +86,7 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "brd_filename": checkpoint.get("brd_filename") or run_id,
             "provider": checkpoint.get("provider") or "azure_openai",
             "deployment": checkpoint.get("deployment"),
+            "target_warehouse": checkpoint.get("target_warehouse"),
             "execution_engine": checkpoint.get("execution_engine") or "native",
             "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or "generate_only",
             "dbt_target_name": checkpoint.get("dbt_target_name"),
@@ -296,6 +297,13 @@ def run_pipeline(payload: PipelineRunRequest, user: AuthUser = Depends(get_curre
         payload = payload.model_copy(update={"dbt_project_object_name": None})
 
     source = str(payload.source or "database").lower()
+    target_warehouse = str(payload.target_warehouse or "").strip().lower()
+    if target_warehouse not in {"databricks", "snowflake"}:
+        raise HTTPException(
+            status_code=400,
+            detail="target_warehouse must be Databricks or Snowflake; this run will not use a simulated target.",
+        )
+    payload.target_warehouse = target_warehouse
 
     capacity = background_capacity_snapshot()
     if capacity["available"] <= 0:

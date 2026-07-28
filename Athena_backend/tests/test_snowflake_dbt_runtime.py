@@ -751,6 +751,7 @@ def test_dbt_pipeline_steps_show_codegen_and_validation_state():
         checkpoint={
             "target_warehouse": "snowflake",
             "execution_engine": "dbt",
+            "dbt_deployment_mode": "generate_and_deploy",
             "status": "RUNNING",
             "background_stage": "snowflake_dbt_codegen",
         },
@@ -768,13 +769,13 @@ def test_dbt_pipeline_steps_show_codegen_and_validation_state():
     by_key = {step["key"]: step for step in steps}
 
     assert by_key["bronze"]["label"] == "Bronze dbt Model Generation"
-    assert by_key["bronze_code_execution"]["label"] == "Bronze dbt Models Ready"
+    assert by_key["bronze_code_execution"]["label"] == "Bronze dbt Models Staged"
     assert by_key["silver"]["label"] == "Silver dbt Model Generation"
-    assert by_key["silver_code_execution"]["label"] == "Silver dbt Models Ready"
+    assert by_key["silver_code_execution"]["label"] == "Silver dbt Models Staged"
     assert by_key["gold"]["label"] == "Gold dbt Model Generation"
-    assert by_key["gold_code_execution"]["label"] == "dbt Static Dependency Check"
+    assert by_key["gold_code_execution"]["label"] == "dbt Project Build & Deployment"
     assert by_key["gold_code_execution"]["state"] == "RUNNING"
-    assert "dbt parse/build and Snowflake execution are outside Astra" in by_key["gold_code_execution"]["detail"]
+    assert "validated, deployed, and built in Snowflake" in by_key["gold_code_execution"]["detail"]
 
 
 def test_dbt_gold_bundle_does_not_expose_native_dimension_companion():

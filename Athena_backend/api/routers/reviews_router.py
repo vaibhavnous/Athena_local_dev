@@ -369,7 +369,6 @@ def submit_bronze_reviews(
     from api.services.ui_service import bronze_review_from_scripts
     from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate4_review
     from sftp_nodes.hitl import submit_sftp_gate4_review
-    from services.databricks_runtime import databricks_bronze_execution_enabled
 
     logger.info("Submitting bronze review", extra={"run_id": run_id, "action": payload.action})
 
@@ -391,13 +390,7 @@ def submit_bronze_reviews(
         stage = (
             "bronze_code_execution"
             if str(payload.action).upper() == "APPROVED"
-            and (
-                str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-                or (
-                    str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
-                    and databricks_bronze_execution_enabled()
-                )
-            )
+            and str(checkpoint.get("target_warehouse") or "").lower() in {"snowflake", "databricks"}
             else "silver_merge_key_review" if str(payload.action).upper() == "APPROVED"
             else "gate4"
         )

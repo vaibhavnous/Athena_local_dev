@@ -349,8 +349,10 @@ def build_ui_payload(
     payload = {
         "id": run_id,
         "run_id": run_id,
+        "project_id": checkpoint.get("project_id"),
         "brd_filename": display_run_name(checkpoint, context),
         "source": checkpoint.get("source") or "database",
+        "target_warehouse": checkpoint.get("target_warehouse"),
         "status": status,
         "provider": checkpoint.get("provider") or "azure_openai",
         "deployment": checkpoint.get("deployment"),
@@ -383,6 +385,7 @@ def build_ui_payload(
         "stage_confirmation": context.get("stage_confirmation"),
         "current_pipeline_step": current_pipeline_step(context),
         "external_execution": context.get("external_execution"),
+        "background_stage": checkpoint.get("background_stage"),
         "failed_stage_key": run_failed_stage_key,
         "failed_stage_label": failed_stage_label,
         "error": checkpoint.get("error"),

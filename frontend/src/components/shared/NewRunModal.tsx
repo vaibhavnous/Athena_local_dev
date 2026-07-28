@@ -28,6 +28,9 @@ const DEFAULT_FORM = {
   deployment: '',
   databaseType: 'azure_sql',
   databaseName: 'insurance',
+  integrationType: '',
+  dataLakeType: '',
+  dataLakeName: '',
   targetWarehouse: 'databricks',
   executionEngine: 'native',
   dbtDeploymentMode: 'generate_only',
@@ -42,8 +45,9 @@ const DEFAULT_FORM = {
   stageConfirmationEnabled: false,
 }
 
-function buildInitialForm(settings, seedRun, project) {
+export function buildInitialForm(settings, seedRun, project) {
   const seedSource = seedRun?.source || DEFAULT_FORM.source
+  const projectSource = project?.connectionType === 'data_lake' ? 'adls_gen2' : 'database'
   return {
     ...DEFAULT_FORM,
     provider: settings.provider || DEFAULT_FORM.provider,
@@ -75,9 +79,13 @@ function buildInitialForm(settings, seedRun, project) {
     ...(project ? {
       projectName: project.name,
       projectDescription: project.description,
-      source: project.connectionType === 'data_lake' ? 'adls_gen2' : 'database',
+      source: projectSource,
+      sftpEntity: normalizeFileEntity(projectSource, 'auto'),
       databaseType: project.dbType || DEFAULT_FORM.databaseType,
       databaseName: project.databaseName || DEFAULT_FORM.databaseName,
+      integrationType: project.integrationType || '',
+      dataLakeType: project.dataLakeType || '',
+      dataLakeName: project.dataLakeName || '',
       targetWarehouse: String(project.target || 'Databricks').toLowerCase(),
       executionEngine:
         String(project.target || '').toLowerCase() === 'snowflake' &&
@@ -583,10 +591,16 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                             ) : (
                               <>
                                 <Field label="Data Lake Type" compact>
-                                  <input className="input-field h-11 cursor-not-allowed opacity-80" value="ADLS" readOnly />
+                                  <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.dataLakeType || 'Not configured'} readOnly />
                                 </Field>
-                                <Field label="Data Entity" compact>
-                                  <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.sftpEntity || '-'} readOnly />
+                                <Field label="Ingestion Type" compact>
+                                  <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.integrationType || 'Not configured'} readOnly />
+                                </Field>
+                                <Field label="Data Lake Name" compact>
+                                  <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.dataLakeName || 'Not configured'} readOnly />
+                                </Field>
+                                <Field label="Discovery Scope" compact>
+                                  <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.source === 'adls_gen2' ? 'Auto-discover configured path' : form.sftpEntity || '-'} readOnly />
                                 </Field>
                               </>
                             )}

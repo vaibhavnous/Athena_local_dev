@@ -21,6 +21,70 @@ test('keeps a later phase when a slower status response reports an earlier phase
   expect(useAthenaStore.getState().runs[0].pipeline_steps[0].key).toBe('silver_code_execution')
 })
 
+test('accepts SFTP nomination after discovery in the six-phase order', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-sftp',
+    source: 'adls_gen2',
+    status: 'RUNNING',
+    pipeline_steps: [{ key: 'discovery', state: 'RUNNING' }],
+  })
+
+  useAthenaStore.getState().updateRun('run-sftp', {
+    id: 'run-sftp',
+    source: 'adls_gen2',
+    status: 'RUNNING',
+    pipeline_steps: [
+      { key: 'discovery', state: 'COMPLETED' },
+      { key: 'nomination', state: 'RUNNING' },
+    ],
+  })
+
+  expect(useAthenaStore.getState().runs[0].pipeline_steps).toEqual([
+    { key: 'discovery', state: 'COMPLETED' },
+    { key: 'nomination', state: 'RUNNING' },
+  ])
+})
+
+test('does not let a stale Gate 3 snapshot replace an active Phase 3 snapshot', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-phase-3',
+    source: 'adls_gen2',
+    status: 'RUNNING',
+    background_stage: 'bronze',
+    next_gate: null,
+    pipeline_steps: [
+      { key: 'gate3', state: 'COMPLETED' },
+      { key: 'bronze', state: 'RUNNING' },
+    ],
+  })
+
+  useAthenaStore.getState().updateRun('run-phase-3', {
+    id: 'run-phase-3',
+    source: 'adls_gen2',
+    status: 'HITL_WAIT',
+    background_stage: null,
+    next_gate: 3,
+    pipeline_steps: [
+      { key: 'gate3', state: 'HITL_WAIT' },
+      // A persisted Bronze artifact made the old ranker treat both snapshots
+      // as equally advanced, allowing the monitor to oscillate.
+      { key: 'bronze', state: 'COMPLETED' },
+    ],
+  })
+
+  expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    status: 'RUNNING',
+    background_stage: 'bronze',
+    next_gate: null,
+    pipeline_steps: [
+      { key: 'gate3', state: 'COMPLETED' },
+      { key: 'bronze', state: 'RUNNING' },
+    ],
+  })
+})
+
 test('does not erase stage detail from a sparse hydration fallback', () => {
   resetStore()
   useAthenaStore.getState().addRun({
