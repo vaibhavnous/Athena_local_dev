@@ -40,13 +40,6 @@ stages:
         CI: true
         REACT_APP_API_BASE_URL: $(REACT_APP_API_BASE_URL)
 
-    - task: PublishBuildArtifacts@1
-      inputs:
-        pathToPublish: '$(buildFolder)'
-        artifactName: 'frontend-app'
-        publishLocation: 'Container'
-      displayName: 'Publish frontend artifact'
-
     - script: |
         cat > $(buildFolder)/web.config << 'EOF'
         <?xml version="1.0" encoding="utf-8"?>
@@ -64,3 +57,10 @@ stages:
         </configuration>
         EOF
       displayName: 'Add web.config for routing'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        pathToPublish: '$(buildFolder)'
+        artifactName: 'frontend-app'
+        publishLocation: 'Container'
+      displayName: 'Publish frontend artifact'

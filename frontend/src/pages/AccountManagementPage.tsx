@@ -173,7 +173,6 @@ function AccountManagementPage() {
 
     const response = await updateAuthUser(uid, {
       username: form.username.trim(),
-      email: form.email.trim(),
       userType: form.userType,
       ...(form.password ? { password: form.password } : {})
     })
@@ -444,13 +443,13 @@ function UserFormPanel({
             />
           </FormField>
 
-          <FormField label="Email" required>
+          <FormField label="Email" required hint={passwordRequired ? undefined : 'Email is fixed after account creation'}>
             <input
               type="email"
               className="input-field"
               placeholder="user@company.com"
               value={form.email}
-              disabled={isPrimaryRow}
+              disabled={!passwordRequired}
               onChange={(e) => set('email', e.target.value)}
             />
           </FormField>
@@ -482,7 +481,6 @@ function UserFormPanel({
             <UserTypeControl
               value={form.userType}
               disabled={isPrimaryRow}
-              lockUnselected={!passwordRequired}
               onChange={(value) => set('userType', value)}
             />
           </FormField>
@@ -618,12 +616,10 @@ function UserCard({
 function UserTypeControl({
   value,
   disabled,
-  lockUnselected,
   onChange
 }: {
   value: UserType
   disabled: boolean
-  lockUnselected: boolean
   onChange: (value: UserType) => void
 }) {
   const options: UserType[] = ['Client', 'Admin']
@@ -632,14 +628,12 @@ function UserTypeControl({
     <div className="grid grid-cols-2 gap-3">
       {options.map((option) => {
         const isSelected = value === option
-        const isDisabled = disabled || (lockUnselected && !isSelected)
-
         return (
           <button
             key={option}
             type="button"
             aria-pressed={isSelected}
-            disabled={isDisabled}
+            disabled={disabled}
             onClick={() => onChange(option)}
             className={`rounded-lg border px-4 py-3 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
               isSelected

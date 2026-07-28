@@ -11,13 +11,17 @@ from services.pipeline_runtime import (
     BACKGROUND_EXECUTOR,
     BACKGROUND_JOBS,
     BACKGROUND_JOB_LOCK,
+    aborted_run_state,
+    clear_run_abort,
     continue_database_pipeline,
     ensure_background_capacity_locked,
     get_run_context,
+    is_run_aborted,
     load_checkpoint_state,
     save_checkpoint_state,
     start_pipeline,
     submit_background,
+    submit_gold_review,
 )
 from services.sftp_runtime import start_sftp_pipeline
 from utilis.db import get_pending_items
@@ -63,6 +67,9 @@ def _next_status(current_status: Optional[str], pending_gate1: bool, *, file_sou
 def _mark_run_failed(run_id: str, exc: Exception, *, stage: str) -> None:
     logger.error("Pipeline job failed run_id=%s stage=%s", run_id, stage, exc_info=exc)
     checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+    if not api_utils.is_file_source(checkpoint.get("source")) and is_run_aborted(run_id, checkpoint):
+        save_checkpoint_state(run_id, aborted_run_state(run_id, checkpoint))
+        return
     checkpoint.update(
         {
             "status": "FAILED",
@@ -79,6 +86,9 @@ def _mark_run_failed(run_id: str, exc: Exception, *, stage: str) -> None:
 def _job_done_callback(run_id: str, job_key: str, stage: str):
     def _handle_done(done) -> None:
         try:
+            if done.cancelled():
+                logger.info("Pipeline background job cancelled run_id=%s stage=%s", run_id, stage)
+                return
             exc = done.exception()
             if exc:
                 _mark_run_failed(run_id, exc, stage=stage)
@@ -106,12 +116,22 @@ def run_pipeline_background(
     compliance_domain: str = "Insurance",
     compliance_countries: Optional[List[str]] = None,
     target_warehouse: str = "databricks",
+    execution_engine: str = "native",
+    dbt_deployment_mode: str = "generate_only",
+    dbt_project_object_name: Optional[str] = None,
+    dbt_target_name: Optional[str] = None,
+    dbt_threads: Optional[int] = None,
+    dbt_command_timeout_secs: Optional[int] = None,
+    force_dbt_deploy: bool = False,
 ) -> None:
     started_at = time.monotonic()
     try:
         logger.info("Pipeline background job started run_id=%s source=%s", run_id, source)
         existing_checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
-        if api_utils.is_file_source(source):
+        file_source = api_utils.is_file_source(source)
+        if not file_source and is_run_aborted(run_id, existing_checkpoint):
+            return
+        if file_source:
             result = start_sftp_pipeline(
                 run_id=run_id,
                 brd_text=brd_text,
@@ -133,12 +153,23 @@ def run_pipeline_background(
                 compliance_domain=compliance_domain,
                 compliance_countries=compliance_countries or ["US"],
                 target_warehouse=target_warehouse,
+                execution_engine=execution_engine,
+                dbt_deployment_mode=dbt_deployment_mode,
+                dbt_project_object_name=dbt_project_object_name,
+                dbt_target_name=dbt_target_name,
+                dbt_threads=dbt_threads,
+                dbt_command_timeout_secs=dbt_command_timeout_secs,
+                force_dbt_deploy=force_dbt_deploy,
             )
         elapsed_seconds = time.monotonic() - started_at
         if elapsed_seconds > _pipeline_timeout_seconds():
             raise TimeoutError(f"Pipeline exceeded timeout after {elapsed_seconds:.1f} seconds.")
 
         state = _validate_pipeline_result(result)
+        if not file_source and is_run_aborted(run_id):
+            latest_checkpoint = load_checkpoint_state(run_id) or existing_checkpoint
+            save_checkpoint_state(run_id, aborted_run_state(run_id, latest_checkpoint))
+            return
         if brd_filename and not state.get("brd_filename"):
             state["brd_filename"] = brd_filename
         pending_gate1 = get_pending_items(run_id, 1)
@@ -185,6 +216,13 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             compliance_domain=str(payload.compliance_domain or "Insurance"),
             compliance_countries=payload.compliance_countries or ["US"],
             target_warehouse=str(payload.target_warehouse or "databricks").lower(),
+            execution_engine=str(payload.execution_engine or "native").lower(),
+            dbt_deployment_mode=str(payload.dbt_deployment_mode or "generate_only").lower(),
+            dbt_project_object_name=payload.dbt_project_object_name,
+            dbt_target_name=payload.dbt_target_name,
+            dbt_threads=payload.dbt_threads,
+            dbt_command_timeout_secs=payload.dbt_command_timeout_secs,
+            force_dbt_deploy=bool(payload.force_dbt_deploy),
         )
         BACKGROUND_JOBS[job_key] = future
 
@@ -205,6 +243,8 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
     source_databases = normalized_source_databases(checkpoint)
     database_name = source_databases[0] if source_databases else checkpoint.get("database_name")
     return PipelineRunRequest(
+        project_id=checkpoint.get("project_id"),
+        dbt_project_object_name=checkpoint.get("dbt_project_object_name"),
         brd_text=str(checkpoint.get("brd_text") or ""),
         brd_filename=checkpoint.get("brd_filename"),
         source=str(checkpoint.get("source") or "database"),
@@ -213,6 +253,12 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
         database_name=database_name,
         database_type=checkpoint.get("database_type"),
         target_warehouse=checkpoint.get("target_warehouse") or "databricks",
+        execution_engine=checkpoint.get("execution_engine") or "native",
+        dbt_deployment_mode=checkpoint.get("dbt_deployment_mode") or "generate_only",
+        dbt_target_name=checkpoint.get("dbt_target_name"),
+        dbt_threads=checkpoint.get("dbt_threads"),
+        dbt_command_timeout_secs=checkpoint.get("dbt_command_timeout_secs"),
+        force_dbt_deploy=bool(checkpoint.get("force_dbt_deploy")),
         source_databases=source_databases,
         sftp_entity=checkpoint.get("sftp_entity") or "transactions",
         use_domain_kb=bool(checkpoint.get("use_domain_kb")),
@@ -225,6 +271,9 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
 
 def clean_checkpoint_for_resume(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
     cleaned = dict(checkpoint or {})
+    if not api_utils.is_file_source(cleaned.get("source")):
+        clear_run_abort(str(cleaned.get("run_id") or ""))
+        cleaned["abort_requested"] = False
     cleaned["status"] = "RUNNING"
     cleaned["background_stage"] = None
     cleaned["failed_background_stage"] = None
@@ -243,6 +292,12 @@ def continue_database_pipeline_job(
     state: Dict[str, Any],
     auto_advance: Optional[bool] = None,
 ) -> Dict[str, Any]:
+    if str(start_stage_key or "").strip().lower() == "snowflake_dbt_codegen":
+        return submit_gold_review(
+            run_id,
+            action="APPROVED",
+            review_artifact=state.get("gold_review_artifact") or {},
+        )
     return continue_database_pipeline(
         run_id,
         start_stage_key=start_stage_key,
@@ -263,6 +318,8 @@ def continue_file_pipeline_job(run_id: str, state: Dict[str, Any]) -> Dict[str, 
 def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Optional[str]:
     def _pipeline_stage(value: Any) -> Optional[str]:
         raw_stage = str(value or "").strip().lower()
+        if raw_stage == "snowflake_dbt_codegen":
+            return raw_stage
         if raw_stage == "gold_code_execution":
             return "gold"
         if raw_stage == "silver_code_execution":

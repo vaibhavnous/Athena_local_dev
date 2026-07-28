@@ -4,15 +4,54 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from api import utils as api_utils
+from api.auth import (
+    AuthUser,
+    assert_run_access,
+    checkpoint_owner_email,
+    get_current_user,
+    load_project_for_user,
+)
 from api.demo import demo_action, demo_enabled, demo_start_progress, demo_status, new_demo_run_id
 from api.models import PipelineRunRequest, StageContinueRequest
 from utilis.logger import logger
 
 router = APIRouter()
 RUN_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_STATUS_WORKERS", "2"))))
+
+
+def _with_project_execution_config(
+    payload: PipelineRunRequest,
+    project: Dict[str, Any],
+) -> PipelineRunRequest:
+    snowflake_database_project = (
+        str(project.get("target") or "").strip().lower() == "snowflake"
+        and str(project.get("connection_type") or "").strip().lower() == "database"
+    )
+    selected_engine = str(project.get("execution_engine") or "native").strip().lower()
+    is_dbt_project = snowflake_database_project and selected_engine == "dbt"
+    data = payload.model_dump()
+    data.update(
+        execution_engine="dbt" if is_dbt_project else "native",
+        dbt_deployment_mode="generate_and_deploy" if is_dbt_project else "generate_only",
+        dbt_project_object_name=project.get("dbt_project_object_name") if is_dbt_project else None,
+        dbt_target_name=project.get("dbt_target_name") if is_dbt_project else None,
+        dbt_threads=project.get("dbt_threads") if is_dbt_project else None,
+        dbt_command_timeout_secs=(
+            project.get("dbt_command_timeout_secs") if is_dbt_project else None
+        ),
+        force_dbt_deploy=bool(project.get("force_dbt_deploy")) if is_dbt_project else False,
+    )
+    if snowflake_database_project:
+        data.update(
+            target_warehouse="snowflake",
+            source="database",
+            database_name=project.get("database_name") or payload.database_name,
+            database_type=project.get("db_type") or payload.database_type,
+        )
+    return PipelineRunRequest.model_validate(data)
 
 
 def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -47,6 +86,12 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "brd_filename": checkpoint.get("brd_filename") or run_id,
             "provider": checkpoint.get("provider") or "azure_openai",
             "deployment": checkpoint.get("deployment"),
+            "execution_engine": checkpoint.get("execution_engine") or "native",
+            "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or "generate_only",
+            "dbt_target_name": checkpoint.get("dbt_target_name"),
+            "dbt_threads": checkpoint.get("dbt_threads"),
+            "dbt_command_timeout_secs": checkpoint.get("dbt_command_timeout_secs"),
+            "force_dbt_deploy": bool(checkpoint.get("force_dbt_deploy")),
             "stages": [],
             "background_stage": checkpoint.get("background_stage"),
             "external_execution": checkpoint.get("external_execution"),
@@ -95,19 +140,22 @@ def _status_response(run_id: str, run: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest) -> None:
+def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest, owner_email: str | None = None) -> None:
     from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
 
     source = str(payload.source or "database").lower()
     sftp_entity = api_utils.normalize_file_entity(source, payload.sftp_entity)
     existing = load_checkpoint_state(run_id) or {"run_id": run_id}
+    owner = str(existing.get("owner_email") or owner_email or "").strip().lower()
 
-    save_checkpoint_state(
-        run_id,
-        {
+    state = {
             **existing,
             "run_id": run_id,
             "project_id": existing.get("project_id") or payload.project_id,
+            "dbt_project_object_name": (
+                existing.get("dbt_project_object_name")
+                or payload.dbt_project_object_name
+            ),
             "status": existing.get("status") or "RUNNING",
             "background_stage": existing.get("background_stage") or "ingestion",
             "resume_message": existing.get("resume_message") or "BRD Ingest is running.",
@@ -117,6 +165,23 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest) -> None:
             "provider": existing.get("provider") or payload.provider,
             "deployment": existing.get("deployment") or payload.deployment,
             "target_warehouse": existing.get("target_warehouse") or payload.target_warehouse or "databricks",
+            "execution_engine": existing.get("execution_engine") or payload.execution_engine or "native",
+            "dbt_deployment_mode": (
+                existing.get("dbt_deployment_mode")
+                or payload.dbt_deployment_mode
+                or "generate_only"
+            ),
+            "dbt_target_name": existing.get("dbt_target_name") or payload.dbt_target_name,
+            "dbt_threads": existing.get("dbt_threads") or payload.dbt_threads,
+            "dbt_command_timeout_secs": (
+                existing.get("dbt_command_timeout_secs")
+                or payload.dbt_command_timeout_secs
+            ),
+            "force_dbt_deploy": (
+                existing.get("force_dbt_deploy")
+                if existing.get("force_dbt_deploy") is not None
+                else bool(payload.force_dbt_deploy)
+            ),
             "source_databases": existing.get("source_databases")
             or payload.source_databases
             or ([payload.database_name] if payload.database_name else None),
@@ -138,8 +203,11 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest) -> None:
             ),
             "compliance_domain": existing.get("compliance_domain") or payload.compliance_domain or "Insurance",
             "compliance_countries": existing.get("compliance_countries") or payload.compliance_countries or ["US"],
-        },
-    )
+        }
+    if owner:
+        state["owner_email"] = owner
+        state["created_by_email"] = existing.get("created_by_email") or owner
+    save_checkpoint_state(run_id, state)
 
 
 def _resume_failed_run(run_id: str, action_name: str) -> Dict[str, Any]:
@@ -161,16 +229,19 @@ def _resume_failed_run(run_id: str, action_name: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Only failed runs can be resumed.")
 
     source = str(checkpoint.get("source") or "database").lower()
-    resumed_state = clean_checkpoint_for_resume(checkpoint)
-    save_checkpoint_state(run_id, resumed_state)
 
     if api_utils.is_file_source(source):
+        resumed_state = clean_checkpoint_for_resume(checkpoint)
+        save_checkpoint_state(run_id, resumed_state)
         submit_background(run_id, "file_resume", continue_file_pipeline_job, run_id, resumed_state)
         return {"run_id": run_id, "status": "SUBMITTED", "action": action_name}
 
     failed_stage_key = database_failed_stage_key(run_id, checkpoint)
     if not failed_stage_key:
         raise HTTPException(status_code=400, detail="No failed stage identified.")
+
+    resumed_state = clean_checkpoint_for_resume(checkpoint)
+    save_checkpoint_state(run_id, resumed_state)
 
     submit_background(
         run_id,
@@ -203,7 +274,7 @@ def health() -> Dict[str, str]:
 # ✅ Run Pipeline
 # -------------------------
 @router.post("/pipeline/run")
-def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
+def run_pipeline(payload: PipelineRunRequest, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         run_id = new_demo_run_id()
         demo_start_progress(run_id, "start")
@@ -213,10 +284,18 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
     from api.services.pipeline_service import submit_pipeline_start
     from services.pipeline_runtime import background_capacity_snapshot, load_checkpoint_state, save_checkpoint_state
 
-    source = str(payload.source or "database").lower()
-
     if not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
+
+    if payload.project_id:
+        payload = _with_project_execution_config(
+            payload,
+            load_project_for_user(payload.project_id, user),
+        )
+    else:
+        payload = payload.model_copy(update={"dbt_project_object_name": None})
+
+    source = str(payload.source or "database").lower()
 
     capacity = background_capacity_snapshot()
     if capacity["available"] <= 0:
@@ -238,7 +317,7 @@ def run_pipeline(payload: PipelineRunRequest) -> Dict[str, Any]:
     )
 
     try:
-        _seed_run_checkpoint(run_id, payload)
+        _seed_run_checkpoint(run_id, payload, owner_email=user.email)
     except Exception:
         logger.error("Failed to initialize checkpoint", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to initialize run checkpoint")
@@ -290,7 +369,7 @@ async def upload_brd(file: UploadFile = File(...)) -> Dict[str, Any]:
 # ✅ Pipeline Status
 # -------------------------
 @router.get("/pipeline/{run_id}/status")
-def pipeline_status(run_id: str) -> Dict[str, Any]:
+def pipeline_status(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_status(run_id)
 
@@ -300,9 +379,9 @@ def pipeline_status(run_id: str) -> Dict[str, Any]:
     try:
         try:
             checkpoint = load_checkpoint_state(run_id) or {}
-        except Exception:
-            # Preserve the existing UI hydration path when the checkpoint store is unavailable.
-            checkpoint = {}
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Failed to verify run access") from exc
+        checkpoint = assert_run_access(run_id, user, checkpoint=checkpoint)
         # Active polling must use the checkpoint snapshot. Full UI hydration reads
         # multiple artifact/log tables and can take longer than the 1.5s UI poll.
         # Falling back to it here caused alternating stale and current stage payloads.
@@ -314,6 +393,8 @@ def pipeline_status(run_id: str) -> Dict[str, Any]:
         timeout_seconds = max(1, int(os.getenv("ATHENA_STATUS_ENDPOINT_TIMEOUT_SECONDS", "5")))
         future = RUN_STATUS_EXECUTOR.submit(ui_run, run_id)
         run = future.result(timeout=timeout_seconds)
+    except HTTPException:
+        raise
     except FutureTimeoutError:
         logger.warning("Pipeline status hydration timed out; returning fallback status", extra={"run_id": run_id})
         try:
@@ -337,15 +418,18 @@ def pipeline_status(run_id: str) -> Dict[str, Any]:
 # ✅ Abort Pipeline
 # -------------------------
 @router.post("/pipeline/{run_id}/abort")
-def abort_run(run_id: str) -> Dict[str, Any]:
+def abort_run(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, status="ABORTED")
 
-    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+    from services.pipeline_runtime import abort_background_run, load_checkpoint_state, save_checkpoint_state
 
-    checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
-    checkpoint["status"] = "ABORTED"
-    save_checkpoint_state(run_id, checkpoint)
+    checkpoint = assert_run_access(run_id, user, checkpoint=load_checkpoint_state(run_id) or {})
+    if api_utils.is_file_source(checkpoint.get("source")):
+        checkpoint["status"] = "ABORTED"
+        save_checkpoint_state(run_id, checkpoint)
+    else:
+        abort_background_run(run_id, checkpoint)
 
     logger.warning("Pipeline aborted", extra={"run_id": run_id})
 
@@ -356,7 +440,11 @@ def abort_run(run_id: str) -> Dict[str, Any]:
 # ✅ Continue Stage
 # -------------------------
 @router.post("/pipeline/{run_id}/continue-stage")
-def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]:
+def continue_stage(
+    run_id: str,
+    payload: StageContinueRequest,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
     if demo_enabled():
         gate = int((demo_status(run_id).get("run") or {}).get("next_gate") or 1)
         segment_by_gate = {1: "kpi", 2: "table", 3: "enrichment", 4: "bronze", 5: "silver"}
@@ -374,7 +462,7 @@ def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]
         submit_background,
     )
 
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = assert_run_access(run_id, user, checkpoint=load_checkpoint_state(run_id) or {})
     next_stage_key = checkpoint.get("next_stage_key")
 
     if not next_stage_key:
@@ -426,7 +514,7 @@ def continue_stage(run_id: str, payload: StageContinueRequest) -> Dict[str, Any]
 # ✅ Retry Failed Stage
 # -------------------------
 @router.post("/pipeline/{run_id}/retry-failed-stage")
-def retry_failed_stage(run_id: str) -> Dict[str, Any]:
+def retry_failed_stage(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, action="retry_failed_stage")
 
@@ -442,7 +530,7 @@ def retry_failed_stage(run_id: str) -> Dict[str, Any]:
         submit_background,
     )
 
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = assert_run_access(run_id, user, checkpoint=load_checkpoint_state(run_id) or {})
 
     if str(checkpoint.get("status") or "").upper() != "FAILED":
         raise HTTPException(status_code=400, detail="Only failed runs can retry a failed stage.")
@@ -489,22 +577,21 @@ def retry_failed_stage(run_id: str) -> Dict[str, Any]:
 
 
 @router.post("/pipeline/{run_id}/resume-from-failure")
-def resume_from_failure(run_id: str) -> Dict[str, Any]:
+def resume_from_failure(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, action="resume_from_failure")
 
+    assert_run_access(run_id, user)
     return _resume_failed_run(run_id, "resume_from_failure")
 
 
 @router.post("/pipeline/{run_id}/restart")
-def restart_run(run_id: str) -> Dict[str, Any]:
+def restart_run(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_action(run_id, action="restart")
 
     from api.services.pipeline_service import seed_payload_from_checkpoint, submit_pipeline_start
-    from services.pipeline_runtime import load_checkpoint_state
-
-    checkpoint = load_checkpoint_state(run_id) or {}
+    checkpoint = assert_run_access(run_id, user)
 
     if not str(checkpoint.get("brd_text") or "").strip():
         raise HTTPException(status_code=400, detail="Cannot restart a run without saved BRD text.")
@@ -513,7 +600,7 @@ def restart_run(run_id: str) -> Dict[str, Any]:
     new_run_id = str(uuid.uuid4())
 
     try:
-        _seed_run_checkpoint(new_run_id, payload)
+        _seed_run_checkpoint(new_run_id, payload, owner_email=checkpoint_owner_email(checkpoint) or user.email)
     except Exception:
         logger.error("Failed to initialize restarted run checkpoint", exc_info=True, extra={"run_id": new_run_id})
         raise HTTPException(status_code=503, detail="Failed to initialize restarted run checkpoint")

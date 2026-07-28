@@ -1,0 +1,2 @@
+# Snowflake-native dbt project deployment and execution.
+snowflake-cli>=3.21,<4

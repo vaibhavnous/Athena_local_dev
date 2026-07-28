@@ -5,7 +5,7 @@ import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Any, Literal
 
 import bcrypt
 import jwt
@@ -174,6 +174,8 @@ class AuthService:
         if self._is_primary_admin(self._public_user(current)):
             if email != self._primary_admin_email or user_type != "Admin":
                 raise HTTPException(status_code=403, detail="Primary admin identity and role cannot be changed")
+        if email != current["email"]:
+            raise HTTPException(status_code=400, detail="Email cannot be changed after account creation")
         duplicate = self.repository.find_by_email(email)
         if duplicate and duplicate["uid"] != uid:
             raise HTTPException(status_code=409, detail="Email is already registered")
@@ -232,8 +234,7 @@ class AuthService:
                         uid=str(uuid.uuid4()),
                         username=self._validate_username(username),
                         email=normalized_email,
-                        # The bootstrap credential is operator-controlled and may be a legacy password.
-                        password_hash=self._hash_password(password),
+                        password_hash=self._hash_password(self._validate_password(password)),
                         user_type="Admin",
                     )
                 except Exception:
@@ -241,26 +242,17 @@ class AuthService:
                     if not self.repository.find_by_email(normalized_email):
                         raise
             else:
-                password_current = False
-                try:
-                    password_current = bcrypt.checkpw(
-                        password.encode("utf-8"), existing_admin["password_hash"].encode("utf-8")
-                    )
-                except ValueError:
-                    password_current = False
-
                 username = self._validate_username(username)
                 if (
                     existing_admin["username"] != username
                     or existing_admin["user_type"] != "Admin"
-                    or not password_current
                 ):
                     self.repository.update_user(
                         existing_admin["uid"],
                         username=username,
                         email=normalized_email,
                         user_type="Admin",
-                        password_hash=None if password_current else self._hash_password(password),
+                        password_hash=None,
                     )
                 if not existing_admin["is_active"]:
                     self.repository.set_active(existing_admin["uid"], True)
@@ -378,3 +370,77 @@ def get_admin(user: AuthUser = Depends(get_current_user)) -> AuthUser:
     if user.user_type != "Admin":
         raise HTTPException(status_code=403, detail="Administrator access required")
     return user
+
+
+def normalize_auth_email(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def has_request_user(user: Any) -> bool:
+    return isinstance(user, AuthUser)
+
+
+def load_project_for_user(project_id: str, user: Any) -> dict[str, Any]:
+    from api.repositories.project_repository import ProjectRepository
+
+    project = ProjectRepository().find(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if has_request_user(user) and user.user_type != "Admin" and normalize_auth_email(
+        project.get("owner_email")
+    ) != normalize_auth_email(user.email):
+        raise HTTPException(status_code=403, detail="Project access denied")
+    return project
+
+
+def checkpoint_owner_email(checkpoint: dict[str, Any]) -> str:
+    for field in ("owner_email", "created_by_email", "submitted_by_email", "user_email"):
+        owner = normalize_auth_email(checkpoint.get(field))
+        if owner:
+            return owner
+    return ""
+
+
+def user_can_access_checkpoint(checkpoint: dict[str, Any], user: Any) -> bool:
+    if not has_request_user(user):
+        return True
+    if user.user_type == "Admin":
+        return True
+    project_id = str(checkpoint.get("project_id") or "").strip()
+    if project_id:
+        try:
+            load_project_for_user(project_id, user)
+            return True
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+    owner_email = checkpoint_owner_email(checkpoint)
+    return bool(owner_email) and owner_email == normalize_auth_email(user.email)
+
+
+def assert_run_access(
+    run_id: str,
+    user: Any,
+    *,
+    checkpoint: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not has_request_user(user):
+        return checkpoint or {}
+    if checkpoint is None:
+        from services.pipeline_runtime import load_checkpoint_state
+
+        try:
+            checkpoint = load_checkpoint_state(run_id) or {}
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Failed to verify run access") from exc
+    if not checkpoint:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    try:
+        allowed = user_can_access_checkpoint(checkpoint, user)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Failed to verify run access") from exc
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Run access denied")
+    return checkpoint

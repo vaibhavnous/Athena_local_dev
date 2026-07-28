@@ -1,4 +1,9 @@
-from api.routers.reviews_router import _compliance_api_findings, _compliance_review_decision
+from api.auth import AuthUser
+from api.routers.reviews_router import (
+    _compliance_api_findings,
+    _compliance_review_decision,
+    _review_artifact_for_user,
+)
 
 
 def test_compliance_review_decision_reflects_rejected_columns():
@@ -11,3 +16,30 @@ def test_compliance_api_findings_translate_ui_rejected_to_api_excluded():
     assert _compliance_api_findings([{"status": "Rejected", "table_name": "claims", "column_name": "ssn"}]) == [
         {"status": "Excluded", "table_name": "claims", "column_name": "ssn"}
     ]
+
+
+def test_clients_cannot_submit_executable_review_code():
+    client = AuthUser(
+        uid="client-1",
+        username="Client",
+        email="client@example.com",
+        userType="Client",
+    )
+    artifact = {
+        "items": [{
+            "table": "claims",
+            "review_status": "APPROVED",
+            "script_body": "UPDATE secrets SET value = 'pwned'",
+            "script_path": "other-run.sql",
+            "dbt_model_sql": "select * from secrets",
+            "dbt_model_body": "select * from other_secrets",
+        }]
+    }
+
+    assert _review_artifact_for_user(artifact, client) == {
+        "items": [{"table": "claims", "review_status": "APPROVED"}]
+    }
+    assert _review_artifact_for_user(
+        artifact,
+        client.model_copy(update={"user_type": "Admin"}),
+    ) == artifact

@@ -60,6 +60,15 @@ def test_snowflake_identifiers_drop_configuration_quotes():
     assert snowflake_bronze_runtime._snowflake_quote_identifier('"insurance"') == '"insurance"'
 
 
+def test_bronze_landing_reuses_existing_database():
+    statements = []
+    cursor = type("Cursor", (), {"execute": lambda self, sql: statements.append(sql)})()
+
+    snowflake_bronze_runtime._use_existing_database(cursor, "insurance")
+
+    assert statements == ['USE DATABASE "insurance"']
+
+
 def test_adls_stage_uses_sas_without_logging_token(monkeypatch):
     token = "sv=test&sig=secret"
     monkeypatch.setenv("SNOWFLAKE_ADLS_SAS_TOKEN", "?" + token)
@@ -257,6 +266,58 @@ def test_snowflake_bronze_runtime_adls_executes_only_approved_scripts(monkeypatc
     assert any("FILES = ('claim_information.csv')" in sql for sql in fake_conn.sql)
     assert not any("COPY INTO \"insurance\".\"dbo\".\"policy_transactions\"" in sql for sql in fake_conn.sql)
     assert fake_conn.closed is True
+
+
+def test_snowflake_dbt_load_only_lands_sources_without_executing_native_sql(monkeypatch):
+    loaded = []
+
+    class FakeSnowflakeConnection:
+        def close(self):
+            pass
+
+    monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_BRONZE", "false")
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE", "true")
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_SOURCE_MODE", "adls")
+    monkeypatch.setattr(snowflake_bronze_runtime, "_snowflake_connect", lambda: FakeSnowflakeConnection())
+    monkeypatch.setattr(snowflake_bronze_runtime, "ensure_adls_stage", lambda _conn: None)
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "load_adls_table_to_snowflake",
+        lambda script, _conn: loaded.append(script["table"]) or {
+            "snowflake_landing_table": "insurance.dbo.claims",
+            "copy_result_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "execute_snowflake_sql_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("native SQL must not execute")),
+    )
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "save_external_execution_progress",
+        lambda state, **_kwargs: state,
+    )
+
+    result = snowflake_bronze_runtime.run_snowflake_bronze_scripts(
+        {
+            "target_warehouse": "snowflake",
+            "bronze_generation_results": [
+                {
+                    "table": "claims",
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "code_generation_format": "dbt",
+                }
+            ],
+        },
+        load_only=True,
+    )
+
+    assert loaded == ["claims"]
+    assert result["snowflake_bronze_source_load_status"] == "COMPLETED"
+    assert result["snowflake_bronze_execution_status"] == "SKIPPED_DBT_CODEGEN_ONLY"
+    assert result["snowflake_bronze_execution_results"] == []
 
 
 def test_approved_review_scripts_match_case_sensitive_variants():

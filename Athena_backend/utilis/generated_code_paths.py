@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from utilis.runtime_paths import runtime_dir
@@ -19,3 +20,12 @@ def generated_code_dir(*parts: str) -> Path:
         if cleaned:
             path = path / cleaned
     return path
+
+
+def generated_run_slug(run_id: object) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(run_id or "run").strip()).strip("_")
+    return slug[:96] or "run"
+
+
+def generated_run_dir(target_warehouse: str, run_id: object, *parts: str) -> Path:
+    return generated_code_dir(str(target_warehouse or "databricks").lower(), generated_run_slug(run_id), *parts)

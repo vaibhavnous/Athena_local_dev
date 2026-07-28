@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from nodes import silver_gen
+from nodes import bronze_gen, silver_gen
 from services import pipeline_runtime
 
 
@@ -474,3 +474,144 @@ def test_snowflake_silver_generates_one_script_per_approved_bronze_result(monkey
         "policy",
     ]
     assert len(result["silver_generation_results"]) == 4
+
+
+def test_snowflake_dbt_bronze_to_silver_dependency_and_rejected_cleanup(monkeypatch, tmp_path):
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
+    monkeypatch.setenv("SNOWFLAKE_SILVER_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_SILVER_SCHEMA", "SILVER")
+    monkeypatch.delenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", raising=False)
+    monkeypatch.setattr(silver_gen, "ai_store_db_writer", lambda **_: None)
+    monkeypatch.chdir(tmp_path)
+
+    bronze_state = {
+        "run_id": "run-dbt-chain",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "certified_tables": [
+            {
+                "database_name": "insurance",
+                "schema_name": "dbo",
+                "table_name": "ClaimInformation",
+            }
+        ],
+        "discovered_metadata": {
+            "tables": [
+                {
+                    "table_name": "ClaimInformation",
+                    "columns": [{"column_name": "ClaimID", "data_type": "int"}],
+                }
+            ]
+        },
+    }
+    bronze_result = bronze_gen.bronze_code_generation_node(bronze_state)
+
+    silver_result = silver_gen.silver_code_generation_node(
+        {
+            **bronze_result,
+            "enriched_metadata": {
+                "columns": [
+                    {
+                        "table_name": "ClaimInformation",
+                        "column_name": "claimid",
+                        "data_type": "int",
+                        "is_join_key": True,
+                    }
+                ]
+            },
+        }
+    )
+    silver_item = silver_result["silver_generation_results"][0]
+    silver_model = Path(silver_item["script_path"])
+    silver_sql = silver_model.read_text(encoding="utf-8")
+
+    assert silver_model.name == "silver_claiminformation.sql"
+    assert silver_item["code_generation_format"] == "dbt"
+    assert silver_item["bronze_model_name"] == "bronze_claiminformation"
+    assert silver_item["dbt_alias"] == "silver_ClaimInformation"
+    assert "{{ ref('bronze_claiminformation') }}" in silver_sql
+    assert """unique_key='"silver_upsert_key"'""" in silver_sql
+    assert "MERGE INTO" not in silver_sql
+    assert "CREATE TABLE" not in silver_sql
+
+    reviewed_sql = silver_sql + "\n-- reviewed silver\n"
+    reviewed = silver_gen.sync_snowflake_dbt_silver_review(
+        "run-dbt-chain",
+        [silver_item],
+        {
+            "items": [
+                {
+                    "entity": "ClaimInformation",
+                    "review_status": "APPROVED",
+                    "generated_silver_script": reviewed_sql,
+                    "primary_keys": ["claimid"],
+                }
+            ]
+        },
+    )
+
+    assert len(reviewed) == 1
+    assert silver_model.read_text(encoding="utf-8") == reviewed_sql
+    assert reviewed[0]["primary_keys"] == ["claimid"]
+    silver_schema = Path(silver_result["snowflake_dbt_silver_schema_path"]).read_text(encoding="utf-8")
+    assert "silver_claiminformation" in silver_schema
+    assert "quote: true" in silver_schema
+
+    rejected_review = silver_gen.sync_snowflake_dbt_silver_review(
+        "run-dbt-chain",
+        reviewed,
+        {
+            "items": [
+                {
+                    "entity": "ClaimInformation",
+                    "review_status": "REJECTED",
+                }
+            ]
+        },
+    )
+
+    assert rejected_review == []
+    assert not silver_model.exists()
+    assert "silver_claiminformation" not in Path(
+        silver_result["snowflake_dbt_silver_schema_path"]
+    ).read_text(encoding="utf-8")
+
+    rejected = dict(bronze_result["bronze_generation_results"][0])
+    rejected["status"] = "REJECTED"
+    skipped = silver_gen.silver_code_generation_node(
+        {
+            **bronze_result,
+            "bronze_generation_results": [rejected],
+        }
+    )
+
+    assert skipped["silver_generation_status"] == "SKIPPED"
+    assert not silver_model.exists()
+
+
+def test_snowflake_dbt_silver_rejects_sanitized_model_name_collision(monkeypatch, tmp_path):
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
+    monkeypatch.setenv("SNOWFLAKE_SILVER_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_SILVER_SCHEMA", "SILVER")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="unique after sanitization"):
+        silver_gen.silver_code_generation_node(
+            {
+                "run_id": "run-dbt-silver-collision",
+                "target_warehouse": "snowflake",
+                "execution_engine": "dbt",
+                "bronze_generation_results": [
+                    {
+                        "table": "Claim-Information",
+                        "status": "APPROVED",
+                    },
+                    {
+                        "table": "Claim Information",
+                        "status": "APPROVED",
+                    },
+                ],
+            }
+        )

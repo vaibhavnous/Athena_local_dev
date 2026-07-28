@@ -308,41 +308,51 @@ def _script_name(script: Dict[str, Any]) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", target_table).strip("_") or "script"
 
 
-def _script_keys(script: Dict[str, Any]) -> set[str]:
-    keys: set[str] = set()
-    for field in ("table", "table_name", "entity", "target_table", "source_table", "silver_table", "bronze_table", "kpi_name", "script_name"):
-        value = str(script.get(field) or "").strip()
-        if not value:
-            continue
-        folded = value.casefold()
-        keys.add(folded)
-        simple = value.split(".")[-1].strip('"').casefold()
-        if simple:
-            keys.add(simple)
-            for prefix in ("bronze_", "silver_", "gold_"):
-                if simple.startswith(prefix):
-                    keys.add(simple[len(prefix):])
-    script_path = str(script.get("script_path") or "").strip()
-    if script_path:
-        keys.add(script_path.casefold())
-        stem = Path(script_path).stem.casefold()
-        if stem:
-            keys.add(stem)
-    return keys
+_REVIEW_IDENTITY_FIELDS = (
+    "target_table",
+    "dbt_model_name",
+    "dbt_alias",
+    "kpi_name",
+    "script_name",
+    "script_path",
+    "table",
+    "table_name",
+    "entity",
+    "silver_table",
+    "bronze_table",
+)
 
 
-def _review_item_keys(item: Dict[str, Any]) -> set[str]:
-    keys: set[str] = set()
-    for field in ("table", "table_name", "entity", "target_table", "source_table", "bronze_table", "silver_table", "kpi_name", "script_name", "script_path"):
-        value = str(item.get(field) or "").strip()
-        if not value:
-            continue
-        keys.add(value.casefold())
-        keys.add(value.split(".")[-1].strip('"').casefold())
-        stem = Path(value).stem.casefold()
-        if stem:
-            keys.add(stem)
-    return keys
+def _review_match_score(script: Dict[str, Any], item: Dict[str, Any]) -> int:
+    # Prefer the approved target identity over stale secondary metadata such as a
+    # script path copied by an earlier bad review match.
+    for score, field in enumerate(reversed(_REVIEW_IDENTITY_FIELDS), start=1):
+        script_value = str(script.get(field) or "").strip().casefold()
+        item_value = str(item.get(field) or "").strip().casefold()
+        if script_value and script_value == item_value:
+            return score
+    return 0
+
+
+_REVIEW_EDITABLE_SCRIPT_FIELDS = {
+    "review_status",
+    "reviewer_comments",
+    "script_body",
+    "script_path",
+    "generated_bronze_script",
+    "generated_silver_script",
+    "generated_gold_script",
+    "dbt_model_sql",
+    "dbt_model_body",
+    "dimension_script_body",
+    "dimension_script_path",
+}
+
+
+def _reviewed_script(script: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
+    # Review identifiers select a generated script; they must not replace its execution metadata.
+    review_edits = {key: value for key, value in item.items() if key in _REVIEW_EDITABLE_SCRIPT_FIELDS}
+    return {**script, **review_edits}
 
 
 def _filtered_scripts(scripts: List[Dict[str, Any]], review_artifact: Optional[Dict[str, Any]], layer: str) -> List[Dict[str, Any]]:
@@ -358,25 +368,27 @@ def _filtered_scripts(scripts: List[Dict[str, Any]], review_artifact: Optional[D
     if not approved_items and not rejected_items:
         return scripts
 
-    def matches(script: Dict[str, Any], item: Dict[str, Any]) -> bool:
-        return bool(_script_keys(script) & _review_item_keys(item))
+    def matching_item(script: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        ranked = [(_review_match_score(script, item), item) for item in candidates]
+        score, item = max(ranked, key=lambda pair: pair[0], default=(0, None))
+        return item if score else None
 
     def reviewed(script: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-        item = next((candidate for candidate in candidates if matches(script, candidate)), None)
-        return {**script, **item} if item else script
+        item = matching_item(script, candidates)
+        return _reviewed_script(script, item) if item else script
 
     if approved_items:
         filtered = []
         for script in scripts:
-            approved_item = next((item for item in approved_items if matches(script, item)), None)
+            approved_item = matching_item(script, approved_items)
             if approved_item:
-                filtered.append({**script, **approved_item})
+                filtered.append(_reviewed_script(script, approved_item))
         return filtered
     if rejected_items:
         return [
             reviewed(script, review_items)
             for script in scripts
-            if not any(matches(script, item) for item in rejected_items)
+            if matching_item(script, rejected_items) is None
         ]
     return [reviewed(script, review_items) for script in scripts]
 
@@ -509,13 +521,29 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
         _script_globals["__name__"] = f"__athena_{{_name}}"
         _script_globals["__file__"] = _item.get("script_path") or f"<athena:{{_name}}>"
         exec(compile(_item.get("script_text") or "", f"<athena:{{_name}}>", "exec"), _script_globals)
-        _RESULTS.append({{
+        _target = str(_item.get("target_table") or "").strip()
+        _verification_status = "UNVERIFIED"
+        _verification_warning = None
+        if _target and _target.casefold() != "gold_dimensions":
+            try:
+                _target_exists = spark.catalog.tableExists(_target)
+            except Exception as _verify_exc:
+                _verification_warning = f"Target verification unavailable for {{_target}}: {{_verify_exc}}"
+            else:
+                if not _target_exists:
+                    raise RuntimeError(f"Expected Databricks target table was not created: {{_target}}")
+                _verification_status = "VERIFIED"
+        _result = {{
             "script_name": _name,
             "script_path": _item.get("script_path"),
-            "target_table": _item.get("target_table"),
+            "target_table": _target or None,
             "status": "SUCCESS",
+            "verification_status": _verification_status,
             "elapsed_seconds": round(time.time() - _started, 2),
-        }})
+        }}
+        if _verification_warning:
+            _result["verification_warning"] = _verification_warning
+        _RESULTS.append(_result)
     except Exception as _exc:
         _RESULTS.append({{
             "script_name": _name,
@@ -610,6 +638,7 @@ def _successful_batch_results_from_scripts(
             "script_path": str(script.get("script_path") or "").strip(),
             "target_table": script.get("target_table") or script.get("silver_table") or script.get("bronze_table"),
             "status": "SUCCESS",
+            "verification_status": "UNVERIFIED",
             "workspace_path": notebook_path,
             "databricks_run_id": run_state.get("run_id"),
             "run_page_url": run_state.get("run_page_url"),

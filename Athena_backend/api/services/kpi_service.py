@@ -168,10 +168,11 @@ def maybe_resume_gate1(run_id: str) -> None:
 # -------------------------
 # ✅ List KPIs (SAFE LIMIT ADD)
 # -------------------------
-def list_all_kpis() -> List[Dict[str, Any]]:
+def list_all_kpis(user: Any = None) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
 
-    runs = list_runs()
+    owner_email = user.email if getattr(user, "user_type", None) != "Admin" and getattr(user, "email", None) else None
+    runs = list_runs(owner_email=owner_email)
 
     # ✅ FIX: safety cap (prevents overload)
     for row in runs[:100]:

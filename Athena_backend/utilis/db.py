@@ -746,7 +746,7 @@ def update_hitl_item(
                 edited_content = ?,
                 rejection_reason = ?,
                 decided_at = GETUTCDATE()
-            WHERE item_id = ?
+            WHERE item_id = ? AND gate_status = 'PENDING'
             """,
             status,
             edited_content,
@@ -754,7 +754,7 @@ def update_hitl_item(
             item_id,
         )
         if cursor.rowcount == 0:
-            raise LookupError(f"HITL item not found: {item_id}")
+            raise LookupError(f"HITL item not found or not pending: {item_id}")
         conn.commit()
     except Exception as e:
         logger.error("HITL item update failed for %s: %s", item_id, e)
@@ -783,7 +783,7 @@ def update_hitl_items_batch(items: Iterable[Dict[str, Optional[str]]]) -> None:
                     edited_content = ?,
                     rejection_reason = ?,
                     decided_at = GETUTCDATE()
-                WHERE item_id = ?
+                WHERE item_id = ? AND gate_status = 'PENDING'
                 """,
                 item["status"],
                 item.get("edited_content"),
@@ -791,7 +791,7 @@ def update_hitl_items_batch(items: Iterable[Dict[str, Optional[str]]]) -> None:
                 item["item_id"],
             )
             if cursor.rowcount == 0:
-                raise LookupError(f"HITL item not found: {item['item_id']}")
+                raise LookupError(f"HITL item not found or not pending: {item['item_id']}")
         conn.commit()
     except Exception as e:
         conn.rollback()

@@ -32,6 +32,37 @@ def test_next_status_derives_database_and_file_source_defaults():
     assert pipeline_service._next_status("done", pending_gate1=False, file_source=True) == "done"
 
 
+def test_start_pipeline_preserves_seeded_identity_before_first_stage(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "project_id": "project-1",
+            "owner_email": "client@example.com",
+            "created_by_email": "client@example.com",
+        },
+    )
+
+    def interrupt_before_completion(run_id, *, start_stage_key, state):
+        captured.update(state)
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(pipeline_runtime, "continue_database_pipeline", interrupt_before_completion)
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        pipeline_runtime.start_pipeline(
+            run_id="run-owned",
+            brd_text="BRD",
+            source="database",
+        )
+
+    assert captured["project_id"] == "project-1"
+    assert captured["owner_email"] == "client@example.com"
+    assert captured["created_by_email"] == "client@example.com"
+
+
 def test_gate2_scope_keeps_lookup_and_fk_dimension_tables():
     tables = [
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "claim_information", "nomination_reason": "Dual Match (Keyword + Semantic)"},
@@ -259,6 +290,35 @@ def test_list_runs_uses_lightweight_checkpoint_index(monkeypatch):
     assert recorded["closed"] is True
 
 
+def test_list_runs_filters_owner_before_top_limit(monkeypatch):
+    recorded = {}
+
+    class StubCursor:
+        timeout = None
+
+        def execute(self, query, *parameters):
+            recorded["query"] = query
+            recorded["parameters"] = parameters
+
+        def fetchall(self):
+            return [("owned-run", "2026-07-27T10:00:00")]
+
+    class StubConnection:
+        def cursor(self):
+            return StubCursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pipeline_runtime, "get_connection", lambda: StubConnection())
+
+    runs = pipeline_runtime.list_runs(10, owner_email=" Client@Example.com ")
+
+    assert runs[0]["run_id"] == "owned-run"
+    assert recorded["query"].index("WHERE") < recorded["query"].index("GROUP BY")
+    assert recorded["parameters"] == ("client@example.com",)
+
+
 def test_run_pipeline_background_database_flow_saves_completed(monkeypatch):
     saved = {}
 
@@ -291,6 +351,41 @@ def test_run_pipeline_background_database_flow_saves_completed(monkeypatch):
     assert saved["state"]["status"] == "COMPLETED"
     assert saved["state"]["payload"] == "ok"
     assert saved["state"]["brd_filename"] == "Customer BRD"
+
+
+def test_run_pipeline_background_does_not_overwrite_abort(monkeypatch):
+    saved = {}
+
+    monkeypatch.setattr(pipeline_service, "load_checkpoint_state", lambda run_id: {"run_id": run_id, "status": "RUNNING"})
+
+    def finish_after_abort(**kwargs):
+        pipeline_runtime.ABORTED_RUNS.add(kwargs["run_id"])
+        return {"result": {"status": "COMPLETED", "source": "database"}}
+
+    monkeypatch.setattr(pipeline_service, "start_pipeline", finish_after_abort)
+    monkeypatch.setattr(pipeline_service.api_utils, "is_file_source", lambda source: False)
+    monkeypatch.setattr(
+        pipeline_service,
+        "save_checkpoint_state",
+        lambda run_id, state: saved.update({"run_id": run_id, "state": state}),
+    )
+
+    try:
+        pipeline_service.run_pipeline_background(
+            run_id="run-abort-finished",
+            brd_text="brd",
+            brd_filename="Abort BRD",
+            source="database",
+            source_databases=None,
+            sftp_entity="transactions",
+            use_domain_kb=False,
+            stage_confirmation_enabled=False,
+        )
+    finally:
+        pipeline_runtime.clear_run_abort("run-abort-finished")
+
+    assert saved["state"]["status"] == "ABORTED"
+    assert saved["state"]["abort_requested"] is True
 
 
 def test_run_pipeline_background_file_source_keeps_completed(monkeypatch):
@@ -418,6 +513,12 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
         brd_filename="Claims BRD",
         source="database",
         database_name="db1",
+        target_warehouse="snowflake",
+        execution_engine="dbt",
+        dbt_project_object_name="CLAIMS_DBT",
+        dbt_target_name="astra_snowflake",
+        dbt_threads=6,
+        dbt_command_timeout_secs=900,
         compliance_enabled=True,
         compliance_domain="Insurance",
         compliance_countries=["US", "AU"],
@@ -429,11 +530,50 @@ def test_submit_pipeline_start_submits_and_registers_callback(monkeypatch):
     assert recorded["kwargs"]["brd_filename"] == "Claims BRD"
     assert recorded["kwargs"]["source_databases"] == ["db1"]
     assert recorded["kwargs"]["stage_confirmation_enabled"] is False
+    assert recorded["kwargs"]["target_warehouse"] == "snowflake"
+    assert recorded["kwargs"]["execution_engine"] == "dbt"
+    assert recorded["kwargs"]["dbt_deployment_mode"] == "generate_only"
+    assert recorded["kwargs"]["dbt_project_object_name"] == "CLAIMS_DBT"
+    assert recorded["kwargs"]["dbt_target_name"] == "astra_snowflake"
+    assert recorded["kwargs"]["dbt_threads"] == 6
+    assert recorded["kwargs"]["dbt_command_timeout_secs"] == 900
+    assert recorded["kwargs"]["force_dbt_deploy"] is False
     assert recorded["kwargs"]["compliance_enabled"] is True
     assert recorded["kwargs"]["compliance_domain"] == "Insurance"
     assert recorded["kwargs"]["compliance_countries"] == ["US", "AU"]
     assert callable(recorded["callback"])
     pipeline_service.BACKGROUND_JOBS.pop("run-submit:pipeline", None)
+
+
+def test_seed_payload_from_checkpoint_restores_dbt_generation_config():
+    payload = pipeline_service.seed_payload_from_checkpoint(
+        {
+            "run_id": "run-restart",
+            "project_id": "project-dbt",
+            "brd_text": "requirements",
+            "source": "database",
+            "source_databases": ["insurance"],
+            "target_warehouse": "snowflake",
+            "execution_engine": "dbt",
+            "dbt_deployment_mode": "generate_only",
+            "dbt_project_object_name": "CLAIMS_DBT",
+            "dbt_target_name": "astra_snowflake",
+            "dbt_threads": 6,
+            "dbt_command_timeout_secs": 900,
+            "force_dbt_deploy": False,
+        }
+    )
+
+    assert payload.project_id == "project-dbt"
+    assert payload.database_name == "insurance"
+    assert payload.target_warehouse == "snowflake"
+    assert payload.execution_engine == "dbt"
+    assert payload.dbt_deployment_mode == "generate_only"
+    assert payload.dbt_project_object_name == "CLAIMS_DBT"
+    assert payload.dbt_target_name == "astra_snowflake"
+    assert payload.dbt_threads == 6
+    assert payload.dbt_command_timeout_secs == 900
+    assert payload.force_dbt_deploy is False
 
 
 def test_continue_file_pipeline_job_rejects_invalid_state(monkeypatch):
@@ -445,6 +585,42 @@ def test_continue_file_pipeline_job_rejects_invalid_state(monkeypatch):
 
     with pytest.raises(ValueError, match="invalid state"):
         pipeline_service.continue_file_pipeline_job("run-4", {"foo": "bar"})
+
+
+def test_continue_database_dbt_codegen_reuses_saved_gold_review(monkeypatch):
+    recorded = {}
+    review_artifact = {"items": [{"script_key": "gold-model", "review_status": "APPROVED"}]}
+
+    monkeypatch.setattr(
+        pipeline_service,
+        "submit_gold_review",
+        lambda run_id, action, review_artifact: recorded.update(
+            {
+                "run_id": run_id,
+                "action": action,
+                "review_artifact": review_artifact,
+            }
+        )
+        or {"status": "COMPLETED"},
+    )
+    monkeypatch.setattr(
+        pipeline_service,
+        "continue_database_pipeline",
+        lambda *args, **kwargs: pytest.fail("dbt finalization must not rerun Gold generation"),
+    )
+
+    result = pipeline_service.continue_database_pipeline_job(
+        "run-dbt-retry",
+        "snowflake_dbt_codegen",
+        {"gold_review_artifact": review_artifact},
+    )
+
+    assert result == {"status": "COMPLETED"}
+    assert recorded == {
+        "run_id": "run-dbt-retry",
+        "action": "APPROVED",
+        "review_artifact": review_artifact,
+    }
 
 
 def test_database_failed_stage_key_uses_context_fallback(monkeypatch):
@@ -464,6 +640,13 @@ def test_database_failed_stage_key_maps_external_gold_execution_to_gold():
         "run-gold-failed",
         {"failed_background_stage": "gold_code_execution"},
     ) == "gold"
+
+
+def test_database_failed_stage_key_preserves_snowflake_dbt_codegen():
+    assert pipeline_service.database_failed_stage_key(
+        "run-dbt-failed",
+        {"failed_background_stage": "snowflake_dbt_codegen"},
+    ) == "snowflake_dbt_codegen"
 
 
 def test_database_failed_stage_key_maps_stale_silver_execution_to_gold_when_gold_exists():
@@ -1032,7 +1215,7 @@ def test_run_context_suppresses_stage_confirmation_when_background_stage_active(
     assert context["current_pipeline_step"]["key"] == "enrichment"
 
 
-def test_run_context_advances_stale_silver_stage_confirmation(monkeypatch):
+def test_run_context_routes_stale_silver_stage_confirmation_to_missing_gate4(monkeypatch):
     from services import pipeline_runtime
 
     checkpoint = {
@@ -1073,13 +1256,13 @@ def test_run_context_advances_stale_silver_stage_confirmation(monkeypatch):
 
     context = pipeline_runtime.get_run_context("run-silver-ready")
 
-    assert context["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
-    assert context["stage_confirmation"]["last_completed_stage_key"] == "silver"
-    assert context["stage_confirmation"]["next_stage_key"] == "gold"
+    assert context["status"] == "HITL_WAIT"
+    assert context["next_gate"] == 4
+    assert context["stage_confirmation"] is None
     assert context["silver"]["scripts"][0]["script_body"] == "print('silver')"
 
 
-def test_run_context_clears_stale_stage_confirmation_when_gold_complete(monkeypatch):
+def test_run_context_keeps_gate5_review_required_when_gold_artifact_exists(monkeypatch):
     from services import pipeline_runtime
 
     checkpoint = {
@@ -1120,7 +1303,8 @@ def test_run_context_clears_stale_stage_confirmation_when_gold_complete(monkeypa
 
     context = pipeline_runtime.get_run_context("run-gold-ready")
 
-    assert context["status"] == "PIPELINE_COMPLETED"
+    assert context["status"] == "HITL_WAIT"
+    assert context["next_gate"] == 5
     assert context["stage_confirmation"] is None
     assert context["gold"]["scripts"][0]["script_body"] == "print('gold')"
 
@@ -1164,6 +1348,67 @@ def test_database_continue_skips_stage_confirmation_before_review_gates(monkeypa
     assert all(state.get("status") != "PAUSED_FOR_STAGE_CONFIRMATION" for state in saved_states)
     assert any(state.get("background_stage") == start_stage for state in saved_states)
     assert any(state.get("background_stage") == expected_gate for state in saved_states)
+
+
+def test_database_continue_stops_before_next_stage_when_aborted(monkeypatch):
+    visited = []
+
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_database_stage_runner",
+        lambda stage_key: lambda state: visited.append(stage_key) or {"status": "RUNNING"},
+    )
+    pipeline_runtime.ABORTED_RUNS.add("run-aborted")
+    try:
+        result = pipeline_runtime.continue_database_pipeline(
+            "run-aborted",
+            start_stage_key="ingestion",
+            state={"run_id": "run-aborted", "status": "RUNNING"},
+        )
+    finally:
+        pipeline_runtime.clear_run_abort("run-aborted")
+
+    assert visited == []
+    assert result["status"] == "ABORTED"
+    assert result["abort_requested"] is True
+
+
+def test_background_completion_callback_preserves_abort(monkeypatch):
+    saved = []
+
+    class CompletedAfterAbortExecutor:
+        def submit(self, fn, *args):
+            future = Future()
+            pipeline_runtime.ABORTED_RUNS.add("run-callback-abort")
+            future.set_result(fn(*args))
+            return future
+
+    monkeypatch.setattr(pipeline_runtime, "BACKGROUND_EXECUTOR", CompletedAfterAbortExecutor())
+    monkeypatch.setattr(pipeline_runtime, "ensure_background_capacity_locked", lambda: None)
+    monkeypatch.setattr(pipeline_runtime, "mark_run_processing", lambda run_id, stage: None)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "PROCESSING", "background_stage": "gate2"},
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state_timed",
+        lambda run_id, state, context: saved.append((dict(state), context)),
+    )
+
+    try:
+        pipeline_runtime.submit_background(
+            "run-callback-abort",
+            "gate2",
+            lambda: {"status": "COMPLETED"},
+        )
+    finally:
+        pipeline_runtime.clear_run_abort("run-callback-abort")
+        pipeline_runtime.BACKGROUND_JOBS.pop("run-callback-abort:gate2", None)
+
+    assert saved[-1][0]["status"] == "ABORTED"
+    assert saved[-1][1] == "gate2:background_aborted"
 
 
 def test_database_continue_clears_stale_failure_when_retrying(monkeypatch):

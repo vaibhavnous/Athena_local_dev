@@ -29,6 +29,12 @@ const DEFAULT_FORM = {
   databaseType: 'azure_sql',
   databaseName: 'insurance',
   targetWarehouse: 'databricks',
+  executionEngine: 'native',
+  dbtDeploymentMode: 'generate_only',
+  dbtTargetName: '',
+  dbtThreads: null,
+  dbtCommandTimeoutSecs: null,
+  forceDbtDeploy: false,
   useDomainKb: false,
   domainProfile: '',
   knowledgeBaseId: '',
@@ -54,6 +60,12 @@ function buildInitialForm(settings, seedRun, project) {
           databaseType: seedRun.database_type || DEFAULT_FORM.databaseType,
           databaseName: seedRun.database_name || DEFAULT_FORM.databaseName,
           targetWarehouse: seedRun.target_warehouse || DEFAULT_FORM.targetWarehouse,
+          executionEngine: seedRun.execution_engine || DEFAULT_FORM.executionEngine,
+          dbtDeploymentMode: seedRun.dbt_deployment_mode || 'generate_only',
+          dbtTargetName: seedRun.dbt_target_name || '',
+          dbtThreads: seedRun.dbt_threads ?? null,
+          dbtCommandTimeoutSecs: seedRun.dbt_command_timeout_secs ?? null,
+          forceDbtDeploy: false,
           useDomainKb: !!seedRun.use_domain_kb,
           domainProfile: seedRun.domain_profile || '',
           knowledgeBaseId: seedRun.knowledge_base_id || '',
@@ -67,6 +79,17 @@ function buildInitialForm(settings, seedRun, project) {
       databaseType: project.dbType || DEFAULT_FORM.databaseType,
       databaseName: project.databaseName || DEFAULT_FORM.databaseName,
       targetWarehouse: String(project.target || 'Databricks').toLowerCase(),
+      executionEngine:
+        String(project.target || '').toLowerCase() === 'snowflake' &&
+        project.connectionType === 'database' &&
+        project.executionEngine === 'dbt'
+          ? 'dbt'
+          : 'native',
+      dbtDeploymentMode: project.dbtDeploymentMode || 'generate_only',
+      dbtTargetName: project.dbtTargetName || '',
+      dbtThreads: project.dbtThreads ?? null,
+      dbtCommandTimeoutSecs: project.dbtCommandTimeoutSecs ?? null,
+      forceDbtDeploy: false,
       useDomainKb: !!project.useDomainKB,
       domainProfile: project.domainProfile || '',
       knowledgeBaseId: project.knowledgeBaseId || '',
@@ -120,6 +143,11 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
+  const sourceValue = String(form.source || DEFAULT_FORM.source).trim().toLowerCase()
+  const targetWarehouseValue = String(form.targetWarehouse || DEFAULT_FORM.targetWarehouse).trim().toLowerCase()
+  const snowflakeDatabaseTarget = targetWarehouseValue === 'snowflake' && sourceValue === 'database'
+  const executionEngineValue = snowflakeDatabaseTarget && form.executionEngine === 'dbt' ? 'dbt' : 'native'
+  const dbtDeploymentModeValue = executionEngineValue === 'dbt' ? 'generate_and_deploy' : 'generate_only'
 
   const resetState = () => {
     setForm(buildInitialForm(settings, initialSeedRun, project))
@@ -254,7 +282,13 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         deployment: form.deployment || undefined,
         database_type: form.databaseType,
         database_name: form.databaseName,
-        target_warehouse: form.targetWarehouse,
+        target_warehouse: targetWarehouseValue,
+        execution_engine: executionEngineValue,
+        dbt_deployment_mode: dbtDeploymentModeValue,
+        dbt_target_name: form.dbtTargetName || undefined,
+        dbt_threads: form.dbtThreads || undefined,
+        dbt_command_timeout_secs: form.dbtCommandTimeoutSecs || undefined,
+        force_dbt_deploy: false,
         budget: settings.budget,
         maxKpis: settings.maxKpis,
         devMode: settings.devMode,
@@ -276,7 +310,13 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         sftp_entity: normalizedSftpEntity,
         provider: form.provider,
         deployment: form.deployment || null,
-        target_warehouse: form.targetWarehouse,
+        target_warehouse: targetWarehouseValue,
+        execution_engine: executionEngineValue,
+        dbt_deployment_mode: dbtDeploymentModeValue,
+        dbt_target_name: form.dbtTargetName || null,
+        dbt_threads: form.dbtThreads,
+        dbt_command_timeout_secs: form.dbtCommandTimeoutSecs,
+        force_dbt_deploy: false,
         use_domain_kb: !!form.useDomainKb,
         started_at: startedAt,
         stages: [],
@@ -497,6 +537,26 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                 <Field label="Database Name" compact>
                                   <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.databaseName || '-'} readOnly />
                                 </Field>
+                                {snowflakeDatabaseTarget && (
+                                  <>
+                                    <Field label="Snowflake Engine" compact>
+                                      <input
+                                        className="input-field h-11 cursor-not-allowed opacity-80"
+                                        value={executionEngineValue === 'dbt' ? 'dbt' : 'Native'}
+                                        readOnly
+                                      />
+                                    </Field>
+                                    {executionEngineValue === 'dbt' && (
+                                      <Field label="dbt Run Mode" compact>
+                                        <input
+                                          className="input-field h-11 cursor-not-allowed opacity-80"
+                                          value={dbtDeploymentModeValue === 'generate_and_deploy' ? 'Deploy and build in Snowflake' : 'Generate only'}
+                                          readOnly
+                                        />
+                                      </Field>
+                                    )}
+                                  </>
+                                )}
                                 <div className="rounded-lg border border-bg-border bg-bg-base p-3">
                                   <div className="flex items-center justify-between gap-3">
                                     <span className="text-xs font-medium text-text-secondary">Domain Knowledge Base</span>

@@ -29,9 +29,10 @@ import {
   submitTableReviews
 } from '../api/athenaApi'
 import { MOCK_KPIS_LIST } from '../data/mockData'
+import { useAuth } from '../context/AuthContext'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { getGateDisplayName } from '../utils/pipelinePhases'
-import { expandMergedCodeReviewItems, mergeCodeReviewItems } from '../utils/codeReviewArtifacts'
+import { expandMergedCodeReviewItems } from '../utils/codeReviewArtifacts'
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const REVIEW_HYDRATION_ATTEMPTS = 20
@@ -455,6 +456,7 @@ function buildDemoGateFallback(run, gate, isFileSource, allRuns) {
 }
 
 function HitlQueue({ onClose = null }) {
+  const { user } = useAuth()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedRunId = searchParams.get('runId') || ''
@@ -518,7 +520,7 @@ function HitlQueue({ onClose = null }) {
     next_gate: requestedGate,
   })
 
-  const REVIEWER_ID = 'reviewer@nousinfo.com'
+  const reviewerId = user?.email || user?.uid || ''
   const currentRun = useMemo(() => {
     const summaryRun = runs.find((run) => run.id === selectedRunId) || null
     if (selectedRunDetail?.id === selectedRunId) {
@@ -1081,7 +1083,7 @@ function HitlQueue({ onClose = null }) {
     [silverMergeKeyReview]
   )
   const bronzeCodeReviewItems = useMemo(
-    () => mergeCodeReviewItems(buildBronzeCodeReviewItems(bronzeReviewFeeds), 'bronze'),
+    () => buildBronzeCodeReviewItems(bronzeReviewFeeds),
     [bronzeReviewFeeds]
   )
   const silverMergeKeyReviewItems = useMemo(
@@ -1089,15 +1091,16 @@ function HitlQueue({ onClose = null }) {
     [silverMergeKeyReviewFeeds]
   )
   const silverCodeReviewItems = useMemo(
-    () => mergeCodeReviewItems(buildSilverCodeReviewItems(silverReviewItems), 'silver'),
+    () => buildSilverCodeReviewItems(silverReviewItems),
     [silverReviewItems]
   )
   const goldCodeReviewItems = useMemo(
-    () => mergeCodeReviewItems(buildGoldCodeReviewItems(goldReviewItems), 'gold'),
+    () => buildGoldCodeReviewItems(goldReviewItems),
     [goldReviewItems]
   )
   const activeCodeReviewItems = isGate4 ? bronzeCodeReviewItems : isSilverMergeKeyReview ? silverMergeKeyReviewItems : isGate5 ? silverCodeReviewItems : isGoldReview ? goldCodeReviewItems : []
   const reviewedCodeReviewCount = activeCodeReviewItems.filter((item) => codeReviewDecisions[item.key]).length
+  const allCodeReviewItemsReviewed = activeCodeReviewItems.length > 0 && reviewedCodeReviewCount === activeCodeReviewItems.length
   const codeReviewGateDecision = getCodeReviewGateDecision(activeCodeReviewItems, codeReviewDecisions)
   const semanticReviewSource = useMemo(
     () => buildSemanticReviewSource(enrichmentReview, currentRun, selectedRunId),
@@ -1109,9 +1112,12 @@ function HitlQueue({ onClose = null }) {
   )
   const pendingSemanticReviewItems = semanticReviewItems.filter((item) => {
     const key = semanticReviewItemKey(item)
-    return !semanticDecisions[key] && !item.decision
+    return !semanticDecisions[key] && !normalizeReviewDecision(item.decision)
   })
   const allSemanticReviewed = semanticReviewItems.length > 0 && pendingSemanticReviewItems.length === 0
+  const allKpisReviewed = queue.length > 0 && kpiCounts.pending === 0
+  const isCodeReview = isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview
+  const allCurrentItemsReviewed = isGate3 ? allSemanticReviewed : isCodeReview ? allCodeReviewItemsReviewed : allKpisReviewed
   const gateReviewReady = isGate4 ? bronzeReviewFeeds.length > 0 : isSilverMergeKeyReview ? silverMergeKeyReviewFeeds.length > 0 : isGate5 ? silverReviewItems.length > 0 : isGoldReview ? goldReviewItems.length > 0 : false
   const canSubmitReview = isReviewableRun && (isGate2
     ? (isSftpRun ? totalFeedCount > 0 : (tableReview?.nominated_tables || []).length > 0)
@@ -1232,12 +1238,12 @@ function HitlQueue({ onClose = null }) {
   const buildApprovedKpiDecisions = () => {
     return queue.map((item) => {
       const key = reviewItemKey(item)
-      const decision = localDecisions[key] || item.decision || 'APPROVED'
+      const decision = localDecisions[key] || item.decision
       const edited = editedKpis[key]
       return {
         kpi_id: key,
         decision,
-        reviewer: REVIEWER_ID,
+        reviewer: reviewerId,
         notes: edited?.notes || rejectionReasons[key] || '',
         edited_definition: edited?.definition || null,
         edited_content: edited ? {
@@ -1313,7 +1319,7 @@ function HitlQueue({ onClose = null }) {
     const next = {}
     semanticReviewItems.forEach((item) => {
       const key = semanticReviewItemKey(item)
-      if (!semanticDecisions[key] && !item.decision) next[key] = 'APPROVED'
+      if (!semanticDecisions[key] && !normalizeReviewDecision(item.decision)) next[key] = 'APPROVED'
     })
     setSemanticValidationError('')
     setSemanticDecisions((prev) => ({ ...prev, ...next }))
@@ -1323,7 +1329,7 @@ function HitlQueue({ onClose = null }) {
     const next = {}
     semanticReviewItems.forEach((item) => {
       const key = semanticReviewItemKey(item)
-      next[key] = semanticDecisions[key] || item.decision || 'APPROVED'
+      next[key] = semanticDecisions[key] || normalizeReviewDecision(item.decision)
     })
     return next
   }
@@ -1416,10 +1422,9 @@ function HitlQueue({ onClose = null }) {
     setSelectedTables(next)
   }
 
-  const selectedOrAllTableKeys = () => {
+  const selectedTableKeys = () => {
     const keys = (tableReview?.nominated_tables || []).map((table) => tableReviewKey(table))
-    const selected = keys.filter((key) => selectedTables[key])
-    return selected.length > 0 ? selected : keys
+    return keys.filter((key) => selectedTables[key])
   }
 
   const selectedOrAllFeedKeys = () => {
@@ -1429,12 +1434,35 @@ function HitlQueue({ onClose = null }) {
   }
 
   const handleSubmit = async () => {
+    if (!isGate2 && !allCurrentItemsReviewed) {
+      if (isGate3) {
+        setSemanticValidationError('Review every semantic item before submitting.')
+      } else {
+        addNotification({
+          type: 'error',
+          title: `${activeReviewName} Is Incomplete`,
+          message: `Review every ${isCodeReview ? 'generated-code item' : 'KPI'} before submitting.`,
+          duration: 5000
+        })
+      }
+      return
+    }
+
     if (isGate2) {
+      const approvedTables = isSftpRun ? selectedOrAllFeedKeys() : selectedTableKeys()
+      if (!isSftpRun && approvedTables.length === 0) {
+        addNotification({
+          type: 'error',
+          title: `${gate2Name} Needs an Approval`,
+          message: 'Approve at least one table before submitting.',
+          duration: 5000
+        })
+        return
+      }
+
       setSubmitting(true)
       try {
-        const approvedTables = isSftpRun ? selectedOrAllFeedKeys() : selectedOrAllTableKeys()
         if (isSftpRun) handleSelectAllFeeds()
-        else handleAutoApproveTables()
         await submitTableReviews(selectedRunId, approvedTables)
         updateRun(selectedRunId, {
             id: selectedRunId,
@@ -1485,7 +1513,14 @@ function HitlQueue({ onClose = null }) {
         })
         const editedEnrichmentMetadata = hasRejectedSemanticItem ? undefined : buildEditedEnrichmentMetadata()
         await submitEnrichmentReview(selectedRunId, !hasRejectedSemanticItem, editedEnrichmentMetadata)
-        updateRun(selectedRunId, {
+        updateRun(selectedRunId, hasRejectedSemanticItem ? {
+          id: selectedRunId,
+          status: 'FAILED',
+          next_gate: null,
+          stage_confirmation: null,
+          background_stage: null,
+          resume_message: `${gate3Name} rejected. Run stopped.`,
+        } : {
             id: selectedRunId,
             status: 'RUNNING',
             next_gate: 0,
@@ -1499,11 +1534,11 @@ function HitlQueue({ onClose = null }) {
         setSemanticRejectionReasons({})
         setSemanticValidationError('')
         addNotification({
-          type: 'success',
-          title: `${gate3Name} Submitted`,
+          type: hasRejectedSemanticItem ? 'error' : 'success',
+          title: hasRejectedSemanticItem ? `${gate3Name} Rejected` : `${gate3Name} Submitted`,
           message: !hasRejectedSemanticItem
             ? `${gate3Name} approved. Bronze generation is running in the background.`
-            : 'Enrichment review was rejected and the run remains paused for rework.',
+            : 'Run stopped.',
           duration: 5000
         })
         if (!hasRejectedSemanticItem && (currentRun?.compliance_enabled || selectedRunDetail?.compliance_enabled)) {
@@ -1533,7 +1568,7 @@ function HitlQueue({ onClose = null }) {
         if (!bronzeCodeReviewItems.length) {
           throw new Error(`${gate4Name} is not ready yet. Bronze scripts are still being generated.`)
         }
-        const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
+        const reviewAction = codeReviewGateDecision
         await submitBronzeReview(selectedRunId, reviewAction, buildCodeReviewArtifact('bronze', codeReviewDraftItems, bronzeReview, codeReviewDecisions))
         updateRun(selectedRunId, {
           id: selectedRunId,
@@ -1577,7 +1612,7 @@ function HitlQueue({ onClose = null }) {
         if (!silverMergeKeyReviewItems.length) {
           throw new Error('Silver Merge Key Review is not ready yet. Merge-key review data is still being prepared.')
         }
-        const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
+        const reviewAction = codeReviewGateDecision
         await submitSilverMergeKeyReview(selectedRunId, reviewAction, buildCodeReviewArtifact('silver_merge_key', codeReviewDraftItems, silverMergeKeyReview, codeReviewDecisions))
         updateRun(selectedRunId, {
           id: selectedRunId,
@@ -1621,7 +1656,7 @@ function HitlQueue({ onClose = null }) {
         if (!silverCodeReviewItems.length) {
           throw new Error(`${gate5Name} is not ready yet. Silver scripts are still being generated.`)
         }
-        const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
+        const reviewAction = codeReviewGateDecision
         await submitSilverReview(selectedRunId, reviewAction, buildCodeReviewArtifact('silver', codeReviewDraftItems, silverReview, codeReviewDecisions))
         updateRun(selectedRunId, {
             id: selectedRunId,
@@ -1664,7 +1699,7 @@ function HitlQueue({ onClose = null }) {
         if (!goldCodeReviewItems.length) {
           throw new Error('Gold Code Review is not ready yet. Gold scripts are still being generated.')
         }
-        const reviewAction = codeReviewGateDecision || gateDecision || 'APPROVED'
+        const reviewAction = codeReviewGateDecision
         await submitGoldReview(selectedRunId, reviewAction, buildCodeReviewArtifact('gold', codeReviewDraftItems, goldReview, codeReviewDecisions))
         updateRun(selectedRunId, {
           id: selectedRunId,
@@ -1823,7 +1858,7 @@ function HitlQueue({ onClose = null }) {
                 </button>
                 <button
                   onClick={handleSubmit}
-                  disabled={submitting}
+                  disabled={submitting || !allKpisReviewed}
                   className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {submitting ? 'Submitting...' : 'Submit Decisions & Resume'}
@@ -2242,7 +2277,7 @@ function HitlQueue({ onClose = null }) {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting || !gateReviewReady}
+              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed}
               submitLabel="Submit & Generate Silver"
             />
             ) : isGoldReview ? (
@@ -2266,7 +2301,7 @@ function HitlQueue({ onClose = null }) {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting || !gateReviewReady}
+              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed}
               submitLabel="Submit & Execute Gold"
             />
             ) : isGate5 ? (
@@ -2290,7 +2325,7 @@ function HitlQueue({ onClose = null }) {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting || !gateReviewReady}
+              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed}
               submitLabel="Submit & View Generated Code"
             />
             ) : isGate4 ? (
@@ -2314,7 +2349,7 @@ function HitlQueue({ onClose = null }) {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting || !gateReviewReady}
+              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed}
               submitLabel="Submit & Generate Silver"
             />
             ) : isGate3 ? (

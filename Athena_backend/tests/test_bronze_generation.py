@@ -6,6 +6,8 @@ import re
 import uuid
 from pathlib import Path
 
+import pytest
+
 from nodes import bronze_gen
 
 
@@ -583,3 +585,165 @@ def test_snowflake_bronze_generation_skips_llm_by_default(monkeypatch):
     assert result["llm_enhanced"] is False
     assert result["llm_enhancement_error"] is None
     assert "-- llm enhanced" not in Path(result["script_path"]).read_text(encoding="utf-8")
+
+
+def test_snowflake_dbt_bronze_refreshes_models_from_current_tables(monkeypatch, tmp_path):
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
+    monkeypatch.delenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    state = {
+        "run_id": "run-dbt-refresh",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "certified_tables": [
+            {
+                "database_name": "insurance",
+                "schema_name": "dbo",
+                "table_name": "ClaimInformation",
+            }
+        ],
+        "discovered_metadata": {
+            "tables": [
+                {
+                    "table_name": "ClaimInformation",
+                    "columns": [{"column_name": "ClaimID", "data_type": "int"}],
+                }
+            ]
+        },
+    }
+
+    first = bronze_gen.bronze_code_generation_node(state)
+    first_result = first["bronze_generation_results"][0]
+    first_model = Path(first_result["script_path"])
+    first_sql = first_model.read_text(encoding="utf-8")
+
+    assert first_model.name == "bronze_claiminformation.sql"
+    assert first_result["code_generation_format"] == "dbt"
+    assert first_result["dbt_alias"] == "bronze_ClaimInformation"
+    assert "{{ source('athena_db_bronze', 'raw_claiminformation') }}" in first_sql
+    assert first_result["snowflake_landing_database"] == "ATHENA_DB"
+    assert first_result["snowflake_landing_schema"] == "BRONZE"
+    assert first_result["snowflake_landing_table"] == "raw_ClaimInformation"
+    assert "CREATE TABLE" not in first_sql
+
+    reviewed_sql = first_sql + "\n-- reviewed bronze\n"
+    reviewed = bronze_gen.sync_snowflake_dbt_bronze_review(
+        "run-dbt-refresh",
+        [first_result],
+        {
+            "feeds": [
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table_name": "ClaimInformation",
+                    "review_status": "APPROVED",
+                    "approved_schema": [
+                        {
+                            "column_name": "claimid",
+                            "description": "Reviewed claim identifier",
+                        }
+                    ],
+                    "generated_bronze_script": reviewed_sql,
+                    "primary_keys": ["claimid"],
+                }
+            ]
+        },
+    )
+
+    assert len(reviewed) == 1
+    assert first_model.read_text(encoding="utf-8") == reviewed_sql
+    assert reviewed[0]["primary_keys"] == ["claimid"]
+    assert "Reviewed claim identifier" in Path(
+        first["snowflake_dbt_bronze_schema_path"]
+    ).read_text(encoding="utf-8")
+
+    renamed = bronze_gen.bronze_code_generation_node(
+        {
+            **state,
+            "certified_tables": [
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table_name": "PolicyDetail",
+                }
+            ],
+            "discovered_metadata": {
+                "tables": [
+                    {
+                        "table_name": "PolicyDetail",
+                        "columns": [{"column_name": "PolicyID", "data_type": "int"}],
+                    }
+                ]
+            },
+        }
+    )
+    renamed_model = Path(renamed["bronze_generation_results"][0]["script_path"])
+
+    assert not first_model.exists()
+    assert renamed_model.name == "bronze_policydetail.sql"
+
+    rejected = bronze_gen.sync_snowflake_dbt_bronze_review(
+        "run-dbt-refresh",
+        renamed["bronze_generation_results"],
+        {
+            "feeds": [
+                {
+                    "database_name": "insurance",
+                    "schema_name": "dbo",
+                    "table_name": "PolicyDetail",
+                    "review_status": "REJECTED",
+                }
+            ]
+        },
+    )
+
+    assert rejected == []
+    assert not renamed_model.exists()
+    assert "policydetail" not in Path(
+        renamed["snowflake_dbt_sources_path"]
+    ).read_text(encoding="utf-8")
+    assert "bronze_policydetail" not in Path(
+        renamed["snowflake_dbt_bronze_schema_path"]
+    ).read_text(encoding="utf-8")
+
+    empty = bronze_gen.bronze_code_generation_node(
+        {
+            **state,
+            "certified_tables": [],
+            "nominated_tables": [],
+            "discovered_metadata": {},
+        }
+    )
+
+    assert empty["bronze_generation_status"] == "SKIPPED"
+    assert not renamed_model.exists()
+    assert Path(empty["snowflake_dbt_sources_path"]).exists()
+    assert Path(empty["snowflake_dbt_bronze_schema_path"]).exists()
+
+
+def test_snowflake_dbt_bronze_rejects_sanitized_model_name_collision(monkeypatch, tmp_path):
+    monkeypatch.delenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="unique after sanitization"):
+        bronze_gen.bronze_code_generation_node(
+            {
+                "run_id": "run-dbt-bronze-collision",
+                "target_warehouse": "snowflake",
+                "execution_engine": "dbt",
+                "certified_tables": [
+                    {
+                        "database_name": "insurance",
+                        "schema_name": "dbo",
+                        "table_name": "Claim-Information",
+                    },
+                    {
+                        "database_name": "insurance",
+                        "schema_name": "dbo",
+                        "table_name": "Claim Information",
+                    },
+                ],
+            }
+        )
