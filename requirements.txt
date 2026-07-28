@@ -1,1 +1,0 @@
--r apps/backend/requirements.txt
