@@ -69,17 +69,18 @@ def save_external_execution_progress(
         "message": message,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    terminal_success = str(status or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
     next_status = "RUNNING" if status == "RUNNING" else state.get("status", "RUNNING")
-    if str(status or "").upper() == "COMPLETED" and str(layer or "").lower() == "gold":
+    if terminal_success and str(layer or "").lower() == "gold":
         next_status = "PIPELINE_COMPLETED"
     updated = {
         **state,
         "run_id": run_id,
         "status": next_status,
-        "background_stage": None if status == "COMPLETED" else stage_key,
-        "failed_background_stage": None if status == "COMPLETED" else state.get("failed_background_stage"),
-        "last_failed_stage_key": None if status == "COMPLETED" else state.get("last_failed_stage_key"),
-        "error": None if status == "COMPLETED" else state.get("error"),
+        "background_stage": None if terminal_success else stage_key,
+        "failed_background_stage": None if terminal_success else state.get("failed_background_stage"),
+        "last_failed_stage_key": None if terminal_success else state.get("last_failed_stage_key"),
+        "error": None if terminal_success else state.get("error"),
         "external_execution": progress,
         f"{platform_name}_{layer}_execution_status": status,
         f"{platform_name}_{layer}_execution_progress": progress,

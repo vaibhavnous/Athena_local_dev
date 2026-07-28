@@ -1663,7 +1663,7 @@ def build_pipeline_steps(
                     and checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
                 ) or bool(
                     str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
-                    and checkpoint.get("databricks_gold_execution_status") == "COMPLETED"
+                    and status_completed(checkpoint.get("databricks_gold_execution_status"))
                 ) or bool(
                     str(checkpoint.get("target_warehouse") or "").lower() not in {"snowflake", "databricks"}
                     and gold_generation_completed
@@ -1848,7 +1848,7 @@ def build_pipeline_steps(
                     and checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
                 ) or bool(
                     str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
-                    and checkpoint.get("databricks_gold_execution_status") == "COMPLETED"
+                    and status_completed(checkpoint.get("databricks_gold_execution_status"))
                 ),
                 "detail": (
                     "Generated Gold scripts are executed in Snowflake after Gold generation."
@@ -2232,7 +2232,7 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     gold_execution_progress_exists = bool(
         checkpoint.get("background_stage") == "gold_code_execution"
         or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
-        or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
+        or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED", "COMPLETED_WITH_WARNINGS"}
         or str(checkpoint.get("status") or "").upper() == "PIPELINE_COMPLETED"
     )
     if gold_execution_progress_exists:
@@ -2270,7 +2270,7 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         status = "PIPELINE_COMPLETED"
     if can_promote_to_completed and (
         gold_generation_completed
-        or checkpoint.get("databricks_gold_execution_status") == "COMPLETED"
+        or status_completed(checkpoint.get("databricks_gold_execution_status"))
         or checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
     ):
         status = "PIPELINE_COMPLETED"
@@ -2278,7 +2278,7 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         not checkpoint.get("background_stage")
         and str(status or "").upper() in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
         and (
-            str(checkpoint.get("databricks_gold_execution_status") or "").upper() == "COMPLETED"
+            status_completed(checkpoint.get("databricks_gold_execution_status"))
             or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
         )
     ):

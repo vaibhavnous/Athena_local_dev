@@ -798,8 +798,66 @@ def test_databricks_batch_notebook_fails_the_job_when_any_script_fails():
 
     assert 'if _SUMMARY["status"] == "FAILED":' in notebook
     assert 'exec(compile(_item.get("script_text") or "", f"<athena:{_name}>", "exec"), _script_globals)' in notebook
-    assert '"scripts_ok": builtins.sum(' in notebook
+    assert '_SCRIPTS_OK = builtins.sum(' in notebook
+    assert "_SCRIPTS_OK > _SCRIPTS_FAILED" in notebook
     assert notebook.index('raise RuntimeError(json.dumps(_SUMMARY') < notebook.index("dbutils.notebook.exit")
+
+
+def test_databricks_gold_batch_majority_success_completes_with_warnings(monkeypatch):
+    monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
+    monkeypatch.delenv("ATHENA_DATABRICKS_GOLD_ALLOW_PARTIAL_SUCCESS", raising=False)
+    monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_: None)
+    monkeypatch.setattr(databricks_runtime, "_workspace_import_notebook", lambda *_: {})
+    monkeypatch.setattr(databricks_runtime, "_submit_run", lambda *_args, **_kwargs: {"run_id": 42})
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_wait_for_run",
+        lambda *_: {"run_id": 42, "result_state": "SUCCESS", "life_cycle_state": "TERMINATED"},
+    )
+    monkeypatch.setattr(databricks_runtime, "_task_run_id", lambda *_: 42)
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_get_run_output",
+        lambda *_: {
+            "notebook_output": {
+                "result": json.dumps(
+                    {
+                        "status": "COMPLETED_WITH_WARNINGS",
+                        "results": [
+                            {"script_name": "gold_fact_one", "status": "SUCCESS"},
+                            {"script_name": "gold_fact_two", "status": "SUCCESS"},
+                            {"script_name": "gold_fact_three", "status": "FAILED", "error": "bad generated SQL"},
+                        ],
+                    }
+                )
+            }
+        },
+    )
+    saved = []
+
+    def capture_progress(state, **kwargs):
+        saved.append((state, kwargs))
+        return state
+
+    monkeypatch.setattr(databricks_runtime, "save_external_execution_progress", capture_progress)
+
+    result = databricks_runtime.run_databricks_gold_scripts(
+        {
+            "run_id": "run-partial-gold",
+            "target_warehouse": "databricks",
+            "gold_generation_results": [
+                {"status": "APPROVED", "script_body": "print('one')", "target_table": "gold.fact_one"},
+                {"status": "APPROVED", "script_body": "print('two')", "target_table": "gold.fact_two"},
+                {"status": "APPROVED", "script_body": "print('three')", "target_table": "gold.fact_three"},
+            ],
+        }
+    )
+
+    assert result["databricks_gold_execution_status"] == "COMPLETED_WITH_WARNINGS"
+    assert [item["script_name"] for item in result["databricks_gold_execution_failures"]] == ["gold_fact_three"]
+    assert saved[-1][1]["status"] == "COMPLETED_WITH_WARNINGS"
+    assert saved[-1][1]["completed_count"] == 2
+    assert "gold_fact_three" in saved[-1][1]["message"]
 
 
 def test_gold_measure_scoring_rejects_operational_counters_for_money_kpis():

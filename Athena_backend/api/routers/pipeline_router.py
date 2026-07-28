@@ -22,7 +22,7 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
         not checkpoint.get("background_stage")
         and result_state.upper() in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
         and (
-            str(checkpoint.get("databricks_gold_execution_status") or "").upper() == "COMPLETED"
+            str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
             or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
         )
     ):

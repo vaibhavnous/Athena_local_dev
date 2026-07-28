@@ -1,9 +1,13 @@
-import { getPhaseGroups, getPipelineSteps, summarizeRunSource } from './pipelinePhases'
+import { getPhaseGroups, getPipelineSteps, normalizeState, summarizeRunSource } from './pipelinePhases'
 
 const phaseState = (run: any, phaseId: string, stepKey: string) => {
   const phase = getPhaseGroups(run, getPipelineSteps(run)).find((item) => item.id === phaseId)
   return phase?.steps.find((step) => step.key === stepKey)?.state
 }
+
+test('treats completed-with-warnings as completed in the UI', () => {
+  expect(normalizeState('COMPLETED_WITH_WARNINGS')).toBe('COMPLETED')
+})
 
 test('renders Snowflake bronze execution as active without advancing Silver', () => {
   const run = {

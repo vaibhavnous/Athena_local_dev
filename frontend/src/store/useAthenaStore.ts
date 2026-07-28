@@ -50,7 +50,7 @@ function normalizeRunStatus(value: any): string {
   const status = String(value || '').toUpperCase()
   if (status === 'PROCESSING' || status === 'SUBMITTED' || status === 'IN_PROGRESS') return 'RUNNING'
   if (status === 'PENDING_REVIEW' || status === 'PAUSED_FOR_HITL') return 'HITL_WAIT'
-  if (status === 'SUCCESS' || status === 'PIPELINE_COMPLETED') return 'COMPLETED'
+  if (status === 'SUCCESS' || status === 'PIPELINE_COMPLETED' || status === 'COMPLETED_WITH_WARNINGS') return 'COMPLETED'
   return status
 }
 

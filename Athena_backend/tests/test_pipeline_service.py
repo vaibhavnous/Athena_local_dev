@@ -650,6 +650,33 @@ def test_databricks_gold_generation_does_not_imply_execution_completion():
     assert by_key["gold_code_execution"]["state"] == "PENDING"
 
 
+def test_databricks_gold_partial_success_completes_execution_step():
+    from services import pipeline_runtime
+
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            "status": "PIPELINE_COMPLETED",
+            "target_warehouse": "databricks",
+            "databricks_gold_execution_status": "COMPLETED_WITH_WARNINGS",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=True,
+        gold_generation_completed=True,
+    )
+
+    gold_execution = next(step for step in steps if step["key"] == "gold_code_execution")
+    assert gold_execution["complete"] is True
+    assert gold_execution["state"] == "COMPLETED"
+
+
 def test_later_stage_cannot_infer_bronze_execution_completion():
     from services import pipeline_runtime
 

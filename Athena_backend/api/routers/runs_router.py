@@ -131,7 +131,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         or checkpoint.get("gold_generation_results")
         or checkpoint.get("background_stage") == "gold_code_execution"
         or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
-        or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
+        or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED", "COMPLETED_WITH_WARNINGS"}
     )
     next_gate = None if gold_completed else checkpoint.get("next_gate")
     next_review_key = None if gold_completed else checkpoint.get("next_review_key")
@@ -160,7 +160,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         fallback_status = "RUNNING"
     elif gold_completed and (
         str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
-        or str(checkpoint.get("databricks_gold_execution_status") or "").upper() == "COMPLETED"
+        or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
     ):
         fallback_status = "SUCCESS"
     elif gold_completed and str(fallback_status or "").upper() == "HITL_WAIT":

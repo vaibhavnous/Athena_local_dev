@@ -71,3 +71,35 @@ def test_completed_gold_progress_marks_pipeline_completed(monkeypatch):
     assert state["background_stage"] is None
     assert state["databricks_gold_execution_status"] == "COMPLETED"
     assert saved[-1][1]["status"] == "PIPELINE_COMPLETED"
+
+
+def test_gold_progress_with_warnings_is_terminal_success(monkeypatch):
+    saved = []
+    pipeline_runtime = types.ModuleType("services.pipeline_runtime")
+    pipeline_runtime.save_checkpoint_state = lambda run_id, state: saved.append((run_id, state))
+    monkeypatch.setitem(sys.modules, "services.pipeline_runtime", pipeline_runtime)
+
+    state = external_execution_progress.save_external_execution_progress(
+        {
+            "run_id": "run-gold-warning",
+            "status": "RUNNING",
+            "background_stage": "gold_code_execution",
+            "failed_background_stage": "gold_code_execution",
+            "error": "stale failure",
+        },
+        run_id="run-gold-warning",
+        platform="databricks",
+        layer="gold",
+        stage_key="gold_code_execution",
+        status="COMPLETED_WITH_WARNINGS",
+        total_count=3,
+        completed_count=2,
+        message="2/3 Gold scripts succeeded.",
+    )
+
+    assert state["status"] == "PIPELINE_COMPLETED"
+    assert state["background_stage"] is None
+    assert state["failed_background_stage"] is None
+    assert state["error"] is None
+    assert state["databricks_gold_execution_status"] == "COMPLETED_WITH_WARNINGS"
+    assert saved[-1][1]["status"] == "PIPELINE_COMPLETED"

@@ -43,6 +43,17 @@ def databricks_gold_execution_enabled() -> bool:
     return databricks_execution_enabled("gold")
 
 
+def _gold_partial_success_enabled(layer: str) -> bool:
+    if str(layer or "").strip().lower() != "gold":
+        return False
+    return str(os.getenv("ATHENA_DATABRICKS_GOLD_ALLOW_PARTIAL_SUCCESS", "true")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def _api_base() -> str:
     host = str(os.getenv("DATABRICKS_HOST") or "").strip().rstrip("/")
     if not host:
@@ -469,7 +480,8 @@ def _build_batch_driver_notebook(layer: str, scripts: List[Dict[str, Any]], *, w
         for script in scripts
     ]
     encoded = base64.b64encode(json.dumps(script_items).encode("utf-8")).decode("ascii")
-    continue_on_error = _env_flag(
+    allow_partial_success = _gold_partial_success_enabled(layer)
+    continue_on_error = allow_partial_success or _env_flag(
         f"ATHENA_DATABRICKS_{str(layer or '').upper()}_CONTINUE_ON_ERROR",
         "ATHENA_DATABRICKS_CONTINUE_ON_ERROR",
     )
@@ -483,6 +495,7 @@ import traceback
 
 _SCRIPT_ITEMS = json.loads(base64.b64decode("{encoded}").decode("utf-8"))
 _CONTINUE_ON_ERROR = {str(continue_on_error)}
+_ALLOW_PARTIAL_SUCCESS = {str(allow_partial_success)}
 _RESULTS = []
 _WORKSPACE_DIR = "{workspace_dir}"
 if _WORKSPACE_DIR not in sys.path:
@@ -516,12 +529,15 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
         if not _CONTINUE_ON_ERROR:
             break
 
+_SCRIPTS_OK = builtins.sum(1 for _r in _RESULTS if _r.get("status") == "SUCCESS")
+_SCRIPTS_FAILED = builtins.sum(1 for _r in _RESULTS if _r.get("status") == "FAILED")
+_PARTIAL_SUCCESS = _ALLOW_PARTIAL_SUCCESS and _SCRIPTS_FAILED > 0 and _SCRIPTS_OK > _SCRIPTS_FAILED
 _SUMMARY = {{
-    "status": "FAILED" if builtins.any(_r.get("status") == "FAILED" for _r in _RESULTS) else "SUCCESS",
+    "status": "COMPLETED_WITH_WARNINGS" if _PARTIAL_SUCCESS else "FAILED" if _SCRIPTS_FAILED else "SUCCESS",
     "scripts_total": builtins.len(_SCRIPT_ITEMS),
     "scripts_executed": builtins.len(_RESULTS),
-    "scripts_ok": builtins.sum(1 for _r in _RESULTS if _r.get("status") == "SUCCESS"),
-    "scripts_failed": builtins.sum(1 for _r in _RESULTS if _r.get("status") == "FAILED"),
+    "scripts_ok": _SCRIPTS_OK,
+    "scripts_failed": _SCRIPTS_FAILED,
     "results": _RESULTS,
 }}
 
@@ -698,7 +714,6 @@ def _execute_databricks_stage_batch(
         )
         summary = {}
     results = [item for item in (summary.get("results") or []) if isinstance(item, dict)]
-    failed = [item for item in results if str(item.get("status") or "").upper() == "FAILED"]
     executed_scripts = (
         _annotate_batch_results(results, notebook_path=notebook_path, run_state=run_state)
         if results
@@ -709,17 +724,30 @@ def _execute_databricks_stage_batch(
             warning=output_warning or "Databricks run succeeded, but notebook output did not include per-script results.",
         )
     )
-    if failed:
+    failed = [item for item in executed_scripts if str(item.get("status") or "").upper() == "FAILED"]
+    succeeded_count = sum(1 for item in executed_scripts if str(item.get("status") or "").upper() == "SUCCESS")
+    partial_success = _gold_partial_success_enabled(layer) and bool(failed) and succeeded_count > len(failed)
+    if failed and not partial_success:
         first = failed[0]
         raise RuntimeError(
             f"Databricks {layer} batch execution failed for {first.get('script_name')}: "
             f"{first.get('error') or 'unknown error'}"
         )
 
+    execution_status = "COMPLETED_WITH_WARNINGS" if partial_success else "COMPLETED"
+    failed_names = [str(item.get("script_name") or item.get("target_table") or "unknown script") for item in failed]
+    message = (
+        f"Databricks Gold completed with warnings: {succeeded_count}/{len(scripts)} scripts succeeded; "
+        f"failed scripts: {', '.join(failed_names)}."
+        if partial_success
+        else f"Databricks {layer.capitalize()} batch execution completed: "
+        f"{succeeded_count}/{len(scripts)} scripts finished in {elapsed_seconds}s."
+    )
     final_state = {
         **state,
-        f"databricks_{layer}_execution_status": "COMPLETED",
+        f"databricks_{layer}_execution_status": execution_status,
         f"databricks_{layer}_execution_results": executed_scripts,
+        f"databricks_{layer}_execution_failures": failed,
         f"databricks_{layer}_executed_at": datetime.now(timezone.utc).isoformat(),
     }
     return save_external_execution_progress(
@@ -728,10 +756,10 @@ def _execute_databricks_stage_batch(
         platform="databricks",
         layer=layer,
         stage_key=f"{layer}_code_execution",
-        status="COMPLETED",
+        status=execution_status,
         total_count=len(scripts),
-        completed_count=len(executed_scripts),
-        message=f"Databricks {layer.capitalize()} batch execution completed: {len(executed_scripts)}/{len(scripts)} scripts finished in {elapsed_seconds}s.",
+        completed_count=succeeded_count,
+        message=message,
     )
 
 

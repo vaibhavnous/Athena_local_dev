@@ -11,7 +11,7 @@ export function normalizeState(value: string | undefined) {
   if (state === 'COMPLETE' || state === 'EXTERNAL_COMPLETED') return 'COMPLETED'
   if (state === 'IN_PROGRESS' || state === 'PROCESSING' || state === 'SUBMITTED' || state === 'EXTERNAL_RUNNING' || state === 'EXTERNAL_WAITING') return 'RUNNING'
   if (state === 'PAUSED_FOR_HITL' || state === 'PENDING_REVIEW') return 'HITL_WAIT'
-  if (state === 'SUCCESS' || state === 'PIPELINE_COMPLETED') return 'COMPLETED'
+  if (state === 'SUCCESS' || state === 'PIPELINE_COMPLETED' || state === 'COMPLETED_WITH_WARNINGS') return 'COMPLETED'
   if (state === 'EXTERNAL_FAILED') return 'FAILED'
   return state || 'PENDING'
 }

@@ -411,6 +411,23 @@ def test_pipeline_status_fallback_treats_completed_databricks_gold_as_terminal()
     assert payload["state"]["life_cycle_state"] == "TERMINATED"
 
 
+def test_pipeline_status_fallback_treats_databricks_gold_warnings_as_terminal():
+    from api.routers.pipeline_router import _fallback_status_payload
+
+    payload = _fallback_status_payload(
+        "run-gold-warning",
+        checkpoint={
+            "run_id": "run-gold-warning",
+            "status": "RUNNING",
+            "background_stage": None,
+            "databricks_gold_execution_status": "COMPLETED_WITH_WARNINGS",
+        },
+    )
+
+    assert payload["status"] == "PIPELINE_COMPLETED"
+    assert payload["state"]["life_cycle_state"] == "TERMINATED"
+
+
 def test_abort_run_persists_aborted_status(monkeypatch):
     saved = {}
     monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"run_id": run_id, "status": "RUNNING"})
