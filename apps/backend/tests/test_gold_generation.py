@@ -74,8 +74,10 @@ def test_snowflake_gold_generation_writes_sql_from_contract(monkeypatch):
     assert script["source_table"] == "ATHENA_DB.SILVER.silver_claim_information"
     assert script["target_table"] == "ATHENA_DB.GOLD.fact_total_claims"
     assert script["dimension_script_path"]
+    assert script["script_body"] == sql
     assert Path(script["script_path"]).parts[-3:] == ("snowflake", "gold", Path(script["script_path"]).name)
     dim_sql = Path(script["dimension_script_path"]).read_text(encoding="utf-8")
+    assert script["dimension_script_body"] == dim_sql
     assert "CREATE SCHEMA IF NOT EXISTS \"ATHENA_DB\".\"GOLD\"" in sql
     assert "MERGE INTO \"ATHENA_DB\".\"GOLD\".\"fact_total_claims\" AS target" in sql
     assert "MERGE INTO \"ATHENA_DB\".\"GOLD\".\"DIM_CLAIM_INFORMATION\" AS target" in dim_sql
@@ -97,7 +99,7 @@ def test_snowflake_gold_generation_writes_sql_from_contract(monkeypatch):
     assert 'TRY_TO_TIMESTAMP_NTZ("claimopendate")' not in sql
     assert 'TRY_TO_DECIMAL("ClaimAmount")' not in sql
     assert 'TRY_TO_DECIMAL("claimamount")' not in sql
-    assert loaded["scripts"][0]["script_body"] == sql
+    assert loaded["scripts"][0]["script_body"].strip() == sql.strip()
 
 
 def test_snowflake_dbt_gold_generation_writes_ref_model_without_native_dimensions(monkeypatch):

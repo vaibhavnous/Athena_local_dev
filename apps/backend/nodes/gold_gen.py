@@ -2201,7 +2201,9 @@ def _generate_one_mapping(
         "source_table": mapping.get("source_silver_table"),
         "target_table": target_table,
         "script_path": script_path,
+        "script_body": code,
         "dimension_script_path": dimension_script_path,
+        "dimension_script_body": dimension_code,
         "script_language": "sql" if is_snowflake else "python",
         "target_warehouse": str(target_warehouse or "databricks").lower(),
         "code_generation_format": "dbt" if is_dbt_snowflake else "native",
@@ -2492,6 +2494,7 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         for item in results:
             if item.get("status") == "APPROVED":
                 item["dimension_script_path"] = shared_dimension_path
+                item["dimension_script_body"] = shared_dimension_code
                 dimension_contract = (
                     source_table_grain_specs
                     if target_warehouse == "snowflake" and source_table_grain_specs

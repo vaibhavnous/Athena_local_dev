@@ -160,10 +160,13 @@ def validate_snowflake_gold_script(script: Dict[str, Any], catalog_connection: A
 
 
 def validate_snowflake_dimension_script(script: Dict[str, Any], catalog_connection: Any = None) -> str:
-    path = Path(str(script.get("dimension_script_path") or ""))
-    if not path.exists() or not path.is_file():
-        return ""
-    sql = _normalize_snowflake_gold_sql(path.read_text(encoding="utf-8"))
+    sql = str(script.get("dimension_script_body") or "").strip()
+    if not sql:
+        path = Path(str(script.get("dimension_script_path") or ""))
+        if not path.exists() or not path.is_file():
+            return ""
+        sql = path.read_text(encoding="utf-8")
+    sql = _normalize_snowflake_gold_sql(sql)
     normalized = sql.upper()
     missing = [
         keyword
