@@ -909,7 +909,7 @@ def _execute_snowflake_dbt(state: Dict[str, Any], project_dir: Path) -> Dict[str
         raise
 
 
-def run_snowflake_dbt(state: Dict[str, Any]) -> Dict[str, Any]:
+def finalize_snowflake_dbt_project(state: Dict[str, Any]) -> Dict[str, Any]:
     if not snowflake_dbt_enabled(state):
         return state
 
@@ -917,33 +917,10 @@ def run_snowflake_dbt(state: Dict[str, Any]) -> Dict[str, Any]:
     state = build_snowflake_dbt_artifacts(state)
     project_dir = Path(str(state["snowflake_dbt_artifact_path"]))
     deployment_mode = _choice(state.get("dbt_deployment_mode"), _VALID_DEPLOYMENT_MODES, "generate_only")
-    if deployment_mode == "generate_and_deploy":
-        with _NATIVE_DBT_DEPLOY_LOCK:
-            final_state = _execute_snowflake_dbt(state, project_dir)
-        _write_ai_store_summary(
-            final_state,
-            {
-                "status": "COMPLETED",
-                "mode": "dbt_executed",
-                "project_dir": str(project_dir),
-                "model_count": state.get("snowflake_dbt_model_count"),
-                "artifact_set_hash": state.get("snowflake_dbt_artifact_set_hash"),
-                "idempotency_key": state.get("snowflake_dbt_idempotency_key"),
-                "execution": final_state.get("snowflake_dbt_execution"),
-            },
-        )
-        logger.info(
-            "Snowflake dbt build completed run_id=%s models=%s artifact_hash=%s",
-            run_id,
-            state.get("snowflake_dbt_model_count"),
-            state.get("snowflake_dbt_artifact_set_hash"),
-            extra={"run_id": str(run_id or ""), "node": "gold_execution", "stage": "gold", "step_name": "dbt_build_complete"},
-        )
-        return final_state
 
     artifact_payload = {
         "status": "GENERATED",
-        "mode": "codegen_only",
+        "mode": "deployment_ready" if deployment_mode == "generate_and_deploy" else "codegen_only",
         "project_dir": str(project_dir),
         "model_count": state.get("snowflake_dbt_model_count"),
         "artifact_set_hash": state.get("snowflake_dbt_artifact_set_hash"),
@@ -952,9 +929,13 @@ def run_snowflake_dbt(state: Dict[str, Any]) -> Dict[str, Any]:
     final_state = {
         **state,
         "snowflake_dbt_status": "GENERATED",
-        "snowflake_dbt_deploy_status": "NOT_APPLICABLE_CODEGEN_ONLY",
+        "snowflake_dbt_deploy_status": (
+            "PENDING"
+            if deployment_mode == "generate_and_deploy"
+            else "NOT_APPLICABLE_CODEGEN_ONLY"
+        ),
         "snowflake_dbt_validation_status": "STATIC_VALIDATED",
-        "completion_mode": "codegen_only",
+        "completion_mode": "deployment_ready" if deployment_mode == "generate_and_deploy" else "codegen_only",
         "snowflake_dbt_generated_at": datetime.now(timezone.utc).isoformat(),
     }
     _write_ai_store_summary(final_state, artifact_payload)
@@ -966,3 +947,59 @@ def run_snowflake_dbt(state: Dict[str, Any]) -> Dict[str, Any]:
         extra={"run_id": str(run_id or ""), "node": "gold_generation", "stage": "gold", "step_name": "dbt_codegen_complete"},
     )
     return final_state
+
+
+def execute_finalized_snowflake_dbt_project(state: Dict[str, Any]) -> Dict[str, Any]:
+    if not snowflake_dbt_enabled(state):
+        return state
+    if _choice(state.get("dbt_deployment_mode"), _VALID_DEPLOYMENT_MODES, "generate_only") != "generate_and_deploy":
+        raise ValueError("Snowflake dbt deployment was not requested for this run.")
+
+    project_dir = Path(str(state.get("snowflake_dbt_artifact_path") or ""))
+    expected_hash = str(state.get("snowflake_dbt_artifact_set_hash") or "").strip()
+    if not expected_hash or not project_dir.is_dir():
+        raise RuntimeError("The finalized Snowflake dbt project is missing; regenerate and review the project before deployment.")
+
+    _validate_project_dependencies(project_dir)
+    actual_hash = str(_hash_project_files(project_dir).get("artifact_set_hash") or "")
+    if actual_hash != expected_hash:
+        raise RuntimeError(
+            "The finalized Snowflake dbt project changed after review; regenerate and approve it before deployment."
+        )
+
+    with _NATIVE_DBT_DEPLOY_LOCK:
+        final_state = _execute_snowflake_dbt(state, project_dir)
+    _write_ai_store_summary(
+        final_state,
+        {
+            "status": "COMPLETED",
+            "mode": "dbt_executed",
+            "project_dir": str(project_dir),
+            "model_count": state.get("snowflake_dbt_model_count"),
+            "artifact_set_hash": expected_hash,
+            "idempotency_key": state.get("snowflake_dbt_idempotency_key"),
+            "execution": final_state.get("snowflake_dbt_execution"),
+        },
+    )
+    logger.info(
+        "Snowflake dbt build completed run_id=%s models=%s artifact_hash=%s",
+        state.get("run_id"),
+        state.get("snowflake_dbt_model_count"),
+        expected_hash,
+        extra={
+            "run_id": str(state.get("run_id") or ""),
+            "node": "gold_execution",
+            "stage": "gold",
+            "step_name": "dbt_build_complete",
+        },
+    )
+    return final_state
+
+
+def run_snowflake_dbt(state: Dict[str, Any]) -> Dict[str, Any]:
+    finalized_state = finalize_snowflake_dbt_project(state)
+    if not snowflake_dbt_enabled(finalized_state):
+        return finalized_state
+    if _choice(finalized_state.get("dbt_deployment_mode"), _VALID_DEPLOYMENT_MODES, "generate_only") == "generate_and_deploy":
+        return execute_finalized_snowflake_dbt_project(finalized_state)
+    return finalized_state

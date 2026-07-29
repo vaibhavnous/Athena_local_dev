@@ -89,6 +89,10 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "target_warehouse": checkpoint.get("target_warehouse"),
             "execution_engine": checkpoint.get("execution_engine") or "native",
             "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or "generate_only",
+            "database_flow_version": checkpoint.get("database_flow_version"),
+            "generation_first_execution": bool(
+                checkpoint.get("database_flow_version") == "generation_first_v1"
+            ),
             "dbt_target_name": checkpoint.get("dbt_target_name"),
             "dbt_threads": checkpoint.get("dbt_threads"),
             "dbt_command_timeout_secs": checkpoint.get("dbt_command_timeout_secs"),
@@ -112,6 +116,10 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "next_review_key": checkpoint.get("next_review_key"),
             "resume_message": checkpoint.get("resume_message"),
             "stage_confirmation": checkpoint.get("stage_confirmation"),
+            "execution_ready": checkpoint.get("execution_ready"),
+            "awaiting_stage_confirmation": checkpoint.get("awaiting_stage_confirmation"),
+            "next_stage_key": checkpoint.get("next_stage_key"),
+            "next_stage_label": checkpoint.get("next_stage_label"),
             "failed_stage_key": checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key"),
             "failed_stage_label": checkpoint.get("failed_stage_label"),
             "error": checkpoint.get("error"),
@@ -142,7 +150,11 @@ def _status_response(run_id: str, run: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest, owner_email: str | None = None) -> None:
-    from services.pipeline_runtime import load_checkpoint_state, save_checkpoint_state
+    from services.pipeline_runtime import (
+        DATABASE_GENERATION_FIRST_FLOW_VERSION,
+        load_checkpoint_state,
+        save_checkpoint_state,
+    )
 
     source = str(payload.source or "database").lower()
     sftp_entity = api_utils.normalize_file_entity(source, payload.sftp_entity)
@@ -166,6 +178,23 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest, owner_email: 
             "provider": existing.get("provider") or payload.provider,
             "deployment": existing.get("deployment") or payload.deployment,
             "target_warehouse": existing.get("target_warehouse") or payload.target_warehouse or "databricks",
+            "database_flow_version": existing.get("database_flow_version") or (
+                DATABASE_GENERATION_FIRST_FLOW_VERSION
+                if source == "database"
+                and not any(
+                    existing.get(key)
+                    for key in (
+                        "fingerprint",
+                        "bronze_generation_results",
+                        "silver_generation_results",
+                        "gold_generation_results",
+                        "bronze_review_decision",
+                        "silver_review_decision",
+                        "gold_review_decision",
+                    )
+                )
+                else None
+            ),
             "execution_engine": existing.get("execution_engine") or payload.execution_engine or "native",
             "dbt_deployment_mode": (
                 existing.get("dbt_deployment_mode")
@@ -493,6 +522,7 @@ def continue_stage(
         "status": "PROCESSING",
         "background_stage": stage_key,
         "awaiting_stage_confirmation": False,
+        "stage_confirmation": None,
         "stage_confirmation_enabled": not auto_advance,
         "resume_message": f"{stage_key} is running.",
     }

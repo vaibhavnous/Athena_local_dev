@@ -308,18 +308,14 @@ def _script_name(script: Dict[str, Any]) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", target_table).strip("_") or "script"
 
 
-_REVIEW_IDENTITY_FIELDS = (
-    "target_table",
-    "dbt_model_name",
-    "dbt_alias",
-    "kpi_name",
-    "script_name",
-    "script_path",
-    "table",
-    "table_name",
-    "entity",
-    "silver_table",
-    "bronze_table",
+_REVIEW_IDENTITY_FAMILIES = (
+    (700, ("target_table", "silver_target", "silver_table")),
+    (600, ("dbt_model_name", "dbt_alias")),
+    (500, ("kpi_name",)),
+    (400, ("table", "table_name", "entity")),
+    (300, ("source_table", "bronze_source", "bronze_table")),
+    (200, ("script_name",)),
+    (100, ("script_path",)),
 )
 
 
@@ -379,14 +375,62 @@ def _script_keys(script: Dict[str, Any]) -> set[str]:
 
 
 def _review_match_score(script: Dict[str, Any], item: Dict[str, Any]) -> int:
-    # Prefer the approved target identity over stale secondary metadata such as a
-    # script path copied by an earlier bad review match.
-    for score, field in enumerate(reversed(_REVIEW_IDENTITY_FIELDS), start=1):
-        script_value = str(script.get(field) or "").strip().casefold()
-        item_value = str(item.get(field) or "").strip().casefold()
-        if script_value and script_value == item_value:
+    for score, fields in _REVIEW_IDENTITY_FAMILIES:
+        script_values = {
+            str(script.get(field) or "").strip().casefold()
+            for field in fields
+            if str(script.get(field) or "").strip()
+        }
+        item_values = {
+            str(item.get(field) or "").strip().casefold()
+            for field in fields
+            if str(item.get(field) or "").strip()
+        }
+        if script_values & item_values:
             return score
     return 0
+
+
+def _unambiguous_review_matches(
+    scripts: List[Dict[str, Any]],
+    candidates: List[Dict[str, Any]],
+) -> tuple[Dict[int, Dict[str, Any]], set[int]]:
+    selected: Dict[int, tuple[int, int]] = {}
+    ambiguous_scripts: set[int] = set()
+    for script_index, script in enumerate(scripts):
+        ranked = [
+            (_review_match_score(script, item), item_index)
+            for item_index, item in enumerate(candidates)
+        ]
+        best_score = max((score for score, _ in ranked), default=0)
+        best_items = [item_index for score, item_index in ranked if score == best_score and score > 0]
+        if len(best_items) == 1:
+            selected[script_index] = (best_score, best_items[0])
+        elif best_items:
+            ambiguous_scripts.add(script_index)
+
+    scripts_by_item: Dict[int, List[tuple[int, int]]] = {}
+    for script_index, (score, item_index) in selected.items():
+        scripts_by_item.setdefault(item_index, []).append((score, script_index))
+
+    matches: Dict[int, Dict[str, Any]] = {}
+    for item_index, ranked_scripts in scripts_by_item.items():
+        best_score = max(score for score, _ in ranked_scripts)
+        best_scripts = [
+            script_index
+            for score, script_index in ranked_scripts
+            if score == best_score
+        ]
+        if len(best_scripts) == 1:
+            matches[best_scripts[0]] = candidates[item_index]
+        else:
+            ambiguous_scripts.update(best_scripts)
+        ambiguous_scripts.update(
+            script_index
+            for score, script_index in ranked_scripts
+            if score < best_score
+        )
+    return matches, ambiguous_scripts
 
 
 _REVIEW_EDITABLE_SCRIPT_FIELDS = {
@@ -423,33 +467,29 @@ def _filtered_scripts(scripts: List[Dict[str, Any]], review_artifact: Optional[D
     if not approved_items and not rejected_items:
         return scripts
 
-    def matching_item(script: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        ranked = [(_review_match_score(script, item), item) for item in candidates]
-        score, item = max(ranked, key=lambda pair: pair[0], default=(0, None))
-        return item if score else None
-
-    def reviewed(script: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-        item = matching_item(script, candidates)
-        return _reviewed_script(script, item) if item else script
-
     if approved_items:
-        filtered = []
-        for script in scripts:
-            approved_item = matching_item(script, approved_items)
-            if approved_item:
-                filtered.append(_reviewed_script(script, approved_item))
-        return filtered
-    if rejected_items:
+        matches, _ = _unambiguous_review_matches(scripts, approved_items)
         return [
-            reviewed(script, review_items)
-            for script in scripts
-            if matching_item(script, rejected_items) is None
+            _reviewed_script(script, matches[index])
+            for index, script in enumerate(scripts)
+            if index in matches
         ]
-    return [reviewed(script, review_items) for script in scripts]
+    if rejected_items:
+        matches, ambiguous_scripts = _unambiguous_review_matches(scripts, rejected_items)
+        review_matches, _ = _unambiguous_review_matches(scripts, review_items)
+        return [
+            _reviewed_script(script, review_matches[index]) if index in review_matches else script
+            for index, script in enumerate(scripts)
+            if index not in matches and index not in ambiguous_scripts
+        ]
+    matches, _ = _unambiguous_review_matches(scripts, review_items)
+    return [
+        _reviewed_script(script, matches[index]) if index in matches else script
+        for index, script in enumerate(scripts)
+    ]
 
 
-def _scripts_for_layer(state: Dict[str, Any], layer: str, review_artifact: Optional[Dict[str, Any]], approved_only: bool) -> List[Dict[str, Any]]:
-    layer = str(layer or "").strip().lower()
+def _generated_scripts_for_layer(state: Dict[str, Any], layer: str) -> List[Dict[str, Any]]:
     scripts = [item for item in (state.get(f"{layer}_generation_results") or []) if isinstance(item, dict)]
     if not scripts:
         from services.pipeline_runtime import load_bronze_scripts, load_gold_scripts, load_silver_scripts
@@ -463,6 +503,23 @@ def _scripts_for_layer(state: Dict[str, Any], layer: str, review_artifact: Optio
         if loader:
             bundle = loader(str(state.get("run_id") or ""), state)
             scripts = [item for item in (bundle.get("scripts") or []) if isinstance(item, dict)]
+    return scripts
+
+
+def _scripts_for_layer(
+    state: Dict[str, Any],
+    layer: str,
+    review_artifact: Optional[Dict[str, Any]],
+    approved_only: bool,
+    *,
+    generated_scripts: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    layer = str(layer or "").strip().lower()
+    scripts = list(
+        generated_scripts
+        if generated_scripts is not None
+        else _generated_scripts_for_layer(state, layer)
+    )
     if approved_only:
         scripts = _filtered_scripts(scripts, review_artifact, layer)
     if layer == "gold":
@@ -866,9 +923,49 @@ def _execute_databricks_stage(
         )
         return {**state, f"databricks_{layer}_execution_status": "DISABLED"}
 
-    scripts = _scripts_for_layer(state, layer, review_artifact, approved_only)
+    generated_scripts = _generated_scripts_for_layer(state, layer)
+    identity_filtered_scripts = (
+        _filtered_scripts(generated_scripts, review_artifact, layer)
+        if approved_only
+        else generated_scripts
+    )
+    identity_matched_count = len(identity_filtered_scripts)
+    scripts = _scripts_for_layer(
+        state,
+        layer,
+        None,
+        False,
+        generated_scripts=identity_filtered_scripts,
+    )
     if not scripts:
-        raise ValueError(f"Databricks {layer} execution enabled but no generated scripts were found.")
+        if not generated_scripts:
+            raise ValueError(
+                f"Databricks {layer} execution enabled but no generated scripts were found "
+                "(generated_count=0)."
+            )
+        review_items = (
+            (review_artifact or {}).get("feeds")
+            if layer == "bronze"
+            else (review_artifact or {}).get("items")
+        )
+        approved_count = sum(
+            1
+            for item in review_items or []
+            if isinstance(item, dict)
+            and str(item.get("review_status") or "").upper() == "APPROVED"
+        )
+        if approved_only and approved_count and identity_matched_count == 0:
+            raise ValueError(
+                f"Databricks {layer} execution found generated and approved review items, "
+                "but zero script identities matched "
+                f"(generated_count={len(generated_scripts)}, "
+                f"approved_count={approved_count}, matched_count=0)."
+            )
+        raise ValueError(
+            f"Databricks {layer} execution has no executable scripts after review filtering "
+            f"(generated_count={len(generated_scripts)}, approved_count={approved_count}, "
+            f"matched_count={identity_matched_count})."
+        )
 
     if _databricks_execution_mode(layer) == "batch":
         return _execute_databricks_stage_batch(state, layer=layer, scripts=scripts)

@@ -683,6 +683,7 @@ def run_snowflake_bronze_scripts(
     review_artifact: Dict[str, Any] | None = None,
     approved_only: bool = False,
     load_only: bool = False,
+    progress_stage_key: str = "bronze_code_execution",
 ) -> Dict[str, Any]:
     run_id = state.get("run_id")
     target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
@@ -714,7 +715,7 @@ def run_snowflake_bronze_scripts(
     source_mode = _source_mode()
     loaded_sources: List[Dict[str, Any]] = []
     executed_scripts: List[Dict[str, Any]] = []
-    stage_key = "bronze_code_execution"
+    stage_key = str(progress_stage_key or "bronze_code_execution")
     logger.info(
         "Starting Snowflake Bronze execution in external Snowflake warehouse: total_tables=%d tables=%s source_load=%s source_mode=%s",
         len(scripts),

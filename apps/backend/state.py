@@ -16,6 +16,16 @@ class Stage01State(TypedDict, total=False):
     status: str
     error: Optional[str]
     target_warehouse: Optional[str]
+    execution_engine: Optional[str]
+    dbt_deployment_mode: Optional[str]
+    snowflake_dbt_status: Optional[str]
+    snowflake_dbt_deploy_status: Optional[str]
+    snowflake_dbt_validation_status: Optional[str]
+    snowflake_dbt_artifact_path: Optional[str]
+    snowflake_dbt_artifact_set_hash: Optional[str]
+    snowflake_dbt_idempotency_key: Optional[str]
+    snowflake_dbt_execution: Optional[Dict[str, Any]]
+    snowflake_bronze_source_load_status: Optional[str]
     compliance_enabled: Optional[bool]
     compliance_domain: Optional[str]
     compliance_countries: Optional[List[str]]
@@ -140,6 +150,8 @@ class Stage01State(TypedDict, total=False):
     bronze_execution_plan: Optional[Dict[str, Any]]
     bronze_review_artifact: Optional[Dict[str, Any]]
     bronze_review_decision: Optional[str]
+    database_flow_version: Optional[str]
+    execution_ready: Optional[bool]
     bronze_validation_status: Optional[str]
     bronze_validation_error: Optional[str]
 
@@ -179,6 +191,8 @@ class Stage01State(TypedDict, total=False):
     gold_generation_bundle_path: Optional[str]
     gold_generation_readme_path: Optional[str]
     gold_generation_ui_path: Optional[str]
+    gold_review_artifact: Optional[Dict[str, Any]]
+    gold_review_decision: Optional[str]
 
     # Canonical SFTP/ADLS LangGraph execution contract
     current_stage: Optional[str]

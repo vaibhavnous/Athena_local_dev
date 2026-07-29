@@ -452,6 +452,35 @@ function getHistoryDisplaySteps(phase) {
     }
   }
 
+  if (phase.label === 'Code Generation & Reviews') {
+    return clampLinearHistorySteps([
+      actual('bronze', 'Bronze Code Generation'),
+      actual('gate4', 'Bronze Review'),
+      actual('silver_merge_key_resolution', 'Silver Merge Key Resolution'),
+      actual('silver_merge_key_review', 'Silver Merge Key Review'),
+      actual('silver', 'Silver Code Generation'),
+      actual('gate5', 'Silver Review'),
+      actual('gold', 'Gold Code Generation'),
+      actual('gold_review', 'Gold Code Review'),
+    ])
+  }
+
+  if (phase.label === 'Target Execution') {
+    if (
+      steps.length === 1 &&
+      steps[0]?.key === 'gold_code_execution'
+    ) {
+      return clampLinearHistorySteps([
+        actual('gold_code_execution', 'Snowflake dbt Deployment & Build'),
+      ])
+    }
+    return clampLinearHistorySteps([
+      actual('bronze_code_execution', 'Bronze Target Execution'),
+      actual('silver_code_execution', 'Silver Target Execution'),
+      actual('gold_code_execution', 'Gold Target Execution'),
+    ])
+  }
+
   if (phase.id === 'phase-1') {
     return clampLinearHistorySteps([
       actual('ingestion', 'BRD Ingest'),

@@ -10,7 +10,7 @@ import useAthenaStore from '../../store/useAthenaStore'
 import usePipelineSocket from '../../hooks/usePipelineSocket'
 import { abortRun, continueStage, getRun, getRuns } from '../../api/athenaApi'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../../utils/demoFallbacks'
-import { getGateDisplayName, getPhaseGroups, normalizeState, summarizeRunSource } from '../../utils/pipelinePhases'
+import { getGateDisplayName, getPhaseGroups, isSnowflakeDbtRun, normalizeState, summarizeRunSource } from '../../utils/pipelinePhases'
 
 const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
 const PAUSED_BANNER_DELAY_MS = 2500
@@ -230,7 +230,7 @@ function AppShell() {
         const detailReviewKey = detail?.next_review_key || ''
         const expectedGate = pausedRunGate
         const expectedReviewKey = pausedRunReviewKey
-        const expectedGateKey = expectedReviewKey === 'gold_review' ? 'gold_code_execution' : expectedReviewKey || (
+        const expectedGateKey = expectedReviewKey || (
           expectedGate === 1 ? 'gate1' :
           expectedGate === 2 ? 'gate2' :
           expectedGate === 3 ? 'gate3' :
@@ -452,6 +452,14 @@ function AppShell() {
 
   const activeRun = activeRunId ? runs.find((run) => run.id === activeRunId) : null
   const stageConfirmation = activeRun?.stage_confirmation
+  const executionReady = Boolean(
+    stageConfirmation?.awaiting_confirmation &&
+    String(stageConfirmation?.last_completed_stage_key || '').toLowerCase() === 'gold_review' &&
+    ['bronze_code_execution', 'gold_code_execution'].includes(
+      String(stageConfirmation?.next_stage_key || '').toLowerCase()
+    )
+  )
+  const dbtExecutionReady = executionReady && isSnowflakeDbtRun(activeRun)
   const stageGateOpen = Boolean(
     activeRun &&
     location.pathname !== '/app/hitl' &&
@@ -588,10 +596,24 @@ function AppShell() {
       <StageGateDialog
         isOpen={stageGateOpen}
         completedStage={{ name: stageConfirmation?.last_completed_stage_label }}
-        nextStage={{ name: stageConfirmation?.next_stage_label }}
+        nextStage={{
+          name: executionReady
+            ? dbtExecutionReady
+              ? 'Snowflake dbt Deployment & Build'
+              : 'Bronze → Silver → Gold Target Execution'
+            : stageConfirmation?.next_stage_label,
+        }}
         onContinue={handleStageGateContinue}
         onCancel={handleStageGateCancel}
         busy={stageGateBusy}
+        title={executionReady ? 'Code Generation Complete' : 'Stage Completed'}
+        prompt={executionReady
+          ? dbtExecutionReady
+            ? 'All dbt models are reviewed and frozen. Start source landing, deployment, and dbt build now?'
+            : 'All generated code has been reviewed. Start ordered target execution now?'
+          : 'Do you want to proceed to the next stage?'}
+        continueLabel={executionReady ? (dbtExecutionReady ? 'Start Deployment & Build' : 'Start Execution') : 'Continue'}
+        showAutoAdvance={!executionReady}
       />
 
       {/* Toast notification stack */}

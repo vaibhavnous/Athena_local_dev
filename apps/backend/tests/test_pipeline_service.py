@@ -32,6 +32,393 @@ def test_next_status_derives_database_and_file_source_defaults():
     assert pipeline_service._next_status("done", pending_gate1=False, file_source=True) == "done"
 
 
+def _generation_first_state(target: str = "databricks"):
+    return {
+        "run_id": "run-generation-first",
+        "source": "database",
+        "target_warehouse": target,
+        "execution_engine": "native",
+        "database_flow_version": "generation_first_v1",
+        "bronze_generation_status": "COMPLETED",
+        "bronze_generation_results": [{"table": "claims", "script_body": "bronze"}],
+        "bronze_review_artifact": {"feeds": [{"table": "claims", "review_status": "APPROVED"}]},
+        "bronze_review_decision": "APPROVED",
+        "gate4": {"decision": "APPROVED"},
+        "silver_merge_key_review_decision": "APPROVED",
+        "silver_generation_status": "COMPLETED",
+        "silver_generation_results": [{"table": "claims", "script_body": "silver"}],
+        "silver_review_artifact": {"items": [{"table": "claims", "review_status": "APPROVED"}]},
+        "silver_review_decision": "APPROVED",
+        "gate5": {"decision": "APPROVED"},
+        "gold_generation_status": "COMPLETED",
+        "gold_generation_results": [
+            {
+                "kpi_name": "Total Claims",
+                "target_table": "main.gold.total_claims",
+                "script_body": "gold",
+            }
+        ],
+        "gold_review_artifact": {
+            "items": [
+                {
+                    "kpi_name": "Total Claims",
+                    "target_table": "main.gold.total_claims",
+                    "review_status": "APPROVED",
+                }
+            ]
+        },
+        "gold_review_decision": "APPROVED",
+    }
+
+
+def test_generation_first_gold_review_pauses_at_start_execution(monkeypatch):
+    state = _generation_first_state()
+    saved = []
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: state)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state",
+        lambda _run_id, checkpoint: saved.append(dict(checkpoint)),
+    )
+
+    result = pipeline_runtime.submit_gold_review(
+        state["run_id"],
+        "APPROVED",
+        state["gold_review_artifact"],
+    )
+
+    assert result["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
+    assert result["last_completed_stage_key"] == "gold_review"
+    assert result["next_stage_key"] == "bronze_code_execution"
+    assert result["execution_ready"] is True
+    assert result["stage_confirmation"]["next_stage_label"] == "Bronze Target Execution"
+    assert not result.get("databricks_bronze_execution_status")
+    assert saved[-1]["gold_generation_results"][0]["script_body"] == "gold"
+    assert saved[-1]["gold_generation_results"][0]["review_status"] == "APPROVED"
+
+
+def test_generation_first_execution_runs_layers_in_order_and_preserves_artifacts(monkeypatch):
+    from services import databricks_runtime
+
+    state = {**_generation_first_state(), "execution_ready": True}
+    calls = []
+    saved = []
+
+    def runner(layer):
+        def execute(checkpoint, **_kwargs):
+            calls.append(layer)
+            return {**checkpoint, f"databricks_{layer}_execution_status": "COMPLETED"}
+
+        return execute
+
+    monkeypatch.setattr(databricks_runtime, "run_databricks_bronze_scripts", runner("bronze"))
+    monkeypatch.setattr(databricks_runtime, "run_databricks_silver_scripts", runner("silver"))
+    monkeypatch.setattr(databricks_runtime, "run_databricks_gold_scripts", runner("gold"))
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state_timed",
+        lambda _run_id, checkpoint, **_kwargs: saved.append(dict(checkpoint)),
+    )
+
+    result = pipeline_runtime.execute_database_native_layers(state["run_id"], state=state)
+
+    assert calls == ["bronze", "silver", "gold"]
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert result["execution_ready"] is False
+    assert result["bronze_generation_results"] == state["bronze_generation_results"]
+    assert result["silver_generation_results"] == state["silver_generation_results"]
+    assert result["gold_generation_results"] == state["gold_generation_results"]
+    assert [
+        checkpoint["background_stage"]
+        for checkpoint in saved
+        if checkpoint.get("background_stage")
+    ] == ["bronze_code_execution", "silver_code_execution", "gold_code_execution"]
+
+
+def test_generation_first_retry_skips_completed_execution_layers(monkeypatch):
+    from services import databricks_runtime
+
+    state = {
+        **_generation_first_state(),
+        "execution_ready": True,
+        "databricks_bronze_execution_status": "COMPLETED",
+    }
+    calls = []
+
+    monkeypatch.setattr(
+        databricks_runtime,
+        "run_databricks_silver_scripts",
+        lambda checkpoint, **_kwargs: (
+            calls.append("silver")
+            or {**checkpoint, "databricks_silver_execution_status": "COMPLETED"}
+        ),
+    )
+    monkeypatch.setattr(
+        databricks_runtime,
+        "run_databricks_gold_scripts",
+        lambda checkpoint, **_kwargs: (
+            calls.append("gold")
+            or {**checkpoint, "databricks_gold_execution_status": "COMPLETED"}
+        ),
+    )
+    monkeypatch.setattr(
+        databricks_runtime,
+        "run_databricks_bronze_scripts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Bronze must not rerun")),
+    )
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+
+    result = pipeline_runtime.execute_database_native_layers(
+        state["run_id"],
+        state=state,
+        start_stage_key="bronze_code_execution",
+    )
+
+    assert calls == ["silver", "gold"]
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert pipeline_service.database_failed_stage_key(
+        state["run_id"],
+        {**state, "status": "FAILED", "failed_background_stage": "silver_code_execution"},
+    ) == "silver_code_execution"
+
+
+def test_generation_first_snowflake_native_uses_same_execution_order(monkeypatch):
+    from services import (
+        snowflake_bronze_runtime,
+        snowflake_gold_runtime,
+        snowflake_silver_runtime,
+    )
+
+    state = {**_generation_first_state("snowflake"), "execution_ready": True}
+    calls = []
+
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "run_snowflake_bronze_scripts",
+        lambda checkpoint, **_kwargs: (
+            calls.append("bronze")
+            or {**checkpoint, "snowflake_bronze_execution_status": "COMPLETED"}
+        ),
+    )
+    monkeypatch.setattr(
+        snowflake_silver_runtime,
+        "run_snowflake_silver_scripts",
+        lambda checkpoint, **_kwargs: (
+            calls.append("silver")
+            or {**checkpoint, "snowflake_silver_execution_status": "COMPLETED"}
+        ),
+    )
+    monkeypatch.setattr(
+        snowflake_gold_runtime,
+        "run_snowflake_gold_scripts",
+        lambda checkpoint: (
+            calls.append("gold")
+            or {**checkpoint, "snowflake_gold_execution_status": "COMPLETED"}
+        ),
+    )
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+
+    result = pipeline_runtime.execute_database_native_layers(state["run_id"], state=state)
+
+    assert calls == ["bronze", "silver", "gold"]
+    assert result["status"] == "PIPELINE_COMPLETED"
+
+
+def test_generation_first_execution_is_fail_fast(monkeypatch):
+    from services import databricks_runtime
+
+    state = {**_generation_first_state(), "execution_ready": True}
+    monkeypatch.setattr(
+        databricks_runtime,
+        "run_databricks_bronze_scripts",
+        lambda checkpoint, **_kwargs: {
+            **checkpoint,
+            "databricks_bronze_execution_status": "FAILED",
+        },
+    )
+    monkeypatch.setattr(
+        databricks_runtime,
+        "run_databricks_silver_scripts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Silver must not start")),
+    )
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: state)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match="Bronze execution did not complete"):
+        pipeline_runtime.execute_database_native_layers(state["run_id"], state=state)
+
+
+@pytest.mark.parametrize(
+    ("boundary", "artifact_key", "kept_execution_layers", "invalidated_generation_layers"),
+    [
+        ("gate4", "bronze_review_artifact", set(), {"silver", "gold"}),
+        ("silver_merge_key_review", "silver_merge_key_review_artifact", set(), {"silver", "gold"}),
+        ("gate5", "silver_review_artifact", {"bronze"}, {"gold"}),
+        ("gold_review", "gold_review_artifact", {"bronze", "silver"}, set()),
+    ],
+)
+def test_generation_first_review_resubmission_clears_ready_state_and_stale_downstream(
+    monkeypatch,
+    boundary,
+    artifact_key,
+    kept_execution_layers,
+    invalidated_generation_layers,
+):
+    state = {
+        **_generation_first_state(),
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "execution_ready": True,
+        "awaiting_stage_confirmation": True,
+        "stage_confirmation": {"awaiting_confirmation": True},
+        "next_stage_key": "bronze_code_execution",
+        "next_stage_label": "Bronze Target Execution",
+        "databricks_bronze_execution_status": "COMPLETED",
+        "databricks_silver_execution_status": "COMPLETED",
+        "databricks_gold_execution_status": "COMPLETED",
+        "bronze_execution_status": "COMPLETED",
+        "silver_execution_status": "COMPLETED",
+        "gold_execution_status": "COMPLETED",
+        "bronze_runtime_validation_status": "COMPLETED",
+        "silver_runtime_validation_status": "COMPLETED",
+        "gold_runtime_validation_status": "COMPLETED",
+    }
+    replacement_artifact = {"boundary": boundary, "items": [{"review_status": "REGENERATE"}]}
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: state)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline_runtime, "ai_store_db_writer", lambda **_kwargs: None)
+
+    if boundary == "gate4":
+        result = pipeline_runtime.submit_gate4_review(
+            state["run_id"],
+            "REGENERATE",
+            replacement_artifact,
+            checkpoint_state=state,
+        )
+    elif boundary == "silver_merge_key_review":
+        result = pipeline_runtime.submit_silver_merge_key_review(
+            state["run_id"],
+            "REGENERATE",
+            replacement_artifact,
+        )
+    elif boundary == "gate5":
+        result = pipeline_runtime.submit_gate5_review(
+            state["run_id"],
+            "REGENERATE",
+            replacement_artifact,
+        )
+    else:
+        result = pipeline_runtime.submit_gold_review(
+            state["run_id"],
+            "REGENERATE",
+            replacement_artifact,
+        )
+
+    assert result["status"] == "REGENERATE_REQUIRED"
+    assert result["execution_ready"] is False
+    assert result["awaiting_stage_confirmation"] is False
+    assert result["stage_confirmation"] is None
+    assert result["next_stage_key"] is None
+    assert result["next_stage_label"] is None
+    assert result[artifact_key] == replacement_artifact
+    for layer in ("bronze", "silver", "gold"):
+        receipt_key = f"databricks_{layer}_execution_status"
+        if layer in kept_execution_layers:
+            assert result[receipt_key] == "COMPLETED"
+            assert result[f"{layer}_execution_status"] == "COMPLETED"
+        else:
+            assert receipt_key not in result
+            assert f"{layer}_execution_status" not in result
+            assert f"{layer}_runtime_validation_status" not in result
+    for layer in invalidated_generation_layers:
+        assert f"{layer}_generation_results" not in result
+    downstream_decisions = {
+        "gate4": {
+            "silver_merge_key_review_decision",
+            "silver_review_decision",
+            "gold_review_decision",
+        },
+        "silver_merge_key_review": {"silver_review_decision", "gold_review_decision"},
+        "gate5": {"gold_review_decision"},
+        "gold_review": set(),
+    }[boundary]
+    for decision_key in downstream_decisions:
+        assert decision_key not in result
+
+
+def test_legacy_review_state_is_not_invalidated():
+    state = {
+        "run_id": "run-legacy",
+        "source": "database",
+        "target_warehouse": "databricks",
+        "execution_ready": True,
+        "databricks_gold_execution_status": "COMPLETED",
+    }
+
+    assert pipeline_runtime._invalidate_generation_first_review_state(
+        state,
+        boundary="gold_review",
+    ) is state
+
+
+def test_generation_first_pipeline_steps_put_all_execution_after_gold_review():
+    state = {
+        **_generation_first_state(),
+        "databricks_bronze_execution_status": "COMPLETED",
+    }
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint=state,
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=True,
+        gold_generation_completed=True,
+    )
+    keys = [step["key"] for step in steps]
+
+    assert keys.index("gold_review") < keys.index("bronze_code_execution")
+    assert keys[-3:] == [
+        "bronze_code_execution",
+        "silver_code_execution",
+        "gold_code_execution",
+    ]
+
+
+def test_generation_first_old_execution_receipt_does_not_infer_generation_reviews():
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            "source": "database",
+            "target_warehouse": "databricks",
+            "execution_engine": "native",
+            "database_flow_version": "generation_first_v1",
+            "databricks_bronze_execution_status": "COMPLETED",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=False,
+        silver_generation_completed=False,
+        gold_generation_completed=False,
+    )
+    by_key = {step["key"]: step for step in steps}
+
+    assert by_key["bronze_code_execution"]["complete"] is True
+    assert by_key["bronze"]["complete"] is False
+    assert by_key["silver"]["complete"] is False
+    assert by_key["gold_review"]["complete"] is False
+
+
 def test_start_pipeline_preserves_seeded_identity_before_first_stage(monkeypatch):
     captured = {}
     monkeypatch.setattr(
@@ -681,6 +1068,36 @@ def test_continue_database_dbt_codegen_reuses_saved_gold_review(monkeypatch):
     }
 
 
+def test_continue_generation_first_dbt_routes_gate_to_deployment(monkeypatch):
+    state = {
+        "run_id": "run-dbt-gate",
+        "source": "database",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "database_flow_version": "generation_first_v1",
+    }
+    recorded = {}
+    monkeypatch.setattr(
+        pipeline_service,
+        "execute_generation_first_snowflake_dbt",
+        lambda run_id, state: recorded.update({"run_id": run_id, "state": state}) or {"status": "PIPELINE_COMPLETED"},
+    )
+    monkeypatch.setattr(
+        pipeline_service,
+        "continue_database_pipeline",
+        lambda *args, **kwargs: pytest.fail("the deployment gate must not re-enter generation"),
+    )
+
+    result = pipeline_service.continue_database_pipeline_job(
+        state["run_id"],
+        "gold_code_execution",
+        state,
+    )
+
+    assert result == {"status": "PIPELINE_COMPLETED"}
+    assert recorded == {"run_id": state["run_id"], "state": state}
+
+
 def test_database_failed_stage_key_uses_context_fallback(monkeypatch):
     monkeypatch.setattr(
         pipeline_service,
@@ -698,6 +1115,19 @@ def test_database_failed_stage_key_maps_external_gold_execution_to_gold():
         "run-gold-failed",
         {"failed_background_stage": "gold_code_execution"},
     ) == "gold"
+
+
+def test_database_failed_stage_key_preserves_generation_first_dbt_deployment():
+    assert pipeline_service.database_failed_stage_key(
+        "run-dbt-deploy-failed",
+        {
+            "source": "database",
+            "target_warehouse": "snowflake",
+            "execution_engine": "dbt",
+            "database_flow_version": "generation_first_v1",
+            "failed_background_stage": "gold_code_execution",
+        },
+    ) == "gold_code_execution"
 
 
 def test_database_failed_stage_key_preserves_snowflake_dbt_codegen():

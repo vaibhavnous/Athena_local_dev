@@ -31,6 +31,14 @@ def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "brd_filename": row.get("brd_filename") or run_id,
         "source": row.get("source") or "database",
         "target_warehouse": row.get("target_warehouse"),
+        "execution_engine": row.get("execution_engine") or "native",
+        "dbt_deployment_mode": row.get("dbt_deployment_mode") or "generate_only",
+        "database_flow_version": row.get("database_flow_version"),
+        "generation_first_execution": bool(row.get("database_flow_version") == "generation_first_v1"),
+        "execution_ready": row.get("execution_ready"),
+        "awaiting_stage_confirmation": row.get("awaiting_stage_confirmation"),
+        "next_stage_key": row.get("next_stage_key"),
+        "next_stage_label": row.get("next_stage_label"),
         "status": row.get("status") or "UNKNOWN",
         "provider": row.get("provider") or "azure_openai",
         "deployment": row.get("deployment"),
@@ -92,6 +100,14 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "source": checkpoint.get("source") or row.get("source") or "database",
         "project_id": checkpoint.get("project_id") or row.get("project_id"),
         "target_warehouse": checkpoint.get("target_warehouse") or row.get("target_warehouse"),
+        "execution_engine": checkpoint.get("execution_engine") or row.get("execution_engine") or "native",
+        "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or row.get("dbt_deployment_mode") or "generate_only",
+        "database_flow_version": checkpoint.get("database_flow_version"),
+        "generation_first_execution": bool(checkpoint.get("database_flow_version") == "generation_first_v1"),
+        "execution_ready": checkpoint.get("execution_ready"),
+        "awaiting_stage_confirmation": checkpoint.get("awaiting_stage_confirmation"),
+        "next_stage_key": checkpoint.get("next_stage_key"),
+        "next_stage_label": checkpoint.get("next_stage_label"),
         "status": _status_from_checkpoint(checkpoint),
         "provider": checkpoint.get("provider") or row.get("provider") or "azure_openai",
         "deployment": checkpoint.get("deployment") or row.get("deployment"),
@@ -119,27 +135,48 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
     checkpoint = checkpoint or {}
     from services.pipeline_runtime import build_pipeline_steps
 
+    generation_first = checkpoint.get("database_flow_version") == "generation_first_v1"
     bronze_completed = bool(
         checkpoint.get("bronze_generation_status") == "COMPLETED"
         or checkpoint.get("bronze_generation_results")
-        or checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
-        or checkpoint.get("databricks_bronze_execution_status") == "COMPLETED"
+        or (
+            not generation_first
+            and (
+                checkpoint.get("snowflake_bronze_execution_status") == "COMPLETED"
+                or checkpoint.get("databricks_bronze_execution_status") == "COMPLETED"
+            )
+        )
     )
     silver_completed = bool(
         checkpoint.get("silver_generation_status") == "COMPLETED"
         or checkpoint.get("silver_generation_results")
-        or checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
-        or checkpoint.get("databricks_silver_execution_status") == "COMPLETED"
+        or (
+            not generation_first
+            and (
+                checkpoint.get("snowflake_silver_execution_status") == "COMPLETED"
+                or checkpoint.get("databricks_silver_execution_status") == "COMPLETED"
+            )
+        )
     )
     gold_completed = bool(
         str(checkpoint.get("gold_generation_status") or "").startswith("COMPLETED")
         or checkpoint.get("gold_generation_results")
-        or checkpoint.get("background_stage") == "gold_code_execution"
-        or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
-        or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED", "COMPLETED_WITH_WARNINGS"}
+        or (
+            not generation_first
+            and (
+                checkpoint.get("background_stage") == "gold_code_execution"
+                or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
+                or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED", "COMPLETED_WITH_WARNINGS"}
+            )
+        )
     )
     next_gate = None if gold_completed else checkpoint.get("next_gate")
-    next_review_key = None if gold_completed else checkpoint.get("next_review_key")
+    next_review_key = (
+        checkpoint.get("next_review_key")
+        if generation_first
+        else None if gold_completed
+        else checkpoint.get("next_review_key")
+    )
     pipeline_steps = build_pipeline_steps(
         source=str(checkpoint.get("source") or "database"),
         checkpoint=checkpoint,
@@ -168,7 +205,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
     ):
         fallback_status = "SUCCESS"
-    elif gold_completed and str(fallback_status or "").upper() == "HITL_WAIT":
+    elif not generation_first and gold_completed and str(fallback_status or "").upper() == "HITL_WAIT":
         fallback_status = "RUNNING"
     current_step = next(
         (
@@ -189,6 +226,9 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
                 "brd_filename": checkpoint.get("brd_filename"),
                 "source": checkpoint.get("source"),
                 "target_warehouse": checkpoint.get("target_warehouse"),
+                "execution_engine": checkpoint.get("execution_engine"),
+                "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode"),
+                "database_flow_version": checkpoint.get("database_flow_version"),
                 "status": fallback_status,
                 "provider": checkpoint.get("provider"),
                 "deployment": checkpoint.get("deployment"),
@@ -200,6 +240,10 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
             }
         ),
         "checkpoint": checkpoint,
+        "execution_ready": checkpoint.get("execution_ready"),
+        "awaiting_stage_confirmation": checkpoint.get("awaiting_stage_confirmation"),
+        "next_stage_key": checkpoint.get("next_stage_key"),
+        "next_stage_label": checkpoint.get("next_stage_label"),
         "stage_confirmation": checkpoint.get("stage_confirmation"),
         "next_gate": next_gate,
         "next_review_key": next_review_key,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
@@ -380,6 +381,48 @@ def test_snowflake_gold_runtime_rejects_databricks_sql():
         assert "databricks/python token" in str(exc).lower()
     else:
         raise AssertionError("Databricks-style Snowflake Gold SQL should be rejected")
+
+
+def test_snowflake_gold_runtime_recovers_legacy_review_metadata(monkeypatch):
+    script_path = Path("generated_code/snowflake/gold/gold_total_claims.sql")
+    script = {
+        "run_id": "run-legacy-review",
+        "kpi_name": "Total Claims",
+        "source_table": "ATHENA_DB.SILVER.silver_claim_information",
+        "target_table": "ATHENA_DB.GOLD.fact_total_claims",
+        "script_path": str(script_path),
+    }
+    script["script_body"] = json.dumps(script)
+
+    class GeneratedScript:
+        def exists(self):
+            return True
+
+        def is_file(self):
+            return True
+
+        def read_text(self, **_kwargs):
+            return _gold_sql()
+
+    monkeypatch.setattr(snowflake_gold_runtime, "Path", lambda _value: GeneratedScript())
+
+    sql = snowflake_gold_runtime.validate_snowflake_gold_script(script)
+
+    assert 'MERGE INTO "ATHENA_DB"."GOLD"."fact_total_claims"' in sql
+
+
+def test_snowflake_gold_runtime_does_not_replace_arbitrary_reviewer_sql():
+    with pytest.raises(ValueError, match="missing required statements"):
+        snowflake_gold_runtime.validate_snowflake_gold_script(
+            {
+                "run_id": "run-invalid-review",
+                "kpi_name": "Total Claims",
+                "source_table": "ATHENA_DB.SILVER.silver_claim_information",
+                "target_table": "ATHENA_DB.GOLD.fact_total_claims",
+                "script_path": "generated_code/snowflake/gold/gold_total_claims.sql",
+                "script_body": json.dumps({"query": "not reviewed SQL"}),
+            }
+        )
 
 
 def test_snowflake_gold_catalog_preflight_rejects_missing_contract_column():

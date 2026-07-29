@@ -106,6 +106,180 @@ test('shows Gold execution as waiting while generated Gold code is under review'
   })
 })
 
+test('groups marked database runs into generation and execution phases', () => {
+  const run = {
+    source: 'database',
+    target_warehouse: 'databricks',
+    execution_engine: 'native',
+    database_flow_version: 'generation_first_v1',
+    status: 'HITL_WAIT',
+    next_review_key: 'gold_review',
+    pipeline_steps: [
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
+      { key: 'silver_merge_key_resolution', state: 'COMPLETED' },
+      { key: 'silver_merge_key_review', state: 'COMPLETED' },
+      { key: 'silver', state: 'COMPLETED' },
+      { key: 'gate5', state: 'COMPLETED' },
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'PENDING' },
+      { key: 'bronze_code_execution', state: 'PENDING' },
+      { key: 'silver_code_execution', state: 'PENDING' },
+      { key: 'gold_code_execution', state: 'PENDING' },
+    ],
+  }
+
+  const phases = getPhaseGroups(run, getPipelineSteps(run))
+
+  expect(phases.map((phase) => phase.label)).toEqual([
+    'Discovery & Requirement Intelligence',
+    'Source & Metadata Intelligence',
+    'Code Generation & Reviews',
+    'Target Execution',
+  ])
+  expect(phases.find((phase) => phase.id === 'phase-3')?.steps.map((step) => step.key)).toEqual([
+    'bronze',
+    'gate4',
+    'silver_merge_key_resolution',
+    'silver_merge_key_review',
+    'silver',
+    'gate5',
+    'gold',
+    'gold_review',
+  ])
+  expect(phaseState(run, 'phase-3', 'gold_review')).toBe('HITL_WAIT')
+  expect(phases.find((phase) => phase.id === 'phase-4')?.steps.map((step) => step.key)).toEqual([
+    'bronze_code_execution',
+    'silver_code_execution',
+    'gold_code_execution',
+  ])
+})
+
+test('does not infer missing generation stages from legacy Bronze execution progress', () => {
+  const run = {
+    source: 'database',
+    target_warehouse: 'databricks',
+    database_flow_version: 'generation_first_v1',
+    status: 'RUNNING',
+    background_stage: 'bronze_code_execution',
+    pipeline_steps: [
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
+      { key: 'bronze_code_execution', state: 'RUNNING' },
+      { key: 'silver', state: 'PENDING' },
+      { key: 'gold', state: 'PENDING' },
+      { key: 'gold_review', state: 'PENDING' },
+    ],
+  }
+
+  expect(phaseState(run, 'phase-3', 'silver')).toBe('PENDING')
+  expect(phaseState(run, 'phase-3', 'gold')).toBe('PENDING')
+  expect(phaseState(run, 'phase-3', 'gold_review')).toBe('PENDING')
+  expect(phaseState(run, 'phase-4', 'bronze_code_execution')).toBe('RUNNING')
+})
+
+test('keeps all target executions pending after generation and reviews complete', () => {
+  const run = {
+    source: 'database',
+    target_warehouse: 'snowflake',
+    execution_engine: 'native',
+    database_flow_version: 'generation_first_v1',
+    status: 'PAUSED_FOR_STAGE_CONFIRMATION',
+    stage_confirmation: {
+      awaiting_confirmation: true,
+      last_completed_stage_key: 'gold_review',
+      next_stage_key: 'bronze_code_execution',
+    },
+    pipeline_steps: [
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'COMPLETED' },
+      { key: 'bronze_code_execution', state: 'PENDING' },
+      { key: 'silver_code_execution', state: 'PENDING' },
+      { key: 'gold_code_execution', state: 'PENDING' },
+    ],
+  }
+
+  expect(phaseState(run, 'phase-4', 'bronze_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-4', 'silver_code_execution')).toBe('PENDING')
+  expect(phaseState(run, 'phase-4', 'gold_code_execution')).toBe('PENDING')
+})
+
+test('keeps unmarked Snowflake dbt runs on the legacy interleaved phase layout', () => {
+  const phases = getPhaseGroups({
+    source: 'database',
+    target_warehouse: 'snowflake',
+    execution_engine: 'dbt',
+    pipeline_steps: [],
+  })
+
+  expect(phases.map((phase) => phase.label)).toEqual([
+    'Discovery & Requirement Intelligence',
+    'Source & Metadata Intelligence',
+    'Bronze Layer (Ingestion)',
+    'Silver Layer (Transformation)',
+    'Gold Layer (Analytics)',
+  ])
+})
+
+test('groups marked Snowflake dbt runs into generation and one deployment phase', () => {
+  const run = {
+    source: 'database',
+    target_warehouse: 'snowflake',
+    execution_engine: 'dbt',
+    dbt_deployment_mode: 'generate_and_deploy',
+    database_flow_version: 'generation_first_v1',
+    status: 'PAUSED_FOR_STAGE_CONFIRMATION',
+    stage_confirmation: {
+      awaiting_confirmation: true,
+      last_completed_stage_key: 'gold_review',
+      next_stage_key: 'gold_code_execution',
+    },
+    pipeline_steps: [
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
+      { key: 'silver_merge_key_resolution', state: 'COMPLETED' },
+      { key: 'silver_merge_key_review', state: 'COMPLETED' },
+      { key: 'silver', state: 'COMPLETED' },
+      { key: 'gate5', state: 'COMPLETED' },
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'COMPLETED' },
+      { key: 'gold_code_execution', label: 'Snowflake dbt Deployment & Build', state: 'PENDING' },
+    ],
+  }
+
+  const phases = getPhaseGroups(run, getPipelineSteps(run))
+
+  expect(phases.map((phase) => phase.label)).toEqual([
+    'Discovery & Requirement Intelligence',
+    'Source & Metadata Intelligence',
+    'Code Generation & Reviews',
+    'Target Execution',
+  ])
+  expect(phases.find((phase) => phase.label === 'Target Execution')?.steps).toHaveLength(1)
+  expect(phases.find((phase) => phase.label === 'Target Execution')?.steps[0]).toMatchObject({
+    key: 'gold_code_execution',
+    label: 'Snowflake dbt Deployment & Build',
+    state: 'PENDING',
+  })
+})
+
+test('marked generate-only Snowflake dbt runs end after generation and review', () => {
+  const phases = getPhaseGroups({
+    source: 'database',
+    target_warehouse: 'snowflake',
+    execution_engine: 'dbt',
+    dbt_deployment_mode: 'generate_only',
+    database_flow_version: 'generation_first_v1',
+    pipeline_steps: [],
+  })
+
+  expect(phases.map((phase) => phase.label)).toEqual([
+    'Discovery & Requirement Intelligence',
+    'Source & Metadata Intelligence',
+    'Code Generation & Reviews',
+  ])
+})
+
 test('does not invent Bronze or Silver execution success from later Gold progress', () => {
   const run = {
     status: 'FAILED',

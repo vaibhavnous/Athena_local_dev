@@ -97,3 +97,30 @@ test('renders the SFTP metadata-bootstrap phase in the latest monitor UI', () =>
   ])
   expect(display.status).toBe('Running')
 })
+
+test('renders one gated Snowflake dbt deployment step', () => {
+  const phase = {
+    id: 'phase-4',
+    label: 'Target Execution',
+    status: 'Pending',
+    steps: [
+      { key: 'gold_code_execution', label: 'Snowflake dbt Deployment & Build', state: 'PENDING' },
+    ],
+  }
+  const run = {
+    source: 'database',
+    target_warehouse: 'snowflake',
+    execution_engine: 'dbt',
+    dbt_deployment_mode: 'generate_and_deploy',
+    database_flow_version: 'generation_first_v1',
+  }
+
+  const display = buildPipelineDisplayPhase(phase, phase.steps, run)
+
+  expect(display.steps).toHaveLength(1)
+  expect(display.steps[0]).toMatchObject({
+    key: 'gold_code_execution',
+    label: 'Snowflake dbt Deployment & Build',
+    state: 'PENDING',
+  })
+})

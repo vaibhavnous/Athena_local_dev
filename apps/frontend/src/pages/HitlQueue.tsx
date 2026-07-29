@@ -31,7 +31,7 @@ import {
 import { MOCK_KPIS_LIST } from '../data/mockData'
 import { useAuth } from '../context/AuthContext'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
-import { getGateDisplayName } from '../utils/pipelinePhases'
+import { getGateDisplayName, isGenerationFirstDatabaseRun } from '../utils/pipelinePhases'
 import { expandMergedCodeReviewItems } from '../utils/codeReviewArtifacts'
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -555,6 +555,10 @@ function HitlQueue({ onClose = null }) {
   const isGate5 = gateToReview === 5
   const runSource = currentRun?.source || selectedRunDetail?.source || ''
   const isSftpRun = runSource === 'sftp' || runSource === 'adls_gen2'
+  const generationFirstDatabaseRun = isGenerationFirstDatabaseRun({
+    ...(currentRun || {}),
+    ...(selectedRunDetail || {}),
+  })
   const gate1Name = getGateDisplayName(1)
   const gate2Name = getGateDisplayName(2, runSource)
   const gate3Name = getGateDisplayName(3)
@@ -1581,9 +1585,19 @@ function HitlQueue({ onClose = null }) {
             next_gate: 0,
             next_review_key: null,
             stage_confirmation: null,
-            background_stage: reviewAction === 'APPROVED' ? 'bronze_code_execution' : undefined,
+            ...(generationFirstDatabaseRun ? {
+              execution_ready: false,
+              awaiting_stage_confirmation: false,
+              next_stage_key: null,
+              next_stage_label: null,
+            } : {}),
+            background_stage: reviewAction === 'APPROVED'
+              ? (generationFirstDatabaseRun ? 'silver_merge_key_resolution' : 'bronze_code_execution')
+              : undefined,
           resume_message: reviewAction === 'APPROVED'
-            ? 'Bronze review submitted. Bronze execution is starting.'
+            ? (generationFirstDatabaseRun
+              ? 'Bronze review submitted. Silver merge-key resolution is starting.'
+              : 'Bronze review submitted. Bronze execution is starting.')
             : 'Bronze review was submitted.',
         })
         setBronzeReview(null)
@@ -1625,6 +1639,12 @@ function HitlQueue({ onClose = null }) {
             next_gate: 0,
             next_review_key: null,
             stage_confirmation: null,
+            ...(generationFirstDatabaseRun ? {
+              execution_ready: false,
+              awaiting_stage_confirmation: false,
+              next_stage_key: null,
+              next_stage_label: null,
+            } : {}),
             background_stage: reviewAction === 'APPROVED' ? 'silver' : undefined,
           resume_message: reviewAction === 'APPROVED'
             ? 'Silver Merge Key Review submitted. Silver generation is starting.'
@@ -1669,9 +1689,19 @@ function HitlQueue({ onClose = null }) {
             next_gate: 0,
             next_review_key: null,
             stage_confirmation: null,
-            background_stage: reviewAction === 'APPROVED' ? 'silver_code_execution' : undefined,
+            ...(generationFirstDatabaseRun ? {
+              execution_ready: false,
+              awaiting_stage_confirmation: false,
+              next_stage_key: null,
+              next_stage_label: null,
+            } : {}),
+            background_stage: reviewAction === 'APPROVED'
+              ? (generationFirstDatabaseRun ? 'gold' : 'silver_code_execution')
+              : undefined,
           resume_message: reviewAction === 'APPROVED'
-            ? `${gate5Name} submitted. Silver execution is starting.`
+            ? (generationFirstDatabaseRun
+              ? `${gate5Name} submitted. Gold generation is starting.`
+              : `${gate5Name} submitted. Silver execution is starting.`)
             : `${gate5Name} was submitted.`,
         })
         setSilverReview(null)
@@ -1710,8 +1740,22 @@ function HitlQueue({ onClose = null }) {
           id: selectedRunId,
           status: 'PROCESSING',
           next_review_key: null,
-          background_stage: reviewAction === 'APPROVED' ? 'gold_code_execution' : undefined,
-          resume_message: reviewAction === 'APPROVED' ? 'Gold review submitted. Gold execution is starting.' : 'Gold review was submitted.',
+          ...(generationFirstDatabaseRun ? {
+            next_gate: 0,
+            stage_confirmation: null,
+            execution_ready: false,
+            awaiting_stage_confirmation: false,
+            next_stage_key: null,
+            next_stage_label: null,
+          } : {}),
+          background_stage: reviewAction === 'APPROVED'
+            ? (generationFirstDatabaseRun ? 'gold_review' : 'gold_code_execution')
+            : undefined,
+          resume_message: reviewAction === 'APPROVED'
+            ? (generationFirstDatabaseRun
+              ? 'Gold review submitted. Preparing the target execution gate.'
+              : 'Gold review submitted. Gold execution is starting.')
+            : 'Gold review was submitted.',
         })
         setGoldReview(null)
         setCodeReviewDraftItems([])
@@ -3772,8 +3816,8 @@ function buildGoldCodeReviewItems(items) {
       title,
       type: 'GOLD',
       queuedAt: formatReviewTimestamp(item.queued_at || item.created_at || item.generated_at),
-      code: item.generated_gold_script || item.script_body || item.code || JSON.stringify(stripEmptyReviewFields(item), null, 2),
-      fileName: item.file_name || `${title}.py`,
+      code: item.generated_gold_script || item.script_body || item.code || '',
+      fileName: item.file_name || item.script_path?.split(/[\\/]/).pop() || `${title}.${item.script_language === 'sql' ? 'sql' : 'py'}`,
       target: item.target_table || item.gold_table,
       source: item.source_silver_table || item.source_table,
       strategy: item.strategy || 'Gold KPI transformation',

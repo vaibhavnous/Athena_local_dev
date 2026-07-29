@@ -56,6 +56,37 @@ export const PIPELINE_PHASE_TEMPLATES = {
     },
     {
       id: 'phase-3',
+      label: 'Code Generation & Reviews',
+      keys: [
+        'bronze',
+        'gate4',
+        'silver_merge_key_resolution',
+        'silver_merge_key_review',
+        'silver',
+        'gate5',
+        'gold',
+        'gold_review',
+      ],
+    },
+    {
+      id: 'phase-4',
+      label: 'Target Execution',
+      keys: ['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'],
+    },
+  ],
+  databaseDbt: [
+    {
+      id: 'phase-1',
+      label: 'Discovery & Requirement Intelligence',
+      keys: ['ingestion', 'memory', 'requirements', 'kpis', 'gate1'],
+    },
+    {
+      id: 'phase-2',
+      label: 'Source & Metadata Intelligence',
+      keys: ['nomination', 'gate2', 'discovery', 'profiling', 'enrichment', 'gate3'],
+    },
+    {
+      id: 'phase-3',
       label: 'Bronze Layer (Ingestion)',
       keys: ['bronze', 'gate4', 'bronze_code_execution'],
     },
@@ -68,6 +99,37 @@ export const PIPELINE_PHASE_TEMPLATES = {
       id: 'phase-5',
       label: 'Gold Layer (Analytics)',
       keys: ['gold', 'gold_code_execution'],
+    },
+  ],
+  databaseDbtGenerationFirst: [
+    {
+      id: 'phase-1',
+      label: 'Discovery & Requirement Intelligence',
+      keys: ['ingestion', 'memory', 'requirements', 'kpis', 'gate1'],
+    },
+    {
+      id: 'phase-2',
+      label: 'Source & Metadata Intelligence',
+      keys: ['nomination', 'gate2', 'discovery', 'profiling', 'enrichment', 'gate3'],
+    },
+    {
+      id: 'phase-3',
+      label: 'Code Generation & Reviews',
+      keys: [
+        'bronze',
+        'gate4',
+        'silver_merge_key_resolution',
+        'silver_merge_key_review',
+        'silver',
+        'gate5',
+        'gold',
+        'gold_review',
+      ],
+    },
+    {
+      id: 'phase-4',
+      label: 'Target Execution',
+      keys: ['gold_code_execution'],
     },
   ],
   file: [
@@ -121,6 +183,56 @@ export const PIPELINE_PHASE_TEMPLATES = {
 
 export function isFileSource(run) {
   return run?.source === 'sftp' || run?.source === 'adls_gen2'
+}
+
+export function isSnowflakeDbtRun(run) {
+  return (
+    String(run?.target_warehouse || '').toLowerCase() === 'snowflake' &&
+    String(run?.execution_engine || 'native').toLowerCase() === 'dbt'
+  )
+}
+
+export function isGenerationFirstDatabaseRun(run) {
+  if (isFileSource(run)) return false
+  if (run?.generation_first_execution === true) return true
+
+  const flowVersion = String(
+    run?.database_flow_version ||
+    run?.pipeline_flow_version ||
+    run?.flow_version ||
+    ''
+  ).toLowerCase()
+  if (flowVersion === 'generation_first_v1') return true
+
+  const confirmation = run?.stage_confirmation || {}
+  if (
+    confirmation?.awaiting_confirmation &&
+    String(confirmation?.last_completed_stage_key || '').toLowerCase() === 'gold_review' &&
+    ['bronze_code_execution', 'gold_code_execution'].includes(
+      String(confirmation?.next_stage_key || '').toLowerCase()
+    )
+  ) return true
+
+  const steps = Array.isArray(run?.pipeline_steps)
+    ? run.pipeline_steps
+    : Array.isArray(run?.stages) ? run.stages : []
+  const keys = steps.map((step) => String(step?.key || '').toLowerCase())
+  const goldReviewIndex = keys.indexOf('gold_review')
+  const bronzeExecutionIndex = keys.indexOf('bronze_code_execution')
+  return goldReviewIndex >= 0 && bronzeExecutionIndex >= 0 && goldReviewIndex < bronzeExecutionIndex
+}
+
+function pipelineTemplatesForRun(run) {
+  if (isFileSource(run)) return PIPELINE_PHASE_TEMPLATES.file
+  if (!isGenerationFirstDatabaseRun(run)) return PIPELINE_PHASE_TEMPLATES.databaseDbt
+  if (!isSnowflakeDbtRun(run)) return PIPELINE_PHASE_TEMPLATES.database
+  return String(run?.dbt_deployment_mode || 'generate_only').toLowerCase() === 'generate_and_deploy'
+    ? PIPELINE_PHASE_TEMPLATES.databaseDbtGenerationFirst
+    : PIPELINE_PHASE_TEMPLATES.databaseDbtGenerationFirst.slice(0, 3)
+}
+
+export function getPipelineOrder(run) {
+  return pipelineTemplatesForRun(run).flatMap((phase) => phase.keys)
 }
 
 const FILE_VISIBLE_STEP_GROUPS = [
@@ -233,7 +345,7 @@ function applyExternalExecutionState(run, steps: PipelineStep[]) {
   if (!stageKey || runState !== 'RUNNING' || (progressState && progressState !== 'RUNNING')) return steps
 
   const sourceType = isFileSource(run) ? 'file' : 'database'
-  const orderedKeys = PIPELINE_PHASE_TEMPLATES[sourceType].flatMap((phase) => phase.keys)
+  const orderedKeys = getPipelineOrder(run)
   const targetIndex = orderedKeys.indexOf(stageKey)
   if (targetIndex < 0) return steps
 
@@ -251,7 +363,8 @@ function applyExternalExecutionState(run, steps: PipelineStep[]) {
         complete: false,
       }
     }
-    if (!isFileSource(run) && stepIndex >= 0 && stepIndex < targetIndex && state !== 'FAILED') {
+    const executionStage = ['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'].includes(stageKey)
+    if (!isFileSource(run) && !executionStage && stepIndex >= 0 && stepIndex < targetIndex && state !== 'FAILED') {
       return {
         ...step,
         state: 'COMPLETED',
@@ -276,7 +389,7 @@ function applyExternalExecutionState(run, steps: PipelineStep[]) {
 
 function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
   const sourceType = isFileSource(run) ? 'file' : 'database'
-  const orderedKeys = PIPELINE_PHASE_TEMPLATES[sourceType].flatMap((phase) => phase.keys)
+  const orderedKeys = getPipelineOrder(run)
   const indexByKey = new Map(orderedKeys.map((key, index) => [key, index]))
   const executionKeys = new Set([
     'bronze_code_execution',
@@ -288,7 +401,7 @@ function clearStaleWaitingSteps(run, steps: PipelineStep[]) {
   ])
   const progressedStates = new Set(['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED', 'SUCCESS', 'PIPELINE_COMPLETED'])
   const progressedIndexes = steps
-    .map((step) => indexByKey.get(step.key) ?? -1)
+    .map((step) => executionKeys.has(step.key) ? -1 : (indexByKey.get(step.key) ?? -1))
     .filter((index, itemIndex) => index >= 0 && progressedStates.has(normalizeState(steps[itemIndex]?.state)))
 
   if (!progressedIndexes.length) return steps
@@ -352,14 +465,26 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
   }
 
   if (run?.next_review_key === 'gold_review') {
+    if (!isGenerationFirstDatabaseRun(run)) {
+      return steps.map((step) => step.key === 'gold_code_execution'
+        ? { ...step, label: 'Gold Review & Execution', state: 'HITL_WAIT', complete: false }
+        : step)
+    }
     if (steps.some((step) => step.key === 'gold_review')) {
       return steps.map((step) => step.key === 'gold_review'
         ? { ...step, state: 'HITL_WAIT', complete: false }
         : step)
     }
-    return steps.map((step) => step.key === 'gold_code_execution'
-      ? { ...step, label: 'Gold Review & Execution', state: 'HITL_WAIT', complete: false }
-      : step)
+    return [
+      ...steps,
+      {
+        key: 'gold_review',
+        label: 'Gold Code Review',
+        detail: buildStepDetail(run, 'gold_review', 'HITL_WAIT', ''),
+        state: 'HITL_WAIT',
+        complete: false,
+      },
+    ]
   }
 
   if (gate < 1 || gate > 5) return steps
@@ -385,12 +510,14 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
 
 export function getPhaseGroups(run, stepsOverride?) {
   const sourceType = isFileSource(run) ? 'file' : 'database'
-  const templates = PIPELINE_PHASE_TEMPLATES[sourceType]
+  const templates = pipelineTemplatesForRun(run)
   const steps = Array.isArray(stepsOverride) ? stepsOverride : getPipelineSteps(run)
   const byKey = new Map<string, PipelineStep>(steps.map((step) => [step.key, step]))
   const orderedKeys = templates.flatMap((phase) => phase.keys)
   const indexByKey = new Map(orderedKeys.map((key, index) => [key, index]))
-  const furthestProgressIndex = steps.reduce((furthest, step) => {
+  const executionKeys = new Set(['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'])
+  const furthestGenerationProgressIndex = steps.reduce((furthest, step) => {
+    if (executionKeys.has(step.key)) return furthest
     const index = indexByKey.get(step.key) ?? -1
     return normalizeState(step.state) === 'PENDING' ? furthest : Math.max(furthest, index)
   }, -1)
@@ -400,7 +527,7 @@ export function getPhaseGroups(run, stepsOverride?) {
       const step = byKey.get(key)
       const syntheticState = sourceType === 'file'
         ? 'PENDING'
-        : syntheticStepState(key, byKey, indexByKey, furthestProgressIndex)
+        : syntheticStepState(key, byKey, indexByKey, furthestGenerationProgressIndex, run)
       return (
         step || {
           key,
@@ -505,11 +632,12 @@ function syntheticStepState(
   key,
   byKey: Map<string, PipelineStep>,
   indexByKey: Map<string, number>,
-  furthestProgressIndex: number,
+  furthestGenerationProgressIndex: number,
+  run,
 ) {
   const keyIndex = indexByKey.get(key) ?? -1
   const executionKeys = new Set(['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'])
-  if (keyIndex >= 0 && keyIndex < furthestProgressIndex && !executionKeys.has(key)) return 'COMPLETED'
+  if (keyIndex >= 0 && keyIndex < furthestGenerationProgressIndex && !executionKeys.has(key)) return 'COMPLETED'
 
   const state = (stepKey: string) => normalizeState(byKey.get(stepKey)?.state)
   const bronze = state('bronze')
@@ -519,38 +647,49 @@ function syntheticStepState(
   const gate5 = state('gate5')
   const silverExecution = state('silver_code_execution')
   const gold = state('gold')
+  const goldReview = state('gold_review')
   const goldExecution = state('gold_code_execution')
   const progressed = (...states: string[]) => states.some((item) => ['RUNNING', 'HITL_WAIT', 'FAILED', 'COMPLETED'].includes(item))
-  const silverProgressed = progressed(silver, gate5, silverExecution, gold, goldExecution)
+  const silverProgressed = progressed(silver, gate5, gold, goldReview)
 
   if (key === 'bronze') {
-    if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(mergeReview, silver, gate5, gold, goldReview)) return 'COMPLETED'
   }
   if (key === 'gate4') {
-    if (progressed(bronzeExecution, mergeReview, silver, gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(mergeReview, silver, gate5, gold, goldReview)) return 'COMPLETED'
   }
   if (key === 'bronze_code_execution') {
     if (bronzeExecution === 'COMPLETED') return 'COMPLETED'
     if (bronze === 'RUNNING') return 'PENDING'
   }
   if (key === 'silver_merge_key_resolution') {
-    if (bronzeExecution === 'COMPLETED' || mergeReview === 'HITL_WAIT' || mergeReview === 'COMPLETED' || silverProgressed) return 'COMPLETED'
+    if (mergeReview === 'HITL_WAIT' || mergeReview === 'COMPLETED' || silverProgressed) return 'COMPLETED'
   }
   if (key === 'silver_merge_key_review') {
     if (mergeReview === 'HITL_WAIT') return 'HITL_WAIT'
     if (mergeReview === 'COMPLETED' || silverProgressed) return 'COMPLETED'
   }
   if (key === 'silver') {
-    if (progressed(gate5, silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(gate5, gold, goldReview)) return 'COMPLETED'
   }
   if (key === 'gate5') {
-    if (progressed(silverExecution, gold, goldExecution)) return 'COMPLETED'
+    if (progressed(gold, goldReview)) return 'COMPLETED'
   }
   if (key === 'silver_code_execution') {
-    if (progressed(gold, goldExecution)) return 'COMPLETED'
+    if (silverExecution === 'COMPLETED') return 'COMPLETED'
   }
   if (key === 'gold') {
-    if (progressed(goldExecution)) return 'COMPLETED'
+    if (progressed(goldReview)) return 'COMPLETED'
+  }
+  if (key === 'gold_review') {
+    const confirmation = run?.stage_confirmation || {}
+    const executionReady =
+      confirmation?.awaiting_confirmation &&
+      String(confirmation?.last_completed_stage_key || '').toLowerCase() === 'gold_review' &&
+      ['bronze_code_execution', 'gold_code_execution'].includes(
+        String(confirmation?.next_stage_key || '').toLowerCase()
+      )
+    if (goldReview === 'COMPLETED' || executionReady || progressed(bronzeExecution, silverExecution, goldExecution)) return 'COMPLETED'
   }
   if (key === 'gold_code_execution') {
     if (goldExecution === 'COMPLETED') return 'COMPLETED'
@@ -597,7 +736,9 @@ function buildStepDetail(run, key, state, existingDetail) {
     case 'silver_merge_key_review':
       if (state === 'HITL_WAIT') return 'Silver Merge Key Review is ready. Approve merge keys before Silver generation starts.'
       if (state === 'COMPLETED') return 'Silver merge keys were approved.'
-      return 'Silver Merge Key Review opens after Bronze execution completes.'
+      return isGenerationFirstDatabaseRun(run)
+        ? 'Silver Merge Key Review opens after Bronze Review completes.'
+        : 'Silver Merge Key Review opens after Bronze execution completes.'
     case 'gate5':
       return readyGateMessage('Silver review', 'Silver review is ready. Validate generated Silver artifacts before downstream validation continues.')
     case 'discovery':
@@ -629,18 +770,33 @@ function buildStepDetail(run, key, state, existingDetail) {
       if (state === 'COMPLETED') return 'Gold analytics scripts were generated.'
       if (state === 'RUNNING') return 'Generating Gold KPI scripts.'
       return 'Gold generation starts after Silver processing completes.'
+    case 'gold_review':
+      if (state === 'HITL_WAIT') return 'Gold Code Review is ready. Approve the final generated artifacts before target execution.'
+      if (state === 'COMPLETED') return 'Gold code was reviewed and approved for target execution.'
+      return 'Gold Code Review opens after Gold generation completes.'
     case 'bronze_code_execution':
       if (state === 'COMPLETED') return `Approved Bronze scripts were executed in ${targetName(run)}.`
       if (state === 'RUNNING') return `Executing approved Bronze scripts in ${targetName(run)}.`
-      return `Bronze execution starts in ${targetName(run)} immediately after Bronze Review approval.`
+      return isGenerationFirstDatabaseRun(run)
+        ? `Bronze execution starts in ${targetName(run)} after all generated code is reviewed and Start Execution is selected.`
+        : `Bronze execution starts in ${targetName(run)} immediately after Bronze Review approval.`
     case 'silver_code_execution':
       if (state === 'COMPLETED') return `Approved Silver scripts were executed in ${targetName(run)}.`
       if (state === 'RUNNING') return `Executing approved Silver scripts in ${targetName(run)}.`
-      return `Silver execution starts in ${targetName(run)} immediately after Silver Review approval.`
+      return isGenerationFirstDatabaseRun(run)
+        ? `Silver execution starts after Bronze execution succeeds in ${targetName(run)}.`
+        : `Silver execution starts in ${targetName(run)} immediately after Silver Review approval.`
     case 'gold_code_execution':
+      if (isSnowflakeDbtRun(run) && isGenerationFirstDatabaseRun(run)) {
+        if (state === 'COMPLETED') return 'The frozen Snowflake dbt project was deployed and built successfully.'
+        if (state === 'RUNNING') return 'Landing approved source data, deploying the frozen dbt project, and running dbt build.'
+        return 'Snowflake dbt deployment and build starts after Gold Review and explicit confirmation.'
+      }
       if (state === 'COMPLETED') return `Approved Gold scripts were executed in ${targetName(run)}.`
       if (state === 'RUNNING') return `Executing approved Gold scripts in ${targetName(run)}.`
-      return `Gold execution starts in ${targetName(run)} after Gold Review approval.`
+      return isGenerationFirstDatabaseRun(run)
+        ? `Gold execution starts after Silver execution succeeds in ${targetName(run)}.`
+        : `Gold execution starts in ${targetName(run)} after Gold Review approval.`
     default:
       return existingDetail || ''
   }

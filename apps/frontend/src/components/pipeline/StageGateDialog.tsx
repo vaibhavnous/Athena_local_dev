@@ -3,7 +3,18 @@ import React, { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { CheckCircle2, ChevronRight, Loader2, XCircle } from 'lucide-react'
 
-export default function StageGateDialog({ isOpen, completedStage, nextStage, onContinue, onCancel, busy = false }) {
+export default function StageGateDialog({
+  isOpen,
+  completedStage,
+  nextStage,
+  onContinue,
+  onCancel,
+  busy = false,
+  title = 'Stage Completed',
+  prompt = 'Do you want to proceed to the next stage?',
+  continueLabel = 'Continue',
+  showAutoAdvance = true,
+}) {
   const [autoAdvance, setAutoAdvance] = useState(false)
 
   useEffect(() => {
@@ -27,7 +38,7 @@ export default function StageGateDialog({ isOpen, completedStage, nextStage, onC
                   <CheckCircle2 size={20} className="text-accent-green" />
                 </div>
                 <div>
-                  <h3 className="text-base font-semibold text-text-primary">Stage Completed</h3>
+                  <h3 className="text-base font-semibold text-text-primary">{title}</h3>
                   <p className="mt-0.5 text-sm text-text-tertiary">
                     <span className="font-medium text-text-secondary">{completedStage?.name || 'Stage'}</span> finished successfully.
                   </p>
@@ -42,22 +53,22 @@ export default function StageGateDialog({ isOpen, completedStage, nextStage, onC
                     <p className="mt-0.5 text-sm font-medium text-text-primary">{nextStage?.name || 'Pipeline completion'}</p>
                   </div>
                 </div>
-                <p className="mt-3 text-center text-xs text-text-tertiary">Do you want to proceed to the next stage?</p>
+                <p className="mt-3 text-center text-xs text-text-tertiary">{prompt}</p>
               </div>
 
-              <div className="px-6 pb-4">
+              {showAutoAdvance && <div className="px-6 pb-4">
                 <label className="flex cursor-pointer select-none items-center gap-2.5">
                   <input type="checkbox" checked={autoAdvance} onChange={(event) => setAutoAdvance(event.target.checked)} className="h-4 w-4 accent-accent-blue" />
                   <span className="text-xs text-text-tertiary">Don't ask again — auto-advance between stages</span>
                 </label>
-              </div>
+              </div>}
 
               <div className="flex gap-3 px-6 pb-6">
                 <button disabled={busy} onClick={onCancel} className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-bg-border px-4 py-2.5 text-sm font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary disabled:opacity-50">
                   <XCircle size={14} /> Cancel Run
                 </button>
                 <button disabled={busy} onClick={() => onContinue(autoAdvance)} className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-accent-blue px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-blue/90 disabled:opacity-50">
-                  {busy ? <Loader2 size={14} className="animate-spin" /> : <ChevronRight size={14} />} Continue
+                  {busy ? <Loader2 size={14} className="animate-spin" /> : <ChevronRight size={14} />} {continueLabel}
                 </button>
               </div>
             </div>

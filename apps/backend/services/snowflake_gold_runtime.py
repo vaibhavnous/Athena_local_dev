@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -38,12 +39,47 @@ def _log_context(run_id: Any, *, table: str | None = None, step_name: str = "sno
 
 def _read_sql(script: Dict[str, Any]) -> str:
     body = str(script.get("script_body") or script.get("generated_gold_script") or "").strip()
-    if body:
+    if body and not _is_serialized_review_metadata(body, script):
         return body
     path = Path(str(script.get("script_path") or ""))
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"Generated Snowflake gold SQL not found: {path}")
+    if body:
+        # ponytail: only the legacy UI's exact metadata snapshot may fall back to
+        # the generated file; arbitrary or invalid reviewer SQL stays authoritative.
+        logger.warning(
+            "Ignoring serialized Gold review metadata and loading generated SQL",
+            extra=_log_context(
+                script.get("run_id"),
+                table=_table_name(script),
+                step_name="gold_review_metadata_recovery",
+            ),
+        )
     return path.read_text(encoding="utf-8")
+
+
+def _is_serialized_review_metadata(body: str, script: Dict[str, Any]) -> bool:
+    if not str(body or "").lstrip().startswith("{"):
+        return False
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+
+    payload_path = str(payload.get("script_path") or "").strip()
+    script_path = str(script.get("script_path") or "").strip()
+    if not payload_path or not script_path:
+        return False
+    if os.path.normcase(os.path.abspath(payload_path)) != os.path.normcase(os.path.abspath(script_path)):
+        return False
+
+    return any(
+        str(payload.get(field) or "").strip() == str(script.get(field) or "").strip()
+        and bool(str(script.get(field) or "").strip())
+        for field in ("run_id", "kpi_name", "target_table")
+    )
 
 
 def _quote_identifier(value: str) -> str:

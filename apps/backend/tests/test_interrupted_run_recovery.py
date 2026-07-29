@@ -18,3 +18,18 @@ def test_interrupted_checkpoint_state_preserves_failed_stage_for_retry():
     assert recovered["failed_background_stage"] == "silver_code_execution"
     assert recovered["interrupted_by_backend_restart"] is True
     assert "Retry Failed Stage" in recovered["resume_message"]
+
+
+def test_interrupted_execution_between_layers_recovers_next_execution_stage():
+    state = {
+        "run_id": "run-generation-first",
+        "status": "RUNNING",
+        "database_flow_version": "generation_first_v1",
+        "background_stage": None,
+        "next_stage_key": "silver_code_execution",
+        "databricks_bronze_execution_status": "COMPLETED",
+    }
+
+    recovered = _interrupted_checkpoint_state(state, "Backend process restarted while this run was active.")
+
+    assert recovered["failed_background_stage"] == "silver_code_execution"

@@ -367,7 +367,12 @@ def submit_bronze_reviews(
         return demo_action(run_id, segment="bronze" if payload.action == "APPROVED" else None, action=payload.action)
 
     from api.services.ui_service import bronze_review_from_scripts
-    from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate4_review
+    from services.pipeline_runtime import (
+        generation_first_database_flow,
+        load_checkpoint_state,
+        submit_background,
+        submit_gate4_review,
+    )
     from sftp_nodes.hitl import submit_sftp_gate4_review
 
     logger.info("Submitting bronze review", extra={"run_id": run_id, "action": payload.action})
@@ -391,6 +396,7 @@ def submit_bronze_reviews(
             "bronze_code_execution"
             if str(payload.action).upper() == "APPROVED"
             and str(checkpoint.get("target_warehouse") or "").lower() in {"snowflake", "databricks"}
+            and not generation_first_database_flow(checkpoint)
             else "silver_merge_key_review" if str(payload.action).upper() == "APPROVED"
             else "gate4"
         )
@@ -484,29 +490,35 @@ def submit_silver_reviews(
     if demo_enabled():
         return demo_action(run_id, segment="silver" if payload.action == "APPROVED" else None, action=payload.action)
 
-    from services.pipeline_runtime import load_checkpoint_state, submit_background, submit_gate5_review
+    from services.pipeline_runtime import (
+        generation_first_database_flow,
+        load_checkpoint_state,
+        submit_background,
+        submit_gate5_review,
+    )
     from sftp_nodes.hitl import submit_sftp_gate5_review
     from services.databricks_runtime import databricks_silver_execution_enabled
-
     logger.info("Submitting silver review", extra={"run_id": run_id, "action": payload.action})
 
     checkpoint = _checkpoint_for_user(run_id, user) or load_checkpoint_state(run_id) or {}
-    stage = (
-        "silver_code_execution"
-        if str(payload.action).upper() == "APPROVED"
-        and (
-            str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
-            or (
-                str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
-                and databricks_silver_execution_enabled()
-            )
-        )
-        else "gold" if str(payload.action).upper() == "APPROVED"
-        else "gate5"
-    )
     if api_utils.is_file_source(checkpoint.get("source")):
+        stage = "silver_code_execution" if str(payload.action).upper() == "APPROVED" else "gate5"
         submit_background(run_id, stage, submit_sftp_gate5_review, run_id, payload.action, payload.review_artifact)
     else:
+        stage = (
+            "silver_code_execution"
+            if str(payload.action).upper() == "APPROVED"
+            and not generation_first_database_flow(checkpoint)
+            and (
+                str(checkpoint.get("target_warehouse") or "").lower() == "snowflake"
+                or (
+                    str(checkpoint.get("target_warehouse") or "").lower() == "databricks"
+                    and databricks_silver_execution_enabled()
+                )
+            )
+            else "gold" if str(payload.action).upper() == "APPROVED"
+            else "gate5"
+        )
         review_artifact = _review_artifact_for_user(payload.review_artifact, user)
         submit_background(run_id, stage, submit_gate5_review, run_id, payload.action, review_artifact)
 
@@ -515,12 +527,23 @@ def submit_silver_reviews(
 
 @router.get("/gold-reviews/{run_id}")
 def gold_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
-    from services.pipeline_runtime import load_checkpoint_state
+    from services.databricks_runtime import _filtered_scripts
+    from services.pipeline_runtime import load_checkpoint_state, load_gold_scripts
 
     run = _checkpoint_for_user(run_id, user) or load_checkpoint_state(run_id) or {}
     artifact = run.get("gold_review_artifact") or {
         "items": [item for item in run.get("gold_generation_results") or [] if isinstance(item, dict)]
     }
+    generated = [
+        item
+        for item in (load_gold_scripts(run_id, run).get("scripts") or [])
+        if isinstance(item, dict)
+    ]
+    if generated:
+        artifact = {
+            **artifact,
+            "items": _filtered_scripts(generated, artifact, "gold"),
+        }
     return {
         "run_id": run_id,
         "next_review_key": run.get("next_review_key"),
@@ -535,10 +558,23 @@ def submit_gold_reviews(
     payload: GenericGateDecisionPayload,
     user: AuthUser = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    from services.pipeline_runtime import submit_background, submit_gold_review
+    from services.pipeline_runtime import (
+        generation_first_database_flow,
+        load_checkpoint_state,
+        submit_background,
+        submit_gold_review,
+    )
 
-    _checkpoint_for_user(run_id, user)
+    checkpoint = _checkpoint_for_user(run_id, user) or load_checkpoint_state(run_id) or {}
     logger.info("Submitting Gold review", extra={"run_id": run_id, "action": payload.action})
     review_artifact = _review_artifact_for_user(payload.review_artifact, user)
-    submit_background(run_id, "gold_code_execution", submit_gold_review, run_id, payload.action, review_artifact)
+    stage = (
+        "gold_review"
+        if generation_first_database_flow(checkpoint)
+        and str(payload.action or "").upper() == "APPROVED"
+        else "gold_code_execution"
+        if str(payload.action or "").upper() == "APPROVED"
+        else "gold_review"
+    )
+    submit_background(run_id, stage, submit_gold_review, run_id, payload.action, review_artifact)
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}

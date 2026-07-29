@@ -67,6 +67,35 @@ def test_snowflake_dbt_generate_only_writes_deterministic_project(monkeypatch):
     assert rerun_state["snowflake_dbt_idempotency_key"] == state["snowflake_dbt_idempotency_key"]
 
 
+def test_execute_finalized_dbt_project_rejects_post_review_changes(monkeypatch):
+    project_dir = _workdir("snowflake_dbt_frozen")
+    model_path = project_dir / "models" / "bronze" / "bronze_claims.sql"
+    model_path.parent.mkdir(parents=True)
+    model_path.write_text("select 1 as claim_id\n", encoding="utf-8")
+    reviewed_hash = dbt_snowflake_runtime._hash_project_files(project_dir)["artifact_set_hash"]
+    state = {
+        "run_id": "run-frozen-dbt",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "dbt_deployment_mode": "generate_and_deploy",
+        "snowflake_dbt_artifact_path": str(project_dir),
+        "snowflake_dbt_artifact_set_hash": reviewed_hash,
+    }
+    monkeypatch.setattr(dbt_snowflake_runtime, "_write_ai_store_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        dbt_snowflake_runtime,
+        "_execute_snowflake_dbt",
+        lambda current, _project_dir: {**current, "snowflake_dbt_status": "EXECUTED"},
+    )
+
+    result = dbt_snowflake_runtime.execute_finalized_snowflake_dbt_project(state)
+    assert result["snowflake_dbt_status"] == "EXECUTED"
+
+    model_path.write_text("select 2 as claim_id\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="changed after review"):
+        dbt_snowflake_runtime.execute_finalized_snowflake_dbt_project(state)
+
+
 def test_snowflake_dbt_build_keeps_bronze_silver_and_gold_in_one_project(monkeypatch):
     workdir = _workdir("snowflake_dbt_combined")
     monkeypatch.setattr(
@@ -545,6 +574,210 @@ def test_dbt_deploy_mode_lands_bronze_sources_before_continuing(monkeypatch):
     assert result["snowflake_bronze_execution_status"] == "SKIPPED_DBT_CODEGEN_ONLY"
 
 
+def _generation_first_dbt_state():
+    return {
+        "run_id": "run-generation-first-dbt",
+        "source": "database",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "dbt_deployment_mode": "generate_and_deploy",
+        "database_flow_version": "generation_first_v1",
+        "gate4": {"decision": "APPROVED"},
+        "bronze_review_decision": "APPROVED",
+        "bronze_review_artifact": {"feeds": [{"table": "claims", "review_status": "APPROVED"}]},
+        "bronze_generation_results": [{"table": "claims", "code_generation_format": "dbt"}],
+        "silver_merge_key_review_decision": "APPROVED",
+        "gate5": {"decision": "APPROVED"},
+        "silver_review_decision": "APPROVED",
+        "silver_generation_results": [{"table": "claims", "code_generation_format": "dbt"}],
+        "gold_review_decision": "APPROVED",
+        "gold_review_artifact": {
+            "items": [
+                {
+                    "target_table": "ATHENA_DB.GOLD.fact_claims",
+                    "review_status": "APPROVED",
+                }
+            ]
+        },
+        "gold_generation_results": [
+            {
+                "target_table": "ATHENA_DB.GOLD.fact_claims",
+                "code_generation_format": "dbt",
+            }
+        ],
+    }
+
+
+def test_generation_first_dbt_gold_review_finalizes_then_pauses(monkeypatch):
+    checkpoint = _generation_first_dbt_state()
+    saved_states = []
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: checkpoint)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state",
+        lambda _run_id, current: saved_states.append(current.copy()),
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "finalize_snowflake_dbt_project",
+        lambda current: {
+            **current,
+            "snowflake_dbt_status": "GENERATED",
+            "snowflake_dbt_deploy_status": "PENDING",
+            "snowflake_dbt_validation_status": "STATIC_VALIDATED",
+            "snowflake_dbt_artifact_path": "generated/dbt/run-generation-first-dbt",
+            "snowflake_dbt_artifact_set_hash": "reviewed-hash",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "run_snowflake_dbt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy dbt execution must not start")),
+    )
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "run_snowflake_bronze_scripts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source landing must wait for the gate")),
+    )
+
+    result = pipeline_runtime.submit_gold_review(
+        checkpoint["run_id"],
+        review_artifact=checkpoint["gold_review_artifact"],
+    )
+
+    assert result["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
+    assert result["execution_ready"] is True
+    assert result["next_stage_key"] == "gold_code_execution"
+    assert result["next_stage_label"] == "Snowflake dbt Deployment & Build"
+    assert result["stage_confirmation"]["last_completed_stage_key"] == "gold_review"
+    assert result["snowflake_dbt_artifact_set_hash"] == "reviewed-hash"
+    assert "snowflake_bronze_source_load_status" not in result
+    assert saved_states[-1]["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
+
+
+def test_generation_first_generate_only_dbt_finishes_without_execution_gate(monkeypatch):
+    checkpoint = {
+        **_generation_first_dbt_state(),
+        "dbt_deployment_mode": "generate_only",
+    }
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: checkpoint)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "finalize_snowflake_dbt_project",
+        lambda current: {
+            **current,
+            "snowflake_dbt_status": "GENERATED",
+            "snowflake_dbt_deploy_status": "NOT_APPLICABLE_CODEGEN_ONLY",
+            "snowflake_dbt_validation_status": "STATIC_VALIDATED",
+            "snowflake_dbt_artifact_path": "generated/dbt/run-generation-first-dbt",
+            "snowflake_dbt_artifact_set_hash": "reviewed-hash",
+            "completion_mode": "codegen_only",
+        },
+    )
+
+    result = pipeline_runtime.submit_gold_review(
+        checkpoint["run_id"],
+        review_artifact=checkpoint["gold_review_artifact"],
+    )
+
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert result["execution_ready"] is False
+    assert result["snowflake_gold_execution_status"] == "SKIPPED_DBT_CODEGEN_ONLY"
+    assert not result.get("stage_confirmation")
+
+
+def test_generation_first_dbt_gate_lands_sources_then_executes_frozen_project(monkeypatch):
+    state = {
+        **_generation_first_dbt_state(),
+        "execution_ready": True,
+        "snowflake_dbt_status": "GENERATED",
+        "snowflake_dbt_deploy_status": "PENDING",
+        "snowflake_dbt_validation_status": "STATIC_VALIDATED",
+        "snowflake_dbt_artifact_path": "generated/dbt/run-generation-first-dbt",
+        "snowflake_dbt_artifact_set_hash": "reviewed-hash",
+    }
+    calls = []
+    saved_states = []
+
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "run_snowflake_bronze_scripts",
+        lambda current, **kwargs: (
+            calls.append(("landing", kwargs))
+            or {**current, "snowflake_bronze_source_load_status": "COMPLETED"}
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "execute_finalized_snowflake_dbt_project",
+        lambda current: (
+            calls.append(("dbt", current["snowflake_dbt_artifact_set_hash"]))
+            or {
+                **current,
+                "snowflake_dbt_status": "EXECUTED",
+                "snowflake_dbt_deploy_status": "COMPLETED",
+                "completion_mode": "dbt_executed",
+            }
+        ),
+    )
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: {})
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state_timed",
+        lambda _run_id, current, **_kwargs: saved_states.append(current.copy()),
+    )
+
+    result = pipeline_runtime.execute_generation_first_snowflake_dbt(
+        state["run_id"],
+        state=state,
+    )
+
+    assert [call[0] for call in calls] == ["landing", "dbt"]
+    assert calls[0][1] == {
+        "review_artifact": state["bronze_review_artifact"],
+        "approved_only": True,
+        "load_only": True,
+        "progress_stage_key": "gold_code_execution",
+    }
+    assert calls[1][1] == "reviewed-hash"
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert result["snowflake_gold_execution_status"] == "COMPLETED"
+    assert result["execution_ready"] is False
+    assert saved_states[-1]["background_stage"] is None
+
+
+def test_generation_first_dbt_retry_reuses_completed_source_landing(monkeypatch):
+    state = {
+        **_generation_first_dbt_state(),
+        "execution_ready": True,
+        "snowflake_bronze_source_load_status": "COMPLETED",
+        "snowflake_dbt_validation_status": "STATIC_VALIDATED",
+        "snowflake_dbt_artifact_path": "generated/dbt/run-generation-first-dbt",
+        "snowflake_dbt_artifact_set_hash": "reviewed-hash",
+    }
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "run_snowflake_bronze_scripts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("completed source landing must not rerun")),
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "execute_finalized_snowflake_dbt_project",
+        lambda current: {**current, "snowflake_dbt_status": "EXECUTED"},
+    )
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: {})
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+
+    result = pipeline_runtime.execute_generation_first_snowflake_dbt(
+        state["run_id"],
+        state=state,
+    )
+
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert result["snowflake_bronze_source_load_status"] == "COMPLETED"
+
+
 def test_dbt_gold_review_finalizes_generation_without_native_execution(monkeypatch):
     saved_states = []
     generated_states = []
@@ -776,6 +1009,36 @@ def test_dbt_pipeline_steps_show_codegen_and_validation_state():
     assert by_key["gold_code_execution"]["label"] == "dbt Project Build & Deployment"
     assert by_key["gold_code_execution"]["state"] == "RUNNING"
     assert "validated, deployed, and built in Snowflake" in by_key["gold_code_execution"]["detail"]
+
+
+def test_generation_first_dbt_pipeline_steps_put_one_deployment_after_gold_review():
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            **_generation_first_dbt_state(),
+            "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+            "execution_ready": True,
+            "snowflake_dbt_validation_status": "STATIC_VALIDATED",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=True,
+        gold_generation_completed=True,
+    )
+    keys = [step["key"] for step in steps]
+    by_key = {step["key"]: step for step in steps}
+
+    assert keys.index("gold_review") < keys.index("gold_code_execution")
+    assert "bronze_code_execution" not in keys
+    assert "silver_code_execution" not in keys
+    assert keys[-1] == "gold_code_execution"
+    assert by_key["gold_code_execution"]["label"] == "Snowflake dbt Deployment & Build"
 
 
 def test_dbt_gold_bundle_does_not_expose_native_dimension_companion():

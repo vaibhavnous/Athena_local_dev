@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { fileVisibleStepKey } from '../utils/pipelinePhases'
+import { fileVisibleStepKey, getPipelineOrder } from '../utils/pipelinePhases'
 
 let notificationIdCounter = 0
 const HITL_SOURCE_RUN_IDS_KEY = 'athena.hitlSourceRunIds'
@@ -55,14 +55,6 @@ function normalizeRunStatus(value: any): string {
   return status
 }
 
-const DATABASE_PROGRESS_ORDER = [
-  'ingestion', 'memory', 'requirements', 'kpis', 'gate1',
-  'nomination', 'gate2', 'discovery', 'profiling', 'enrichment', 'gate3',
-  'bronze', 'gate4', 'bronze_code_execution',
-  'silver_merge_key_resolution', 'silver_merge_key_review', 'silver', 'gate5', 'silver_code_execution',
-  'gold', 'gold_code_execution',
-]
-
 const FILE_PROGRESS_ORDER = [
   'ingestion', 'memory', 'requirements', 'kpis', 'gate1',
   'feed_discovery', 'feed_nomination', 'gate2', 'column_extraction',
@@ -76,7 +68,7 @@ const FILE_PROGRESS_ORDER = [
 function runProgressIndex(run: any, sourceHint?: string): number {
   const source = String(run?.source || sourceHint || '').toLowerCase()
   const fileSource = ['sftp', 'adls_gen2'].includes(source)
-  const progressOrder = fileSource ? FILE_PROGRESS_ORDER : DATABASE_PROGRESS_ORDER
+  const progressOrder = fileSource ? FILE_PROGRESS_ORDER : getPipelineOrder(run)
   const order = new Map(progressOrder.map((key, index) => [key, index]))
   const progressKey = (value: any) => fileSource
     ? fileVisibleStepKey(String(value || ''))
@@ -116,6 +108,7 @@ function preserveProgressFields(existing: any, merged: any) {
     'snowflake_silver_execution_status', 'snowflake_silver_execution_progress',
     'snowflake_gold_execution_status', 'snowflake_gold_execution_progress',
     'stage_confirmation', 'next_gate', 'next_review_key', 'resume_message',
+    'database_flow_version', 'pipeline_flow_version', 'flow_version', 'generation_first_execution',
   ]) {
     if (existing[key] !== undefined) merged[key] = existing[key]
   }
@@ -146,6 +139,14 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
   const incomingPausedOrTerminal =
     incomingStatus === 'HITL_WAIT' ||
     incomingTerminal
+  const clearsExecutionGate =
+    Object.prototype.hasOwnProperty.call(incoming, 'stage_confirmation') &&
+    incoming.stage_confirmation === null &&
+    (
+      incoming.execution_ready === false ||
+      incoming.awaiting_stage_confirmation === false ||
+      ['REGENERATE_REQUIRED', 'FAILED'].includes(incomingStatus)
+    )
 
   // The history endpoint intentionally returns lightweight UNKNOWN summaries.
   // Keep the authoritative status from the selected run's detail response.
@@ -156,8 +157,20 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
   // Status hydration can return a sparse checkpoint snapshot after its detail query times out.
   // Keep the furthest known stage; a slower response must not move the UI back to an earlier phase.
   const sourceHint = incoming?.source || existing?.source
-  if (!incomingTerminal && runProgressIndex(incoming, sourceHint) < runProgressIndex(existing, sourceHint)) {
+  if (
+    !incomingTerminal &&
+    !clearsExecutionGate &&
+    runProgressIndex(incoming, sourceHint) < runProgressIndex(existing, sourceHint)
+  ) {
     return preserveProgressFields(existing, merged)
+  }
+
+  if (clearsExecutionGate) {
+    merged.stage_confirmation = null
+    if (!Object.prototype.hasOwnProperty.call(incoming, 'execution_ready')) merged.execution_ready = false
+    if (!Object.prototype.hasOwnProperty.call(incoming, 'awaiting_stage_confirmation')) merged.awaiting_stage_confirmation = false
+    if (!Object.prototype.hasOwnProperty.call(incoming, 'next_stage_key')) merged.next_stage_key = null
+    if (!Object.prototype.hasOwnProperty.call(incoming, 'next_stage_label')) merged.next_stage_label = null
   }
 
   for (const key of ['stages', 'pipeline_steps']) {
@@ -193,8 +206,12 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
       'enriched_columns',
       'enriched_joins',
       'gold_review_artifact',
+      'database_flow_version',
+      'pipeline_flow_version',
+      'flow_version',
+      'generation_first_execution',
     ]) {
-      if (existing[key] !== undefined && (incoming[key] === undefined || incoming[key] === null)) merged[key] = existing[key]
+      if (existing[key] !== undefined && !Object.prototype.hasOwnProperty.call(incoming, key)) merged[key] = existing[key]
     }
   }
 

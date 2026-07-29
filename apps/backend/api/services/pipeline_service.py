@@ -14,8 +14,13 @@ from services.pipeline_runtime import (
     aborted_run_state,
     clear_run_abort,
     continue_database_pipeline,
+    execute_database_native_layers,
+    execute_generation_first_snowflake_dbt,
     ensure_background_capacity_locked,
     get_run_context,
+    generation_first_database_flow,
+    generation_first_native_database_flow,
+    generation_first_snowflake_dbt_flow,
     is_run_aborted,
     load_checkpoint_state,
     save_checkpoint_state,
@@ -302,6 +307,21 @@ def continue_database_pipeline_job(
             action="APPROVED",
             review_artifact=state.get("gold_review_artifact") or {},
         )
+    if (
+        str(start_stage_key or "").strip().lower() == "gold_code_execution"
+        and generation_first_snowflake_dbt_flow(state)
+    ):
+        return execute_generation_first_snowflake_dbt(run_id, state=state)
+    if str(start_stage_key or "").strip().lower() in {
+        "bronze_code_execution",
+        "silver_code_execution",
+        "gold_code_execution",
+    } and generation_first_native_database_flow(state):
+        return execute_database_native_layers(
+            run_id,
+            state=state,
+            start_stage_key=str(start_stage_key).strip().lower(),
+        )
     return continue_database_pipeline(
         run_id,
         start_stage_key=start_stage_key,
@@ -324,12 +344,17 @@ def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Option
         raw_stage = str(value or "").strip().lower()
         if raw_stage == "snowflake_dbt_codegen":
             return raw_stage
+        generation_first_execution = generation_first_database_flow(checkpoint)
         if raw_stage == "gold_code_execution":
-            return "gold"
+            return raw_stage if generation_first_execution else "gold"
         if raw_stage == "silver_code_execution":
+            if generation_first_execution:
+                return raw_stage
             if checkpoint.get("gold_generation_results") or checkpoint.get("gold_generation_completed"):
                 return "gold"
             return "silver"
+        if raw_stage == "bronze_code_execution" and generation_first_execution:
+            return raw_stage
         stage = api_utils.stage_key(value)
         if stage == "gold_code_execution":
             return "gold"

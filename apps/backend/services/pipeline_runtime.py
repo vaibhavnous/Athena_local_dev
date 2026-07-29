@@ -12,7 +12,12 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
-from services.dbt_snowflake_runtime import run_snowflake_dbt, snowflake_dbt_enabled
+from services.dbt_snowflake_runtime import (
+    execute_finalized_snowflake_dbt_project,
+    finalize_snowflake_dbt_project,
+    run_snowflake_dbt,
+    snowflake_dbt_enabled,
+)
 from utilis.db import ai_store_db_writer, config, get_completed_items, get_connection, get_pending_items, timed_stage, update_hitl_items_batch
 from utilis.generated_code_paths import generated_code_dir
 from utilis.logger import logger
@@ -33,10 +38,136 @@ GENERATION_ARTIFACT_TYPES = {
     "silver": {"SILVER_GENERATION", "SILVER_SCRIPTS", "SFTP_SILVER_GENERATION"},
     "gold": {"GOLD_GENERATION", "GOLD_SCRIPTS", "SFTP_GOLD_GENERATION"},
 }
+DATABASE_GENERATION_FIRST_FLOW_VERSION = "generation_first_v1"
 
 
 def _status_completed(value: Any) -> bool:
     return str(value or "").upper() in COMPLETED_EXECUTION_STATUSES
+
+
+def generation_first_database_flow(state: Dict[str, Any]) -> bool:
+    return (
+        str(state.get("database_flow_version") or "") == DATABASE_GENERATION_FIRST_FLOW_VERSION
+        and str(state.get("source") or "database").lower() == "database"
+        and str(state.get("target_warehouse") or "").lower() in {"databricks", "snowflake"}
+    )
+
+
+def generation_first_native_database_flow(state: Dict[str, Any]) -> bool:
+    return generation_first_database_flow(state) and not snowflake_dbt_enabled(state)
+
+
+def generation_first_snowflake_dbt_flow(state: Dict[str, Any]) -> bool:
+    return generation_first_database_flow(state) and snowflake_dbt_enabled(state)
+
+
+def _invalidate_generation_first_review_state(
+    state: Dict[str, Any],
+    *,
+    boundary: str,
+) -> Dict[str, Any]:
+    if not generation_first_database_flow(state):
+        return state
+
+    updated = dict(state)
+    execution_layers = {
+        "gate4": {"bronze", "silver", "gold"},
+        "silver_merge_key_review": {"bronze", "silver", "gold"},
+        "gate5": {"silver", "gold"},
+        "gold_review": {"gold"},
+    }.get(boundary, set())
+    downstream_prefixes = {
+        "gate4": (
+            "silver_merge_key_resolution_",
+            "silver_merge_key_review_",
+            "silver_generation_",
+            "silver_review_",
+            "gold_contract_",
+            "gold_generation_",
+            "gold_review_",
+        ),
+        "silver_merge_key_review": (
+            "silver_generation_",
+            "silver_review_",
+            "gold_contract_",
+            "gold_generation_",
+            "gold_review_",
+        ),
+        "gate5": (
+            "gold_contract_",
+            "gold_generation_",
+            "gold_review_",
+        ),
+        "gold_review": (),
+    }.get(boundary, ())
+    downstream_exact = {
+        "gate4": {
+            "gate_silver_merge_key_review",
+            "gate5",
+            "gold_generation_contract",
+        },
+        "silver_merge_key_review": {
+            "gate5",
+            "gold_generation_contract",
+        },
+        "gate5": {"gold_generation_contract"},
+        "gold_review": set(),
+    }.get(boundary, set())
+
+    for key in list(updated):
+        if generation_first_snowflake_dbt_flow(state) and key.startswith("snowflake_dbt_"):
+            updated.pop(key, None)
+            continue
+        if (
+            generation_first_snowflake_dbt_flow(state)
+            and boundary == "gate4"
+            and key.startswith("snowflake_bronze_source_load_")
+        ):
+            updated.pop(key, None)
+            continue
+        if key in downstream_exact or any(key.startswith(prefix) for prefix in downstream_prefixes):
+            updated.pop(key, None)
+            continue
+        if any(
+            key.startswith(f"{target}_{layer}_execution")
+            for target in ("databricks", "snowflake")
+            for layer in execution_layers
+        ):
+            updated.pop(key, None)
+            continue
+        if any(
+            key == f"{layer}_execution_status"
+            or key.startswith(f"{layer}_execution_")
+            for layer in execution_layers
+        ):
+            updated.pop(key, None)
+            continue
+        if key in {f"{layer}_runtime_validation_status" for layer in execution_layers}:
+            updated.pop(key, None)
+
+    for key in ("final_publish_status", "finalization_status", "completion_mode"):
+        updated.pop(key, None)
+    updated.update(
+        {
+            "execution_ready": False,
+            "awaiting_stage_confirmation": False,
+            "stage_confirmation": None,
+            "next_stage_key": None,
+            "next_stage_label": None,
+            "next_review_key": None,
+            "next_gate": None,
+            "last_completed_stage_key": None,
+            "last_completed_stage_label": None,
+            "background_stage": None,
+            "failed_background_stage": None,
+            "external_execution": None,
+            "error": None,
+            "error_type": None,
+            "error_message": None,
+            "completed_at": None,
+        }
+    )
+    return updated
 
 
 DATABASE_STAGE_SEQUENCE = [
@@ -663,7 +794,13 @@ def save_checkpoint_state_timed(run_id: str, state: Dict[str, Any], *, context: 
 
 
 def _interrupted_checkpoint_state(state: Dict[str, Any], reason: str) -> Dict[str, Any]:
-    failed_stage = state.get("background_stage") or state.get("failed_background_stage") or state.get("last_failed_stage_key") or "pipeline"
+    failed_stage = (
+        state.get("background_stage")
+        or state.get("failed_background_stage")
+        or state.get("last_failed_stage_key")
+        or state.get("next_stage_key")
+        or "pipeline"
+    )
     return {
         **state,
         "status": "FAILED",
@@ -2107,6 +2244,51 @@ def build_pipeline_steps(
                 ),
             },
         ]
+        if generation_first_database_flow(checkpoint):
+            execution_steps = {
+                step["key"]: step
+                for step in steps
+                if step.get("key") in {
+                    "bronze_code_execution",
+                    "silver_code_execution",
+                    "gold_code_execution",
+                }
+            }
+            steps = [
+                step
+                for step in steps
+                if step.get("key") not in execution_steps
+            ]
+            steps.append(
+                {
+                    "key": "gold_review",
+                    "label": "Gold Code Review",
+                    "complete": str(checkpoint.get("gold_review_decision") or "").upper() == "APPROVED",
+                    "detail": (
+                        "Generated dbt project approved before deployment and build starts"
+                        if generation_first_snowflake_dbt_flow(checkpoint)
+                        else "Generated Gold scripts approved before target execution starts"
+                    ),
+                }
+            )
+            execution_layers = (
+                (("gold",) if dbt_deploy else ())
+                if generation_first_snowflake_dbt_flow(checkpoint)
+                else ("bronze", "silver", "gold")
+            )
+            for layer in execution_layers:
+                execution_step = execution_steps[f"{layer}_code_execution"]
+                if generation_first_snowflake_dbt_flow(checkpoint):
+                    execution_step["label"] = "Snowflake dbt Deployment & Build"
+                    execution_step["detail"] = (
+                        "Approved source data is landed, then the frozen dbt project is deployed and built in Snowflake"
+                    )
+                else:
+                    execution_step["label"] = f"{layer.capitalize()} Target Execution"
+                    execution_step["detail"] = (
+                        f"Approved {layer.capitalize()} scripts execute after all code generation and reviews complete"
+                    )
+                steps.append(execution_step)
 
     checkpoint_status = str(checkpoint.get("status") or "").upper()
     pipeline_is_active = bool(
@@ -2116,7 +2298,11 @@ def build_pipeline_steps(
 
     active_stage_key = str(checkpoint.get("background_stage") or "")
     if active_stage_key == "snowflake_dbt_codegen":
-        active_stage_key = "gold_code_execution"
+        active_stage_key = (
+            "gold_review"
+            if generation_first_snowflake_dbt_flow(checkpoint)
+            else "gold_code_execution"
+        )
     external_execution = checkpoint.get("external_execution") if isinstance(checkpoint.get("external_execution"), dict) else {}
     external_message = str(external_execution.get("message") or "").strip()
 
@@ -2152,8 +2338,12 @@ def build_pipeline_steps(
 
     else:
         last_complete_index = -1
+        generation_first_flow = generation_first_database_flow(checkpoint)
+        execution_stage_keys = {stage_key for _, stage_key in NATIVE_EXECUTION_STAGES}
         for index, step in enumerate(steps):
-            if step["complete"]:
+            if step["complete"] and not (
+                generation_first_flow and step.get("key") in execution_stage_keys
+            ):
                 last_complete_index = index
 
         # The pipeline is linear for this UI. If a downstream node completed, every
@@ -2472,7 +2662,15 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
             )
     elif paused_for_stage_confirmation and not stage_confirmation and not stale_stage_confirmation_completed:
         stage_confirmation = {
-            "enabled": bool(checkpoint.get("stage_confirmation_enabled")),
+            **(
+                checkpoint.get("stage_confirmation")
+                if isinstance(checkpoint.get("stage_confirmation"), dict)
+                else {}
+            ),
+            "enabled": bool(
+                checkpoint.get("execution_ready")
+                or checkpoint.get("stage_confirmation_enabled")
+            ),
             "awaiting_confirmation": True,
             "last_completed_stage_key": checkpoint.get("last_completed_stage_key"),
             "last_completed_stage_label": checkpoint.get("last_completed_stage_label"),
@@ -2583,7 +2781,11 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     waiting_stage_key = str(
         next_review_key or waiting_gate_key or ""
         if source_value in {"sftp", "adls_gen2"}
-        else "gold_code_execution"
+        else (
+            "gold_review"
+            if generation_first_database_flow(checkpoint)
+            else "gold_code_execution"
+        )
         if next_review_key == "gold_review"
         else next_review_key or waiting_gate_key or ""
     ) or None
@@ -2606,6 +2808,8 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
 
     return {
         "run_id": run_id,
+        "database_flow_version": checkpoint.get("database_flow_version"),
+        "generation_first_execution": generation_first_database_flow(checkpoint),
         "checkpoint": checkpoint,
         "summary": summary,
         "pending_gate1": pending_gate1,
@@ -2689,6 +2893,12 @@ def start_pipeline(
         "dbt_command_timeout_secs": dbt_command_timeout_secs,
         "force_dbt_deploy": bool(force_dbt_deploy),
     }
+    if (
+        not initial_state.get("database_flow_version")
+        and not seeded_state
+        and source_value == "database"
+    ):
+        initial_state["database_flow_version"] = DATABASE_GENERATION_FIRST_FLOW_VERSION
 
     if source_value in file_sources:
         from services.sftp_runtime import start_sftp_pipeline
@@ -3155,11 +3365,17 @@ def submit_gate4_review(
     if is_run_aborted(run_id, checkpoint_state):
         return aborted_run_state(run_id, checkpoint_state)
     decision = str(action or "APPROVED").upper()
+    current_review_artifact = review_artifact or checkpoint_state.get("bronze_review_artifact") or {}
+    if decision != "APPROVED":
+        checkpoint_state = _invalidate_generation_first_review_state(
+            checkpoint_state,
+            boundary="gate4",
+        )
     final_state = {
         **checkpoint_state,
         "run_id": run_id,
         "bronze_review_decision": decision,
-        "bronze_review_artifact": review_artifact or checkpoint_state.get("bronze_review_artifact") or {},
+        "bronze_review_artifact": current_review_artifact,
         "gate4": {"gate": "gate4", "status": "COMPLETED", "decision": decision},
     }
 
@@ -3194,7 +3410,10 @@ def submit_gate4_review(
             final_state["bronze_review_artifact"],
         )
         if target_warehouse == "snowflake" and snowflake_dbt_enabled(final_state):
-            if str(final_state.get("dbt_deployment_mode") or "generate_only").lower() == "generate_and_deploy":
+            if (
+                str(final_state.get("dbt_deployment_mode") or "generate_only").lower() == "generate_and_deploy"
+                and not generation_first_snowflake_dbt_flow(final_state)
+            ):
                 from services.snowflake_bronze_runtime import run_snowflake_bronze_scripts
 
                 landing_state = {
@@ -3228,7 +3447,7 @@ def submit_gate4_review(
                     "resume_message": "Bronze dbt models generated; continuing to Silver generation.",
                 }
             )
-        elif target_warehouse == "snowflake":
+        elif not generation_first_native_database_flow(final_state) and target_warehouse == "snowflake":
             from services.snowflake_bronze_runtime import run_snowflake_bronze_scripts
 
             execution_state = {
@@ -3262,7 +3481,7 @@ def submit_gate4_review(
                 save_checkpoint_state_timed(run_id, failed_state, context="bronze_code_execution:failed")
                 raise
             final_state["background_stage"] = None
-        elif target_warehouse == "databricks":
+        elif not generation_first_native_database_flow(final_state) and target_warehouse == "databricks":
             from services.databricks_runtime import databricks_bronze_execution_enabled, run_databricks_bronze_scripts
 
             if not databricks_bronze_execution_enabled():
@@ -3331,6 +3550,11 @@ def submit_silver_merge_key_review(run_id: str, action: str = "APPROVED", review
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
     decision = str(action or "APPROVED").upper()
     artifact = review_artifact or _silver_merge_key_review_artifact(checkpoint_state)
+    if decision != "APPROVED":
+        checkpoint_state = _invalidate_generation_first_review_state(
+            checkpoint_state,
+            boundary="silver_merge_key_review",
+        )
     final_state = {
         **checkpoint_state,
         "run_id": run_id,
@@ -3477,11 +3701,17 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
     if is_run_aborted(run_id, checkpoint_state):
         return aborted_run_state(run_id, checkpoint_state)
     decision = str(action or "APPROVED").upper()
+    current_review_artifact = review_artifact or checkpoint_state.get("silver_review_artifact") or {}
+    if decision != "APPROVED":
+        checkpoint_state = _invalidate_generation_first_review_state(
+            checkpoint_state,
+            boundary="gate5",
+        )
     final_state = {
         **checkpoint_state,
         "run_id": run_id,
         "silver_review_decision": decision,
-        "silver_review_artifact": review_artifact or checkpoint_state.get("silver_review_artifact") or {},
+        "silver_review_artifact": current_review_artifact,
         "gate5": {"gate": "gate5", "status": "COMPLETED", "decision": decision},
     }
 
@@ -3523,7 +3753,7 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
                     "resume_message": "Silver dbt models generated; continuing to Gold generation.",
                 }
             )
-        elif target_warehouse == "snowflake":
+        elif not generation_first_native_database_flow(final_state) and target_warehouse == "snowflake":
             from services.snowflake_silver_runtime import run_snowflake_silver_scripts
 
             execution_state = {
@@ -3552,7 +3782,7 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
                 save_checkpoint_state(run_id, failed_state)
                 raise
             final_state["background_stage"] = None
-        elif target_warehouse == "databricks":
+        elif not generation_first_native_database_flow(final_state) and target_warehouse == "databricks":
             from services.databricks_runtime import databricks_silver_execution_enabled, run_databricks_silver_scripts
 
             if databricks_silver_execution_enabled():
@@ -3653,16 +3883,361 @@ def submit_gold_generation(run_id: str) -> Dict[str, Any]:
     return final_state
 
 
+NATIVE_EXECUTION_STAGES = (
+    ("bronze", "bronze_code_execution"),
+    ("silver", "silver_code_execution"),
+    ("gold", "gold_code_execution"),
+)
+
+
+def _native_execution_completed(state: Dict[str, Any], target_warehouse: str, layer: str) -> bool:
+    status = state.get(f"{target_warehouse}_{layer}_execution_status")
+    if target_warehouse == "databricks":
+        return _status_completed(status)
+    return str(status or "").upper() == "COMPLETED"
+
+
+def _database_native_execution_validation_errors(state: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    source = str(state.get("source") or "database").lower()
+    target_warehouse = str(state.get("target_warehouse") or "").lower()
+    if source != "database":
+        errors.append("source must be database")
+    if not generation_first_native_database_flow(state):
+        errors.append("run is not a generation-first native database flow")
+    if target_warehouse not in {"databricks", "snowflake"}:
+        errors.append("target warehouse must be Databricks or Snowflake")
+    if snowflake_dbt_enabled(state):
+        errors.append("Snowflake dbt execution uses its existing Gold Review finalization flow")
+
+    review_decisions = {
+        "Bronze Review": str(
+            (state.get("gate4") or {}).get("decision")
+            or state.get("bronze_review_decision")
+            or ""
+        ).upper(),
+        "Silver Merge Key Review": str(state.get("silver_merge_key_review_decision") or "").upper(),
+        "Silver Review": str(
+            (state.get("gate5") or {}).get("decision")
+            or state.get("silver_review_decision")
+            or ""
+        ).upper(),
+        "Gold Review": str(state.get("gold_review_decision") or "").upper(),
+    }
+    errors.extend(
+        f"{label} is not approved"
+        for label, decision in review_decisions.items()
+        if decision != "APPROVED"
+    )
+    errors.extend(
+        f"{layer.capitalize()} generation artifacts are missing"
+        for layer in ("bronze", "silver", "gold")
+        if not [
+            item
+            for item in state.get(f"{layer}_generation_results") or []
+            if isinstance(item, dict)
+        ]
+    )
+    return errors
+
+
+def execute_database_native_layers(
+    run_id: str,
+    *,
+    state: Optional[Dict[str, Any]] = None,
+    start_stage_key: str = "bronze_code_execution",
+) -> Dict[str, Any]:
+    working_state = dict(state or load_checkpoint_state(run_id) or {"run_id": run_id})
+    working_state["run_id"] = run_id
+    validation_errors = _database_native_execution_validation_errors(working_state)
+    if validation_errors:
+        raise RuntimeError(
+            "Database target execution is not ready: " + "; ".join(validation_errors) + "."
+        )
+
+    target_warehouse = str(working_state.get("target_warehouse") or "").lower()
+    stage_keys = [stage_key for _, stage_key in NATIVE_EXECUTION_STAGES]
+    if start_stage_key not in stage_keys:
+        raise ValueError(f"Unsupported database execution stage: {start_stage_key}")
+    start_index = stage_keys.index(start_stage_key)
+
+    # ponytail: completed layer receipts are the idempotency boundary; a retry
+    # resumes at the failed layer without rerunning successful target mutations.
+    for prerequisite_layer, _ in NATIVE_EXECUTION_STAGES[:start_index]:
+        if not _native_execution_completed(working_state, target_warehouse, prerequisite_layer):
+            raise RuntimeError(
+                f"{prerequisite_layer.capitalize()} execution must complete before "
+                f"{NATIVE_EXECUTION_STAGES[start_index][0].capitalize()} execution can resume."
+            )
+
+    for index, (layer, stage_key) in enumerate(NATIVE_EXECUTION_STAGES[start_index:], start=start_index):
+        if _native_execution_completed(working_state, target_warehouse, layer):
+            continue
+        if is_run_aborted(run_id, working_state):
+            return aborted_run_state(run_id, working_state)
+
+        execution_state = {
+            **working_state,
+            "status": "RUNNING",
+            "execution_ready": True,
+            "background_stage": stage_key,
+            "next_stage_key": stage_key,
+            "next_stage_label": f"{layer.capitalize()} Target Execution",
+            "awaiting_stage_confirmation": False,
+            "stage_confirmation": None,
+            "failed_background_stage": None,
+            "error": None,
+            "resume_message": f"Executing approved {layer.capitalize()} scripts in {target_warehouse.capitalize()}.",
+        }
+        save_checkpoint_state_timed(run_id, execution_state, context=f"{stage_key}:running")
+
+        try:
+            if target_warehouse == "databricks":
+                from services.databricks_runtime import (
+                    run_databricks_bronze_scripts,
+                    run_databricks_gold_scripts,
+                    run_databricks_silver_scripts,
+                )
+
+                runners = {
+                    "bronze": run_databricks_bronze_scripts,
+                    "silver": run_databricks_silver_scripts,
+                    "gold": run_databricks_gold_scripts,
+                }
+                result = runners[layer](
+                    execution_state,
+                    review_artifact=execution_state.get(f"{layer}_review_artifact") or {},
+                    approved_only=True,
+                )
+            else:
+                from services.snowflake_bronze_runtime import run_snowflake_bronze_scripts
+                from services.snowflake_gold_runtime import run_snowflake_gold_scripts
+                from services.snowflake_silver_runtime import run_snowflake_silver_scripts
+
+                if layer == "bronze":
+                    result = run_snowflake_bronze_scripts(
+                        execution_state,
+                        review_artifact=execution_state.get("bronze_review_artifact") or {},
+                        approved_only=True,
+                    )
+                elif layer == "silver":
+                    result = run_snowflake_silver_scripts(
+                        execution_state,
+                        review_artifact=execution_state.get("silver_review_artifact") or {},
+                        approved_only=True,
+                    )
+                else:
+                    result = run_snowflake_gold_scripts(execution_state)
+
+            working_state = {**execution_state, **result, "run_id": run_id}
+            if is_run_aborted(run_id, working_state):
+                return aborted_run_state(run_id, working_state)
+            if not _native_execution_completed(working_state, target_warehouse, layer):
+                status = working_state.get(f"{target_warehouse}_{layer}_execution_status")
+                raise RuntimeError(
+                    f"{target_warehouse.capitalize()} {layer.capitalize()} execution "
+                    f"did not complete (status={status or 'missing'})."
+                )
+        except Exception as exc:
+            latest_checkpoint = load_checkpoint_state(run_id) or {}
+            failed_state = {
+                **execution_state,
+                **working_state,
+                **latest_checkpoint,
+                "status": "FAILED",
+                "execution_ready": True,
+                "background_stage": stage_key,
+                "failed_background_stage": stage_key,
+                "next_stage_key": stage_key,
+                "next_stage_label": f"{layer.capitalize()} Target Execution",
+                "error": str(exc),
+                "resume_message": (
+                    f"{layer.capitalize()} target execution failed. "
+                    "Retry resumes from this layer without regenerating approved code."
+                ),
+            }
+            save_checkpoint_state_timed(run_id, failed_state, context=f"{stage_key}:failed")
+            raise
+
+        next_stage = NATIVE_EXECUTION_STAGES[index + 1] if index + 1 < len(NATIVE_EXECUTION_STAGES) else None
+        working_state.update(
+            {
+                "status": "RUNNING" if next_stage else "PIPELINE_COMPLETED",
+                "execution_ready": bool(next_stage),
+                "background_stage": None,
+                "last_completed_stage_key": stage_key,
+                "last_completed_stage_label": f"{layer.capitalize()} Target Execution",
+                "next_stage_key": next_stage[1] if next_stage else None,
+                "next_stage_label": f"{next_stage[0].capitalize()} Target Execution" if next_stage else None,
+                "stage_confirmation": None,
+                f"{layer}_runtime_validation_status": "COMPLETED",
+                "resume_message": (
+                    f"{layer.capitalize()} target execution completed. "
+                    f"Continuing to {next_stage[0].capitalize()} target execution."
+                    if next_stage
+                    else "Bronze, Silver, and Gold target execution completed."
+                ),
+            }
+        )
+        save_checkpoint_state_timed(run_id, working_state, context=f"{stage_key}:complete")
+
+    return working_state
+
+
+def _database_dbt_execution_validation_errors(state: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    if not generation_first_snowflake_dbt_flow(state):
+        errors.append("run is not a generation-first Snowflake dbt flow")
+    if str(state.get("dbt_deployment_mode") or "generate_only").lower() != "generate_and_deploy":
+        errors.append("Snowflake dbt deployment was not requested")
+
+    review_decisions = {
+        "Bronze Review": str(
+            (state.get("gate4") or {}).get("decision")
+            or state.get("bronze_review_decision")
+            or ""
+        ).upper(),
+        "Silver Merge Key Review": str(state.get("silver_merge_key_review_decision") or "").upper(),
+        "Silver Review": str(
+            (state.get("gate5") or {}).get("decision")
+            or state.get("silver_review_decision")
+            or ""
+        ).upper(),
+        "Gold Review": str(state.get("gold_review_decision") or "").upper(),
+    }
+    errors.extend(
+        f"{label} is not approved"
+        for label, decision in review_decisions.items()
+        if decision != "APPROVED"
+    )
+    errors.extend(
+        f"{layer.capitalize()} generation artifacts are missing"
+        for layer in ("bronze", "silver", "gold")
+        if not [
+            item
+            for item in state.get(f"{layer}_generation_results") or []
+            if isinstance(item, dict)
+        ]
+    )
+    if str(state.get("snowflake_dbt_validation_status") or "").upper() != "STATIC_VALIDATED":
+        errors.append("Snowflake dbt project has not passed static validation")
+    if not str(state.get("snowflake_dbt_artifact_path") or "").strip():
+        errors.append("finalized Snowflake dbt project is missing")
+    if not str(state.get("snowflake_dbt_artifact_set_hash") or "").strip():
+        errors.append("finalized Snowflake dbt project hash is missing")
+    return errors
+
+
+def execute_generation_first_snowflake_dbt(
+    run_id: str,
+    *,
+    state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    working_state = dict(state or load_checkpoint_state(run_id) or {"run_id": run_id})
+    working_state["run_id"] = run_id
+    validation_errors = _database_dbt_execution_validation_errors(working_state)
+    if validation_errors:
+        raise RuntimeError(
+            "Snowflake dbt deployment is not ready: " + "; ".join(validation_errors) + "."
+        )
+
+    stage_key = "gold_code_execution"
+    execution_state = {
+        **working_state,
+        "status": "RUNNING",
+        "execution_ready": True,
+        "background_stage": stage_key,
+        "next_stage_key": stage_key,
+        "next_stage_label": "Snowflake dbt Deployment & Build",
+        "awaiting_stage_confirmation": False,
+        "stage_confirmation": None,
+        "failed_background_stage": None,
+        "error": None,
+        "resume_message": "Landing approved source data before Snowflake dbt deployment.",
+    }
+    save_checkpoint_state_timed(run_id, execution_state, context="snowflake_dbt_deployment:running")
+
+    try:
+        if str(execution_state.get("snowflake_bronze_source_load_status") or "").upper() != "COMPLETED":
+            from services.snowflake_bronze_runtime import run_snowflake_bronze_scripts
+
+            landed_state = run_snowflake_bronze_scripts(
+                execution_state,
+                review_artifact=execution_state.get("bronze_review_artifact") or {},
+                approved_only=True,
+                load_only=True,
+                progress_stage_key=stage_key,
+            )
+            working_state = {**execution_state, **landed_state, "run_id": run_id}
+            if str(working_state.get("snowflake_bronze_source_load_status") or "").upper() != "COMPLETED":
+                raise RuntimeError("Snowflake source landing did not complete before dbt deployment.")
+            working_state.update(
+                {
+                    "status": "RUNNING",
+                    "background_stage": stage_key,
+                    "resume_message": "Deploying the frozen dbt project and running dbt build in Snowflake.",
+                }
+            )
+            save_checkpoint_state_timed(run_id, working_state, context="snowflake_dbt_source_landing:complete")
+
+        deployed_state = execute_finalized_snowflake_dbt_project(working_state)
+        working_state = {
+            **working_state,
+            **deployed_state,
+            "run_id": run_id,
+            "status": "PIPELINE_COMPLETED",
+            "execution_ready": False,
+            "background_stage": None,
+            "failed_background_stage": None,
+            "last_completed_stage_key": stage_key,
+            "last_completed_stage_label": "Snowflake dbt Deployment & Build",
+            "next_stage_key": None,
+            "next_stage_label": None,
+            "stage_confirmation": None,
+            "snowflake_gold_execution_status": "COMPLETED",
+            "gold_runtime_validation_status": "COMPLETED",
+            "resume_message": "Snowflake dbt project deployment and build completed.",
+        }
+        save_checkpoint_state_timed(run_id, working_state, context="snowflake_dbt_deployment:complete")
+        return working_state
+    except Exception as exc:
+        latest_checkpoint = load_checkpoint_state(run_id) or {}
+        failed_state = {
+            **execution_state,
+            **working_state,
+            **latest_checkpoint,
+            "status": "FAILED",
+            "execution_ready": True,
+            "background_stage": stage_key,
+            "failed_background_stage": stage_key,
+            "next_stage_key": stage_key,
+            "next_stage_label": "Snowflake dbt Deployment & Build",
+            "error": str(exc),
+            "resume_message": (
+                "Snowflake dbt deployment or build failed. Retry reuses completed source landing "
+                "and the frozen reviewed project."
+            ),
+        }
+        save_checkpoint_state_timed(run_id, failed_state, context="snowflake_dbt_deployment:failed")
+        raise
+
+
 def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
     if is_run_aborted(run_id, checkpoint):
         return aborted_run_state(run_id, checkpoint)
     decision = str(action or "APPROVED").upper()
+    current_review_artifact = review_artifact or checkpoint.get("gold_review_artifact") or {}
+    if decision != "APPROVED":
+        checkpoint = _invalidate_generation_first_review_state(
+            checkpoint,
+            boundary="gold_review",
+        )
     final_state = {
         **checkpoint,
         "run_id": run_id,
         "gold_review_decision": decision,
-        "gold_review_artifact": review_artifact or checkpoint.get("gold_review_artifact") or {},
+        "gold_review_artifact": current_review_artifact,
         "next_review_key": None,
     }
 
@@ -3679,6 +4254,73 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
         final_state.update({"status": "FAILED", "error": "Gold Review rejected generated Gold scripts"})
     elif decision == "REGENERATE":
         final_state.update({"status": "REGENERATE_REQUIRED", "resume_message": "Gold Review requested regeneration."})
+    elif (
+        decision == "APPROVED"
+        and str(final_state.get("target_warehouse") or "").lower() == "snowflake"
+        and snowflake_dbt_enabled(final_state)
+        and generation_first_snowflake_dbt_flow(final_state)
+    ):
+        generation_state = {
+            **final_state,
+            "status": "RUNNING",
+            "background_stage": "snowflake_dbt_codegen",
+            "snowflake_dbt_validation_status": "RUNNING",
+            "resume_message": "Finalizing and validating the reviewed Snowflake dbt project.",
+        }
+        save_checkpoint_state(run_id, generation_state)
+        try:
+            final_state = finalize_snowflake_dbt_project(generation_state)
+        except Exception as exc:
+            failed_state = {
+                **generation_state,
+                "status": "FAILED",
+                "failed_background_stage": "snowflake_dbt_codegen",
+                "snowflake_dbt_validation_status": "FAILED",
+                "error": str(exc),
+            }
+            save_checkpoint_state(run_id, failed_state)
+            raise
+
+        if str(final_state.get("dbt_deployment_mode") or "generate_only").lower() != "generate_and_deploy":
+            final_state.update(
+                {
+                    "status": "PIPELINE_COMPLETED",
+                    "background_stage": None,
+                    "execution_ready": False,
+                    "snowflake_gold_execution_status": "SKIPPED_DBT_CODEGEN_ONLY",
+                    "resume_message": "Snowflake dbt project generated and statically validated. Execution was not requested.",
+                }
+            )
+        else:
+            validation_errors = _database_dbt_execution_validation_errors(final_state)
+            if validation_errors:
+                error = "Approved dbt project is not ready for deployment: " + "; ".join(validation_errors) + "."
+                final_state.update({"status": "FAILED", "error": error})
+                save_checkpoint_state(run_id, final_state)
+                raise RuntimeError(error)
+            final_state.update(
+                {
+                    "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+                    "execution_ready": True,
+                    "background_stage": None,
+                    "awaiting_stage_confirmation": True,
+                    "last_completed_stage_key": "gold_review",
+                    "last_completed_stage_label": "Gold Code Review",
+                    "next_stage_key": "gold_code_execution",
+                    "next_stage_label": "Snowflake dbt Deployment & Build",
+                    "resume_message": "All dbt models are reviewed and frozen. Start deployment and build when ready.",
+                    "stage_confirmation": {
+                        "enabled": True,
+                        "awaiting_confirmation": True,
+                        "last_completed_stage_key": "gold_review",
+                        "last_completed_stage_label": "Gold Code Review",
+                        "next_stage_key": "gold_code_execution",
+                        "next_stage_label": "Snowflake dbt Deployment & Build",
+                        "resume_message": "All dbt models are reviewed and frozen. Start deployment and build when ready.",
+                    },
+                }
+            )
+        save_checkpoint_state(run_id, final_state)
     elif (
         decision == "APPROVED"
         and str(final_state.get("target_warehouse") or "").lower() == "snowflake"
@@ -3719,6 +4361,35 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
                     if final_state.get("completion_mode") == "dbt_executed"
                     else "Snowflake dbt project generated. Execution was not requested."
                 ),
+            }
+        )
+    elif decision == "APPROVED" and generation_first_native_database_flow(final_state):
+        validation_errors = _database_native_execution_validation_errors(final_state)
+        if validation_errors:
+            error = "Approved code is not ready for target execution: " + "; ".join(validation_errors) + "."
+            final_state.update({"status": "FAILED", "error": error})
+            save_checkpoint_state(run_id, final_state)
+            raise RuntimeError(error)
+        final_state.update(
+            {
+                "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+                "execution_ready": True,
+                "background_stage": None,
+                "awaiting_stage_confirmation": True,
+                "last_completed_stage_key": "gold_review",
+                "last_completed_stage_label": "Gold Code Review",
+                "next_stage_key": "bronze_code_execution",
+                "next_stage_label": "Bronze Target Execution",
+                "resume_message": "All generated code is approved. Start target execution when ready.",
+                "stage_confirmation": {
+                    "enabled": True,
+                    "awaiting_confirmation": True,
+                    "last_completed_stage_key": "gold_review",
+                    "last_completed_stage_label": "Gold Code Review",
+                    "next_stage_key": "bronze_code_execution",
+                    "next_stage_label": "Bronze Target Execution",
+                    "resume_message": "All generated code is approved. Start target execution when ready.",
+                },
             }
         )
     elif decision == "APPROVED" and str(final_state.get("target_warehouse") or "").lower() == "snowflake":

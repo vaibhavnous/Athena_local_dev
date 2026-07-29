@@ -90,11 +90,18 @@ def normalize_bronze_review_artifact(artifact: Dict[str, Any], checkpoint: Dict[
 
 def _map_silver_item(item: Dict[str, Any]) -> Dict[str, Any]:
     primary_keys = item.get("primary_keys") or []
+    table = item.get("table") or item.get("table_name") or item.get("entity")
+    source_table = item.get("source_table") or item.get("bronze_table")
+    target_table = item.get("target_table") or item.get("silver_table")
     return {
-        "entity": item.get("entity") or item.get("table") or "Silver Item",
+        "entity": item.get("entity") or table or "Silver Item",
+        "table": table,
         "vendor": item.get("vendor"),
-        "bronze_source": item.get("bronze_table") or item.get("source_table"),
-        "silver_target": item.get("silver_table") or item.get("target_table"),
+        "bronze_source": item.get("bronze_table") or source_table,
+        "source_table": source_table,
+        "silver_target": item.get("silver_table") or target_table,
+        "target_table": target_table,
+        "script_path": item.get("script_path"),
         "primary_keys": primary_keys,
         "watermark_column": item.get("watermark_column"),
         "transformations": [

@@ -151,6 +151,86 @@ test('clears the completed-stage dialog when the next stage starts', () => {
   expect(useAthenaStore.getState().runs[0].stage_confirmation).toBeNull()
 })
 
+test.each(['REGENERATE_REQUIRED', 'FAILED'])(
+  'honors explicit execution-gate clears from a sparse %s review payload',
+  (status) => {
+    resetStore()
+    useAthenaStore.getState().addRun({
+      id: 'run-generation-first',
+      status: 'PAUSED_FOR_STAGE_CONFIRMATION',
+      database_flow_version: 'generation_first_v1',
+      execution_ready: true,
+      awaiting_stage_confirmation: true,
+      next_stage_key: 'bronze_code_execution',
+      next_stage_label: 'Bronze Target Execution',
+      stage_confirmation: {
+        awaiting_confirmation: true,
+        last_completed_stage_key: 'gold_review',
+        next_stage_key: 'bronze_code_execution',
+      },
+      pipeline_steps: [{ key: 'gold_review', state: 'COMPLETED' }],
+    })
+
+    // The list/status endpoints intentionally omit heavyweight pipeline detail.
+    useAthenaStore.getState().setRuns([{
+      id: 'run-generation-first',
+      source: 'database',
+      target_warehouse: 'databricks',
+      database_flow_version: 'generation_first_v1',
+      generation_first_execution: true,
+      status,
+      stage_confirmation: null,
+      execution_ready: false,
+      awaiting_stage_confirmation: false,
+      next_stage_key: null,
+      next_stage_label: null,
+    }])
+
+    expect(useAthenaStore.getState().runs[0]).toMatchObject({
+      status,
+      stage_confirmation: null,
+      execution_ready: false,
+      awaiting_stage_confirmation: false,
+      next_stage_key: null,
+      next_stage_label: null,
+      pipeline_steps: [{ key: 'gold_review', state: 'COMPLETED' }],
+    })
+  },
+)
+
+test('clears a stale execution gate from a degraded regeneration fallback', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-fallback-regeneration',
+    status: 'PAUSED_FOR_STAGE_CONFIRMATION',
+    database_flow_version: 'generation_first_v1',
+    execution_ready: true,
+    awaiting_stage_confirmation: true,
+    next_stage_key: 'bronze_code_execution',
+    stage_confirmation: {
+      awaiting_confirmation: true,
+      last_completed_stage_key: 'gold_review',
+      next_stage_key: 'bronze_code_execution',
+    },
+    pipeline_steps: [{ key: 'gold_review', state: 'COMPLETED' }],
+  })
+
+  useAthenaStore.getState().setRuns([{
+    id: 'run-fallback-regeneration',
+    status: 'REGENERATE_REQUIRED',
+    stage_confirmation: null,
+  }])
+
+  expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    status: 'REGENERATE_REQUIRED',
+    stage_confirmation: null,
+    execution_ready: false,
+    awaiting_stage_confirmation: false,
+    next_stage_key: null,
+    pipeline_steps: [{ key: 'gold_review', state: 'COMPLETED' }],
+  })
+})
+
 test('keeps detailed HITL status when history refresh returns an UNKNOWN summary', () => {
   resetStore()
   useAthenaStore.getState().addRun({

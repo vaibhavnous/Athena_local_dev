@@ -6,7 +6,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Co
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
 import { PageHeader } from '../components/shared/DashboardLayout'
-import { formatPipelineStepLabel, getPhaseGroups, getPipelineSteps, normalizeState, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
+import { formatPipelineStepLabel, getPhaseGroups, getPipelineSteps, isGenerationFirstDatabaseRun, isSnowflakeDbtRun, normalizeState, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { abortRun, continueStage, getRun, getRunStatus, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
 
@@ -921,7 +921,7 @@ function StepRow({ step, index = 0, isLast = false, onOpenReview, onRerun, rerun
   const running = state === 'RUNNING'
   const failed = state === 'FAILED'
   const isGate = /^gate[1-5]$/.test(String(step.key || ''))
-  const isNamedReview = step.key === 'silver_merge_key_review'
+  const isNamedReview = step.key === 'silver_merge_key_review' || step.key === 'gold_review'
   const canOpenReview = waiting && (isGate || isNamedReview) && onOpenReview
 
   return (
@@ -1085,7 +1085,26 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
 
   let displaySteps = steps
 
-  if (phase.id === 'phase-1') {
+  if (!fileFlow && phase.label === 'Code Generation & Reviews') {
+    displaySteps = [
+      makeStep('bronze', 'Bronze Code Generation'),
+      makeStep('gate4', 'Bronze Review', reviewAwareStepState(byKey.get('gate4'), phase, run, 4)),
+      makeStep('silver_merge_key_resolution', 'Silver Merge Key Resolution'),
+      makeStep('silver_merge_key_review', 'Silver Merge Key Review'),
+      makeStep('silver', 'Silver Code Generation'),
+      makeStep('gate5', 'Silver Review', reviewAwareStepState(byKey.get('gate5'), phase, run, 5)),
+      makeStep('gold', 'Gold Code Generation'),
+      makeStep('gold_review', 'Gold Code Review'),
+    ]
+  } else if (!fileFlow && phase.label === 'Target Execution') {
+    displaySteps = isGenerationFirstDatabaseRun(run) && isSnowflakeDbtRun(run)
+      ? [makeStep('gold_code_execution', 'Snowflake dbt Deployment & Build')]
+      : [
+          makeStep('bronze_code_execution', 'Bronze Target Execution'),
+          makeStep('silver_code_execution', 'Silver Target Execution'),
+          makeStep('gold_code_execution', 'Gold Target Execution'),
+        ]
+  } else if (phase.id === 'phase-1') {
     displaySteps = [
       makeStep('ingestion', 'BRD Ingest'),
       makeStep('memory', 'Memory Check'),

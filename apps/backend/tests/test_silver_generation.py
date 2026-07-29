@@ -351,6 +351,189 @@ def test_databricks_silver_uses_serverless_safe_try_cast():
     assert "try_cast(`{escaped_name}` AS {target_type})" in script
 
 
+def test_databricks_silver_canonicalizes_uppercase_metadata_and_duplicate_reference_keys():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "policy_cover_level_transactions",
+        "bronze_table": "workspace.bronze.bronze_policy_cover_level_transactions",
+        "silver_table": "workspace.silver.silver_policy_cover_level_transactions",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+    enriched_columns = [
+        {"column_name": "COVER_NAME", "data_type": "varchar"},
+        {"column_name": "RERERENCE_ID", "data_type": "bigint", "is_join_key": True},
+        {"column_name": "rererence_id", "data_type": "bigint", "is_join_key": True},
+    ]
+
+    script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=enriched_columns,
+        run_id="run-uppercase-metadata",
+    )
+    assignments = silver_gen._databricks_literal_assignments(script)
+
+    assert assignments["EXPECTED_COLUMNS"] == ["cover_name", "reference_id"]
+    assert assignments["KEY_COLUMNS"] == ["reference_id"]
+    assert assignments["STRING_COLUMNS"] == ["cover_name"]
+    assert assignments["CAST_RULES"] == {"reference_id": "bigint"}
+    assert assignments["COLUMN_ALIASES"] == {"rererence_id": "reference_id"}
+    assert "available_by_compact.get(compact_name(expected_name))" in script
+    assert "col(actual_name).alias(expected_name)" in script
+
+    twelve_columns = [
+        {"column_name": f"COLUMN_{index}", "data_type": "varchar"}
+        for index in range(11)
+    ] + [{"column_name": "RERERENCE_ID", "data_type": "bigint"}]
+    canonical_columns = silver_gen._canonicalize_databricks_columns(twelve_columns * 2)
+    canonical_pairs = [
+        (column["source_column_name"], column["column_name"])
+        for column in canonical_columns
+    ]
+
+    assert len(canonical_columns) == 12
+    assert len(canonical_pairs) == len(set(canonical_pairs))
+    assert canonical_pairs[-1] == ("rererence_id", "reference_id")
+
+
+def test_databricks_silver_rejects_uppercase_llm_column_contract_and_aliases():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "policy_cover_level_transactions",
+        "bronze_table": "workspace.bronze.bronze_policy_cover_level_transactions",
+        "silver_table": "workspace.silver.silver_policy_cover_level_transactions",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+    enriched_columns = [
+        {"column_name": "COVER_NAME", "data_type": "varchar"},
+        {"column_name": "RERERENCE_ID", "data_type": "bigint", "is_join_key": True},
+    ]
+    safe_script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=enriched_columns,
+        run_id="run-unsafe-llm",
+    )
+    uppercase_contract = (
+        safe_script.replace(
+            "EXPECTED_COLUMNS = ['cover_name', 'reference_id']",
+            "EXPECTED_COLUMNS = ['COVER_NAME', 'RERERENCE_ID']",
+        )
+        .replace("KEY_COLUMNS = ['reference_id']", "KEY_COLUMNS = ['RERERENCE_ID']")
+        .replace("STRING_COLUMNS = ['cover_name']", "STRING_COLUMNS = ['COVER_NAME']")
+    )
+    uppercase_aliases = safe_script.replace(
+        "COLUMN_ALIASES = {'rererence_id': 'reference_id'}",
+        "COLUMN_ALIASES = {'RERERENCE_ID': 'REFERENCE_ID'}",
+    )
+
+    with pytest.raises(ValueError, match="EXPECTED_COLUMNS"):
+        silver_gen._validate_generated_silver_code(
+            uppercase_contract,
+            table_ref=table_ref,
+            enriched_columns=enriched_columns,
+            target_warehouse="databricks",
+        )
+    with pytest.raises(ValueError, match="COLUMN_ALIASES"):
+        silver_gen._validate_generated_silver_code(
+            uppercase_aliases,
+            table_ref=table_ref,
+            enriched_columns=enriched_columns,
+            target_warehouse="databricks",
+        )
+
+
+@pytest.mark.parametrize(
+    ("retry_is_safe", "expected_mode"),
+    [(True, "LLM_RETRY"), (False, "DETERMINISTIC")],
+)
+def test_databricks_silver_validates_llm_retry_or_uses_deterministic_fallback(
+    monkeypatch,
+    retry_is_safe,
+    expected_mode,
+):
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "policy_cover_level_transactions",
+        "bronze_table": "workspace.bronze.bronze_policy_cover_level_transactions",
+        "silver_table": "workspace.silver.silver_policy_cover_level_transactions",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+    enriched_columns = [
+        {
+            "table_name": "policy_cover_level_transactions",
+            "column_name": "COVER_NAME",
+            "data_type": "varchar",
+        },
+        {
+            "table_name": "policy_cover_level_transactions",
+            "column_name": "RERERENCE_ID",
+            "data_type": "bigint",
+            "is_join_key": True,
+        },
+        {
+            "table_name": "policy_cover_level_transactions",
+            "column_name": "rererence_id",
+            "data_type": "bigint",
+            "is_join_key": True,
+        },
+    ]
+    safe_script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=enriched_columns,
+        run_id="run-llm-fallback",
+    )
+    unsafe_script = (
+        safe_script.replace(
+            "EXPECTED_COLUMNS = ['cover_name', 'reference_id']",
+            "EXPECTED_COLUMNS = ['COVER_NAME', 'RERERENCE_ID']",
+        )
+        .replace("KEY_COLUMNS = ['reference_id']", "KEY_COLUMNS = ['RERERENCE_ID', 'REFERENCE_ID']")
+        .replace("STRING_COLUMNS = ['cover_name']", "STRING_COLUMNS = ['COVER_NAME']")
+        .replace(
+            "COLUMN_ALIASES = {'rererence_id': 'reference_id'}",
+            "COLUMN_ALIASES = {'RERERENCE_ID': 'REFERENCE_ID'}",
+        )
+    )
+    responses = [unsafe_script, safe_script if retry_is_safe else unsafe_script]
+    calls = []
+
+    def fake_llm_generate_silver_code(**kwargs):
+        calls.append(kwargs)
+        return responses[len(calls) - 1]
+
+    monkeypatch.setenv("ATHENA_SILVER_USE_LLM", "true")
+    monkeypatch.setattr(silver_gen, "_llm_generate_silver_code", fake_llm_generate_silver_code)
+    output_dir = Path.cwd() / ".tmp-tests" / f"silver_llm_fallback_{uuid.uuid4().hex}"
+    output_dir.mkdir(parents=True)
+    monkeypatch.setattr(silver_gen, "_silver_output_dir_for", lambda _: str(output_dir))
+
+    result = silver_gen._generate_one_table(
+        table_ref,
+        enriched_metadata={"columns": enriched_columns},
+        run_id="run-llm-fallback",
+        silver_catalog="workspace",
+        silver_schema="silver",
+        target_warehouse="databricks",
+        execution_engine="native",
+    )
+    persisted = Path(result["script_path"]).read_text(encoding="utf-8")
+    assignments = silver_gen._databricks_literal_assignments(persisted)
+
+    assert result["generation_mode"] == expected_mode
+    assert result["column_count"] == 2
+    assert result["merge_keys"] == ["reference_id"]
+    assert assignments["EXPECTED_COLUMNS"] == ["cover_name", "reference_id"]
+    assert assignments["KEY_COLUMNS"] == ["reference_id"]
+    assert assignments["COLUMN_ALIASES"] == {"rererence_id": "reference_id"}
+    assert len(calls) == 2
+    assert calls[1]["validation_feedback"]
+
+
 def test_databricks_silver_skips_duplicate_expected_output_columns():
     table_ref = {
         "database_name": "insurance",

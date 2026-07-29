@@ -21,7 +21,15 @@ client = TestClient(app)
 def test_ui_run_builds_cross_layer_payload(monkeypatch):
     context = {
         "summary": [{"stored_at": "2026-06-17T12:00:00+00:00", "token_count": 12, "cost_usd": 0.5}],
-        "checkpoint": {"source": "database", "provider": "azure_openai", "deployment": "dep1"},
+        "checkpoint": {
+            "source": "database",
+            "provider": "azure_openai",
+            "deployment": "dep1",
+            "execution_ready": False,
+            "awaiting_stage_confirmation": False,
+            "next_stage_key": None,
+            "next_stage_label": None,
+        },
         "pipeline_steps": [{"key": "kpis", "label": "KPI Extraction", "state": "COMPLETED"}],
         "bronze": {"scripts": [{"id": 1}]},
         "silver": {"scripts": []},
@@ -74,6 +82,10 @@ def test_ui_run_builds_cross_layer_payload(monkeypatch):
     assert payload["kpis"][0]["name"] == "Revenue"
     assert payload["script_counts"]["bronze"] == 1
     assert payload["next_gate"] == 2
+    assert payload["execution_ready"] is False
+    assert payload["awaiting_stage_confirmation"] is False
+    assert payload["next_stage_key"] is None
+    assert payload["next_stage_label"] is None
 
 
 def test_display_run_name_prefers_submitted_brd_filename():

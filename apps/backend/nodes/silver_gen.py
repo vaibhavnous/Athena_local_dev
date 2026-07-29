@@ -8,6 +8,7 @@ that bronze tables exist.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -132,14 +133,24 @@ def _llm_generate_silver_code(
     from nodes.req_extraction import get_llm
 
     language = "Snowflake SQL" if str(target_warehouse).lower() == "snowflake" else "Databricks PySpark"
-    canonical_source_columns = sorted(
-        {
-            str(item.get("source_column_name") or item.get("column_name") or "").strip()
-            for item in table_ref.get("source_columns") or []
-            if isinstance(item, dict) and str(item.get("source_column_name") or item.get("column_name") or "").strip()
-        }
-        | {"run_id", "ingestion_timestamp", "source_system", "source_table"}
-    )
+    if str(target_warehouse or "").lower() == "snowflake":
+        canonical_source_columns = sorted(
+            {
+                str(item.get("source_column_name") or item.get("column_name") or "").strip()
+                for item in table_ref.get("source_columns") or []
+                if isinstance(item, dict) and str(item.get("source_column_name") or item.get("column_name") or "").strip()
+            }
+            | {"run_id", "ingestion_timestamp", "source_system", "source_table"}
+        )
+    else:
+        canonical_source_columns = sorted(
+            {
+                _normalized_column_name(item)
+                for item in table_ref.get("source_columns") or []
+                if isinstance(item, dict) and _normalized_column_name(item)
+            }
+            | {"run_id", "ingestion_timestamp", "source_system", "source_table"}
+        )
     retry_context = (
         f"\nA previous candidate was rejected by the hard validator for this reason:\n{validation_feedback}\n"
         "Correct that exact violation without changing transformation semantics.\n"
@@ -222,6 +233,107 @@ def _require_snowflake_silver_structure(code: str, table_ref: SilverTableRef) ->
         raise ValueError(f"LLM Silver SQL contains forbidden statement: {forbidden.group(1).upper()}")
 
 
+def _databricks_literal_assignments(code: str) -> Dict[str, Any]:
+    assignments: Dict[str, Any] = {}
+    for node in ast.parse(str(code or "")).body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        name = node.targets[0].id
+        if name not in {
+            "EXPECTED_COLUMNS",
+            "KEY_COLUMNS",
+            "STRING_COLUMNS",
+            "PII_COLUMNS",
+            "CAST_RULES",
+            "COLUMN_ALIASES",
+        }:
+            continue
+        try:
+            assignments[name] = ast.literal_eval(node.value)
+        except (TypeError, ValueError):
+            continue
+    return assignments
+
+
+def _require_databricks_silver_safety_scaffold(
+    code: str,
+    enriched_columns: List[Dict[str, Any]],
+) -> None:
+    assignments = _databricks_literal_assignments(code)
+    expected_columns = assignments.get("EXPECTED_COLUMNS")
+    key_columns = assignments.get("KEY_COLUMNS")
+    string_columns = assignments.get("STRING_COLUMNS")
+    pii_columns = assignments.get("PII_COLUMNS")
+    cast_rules = assignments.get("CAST_RULES")
+    column_aliases = assignments.get("COLUMN_ALIASES")
+    if not (
+        isinstance(expected_columns, list)
+        and isinstance(key_columns, list)
+        and isinstance(string_columns, list)
+        and isinstance(pii_columns, list)
+        and isinstance(cast_rules, dict)
+        and isinstance(column_aliases, dict)
+    ):
+        raise ValueError("LLM Silver PySpark omitted the deterministic column safety contract")
+
+    canonical_columns = {
+        _normalized_column_name(column)
+        for column in enriched_columns
+        if _normalized_column_name(column)
+    }
+    canonical_expected = [
+        COLUMN_NAME_CORRECTIONS.get(str(column or "").strip().lower(), str(column or "").strip().lower())
+        for column in expected_columns
+    ]
+    canonical_keys = [
+        COLUMN_NAME_CORRECTIONS.get(str(column or "").strip().lower(), str(column or "").strip().lower())
+        for column in key_columns
+    ]
+    canonical_string_columns = [
+        COLUMN_NAME_CORRECTIONS.get(str(column or "").strip().lower(), str(column or "").strip().lower())
+        for column in string_columns
+    ]
+    canonical_pii_columns = [
+        COLUMN_NAME_CORRECTIONS.get(str(column or "").strip().lower(), str(column or "").strip().lower())
+        for column in pii_columns
+    ]
+    if expected_columns != canonical_expected or not canonical_columns.issubset(set(canonical_expected)):
+        raise ValueError("LLM Silver PySpark EXPECTED_COLUMNS are not canonical lowercase Silver columns")
+    if key_columns != canonical_keys or len(canonical_keys) != len(dict.fromkeys(canonical_keys)):
+        raise ValueError("LLM Silver PySpark KEY_COLUMNS are not canonical ordered unique merge keys")
+    if string_columns != canonical_string_columns or pii_columns != canonical_pii_columns:
+        raise ValueError("LLM Silver PySpark schema-bearing column lists are not canonical lowercase Silver columns")
+    if any(
+        key != COLUMN_NAME_CORRECTIONS.get(str(key or "").strip().lower(), str(key or "").strip().lower())
+        for key in cast_rules
+    ):
+        raise ValueError("LLM Silver PySpark CAST_RULES use non-canonical column names")
+
+    required_aliases = {
+        _source_column_name(column): _normalized_column_name(column)
+        for column in enriched_columns
+        if _source_column_name(column)
+        and _source_column_name(column) != _normalized_column_name(column)
+    }
+    normalized_aliases = {
+        str(source or "").strip().lower(): str(target or "").strip().lower()
+        for source, target in column_aliases.items()
+    }
+    if column_aliases != normalized_aliases:
+        raise ValueError("LLM Silver PySpark COLUMN_ALIASES are not canonical lowercase mappings")
+    if any(normalized_aliases.get(source) != target for source, target in required_aliases.items()):
+        raise ValueError("LLM Silver PySpark omitted required canonical column aliases")
+
+    required_scaffold = (
+        "def compact_name(name):",
+        "available_by_compact =",
+        "available_by_compact.get(compact_name(expected_name))",
+        "col(actual_name).alias(expected_name)",
+    )
+    if any(marker not in code for marker in required_scaffold):
+        raise ValueError("LLM Silver PySpark omitted deterministic case-insensitive column resolution")
+
+
 def _validate_generated_silver_code(
     code: str,
     *,
@@ -282,6 +394,7 @@ def _validate_generated_silver_code(
                 )
     else:
         _validate_python(code)
+        _require_databricks_silver_safety_scaffold(code, enriched_columns)
 
 
 def _load_bronze_bundle(target_warehouse: str = "databricks") -> Dict[str, Any]:
@@ -485,12 +598,13 @@ def _key_columns(enriched_columns: List[Dict[str, Any]]) -> List[str]:
         if column.get("is_join_key") is True
     ]
     if reviewed:
-        return reviewed
-    return [
+        return list(dict.fromkeys(column for column in reviewed if column))
+    return list(dict.fromkeys(
         _normalized_column_name(column)
         for column in enriched_columns
         if str(column.get("semantic_type") or "") in {"ID", "SURROGATE_KEY"}
-    ]
+        and _normalized_column_name(column)
+    ))
 
 
 COLUMN_NAME_CORRECTIONS = {
@@ -510,6 +624,24 @@ def _source_column_name(column: Dict[str, Any]) -> str:
     return str(column.get("column_name") or "").strip().lower()
 
 
+def _canonicalize_databricks_columns(enriched_columns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    canonical_columns: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for column in enriched_columns:
+        source_name = _source_column_name(column)
+        target_name = _normalized_column_name(column)
+        identity = (source_name, target_name)
+        if not target_name or identity in seen:
+            continue
+        seen.add(identity)
+        canonical_columns.append({
+            **column,
+            "source_column_name": source_name,
+            "column_name": target_name,
+        })
+    return canonical_columns
+
+
 def generate_silver_script(
     *,
     table_ref: SilverTableRef,
@@ -518,22 +650,26 @@ def generate_silver_script(
     silver_catalog: str = "main",
     silver_schema: str = "silver",
 ) -> str:
+    enriched_columns = _canonicalize_databricks_columns(enriched_columns)
     table_name = table_ref["table_name"]
     bronze_table = table_ref["bronze_table"]
     silver_table = table_ref["silver_table"]
 
-    source_columns = [_normalized_column_name(column) for column in enriched_columns]
-    source_columns = [column for column in source_columns if column]
-    string_columns = [
+    source_columns = list(dict.fromkeys(
+        _normalized_column_name(column)
+        for column in enriched_columns
+        if _normalized_column_name(column)
+    ))
+    string_columns = list(dict.fromkeys(
         _normalized_column_name(column)
         for column in enriched_columns
         if str(column.get("data_type") or "").lower() in {"varchar", "nvarchar", "text", "char", "nchar"}
-    ]
-    pii_columns = [
+    ))
+    pii_columns = list(dict.fromkeys(
         _normalized_column_name(column)
         for column in enriched_columns
         if column.get("is_pii_candidate") or column.get("is_pii") or column.get("semantic_type") == "PII"
-    ]
+    ))
     key_columns = _key_columns(enriched_columns)
     cast_rules = {
         _normalized_column_name(column): _datatype_cast(str(column.get("data_type") or ""))
@@ -541,9 +677,10 @@ def generate_silver_script(
     }
     cast_rules = {key: value for key, value in cast_rules.items() if key and value}
     column_aliases = {
-        bad_name: good_name
-        for bad_name, good_name in COLUMN_NAME_CORRECTIONS.items()
-        if bad_name in {str(column.get("column_name") or "").strip().lower() for column in enriched_columns}
+        _source_column_name(column): _normalized_column_name(column)
+        for column in enriched_columns
+        if _source_column_name(column)
+        and _source_column_name(column) != _normalized_column_name(column)
     }
 
     return f'''
@@ -1288,6 +1425,8 @@ def _generate_one_table(
     enriched_columns = _columns_for_table(enriched_metadata, table_name)
     if not enriched_columns and target_warehouse == "snowflake":
         enriched_columns = table_ref.get("source_columns") or []
+    if target_warehouse == "databricks" and execution_engine == "native":
+        enriched_columns = _canonicalize_databricks_columns(enriched_columns)
     merge_keys = _key_columns(enriched_columns)
 
     if dbt_codegen:

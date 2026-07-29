@@ -396,6 +396,89 @@ def test_pipeline_run_returns_503_when_checkpoint_init_fails(monkeypatch):
     assert response.json()["detail"] == "Failed to initialize run checkpoint"
 
 
+def test_new_native_database_checkpoint_is_versioned_for_generation_first(monkeypatch):
+    from api.models import PipelineRunRequest
+    from api.routers import pipeline_router
+
+    saved = {}
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda _run_id: None)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_checkpoint_state",
+        lambda run_id, state: saved.update({"run_id": run_id, "state": dict(state)}),
+    )
+
+    pipeline_router._seed_run_checkpoint(
+        "run-generation-first",
+        PipelineRunRequest(
+            brd_text="Generate all layers before execution.",
+            source="database",
+            target_warehouse="databricks",
+            execution_engine="native",
+        ),
+        owner_email="test@example.com",
+    )
+
+    assert saved["state"]["database_flow_version"] == "generation_first_v1"
+
+
+def test_new_snowflake_dbt_checkpoint_is_versioned_for_generation_first(monkeypatch):
+    from api.models import PipelineRunRequest
+    from api.routers import pipeline_router
+
+    saved = {}
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda _run_id: None)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_checkpoint_state",
+        lambda run_id, state: saved.update({"run_id": run_id, "state": dict(state)}),
+    )
+
+    pipeline_router._seed_run_checkpoint(
+        "run-generation-first-dbt",
+        PipelineRunRequest(
+            brd_text="Generate the dbt project before deployment.",
+            source="database",
+            target_warehouse="snowflake",
+            execution_engine="dbt",
+            dbt_deployment_mode="generate_and_deploy",
+        ),
+        owner_email="test@example.com",
+    )
+
+    assert saved["state"]["database_flow_version"] == "generation_first_v1"
+
+
+def test_existing_unversioned_snowflake_dbt_checkpoint_keeps_legacy_flow(monkeypatch):
+    from api.models import PipelineRunRequest
+    from api.routers import pipeline_router
+
+    saved = {}
+    existing = {
+        "run_id": "run-legacy-dbt",
+        "fingerprint": "existing-run",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+    }
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda _run_id: existing)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_checkpoint_state",
+        lambda run_id, state: saved.update({"run_id": run_id, "state": dict(state)}),
+    )
+
+    pipeline_router._seed_run_checkpoint(
+        existing["run_id"],
+        PipelineRunRequest(
+            brd_text="Continue the existing dbt run.",
+            source="database",
+            target_warehouse="snowflake",
+            execution_engine="dbt",
+            dbt_deployment_mode="generate_and_deploy",
+        ),
+        owner_email="test@example.com",
+    )
+
+    assert saved["state"].get("database_flow_version") is None
+
+
 def test_upload_brd_creates_file(monkeypatch):
     monkeypatch.setattr("api.routers.pipeline_router.api_utils.ROOT_DIR", Path(__file__).resolve().parents[1])
 
@@ -464,11 +547,19 @@ def test_pipeline_status_fallback_treats_completed_databricks_gold_as_terminal()
             "status": "RUNNING",
             "background_stage": None,
             "databricks_gold_execution_status": "COMPLETED",
+            "execution_ready": False,
+            "awaiting_stage_confirmation": False,
+            "next_stage_key": None,
+            "next_stage_label": None,
         },
     )
 
     assert payload["status"] == "PIPELINE_COMPLETED"
     assert payload["state"]["life_cycle_state"] == "TERMINATED"
+    assert payload["run"]["execution_ready"] is False
+    assert payload["run"]["awaiting_stage_confirmation"] is False
+    assert payload["run"]["next_stage_key"] is None
+    assert payload["run"]["next_stage_label"] is None
 
 
 def test_pipeline_status_fallback_treats_databricks_gold_warnings_as_terminal():
@@ -632,6 +723,94 @@ def test_gold_review_submit_runs_execution_in_background(monkeypatch):
     assert recorded["args"][1] == "APPROVED"
 
 
+def test_gold_review_get_hydrates_generated_sql(monkeypatch):
+    from api.routers import reviews_router
+
+    checkpoint = {
+        "run_id": "run-gold-review",
+        "status": "HITL_WAIT",
+        "next_review_key": "gold_review",
+        "gold_review_artifact": {
+            "items": [
+                {
+                    "run_id": "run-gold-review",
+                    "kpi_name": "Total Claims",
+                    "script_path": "gold_total_claims.sql",
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda _run_id: checkpoint,
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_gold_scripts",
+        lambda _run_id, _checkpoint=None: {
+            "scripts": [
+                {
+                    **checkpoint["gold_review_artifact"]["items"][0],
+                    "script_body": "CREATE TABLE gold_total_claims (id NUMBER);",
+                }
+            ]
+        },
+    )
+
+    response = reviews_router.gold_reviews("run-gold-review")
+
+    assert response["gold_review_artifact"]["items"][0]["script_body"].startswith("CREATE TABLE")
+
+
+def test_generation_first_gold_review_submits_review_boundary_not_execution(monkeypatch):
+    recorded = {}
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "source": "database",
+            "target_warehouse": "databricks",
+            "execution_engine": "native",
+            "database_flow_version": "generation_first_v1",
+            "status": "HITL_WAIT",
+            "next_review_key": "gold_review",
+        },
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update({"run_id": run_id, "stage": stage, "args": args}),
+    )
+
+    response = client.post(
+        "/gold-reviews/run-generation-first",
+        json={"action": "APPROVED", "review_artifact": {"items": [{"script_body": "select 1"}]}},
+    )
+
+    assert response.status_code == 200
+    assert recorded["stage"] == "gold_review"
+
+
+def test_generation_first_fallback_keeps_pending_gold_review():
+    from api.routers.runs_router import _fallback_run_detail
+
+    detail = _fallback_run_detail(
+        "run-generation-first",
+        {
+            "run_id": "run-generation-first",
+            "source": "database",
+            "target_warehouse": "databricks",
+            "execution_engine": "native",
+            "database_flow_version": "generation_first_v1",
+            "status": "HITL_WAIT",
+            "gold_generation_status": "COMPLETED",
+            "gold_generation_results": [{"kpi_name": "Total Claims"}],
+            "next_review_key": "gold_review",
+        },
+    )
+
+    assert detail["status"] == "HITL_WAIT"
+    assert detail["next_review_key"] == "gold_review"
+
+
 def test_bronze_review_normalizes_legacy_feed_lineage_fields():
     from api.services.ui.review_ui_service import normalize_bronze_review_artifact
 
@@ -741,6 +920,10 @@ def test_runs_uses_fast_checkpoint_summary_by_default(monkeypatch):
             "status": "RUNNING",
             "next_gate": 2,
             "resume_message": "Table Review is pending.",
+            "execution_ready": False,
+            "awaiting_stage_confirmation": False,
+            "next_stage_key": None,
+            "next_stage_label": None,
         },
     )
 
@@ -757,6 +940,10 @@ def test_runs_uses_fast_checkpoint_summary_by_default(monkeypatch):
     assert payload[0]["brd_filename"] == "fast-summary.docx"
     assert payload[0]["next_gate"] == 2
     assert payload[0]["resume_message"] == "Table Review is pending."
+    assert payload[0]["execution_ready"] is False
+    assert payload[0]["awaiting_stage_confirmation"] is False
+    assert payload[0]["next_stage_key"] is None
+    assert payload[0]["next_stage_label"] is None
 
 
 def test_run_detail_returns_fallback_on_failure(monkeypatch):
