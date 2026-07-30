@@ -281,6 +281,8 @@ def test_generation_first_review_resubmission_clears_ready_state_and_stale_downs
         "bronze_runtime_validation_status": "COMPLETED",
         "silver_runtime_validation_status": "COMPLETED",
         "gold_runtime_validation_status": "COMPLETED",
+        "report_generation_status": "COMPLETED",
+        "run_report": {"generated_at": "2026-07-30T00:00:00Z"},
     }
     replacement_artifact = {"boundary": boundary, "items": [{"review_status": "REGENERATE"}]}
     monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: state)
@@ -321,6 +323,8 @@ def test_generation_first_review_resubmission_clears_ready_state_and_stale_downs
     assert result["next_stage_key"] is None
     assert result["next_stage_label"] is None
     assert result[artifact_key] == replacement_artifact
+    assert "report_generation_status" not in result
+    assert "run_report" not in result
     for layer in ("bronze", "silver", "gold"):
         receipt_key = f"databricks_{layer}_execution_status"
         if layer in kept_execution_layers:

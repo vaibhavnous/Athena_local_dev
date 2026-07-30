@@ -426,10 +426,10 @@ function DataLineagePage() {
         <section className="overflow-hidden rounded-[28px] border border-[#253044] bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.18),_transparent_34%),radial-gradient(circle_at_top_right,_rgba(251,191,36,0.16),_transparent_30%),linear-gradient(135deg,_#0f172a,_#111827_55%,_#0b1325)] p-6 shadow-[0_24px_80px_rgba(3,7,18,0.35)]">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
             <div className="max-w-3xl">
-              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-slate-200">
+              {/*<div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-slate-200">
                 <ArrowRightLeft size={14} />
                 Databricks Medallion View
-              </div>
+              </div>*/}
               <h1 className="mt-4 text-3xl font-semibold tracking-[-0.04em] text-white sm:text-4xl">
                 Data Lineage Studio
               </h1>

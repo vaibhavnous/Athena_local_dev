@@ -228,7 +228,7 @@ test('recognizes Snowflake dbt deployment mode when a sparse response omits the 
     dbt_deployment_mode: 'generate_and_deploy',
     database_flow_version: 'generation_first_v1',
     pipeline_steps: [
-      { key: 'gold_code_execution', label: 'Deployment', state: 'RUNNING' },
+      { key: 'gold_code_execution', label: 'Code Execution', state: 'RUNNING' },
     ],
   }
 
@@ -236,7 +236,7 @@ test('recognizes Snowflake dbt deployment mode when a sparse response omits the 
   const target = phases.find((phase) => phase.label === 'Code Execution & Report Generation')
 
   expect(target?.steps).toHaveLength(1)
-  expect(target?.steps[0]?.label).toBe('Deployment')
+  expect(target?.steps[0]?.label).toBe('Code Execution')
 })
 
 test('groups marked Snowflake dbt runs into generation and one deployment phase', () => {
@@ -261,7 +261,7 @@ test('groups marked Snowflake dbt runs into generation and one deployment phase'
       { key: 'gate5', state: 'COMPLETED' },
       { key: 'gold', state: 'COMPLETED' },
       { key: 'gold_review', state: 'COMPLETED' },
-      { key: 'gold_code_execution', label: 'Deployment', state: 'PENDING' },
+      { key: 'gold_code_execution', label: 'Code Execution', state: 'PENDING' },
     ],
   }
 
@@ -276,9 +276,35 @@ test('groups marked Snowflake dbt runs into generation and one deployment phase'
   expect(phases.find((phase) => phase.label === 'Code Execution & Report Generation')?.steps).toHaveLength(1)
   expect(phases.find((phase) => phase.label === 'Code Execution & Report Generation')?.steps[0]).toMatchObject({
     key: 'gold_code_execution',
-    label: 'Deployment',
+    label: 'Code Execution',
     state: 'PENDING',
   })
+})
+
+test('adds report generation after deployment only for report-enabled dbt runs', () => {
+  const run = {
+    source: 'database',
+    target_warehouse: 'snowflake',
+    execution_engine: 'dbt',
+    dbt_deployment_mode: 'generate_and_deploy',
+    database_flow_version: 'generation_first_v1',
+    report_generation_enabled: true,
+    report_generation_status: 'RUNNING',
+    status: 'RUNNING',
+    background_stage: 'report_generation',
+    pipeline_steps: [
+      { key: 'gold_code_execution', label: 'Code Execution', state: 'COMPLETED' },
+      { key: 'report_generation', label: 'Report Generation', state: 'RUNNING' },
+    ],
+  }
+
+  const target = getPhaseGroups(run, getPipelineSteps(run))
+    .find((phase) => phase.label === 'Code Execution & Report Generation')
+
+  expect(target?.steps).toMatchObject([
+    { key: 'gold_code_execution', state: 'COMPLETED' },
+    { key: 'report_generation', state: 'RUNNING' },
+  ])
 })
 
 test('marked generate-only Snowflake dbt runs end after generation and review', () => {

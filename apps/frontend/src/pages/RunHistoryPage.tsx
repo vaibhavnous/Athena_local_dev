@@ -19,6 +19,7 @@ import useAthenaStore from '../store/useAthenaStore'
 import { getRun, getRuns, getRunStatus, getRunSummaryStatus } from '../api/athenaApi'
 import { PageHeader } from '../components/shared/DashboardLayout'
 import PythonCodeDialog from '../components/shared/PythonCodeDialog'
+import RunReportDialog from '../components/shared/RunReportDialog'
 import { getPhaseGroups, normalizeState, statusTone } from '../utils/pipelinePhases'
 import { isTransientReadError } from '../utils/apiErrors'
 
@@ -54,6 +55,7 @@ function RunHistoryPage() {
   const [runsError, setRunsError] = useState('')
   const [runInfoOpen, setRunInfoOpen] = useState(false)
   const [codeDialogStage, setCodeDialogStage] = useState('')
+  const [reportOpen, setReportOpen] = useState(false)
   const runsRequestInFlightRef = useRef(false)
   const detailRequestInFlightRef = useRef<string | null>(null)
   const statusHydratedRunIdsRef = useRef(new Set<string>())
@@ -72,6 +74,7 @@ function RunHistoryPage() {
   useEffect(() => {
     setRunInfoOpen(false)
     setCodeDialogStage('')
+    setReportOpen(false)
   }, [selectedRunId])
 
   const loadRuns = useCallback(async (showLoading = false) => {
@@ -387,6 +390,7 @@ function RunHistoryPage() {
                       phase={phase}
                       index={index + 1}
                       onViewCode={setCodeDialogStage}
+                      onViewReport={() => setReportOpen(true)}
                     />
                   ))}
                 </div>
@@ -409,6 +413,11 @@ function RunHistoryPage() {
         runId={selectedRunId || ''}
         title={`Generated Code — ${codeDialogStage}`}
       />
+      <RunReportDialog
+        isOpen={reportOpen}
+        onClose={() => setReportOpen(false)}
+        report={selectedRun?.run_report}
+      />
     </div>
   )
 }
@@ -425,7 +434,7 @@ function InfoRow({ icon: Icon, label, value }) {
   )
 }
 
-function PhaseRow({ phase, index, onViewCode }) {
+function PhaseRow({ phase, index, onViewCode, onViewReport }) {
   const [expanded, setExpanded] = useState(false)
   const displaySteps = getHistoryDisplaySteps(phase)
   const completed = displaySteps.filter((step) => isCompletedStep(step.state)).length
@@ -482,7 +491,7 @@ function PhaseRow({ phase, index, onViewCode }) {
         <div className="bg-[#080e1d]/50 px-3 pb-2">
           <div>
             {displaySteps.map((step) => (
-              <StageTreeRow key={step.key} step={step} onViewCode={onViewCode} />
+              <StageTreeRow key={step.key} step={step} onViewCode={onViewCode} onViewReport={onViewReport} />
             ))}
           </div>
         </div>
@@ -491,7 +500,7 @@ function PhaseRow({ phase, index, onViewCode }) {
   )
 }
 
-function StageTreeRow({ step, onViewCode }) {
+function StageTreeRow({ step, onViewCode, onViewReport }) {
   const state = normalizeState(step.state)
   const done = isCompletedStep(state)
   const running = state === 'RUNNING'
@@ -533,6 +542,19 @@ function StageTreeRow({ step, onViewCode }) {
           View Code
         </button>
       )}
+      {done && step.key === 'report_generation' && (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation()
+            onViewReport()
+          }}
+          className="flex flex-shrink-0 items-center gap-1 rounded border border-[#3f82ff]/30 bg-[#3f82ff]/10 px-2 py-0.5 text-[10px] font-medium text-[#3f82ff] transition-colors hover:bg-[#3f82ff]/20"
+        >
+          <FileText size={10} />
+          View Report
+        </button>
+      )}
     </div>
   )
 }
@@ -566,12 +588,12 @@ function getHistoryDisplaySteps(phase) {
   }
 
   if (['Target Execution', 'Code Execution & Report Generation', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
-    if (
-      steps.length === 1 &&
-      steps[0]?.key === 'gold_code_execution'
-    ) {
+    if (steps.some((step) => step.key === 'gold_code_execution' && ['Deployment', 'Code Execution'].includes(step.label))) {
       return clampLinearHistorySteps([
-        actual('gold_code_execution', 'Deployment'),
+        actual('gold_code_execution', 'Code Execution'),
+        ...(steps.some((step) => step.key === 'report_generation')
+          ? [actual('report_generation', 'Report Generation')]
+          : []),
       ])
     }
     return clampLinearHistorySteps([

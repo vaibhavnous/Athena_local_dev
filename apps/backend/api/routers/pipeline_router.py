@@ -216,6 +216,16 @@ def _seed_run_checkpoint(
                 or payload.dbt_deployment_mode
                 or "generate_only"
             ),
+            "report_generation_enabled": (
+                existing.get("report_generation_enabled")
+                if existing.get("report_generation_enabled") is not None
+                else bool(
+                    source == "database"
+                    and str(payload.target_warehouse or "").lower() == "snowflake"
+                    and str(payload.execution_engine or "").lower() == "dbt"
+                    and str(payload.dbt_deployment_mode or "").lower() == "generate_and_deploy"
+                )
+            ),
             "dbt_target_name": existing.get("dbt_target_name") or payload.dbt_target_name,
             "dbt_threads": existing.get("dbt_threads") or payload.dbt_threads,
             "dbt_command_timeout_secs": (

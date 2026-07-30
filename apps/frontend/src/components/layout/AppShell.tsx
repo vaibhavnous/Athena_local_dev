@@ -261,7 +261,7 @@ function AppShell() {
         nextStage={{
           name: executionReady
             ? dbtExecutionReady
-              ? 'Deployment'
+              ? 'Code Execution'
               : 'Bronze → Silver → Gold Target Execution'
             : stageConfirmation?.next_stage_label,
         }}
@@ -274,7 +274,7 @@ function AppShell() {
             ? 'All dbt models are reviewed and frozen. Start source landing, deployment, and dbt build now?'
             : 'All generated code has been reviewed. Start ordered target execution now?'
           : 'Do you want to proceed to the next stage?'}
-        continueLabel={executionReady ? (dbtExecutionReady ? 'Start Deployment' : 'Start Execution') : 'Continue'}
+        continueLabel={executionReady ? (dbtExecutionReady ? 'Start Code Execution' : 'Start Execution') : 'Continue'}
         showAutoAdvance={!executionReady}
       />
 

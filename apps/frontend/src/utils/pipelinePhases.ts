@@ -129,7 +129,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-4',
       label: 'Code Execution & Report Generation',
-      keys: ['gold_code_execution'],
+      keys: ['gold_code_execution', 'report_generation'],
     },
   ],
   file: [
@@ -228,9 +228,17 @@ function pipelineTemplatesForRun(run) {
   if (isFileSource(run)) return PIPELINE_PHASE_TEMPLATES.file
   if (!isGenerationFirstDatabaseRun(run)) return PIPELINE_PHASE_TEMPLATES.databaseDbt
   if (!isSnowflakeDbtRun(run)) return PIPELINE_PHASE_TEMPLATES.database
-  return String(run?.dbt_deployment_mode || 'generate_only').toLowerCase() === 'generate_and_deploy'
-    ? PIPELINE_PHASE_TEMPLATES.databaseDbtGenerationFirst
-    : PIPELINE_PHASE_TEMPLATES.databaseDbtGenerationFirst.slice(0, 3)
+  if (String(run?.dbt_deployment_mode || 'generate_only').toLowerCase() !== 'generate_and_deploy') {
+    return PIPELINE_PHASE_TEMPLATES.databaseDbtGenerationFirst.slice(0, 3)
+  }
+  if (run?.report_generation_enabled || run?.report_generation_status || run?.run_report?.generated_at) {
+    return PIPELINE_PHASE_TEMPLATES.databaseDbtGenerationFirst
+  }
+  return PIPELINE_PHASE_TEMPLATES.databaseDbtGenerationFirst.map((phase) => (
+    phase.id === 'phase-4'
+      ? { ...phase, keys: phase.keys.filter((key) => key !== 'report_generation') }
+      : phase
+  ))
 }
 
 export function getPipelineOrder(run) {
@@ -623,6 +631,7 @@ function fallbackStepLabel(key, sourceType = 'database') {
     gold: 'Gold Code Generation',
     gold_review: 'Gold Code Review',
     gold_code_execution: 'Gold Code Execution',
+    report_generation: 'Report Generation',
     gold_runtime_validation: 'Gold Runtime Validation',
     final_publish: 'Final Publish (Target Gate 5)',
     finalize: 'Finalize Run',
@@ -695,6 +704,11 @@ function syntheticStepState(
   }
   if (key === 'gold_code_execution') {
     if (goldExecution === 'COMPLETED') return 'COMPLETED'
+  }
+  if (key === 'report_generation') {
+    const reportState = normalizeState(run?.report_generation_status)
+    if (reportState === 'COMPLETED') return 'COMPLETED'
+    if (reportState === 'RUNNING') return 'RUNNING'
   }
   return 'PENDING'
 }
@@ -799,6 +813,10 @@ function buildStepDetail(run, key, state, existingDetail) {
       return isGenerationFirstDatabaseRun(run)
         ? `Gold execution starts after Silver execution succeeds in ${targetName(run)}.`
         : `Gold execution starts in ${targetName(run)} after Gold Review approval.`
+    case 'report_generation':
+      if (state === 'COMPLETED') return 'The enterprise run report is ready to view.'
+      if (state === 'RUNNING') return 'Assembling run artifacts, table metadata, KPIs, and governance outcomes.'
+      return 'Report generation starts automatically after deployment succeeds.'
     default:
       return existingDetail || ''
   }

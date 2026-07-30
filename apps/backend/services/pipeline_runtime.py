@@ -146,7 +146,13 @@ def _invalidate_generation_first_review_state(
         if key in {f"{layer}_runtime_validation_status" for layer in execution_layers}:
             updated.pop(key, None)
 
-    for key in ("final_publish_status", "finalization_status", "completion_mode"):
+    for key in (
+        "final_publish_status",
+        "finalization_status",
+        "completion_mode",
+        "report_generation_status",
+        "run_report",
+    ):
         updated.pop(key, None)
     updated.update(
         {
@@ -2286,7 +2292,7 @@ def build_pipeline_steps(
             for layer in execution_layers:
                 execution_step = execution_steps[f"{layer}_code_execution"]
                 if generation_first_snowflake_dbt_flow(checkpoint):
-                    execution_step["label"] = "Deployment"
+                    execution_step["label"] = "Code Execution"
                     execution_step["detail"] = (
                         "Approved source data is landed, then the frozen dbt project is deployed and built in Snowflake"
                     )
@@ -2296,6 +2302,16 @@ def build_pipeline_steps(
                         f"Approved {layer.capitalize()} scripts execute after all code generation and reviews complete"
                     )
                 steps.append(execution_step)
+            if dbt_deploy and checkpoint.get("report_generation_enabled"):
+                steps.append(
+                    {
+                        "key": "report_generation",
+                        "label": "Report Generation",
+                        "complete": str(checkpoint.get("report_generation_status") or "").upper()
+                        in {"COMPLETED", "COMPLETED_WITH_WARNINGS"},
+                        "detail": "Professional run summary assembled from the existing pipeline checkpoint",
+                    }
+                )
 
     checkpoint_status = str(checkpoint.get("status") or "").upper()
     pipeline_is_active = bool(
@@ -2823,6 +2839,9 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
         "run_id": run_id,
         "database_flow_version": checkpoint.get("database_flow_version"),
         "generation_first_execution": generation_first_database_flow(checkpoint),
+        "report_generation_enabled": bool(checkpoint.get("report_generation_enabled")),
+        "report_generation_status": checkpoint.get("report_generation_status"),
+        "run_report": checkpoint.get("run_report") or {},
         "checkpoint": checkpoint,
         "summary": summary,
         "pending_gate1": pending_gate1,
@@ -2905,6 +2924,15 @@ def start_pipeline(
         "dbt_threads": dbt_threads,
         "dbt_command_timeout_secs": dbt_command_timeout_secs,
         "force_dbt_deploy": bool(force_dbt_deploy),
+        "report_generation_enabled": bool(
+            seeded_state.get("report_generation_enabled")
+            or (
+                source_value == "database"
+                and str(target_warehouse or "").lower() == "snowflake"
+                and str(execution_engine or "").lower() == "dbt"
+                and str(dbt_deployment_mode or "").lower() == "generate_and_deploy"
+            )
+        ),
     }
     if (
         not initial_state.get("database_flow_version")
@@ -4141,6 +4169,149 @@ def _database_dbt_execution_validation_errors(state: Dict[str, Any]) -> List[str
     return errors
 
 
+def build_run_report(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a display-ready report exclusively from the persisted run state."""
+    generated_at = datetime.now(timezone.utc).isoformat()
+    enriched = state.get("enriched_metadata") if isinstance(state.get("enriched_metadata"), dict) else {}
+    columns = [
+        item for item in enriched.get("columns") or state.get("enriched_columns") or []
+        if isinstance(item, dict)
+    ]
+    tables = [
+        item for item in state.get("certified_tables") or state.get("nominated_tables") or []
+        if isinstance(item, dict)
+    ]
+    kpis = [
+        item for item in state.get("certified_kpis") or state.get("extracted_kpis") or state.get("kpis") or []
+        if isinstance(item, dict)
+    ]
+
+    def table_name(item: Dict[str, Any]) -> str:
+        return str(
+            item.get("table_name")
+            or item.get("table")
+            or item.get("entity")
+            or item.get("source_table")
+            or "Unassigned"
+        ).split(".")[-1]
+
+    table_rows: Dict[str, Dict[str, Any]] = {}
+    for table in tables:
+        name = table_name(table)
+        table_rows[name.casefold()] = {
+            "name": name,
+            "database": table.get("database_name") or table.get("database"),
+            "schema": table.get("schema_name") or table.get("schema"),
+            "columns": [],
+        }
+    for column in columns:
+        name = table_name(column)
+        row = table_rows.setdefault(
+            name.casefold(),
+            {
+                "name": name,
+                "database": column.get("database_name") or column.get("database"),
+                "schema": column.get("schema_name") or column.get("schema"),
+                "columns": [],
+            },
+        )
+        row["columns"].append(
+            {
+                "name": column.get("column_name") or column.get("name") or "Unnamed column",
+                "data_type": column.get("data_type") or column.get("type") or "UNKNOWN",
+                "semantic_type": column.get("semantic_type") or "UNKNOWN",
+                "is_key": bool(
+                    column.get("is_join_key")
+                    or column.get("is_primary_key")
+                    or str(column.get("semantic_type") or "").upper() in {"ID", "SURROGATE_KEY"}
+                ),
+                "is_pii": bool(column.get("is_pii") or column.get("is_pii_candidate")),
+                "is_measure": bool(column.get("is_measure")),
+            }
+        )
+
+    artifacts = []
+    for layer in ("bronze", "silver", "gold"):
+        for artifact in state.get(f"{layer}_generation_results") or []:
+            if not isinstance(artifact, dict):
+                continue
+            artifacts.append(
+                {
+                    "layer": layer,
+                    "name": (
+                        artifact.get("dbt_model_name")
+                        or artifact.get("dbt_alias")
+                        or str(artifact.get("target_table") or artifact.get("table") or "Generated model").split(".")[-1]
+                    ),
+                    "target": artifact.get("target_table"),
+                    "format": artifact.get("code_generation_format") or artifact.get("script_language") or "dbt",
+                    "status": artifact.get("review_status") or artifact.get("status") or "APPROVED",
+                }
+            )
+
+    report_tables = sorted(table_rows.values(), key=lambda item: str(item.get("name") or "").casefold())
+    source_databases = state.get("source_databases")
+    source_database = state.get("database_name") or (
+        source_databases[0] if isinstance(source_databases, list) and source_databases else source_databases
+    )
+    return {
+        "version": 1,
+        "generated_at": generated_at,
+        "title": "Pipeline Run Report",
+        "outcome": "SUCCESS",
+        "run": {
+            "id": state.get("run_id"),
+            "name": state.get("project_name") or state.get("brd_filename") or state.get("run_id"),
+            "source": state.get("source") or "database",
+            "source_database": source_database,
+            "target": state.get("target_warehouse") or "snowflake",
+            "execution_engine": state.get("execution_engine") or "dbt",
+            "deployment_mode": state.get("dbt_deployment_mode") or "generate_and_deploy",
+            "started_at": state.get("started_at"),
+            "completed_at": generated_at,
+        },
+        "metrics": {
+            "tables": len(report_tables),
+            "columns": sum(len(item["columns"]) for item in report_tables),
+            "kpis": len(kpis),
+            "artifacts": len(artifacts),
+            "pii_columns": sum(1 for column in columns if column.get("is_pii") or column.get("is_pii_candidate")),
+            "key_columns": sum(
+                1 for column in columns
+                if column.get("is_join_key")
+                or column.get("is_primary_key")
+                or str(column.get("semantic_type") or "").upper() in {"ID", "SURROGATE_KEY"}
+            ),
+        },
+        "artifacts": artifacts,
+        "tables": report_tables,
+        "kpis": [
+            {
+                "name": item.get("kpi_name") or item.get("name") or "Unnamed KPI",
+                "description": item.get("kpi_description") or item.get("description"),
+                "formula": item.get("formula") or item.get("business_formula") or item.get("calculation"),
+                "target": item.get("target_table") or item.get("output_table"),
+            }
+            for item in kpis
+        ],
+        "reviews": {
+            "kpi": str((state.get("gate1") or {}).get("decision") or state.get("human_decision") or "APPROVED"),
+            "tables": str((state.get("gate2") or {}).get("decision") or state.get("human_table_decision") or "APPROVED"),
+            "semantics": str(state.get("enrichment_review_decision") or state.get("enrichment_review_status") or "APPROVED"),
+            "bronze": str(state.get("bronze_review_decision") or (state.get("gate4") or {}).get("decision") or "APPROVED"),
+            "merge_keys": str(state.get("silver_merge_key_review_decision") or "APPROVED"),
+            "silver": str(state.get("silver_review_decision") or (state.get("gate5") or {}).get("decision") or "APPROVED"),
+            "gold": str(state.get("gold_review_decision") or "APPROVED"),
+        },
+        "deployment": {
+            "status": state.get("snowflake_dbt_deploy_status") or state.get("snowflake_dbt_status") or "COMPLETED",
+            "validation_status": state.get("snowflake_dbt_validation_status"),
+            "artifact_set_hash": state.get("snowflake_dbt_artifact_set_hash"),
+            "completion_mode": state.get("completion_mode") or "dbt_executed",
+        },
+    }
+
+
 def execute_generation_first_snowflake_dbt(
     run_id: str,
     *,
@@ -4161,7 +4332,7 @@ def execute_generation_first_snowflake_dbt(
         "execution_ready": True,
         "background_stage": stage_key,
         "next_stage_key": stage_key,
-        "next_stage_label": "Deployment",
+        "next_stage_label": "Code Execution",
         "awaiting_stage_confirmation": False,
         "stage_confirmation": None,
         "failed_background_stage": None,
@@ -4198,20 +4369,57 @@ def execute_generation_first_snowflake_dbt(
             **working_state,
             **deployed_state,
             "run_id": run_id,
-            "status": "PIPELINE_COMPLETED",
+            "status": "RUNNING",
             "execution_ready": False,
-            "background_stage": None,
+            "background_stage": "report_generation",
             "failed_background_stage": None,
             "last_completed_stage_key": stage_key,
-            "last_completed_stage_label": "Deployment",
+            "last_completed_stage_label": "Code Execution",
             "next_stage_key": None,
             "next_stage_label": None,
             "stage_confirmation": None,
             "snowflake_gold_execution_status": "COMPLETED",
             "gold_runtime_validation_status": "COMPLETED",
-            "resume_message": "Snowflake dbt project deployment and build completed.",
+            "report_generation_enabled": True,
+            "report_generation_status": "RUNNING",
+            "resume_message": "Deployment completed. Generating the pipeline run report.",
         }
         save_checkpoint_state_timed(run_id, working_state, context="snowflake_dbt_deployment:complete")
+        try:
+            run_report = build_run_report(working_state)
+            report_status = "COMPLETED"
+        except Exception:
+            logger.exception(
+                "Run report generation failed after successful Snowflake dbt deployment",
+                extra={"run_id": run_id, "stage": "report_generation"},
+            )
+            run_report = {
+                "version": 1,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "title": "Pipeline Run Report",
+                "outcome": "SUCCESS",
+                "warning": "Detailed report sections could not be assembled.",
+                "run": {"id": run_id, "target": "snowflake", "execution_engine": "dbt"},
+                "metrics": {},
+                "artifacts": [],
+                "tables": [],
+                "kpis": [],
+                "reviews": {},
+                "deployment": {"status": "COMPLETED"},
+            }
+            report_status = "COMPLETED_WITH_WARNINGS"
+        working_state.update(
+            {
+                "status": "PIPELINE_COMPLETED",
+                "background_stage": None,
+                "last_completed_stage_key": "report_generation",
+                "last_completed_stage_label": "Report Generation",
+                "report_generation_status": report_status,
+                "run_report": run_report,
+                "resume_message": "Snowflake dbt deployment, build, and run report completed.",
+            }
+        )
+        save_checkpoint_state_timed(run_id, working_state, context="report_generation:complete")
         return working_state
     except Exception as exc:
         latest_checkpoint = load_checkpoint_state(run_id) or {}
@@ -4224,7 +4432,7 @@ def execute_generation_first_snowflake_dbt(
             "background_stage": stage_key,
             "failed_background_stage": stage_key,
             "next_stage_key": stage_key,
-            "next_stage_label": "Deployment",
+            "next_stage_label": "Code Execution",
             "error": str(exc),
             "resume_message": (
                 "Snowflake dbt deployment or build failed. Retry reuses completed source landing "
@@ -4320,7 +4528,7 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
                     "last_completed_stage_key": "gold_review",
                     "last_completed_stage_label": "Gold Code Review",
                     "next_stage_key": "gold_code_execution",
-                    "next_stage_label": "Deployment",
+                    "next_stage_label": "Code Execution",
                     "resume_message": "All dbt models are reviewed and frozen. Start deployment and build when ready.",
                     "stage_confirmation": {
                         "enabled": True,
@@ -4328,7 +4536,7 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
                         "last_completed_stage_key": "gold_review",
                         "last_completed_stage_label": "Gold Code Review",
                         "next_stage_key": "gold_code_execution",
-                        "next_stage_label": "Deployment",
+                        "next_stage_label": "Code Execution",
                         "resume_message": "All dbt models are reviewed and frozen. Start deployment and build when ready.",
                     },
                 }

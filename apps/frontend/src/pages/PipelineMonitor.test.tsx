@@ -227,13 +227,14 @@ test('keeps code review gates out of the monitor substage list', () => {
   ])
 })
 
-test('renders one gated Snowflake dbt deployment step', () => {
+test('renders deployment followed by report generation for enabled Snowflake dbt runs', () => {
   const phase = {
     id: 'phase-4',
     label: 'Code Execution & Report Generation',
     status: 'Pending',
     steps: [
-      { key: 'gold_code_execution', label: 'Deployment', state: 'PENDING' },
+      { key: 'gold_code_execution', label: 'Code Execution', state: 'PENDING' },
+      { key: 'report_generation', label: 'Report Generation', state: 'PENDING' },
     ],
   }
   const run = {
@@ -242,14 +243,13 @@ test('renders one gated Snowflake dbt deployment step', () => {
     execution_engine: 'dbt',
     dbt_deployment_mode: 'generate_and_deploy',
     database_flow_version: 'generation_first_v1',
+    report_generation_enabled: true,
   }
 
   const display = buildPipelineDisplayPhase(phase, phase.steps, run)
 
-  expect(display.steps).toHaveLength(1)
-  expect(display.steps[0]).toMatchObject({
-    key: 'gold_code_execution',
-    label: 'Deployment',
-    state: 'PENDING',
-  })
+  expect(display.steps).toMatchObject([
+    { key: 'gold_code_execution', label: 'Code Execution', state: 'PENDING' },
+    { key: 'report_generation', label: 'Report Generation', state: 'PENDING' },
+  ])
 })

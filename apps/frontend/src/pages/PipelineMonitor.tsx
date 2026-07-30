@@ -6,6 +6,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Co
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
 import { PageHeader } from '../components/shared/DashboardLayout'
+import RunReportDialog from '../components/shared/RunReportDialog'
 import { formatPipelineStepLabel, getGateDisplayName, getPhaseGroups, getPipelineSteps, isGenerationFirstDatabaseRun, isSnowflakeDbtRun, normalizeState, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
 import { isDemoFallbackRun } from '../utils/demoFallbacks'
 import {
@@ -368,6 +369,8 @@ function PipelineMonitor() {
   const [failureActionSubmitting, setFailureActionSubmitting] = useState('')
   const [rerunningStepKey, setRerunningStepKey] = useState('')
   const [scriptBundles, setScriptBundles] = useState(null)
+  const [reportOpen, setReportOpen] = useState(false)
+  const shownReportRef = useRef(new Set())
 
   useEffect(() => {
     if (!activeRunStableId) {
@@ -427,6 +430,31 @@ function PipelineMonitor() {
   const failureSummary = useMemo(() => buildFailureSummary(monitorRun), [monitorRun])
   const stageConfirmation = monitorRun?.stage_confirmation || null
   const stageScriptReview = useMemo(() => buildStageScriptReview(monitorRunWithScripts), [monitorRunWithScripts])
+
+  useEffect(() => {
+    const report = monitorRun?.run_report
+    const reportKey = `${monitorRun?.id || ''}:${report?.generated_at || ''}`
+    const storageKey = `athena:run-report:${reportKey}`
+    let alreadyShown = shownReportRef.current.has(reportKey)
+    try {
+      alreadyShown ||= window.sessionStorage.getItem(storageKey) === 'shown'
+    } catch {
+      // Session storage can be disabled; the in-memory guard still prevents duplicates.
+    }
+    if (
+      report?.generated_at &&
+      normalizeState(monitorRun?.report_generation_status) === 'COMPLETED' &&
+      !alreadyShown
+    ) {
+      shownReportRef.current.add(reportKey)
+      try {
+        window.sessionStorage.setItem(storageKey, 'shown')
+      } catch {
+        // The report remains available when browser storage is restricted.
+      }
+      setReportOpen(true)
+    }
+  }, [monitorRun?.id, monitorRun?.report_generation_status, monitorRun?.run_report])
 
   if (!activeRun) {
     const title = pendingRun ? 'Starting pipeline run' : 'No active pipeline'
@@ -819,6 +847,7 @@ function PipelineMonitor() {
                                   index={stepIndex}
                                   isLast={stepIndex === phase.steps.length - 1}
                                   onOpenReview={() => handleOpenGateReview(step)}
+                                  onOpenReport={() => setReportOpen(true)}
                                   onRerun={() => handleRerunStep(step)}
                                   rerunning={rerunningStepKey === step.key}
                                 />
@@ -839,6 +868,12 @@ function PipelineMonitor() {
           <PipelineLogsPanel runId={activeRun.run_id || activeRun.id} isActive onLogsUpdated={handleLogsUpdated} />
         </section>
       </div>
+
+      <RunReportDialog
+        isOpen={reportOpen}
+        onClose={() => setReportOpen(false)}
+        report={monitorRun.run_report}
+      />
 
       {/* ponytail: AppShell owns the compact stage gate; keep the richer script-review overlay dormant until it has a distinct trigger. */}
       {false && isStageConfirmationPaused && stageConfirmation?.awaiting_confirmation && (
@@ -1032,7 +1067,7 @@ function StatusPill({ status, tone }) {
   )
 }
 
-function StepRow({ step, index = 0, isLast = false, onOpenReview, onRerun, rerunning = false }) {
+function StepRow({ step, index = 0, isLast = false, onOpenReview, onOpenReport, onRerun, rerunning = false }) {
   const state = normalizeState(step.state)
   const complete = state === 'COMPLETED'
   const waiting = state === 'HITL_WAIT'
@@ -1095,7 +1130,20 @@ function StepRow({ step, index = 0, isLast = false, onOpenReview, onRerun, rerun
         {step.inferredProgress && (
           <span className="shrink-0 text-[10px] font-medium text-[#3f82ff]">Starting…</span>
         )}
-        {complete && onRerun && (
+        {complete && step.key === 'report_generation' && (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation()
+              onOpenReport?.()
+            }}
+            className="inline-flex shrink-0 items-center gap-1 rounded border border-[#3f82ff]/40 bg-[#3f82ff]/10 px-1.5 py-0.5 text-[9px] font-medium text-[#78a9ff] transition-colors hover:bg-[#3f82ff]/20"
+          >
+            <FileText size={9} />
+            View Report
+          </button>
+        )}
+        {complete && onRerun && step.key !== 'report_generation' && (
           <button
             type="button"
             onClick={(event) => {
@@ -1287,7 +1335,12 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
     ]
   } else if (!fileFlow && ['Target Execution', 'Code Execution & Report Generation', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
     displaySteps = isGenerationFirstDatabaseRun(run) && isSnowflakeDbtRun(run)
-      ? [makeStep('gold_code_execution', 'Deployment')]
+      ? [
+          makeStep('gold_code_execution', 'Code Execution'),
+          ...(run?.report_generation_enabled || byKey.has('report_generation')
+            ? [makeStep('report_generation', 'Report Generation')]
+            : []),
+        ]
       : [
           makeStep('bronze_code_execution', 'Bronze Target Execution'),
           makeStep('silver_code_execution', 'Silver Target Execution'),

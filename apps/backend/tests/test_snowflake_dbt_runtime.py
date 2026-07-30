@@ -648,7 +648,7 @@ def test_generation_first_dbt_gold_review_finalizes_then_pauses(monkeypatch):
     assert result["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
     assert result["execution_ready"] is True
     assert result["next_stage_key"] == "gold_code_execution"
-    assert result["next_stage_label"] == "Deployment"
+    assert result["next_stage_label"] == "Code Execution"
     assert result["stage_confirmation"]["last_completed_stage_key"] == "gold_review"
     assert result["snowflake_dbt_artifact_set_hash"] == "reviewed-hash"
     assert "snowflake_bronze_source_load_status" not in result
@@ -744,6 +744,9 @@ def test_generation_first_dbt_gate_lands_sources_then_executes_frozen_project(mo
     assert result["status"] == "PIPELINE_COMPLETED"
     assert result["snowflake_gold_execution_status"] == "COMPLETED"
     assert result["execution_ready"] is False
+    assert result["report_generation_status"] == "COMPLETED"
+    assert result["run_report"]["outcome"] == "SUCCESS"
+    assert [state["background_stage"] for state in saved_states[-2:]] == ["report_generation", None]
     assert saved_states[-1]["background_stage"] is None
 
 
@@ -1038,7 +1041,35 @@ def test_generation_first_dbt_pipeline_steps_put_one_deployment_after_gold_revie
     assert "bronze_code_execution" not in keys
     assert "silver_code_execution" not in keys
     assert keys[-1] == "gold_code_execution"
-    assert by_key["gold_code_execution"]["label"] == "Deployment"
+    assert by_key["gold_code_execution"]["label"] == "Code Execution"
+
+
+def test_generation_first_dbt_pipeline_steps_add_report_for_enabled_runs():
+    steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            **_generation_first_dbt_state(),
+            "report_generation_enabled": True,
+            "report_generation_status": "RUNNING",
+            "status": "RUNNING",
+            "background_stage": "report_generation",
+            "snowflake_gold_execution_status": "COMPLETED",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=True,
+        gold_generation_completed=True,
+    )
+
+    assert [step["key"] for step in steps][-2:] == ["gold_code_execution", "report_generation"]
+    assert steps[-2]["state"] == "COMPLETED"
+    assert steps[-1]["state"] == "RUNNING"
 
 
 def test_dbt_gold_bundle_does_not_expose_native_dimension_companion():
