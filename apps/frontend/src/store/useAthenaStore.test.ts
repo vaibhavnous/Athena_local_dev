@@ -259,6 +259,79 @@ test('keeps known runs when polling returns a transient empty snapshot', () => {
   expect(useAthenaStore.getState().activeRunId).toBe('run-4')
 })
 
+test('does not show a failed run from a hydration fallback', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-fallback-failure',
+    status: 'RUNNING',
+    background_stage: 'silver',
+  })
+
+  useAthenaStore.getState().setRuns([{
+    id: 'run-fallback-failure',
+    status: 'FAILED',
+    error: 'temporary fallback failure',
+    hydration_fallback: true,
+  }])
+
+  expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    status: 'RUNNING',
+    background_stage: 'silver',
+    pending_failure_confirmation: true,
+  })
+})
+
+test('accepts a failed status confirmed by the persisted checkpoint', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-confirmed-failure',
+    status: 'UNKNOWN',
+  })
+
+  useAthenaStore.getState().updateRun('run-confirmed-failure', {
+    id: 'run-confirmed-failure',
+    status: 'FAILED',
+    error: 'dbt build failed',
+    hydration_fallback: true,
+    status_authoritative: true,
+  })
+
+  expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    status: 'FAILED',
+    error: 'dbt build failed',
+    pending_failure_confirmation: false,
+  })
+})
+
+test('keeps authoritative Snowflake dbt settings during fallback hydration', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-snowflake-dbt',
+    status: 'RUNNING',
+    source: 'database',
+    target_warehouse: 'snowflake',
+    execution_engine: 'dbt',
+    dbt_deployment_mode: 'generate_and_deploy',
+    database_flow_version: 'generation_first_v1',
+    pipeline_steps: [{ key: 'gold_code_execution', state: 'RUNNING' }],
+  })
+
+  useAthenaStore.getState().setRuns([{
+    id: 'run-snowflake-dbt',
+    status: 'RUNNING',
+    target_warehouse: 'snowflake',
+    execution_engine: 'native',
+    dbt_deployment_mode: 'generate_only',
+    hydration_fallback: true,
+  }])
+
+  expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    execution_engine: 'dbt',
+    dbt_deployment_mode: 'generate_and_deploy',
+    database_flow_version: 'generation_first_v1',
+  })
+})
+
 test('does not replace a run name with the run ID from sparse status polling', () => {
   resetStore()
   useAthenaStore.getState().addRun({

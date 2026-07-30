@@ -13,7 +13,7 @@ const api = axios.create({
 })
 
 const READ_TIMEOUT = 15000
-const RUNS_LIST_TIMEOUT = 10000
+const RUNS_LIST_TIMEOUT = 15000
 const RUN_DETAIL_TIMEOUT = 30000
 const REVIEW_TIMEOUT = 90000
 const WRITE_TIMEOUT = 90000
@@ -135,6 +135,8 @@ export const uploadBrd = (file: File) => {
 }
 
 export const getRunStatus = (runId: string) => api.get(`/pipeline/${runId}/status`, { timeout: READ_TIMEOUT })
+export const getRunSummaryStatus = (runId: string) =>
+  api.get(`/pipeline/${runId}/summary-status`, { timeout: READ_TIMEOUT })
 
 export const getPipelineKpis = (runId: string) => api.get(`/kpi-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 export const createKpiReview = (runId: string, payload: { name: string; definition: string }) =>

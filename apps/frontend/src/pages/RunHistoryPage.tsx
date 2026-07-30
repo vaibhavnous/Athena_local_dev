@@ -1,7 +1,8 @@
 // @ts-nocheck
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
+  AlertCircle,
   CalendarDays,
   CheckCircle2,
   ChevronDown,
@@ -10,14 +11,16 @@ import {
   FileText,
   History,
   Info,
+  Loader2,
   RefreshCw,
   Search,
 } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
-import { getRun, getRuns } from '../api/athenaApi'
+import { getRun, getRuns, getRunStatus, getRunSummaryStatus } from '../api/athenaApi'
 import { PageHeader } from '../components/shared/DashboardLayout'
 import PythonCodeDialog from '../components/shared/PythonCodeDialog'
 import { getPhaseGroups, normalizeState, statusTone } from '../utils/pipelinePhases'
+import { isTransientReadError } from '../utils/apiErrors'
 
 const FILTERS = ['All', 'Running', 'Pending', 'Hitl wait', 'Paused for hitl', 'Pending review', 'Completed', 'Failed', 'Cancelled']
 
@@ -47,10 +50,13 @@ function RunHistoryPage() {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('All')
   const [detailRun, setDetailRun] = useState(null)
+  const [isLoadingRuns, setIsLoadingRuns] = useState(true)
+  const [runsError, setRunsError] = useState('')
   const [runInfoOpen, setRunInfoOpen] = useState(false)
   const [codeDialogStage, setCodeDialogStage] = useState('')
   const runsRequestInFlightRef = useRef(false)
   const detailRequestInFlightRef = useRef<string | null>(null)
+  const statusHydratedRunIdsRef = useRef(new Set<string>())
 
   useEffect(() => {
     if (!selectedRunId && runs[0]?.id) setSelectedRunId(runs[0].id)
@@ -68,50 +74,97 @@ function RunHistoryPage() {
     setCodeDialogStage('')
   }, [selectedRunId])
 
-  useEffect(() => {
-    let cancelled = false
+  const loadRuns = useCallback(async (showLoading = false) => {
+    if (runsRequestInFlightRef.current) return
+    runsRequestInFlightRef.current = true
+    if (showLoading) setIsLoadingRuns(true)
+    try {
+      const data = await getRuns()
+      if (!Array.isArray(data)) throw new Error('Run history returned an invalid response.')
+      setRuns(data)
+      setRunsError('')
+      setServerOnline(true)
+    } catch (error) {
+      setRunsError(error?.message || 'Run history is temporarily unavailable.')
+      if (!isTransientReadError(error)) setServerOnline(false)
+      console.warn('[RunHistoryPage] Failed to refresh runs', error)
+    } finally {
+      runsRequestInFlightRef.current = false
+      setIsLoadingRuns(false)
+    }
+  }, [setRuns, setServerOnline])
 
-    const loadRuns = async () => {
-      if (runsRequestInFlightRef.current) return
-      runsRequestInFlightRef.current = true
-      try {
-        const data = await getRuns()
-        if (!cancelled && Array.isArray(data)) {
-          setRuns(data)
-          setServerOnline(true)
+  useEffect(() => {
+    loadRuns(true)
+    const timer = window.setInterval(() => loadRuns(false), 8000)
+    return () => window.clearInterval(timer)
+  }, [loadRuns])
+
+  useEffect(() => {
+    const pendingIds = (runs || [])
+      .filter((run) => (
+        String(run?.status || '').toUpperCase() === 'UNKNOWN' &&
+        run?.status_authoritative !== true &&
+        !statusHydratedRunIdsRef.current.has(run.id)
+      ))
+      .map((run) => run.id)
+
+    if (pendingIds.length === 0) return undefined
+    pendingIds.forEach((runId) => statusHydratedRunIdsRef.current.add(runId))
+
+    let nextIndex = 0
+    const hydrateNext = async () => {
+      while (nextIndex < pendingIds.length) {
+        const runId = pendingIds[nextIndex]
+        nextIndex += 1
+        try {
+          const payload = await getRunSummaryStatus(runId)
+          if (payload?.run) {
+            updateRun(runId, {
+              ...payload.run,
+              hydration_fallback: false,
+              status_authoritative: true,
+            })
+          }
+        } catch (error) {
+          if (isTransientReadError(error)) {
+            statusHydratedRunIdsRef.current.delete(runId)
+          } else {
+            updateRun(runId, {
+              status: 'UNAVAILABLE',
+              status_authoritative: true,
+              hydration_fallback: false,
+            })
+          }
         }
-      } catch (error) {
-        if (!cancelled) setServerOnline(false)
-        if (!cancelled) console.warn('[RunHistoryPage] Failed to refresh runs', error)
-      } finally {
-        runsRequestInFlightRef.current = false
       }
     }
 
-    loadRuns()
-    const timer = window.setInterval(loadRuns, 8000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [setRuns, setServerOnline])
+    // Two workers keep the badges moving without recreating the database
+    // request flood that previously blocked Run History.
+    void Promise.all([hydrateNext(), hydrateNext()])
+    return undefined
+  }, [runs, updateRun])
 
   useEffect(() => {
     if (!selectedRunId) return
     let cancelled = false
 
-    const loadRun = async () => {
+    const applyRun = (data) => {
+      if (cancelled || !data) return
+      setDetailRun((current) => ({ ...(current || {}), ...data }))
+      updateRun(selectedRunId, data)
+      setServerOnline(true)
+    }
+
+    const loadRunDetail = async () => {
       if (detailRequestInFlightRef.current === selectedRunId) return
       detailRequestInFlightRef.current = selectedRunId
       try {
         const data = await getRun(selectedRunId)
-        if (!cancelled) {
-          setDetailRun(data)
-          updateRun(selectedRunId, data)
-          setServerOnline(true)
-        }
+        applyRun(data)
       } catch (error) {
-        if (!cancelled) setServerOnline(false)
+        if (!cancelled && !isTransientReadError(error)) setServerOnline(false)
         if (!cancelled) console.warn('[RunHistoryPage] Failed to load run detail', error)
       } finally {
         if (detailRequestInFlightRef.current === selectedRunId) {
@@ -120,8 +173,17 @@ function RunHistoryPage() {
       }
     }
 
-    loadRun()
-    const timer = window.setInterval(loadRun, 5000)
+    const loadRunStatus = async () => {
+      try {
+        const payload = await getRunStatus(selectedRunId)
+        applyRun(payload?.run)
+      } catch (error) {
+        if (!cancelled && !isTransientReadError(error)) setServerOnline(false)
+      }
+    }
+
+    loadRunDetail()
+    const timer = window.setInterval(loadRunStatus, 5000)
     return () => {
       cancelled = true
       window.clearInterval(timer)
@@ -129,13 +191,16 @@ function RunHistoryPage() {
   }, [selectedRunId, updateRun, setServerOnline])
 
   const filteredRuns = useMemo(() => {
-    return (runs || []).filter((run) => {
+    const displayedRuns = (runs || []).map((run) => (
+      detailRun?.id === run.id ? { ...run, ...detailRun } : run
+    ))
+    return displayedRuns.filter((run) => {
       const text = `${run.id} ${run.brd_filename || ''}`.toLowerCase()
       const queryMatch = !query.trim() || text.includes(query.trim().toLowerCase())
       const filterMatch = matchesStatusFilter(run.status, filter)
       return queryMatch && filterMatch
     })
-  }, [runs, query, filter])
+  }, [runs, detailRun, query, filter])
 
   const selectedRun =
     (detailRun && detailRun.id === selectedRunId ? detailRun : null) ||
@@ -150,17 +215,21 @@ function RunHistoryPage() {
       <PageHeader
         eyebrow="Run History"
         title="Pipeline run history."
-        description={`${filteredRuns.length}${filteredRuns.length !== runs.length ? ` of ${runs.length}` : ''} run${runs.length === 1 ? '' : 's'} available for inspection and rerun.`}
+        description={
+          isLoadingRuns && runs.length === 0
+            ? 'Loading persisted pipeline runs...'
+            : runsError && runs.length === 0
+            ? 'Run history is temporarily unavailable.'
+            : `${filteredRuns.length}${filteredRuns.length !== runs.length ? ` of ${runs.length}` : ''} run${runs.length === 1 ? '' : 's'} available for inspection and rerun.`
+        }
         icon={History}
         actions={
           <button
-            onClick={async () => {
-              const data = await getRuns()
-              setRuns(Array.isArray(data) ? data : [])
-            }}
-            className="btn-secondary inline-flex items-center justify-center gap-2 text-xs"
+            onClick={() => loadRuns(true)}
+            disabled={isLoadingRuns}
+            className="btn-secondary inline-flex items-center justify-center gap-2 text-xs disabled:opacity-50"
           >
-            <RefreshCw size={13} />
+            <RefreshCw size={13} className={isLoadingRuns ? 'animate-spin' : ''} />
             Refresh
           </button>
         }
@@ -196,6 +265,26 @@ function RunHistoryPage() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
+            {isLoadingRuns && runs.length === 0 && (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 size={20} className="animate-spin text-[#3f82ff]" />
+              </div>
+            )}
+            {!isLoadingRuns && runsError && runs.length === 0 && (
+              <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
+                <AlertCircle size={20} className="text-red-400" />
+                <p className="text-xs text-red-300">{runsError}</p>
+                <button type="button" onClick={() => loadRuns(true)} className="btn-secondary mt-1 inline-flex items-center gap-1.5 text-xs">
+                  <RefreshCw size={11} />
+                  Retry
+                </button>
+              </div>
+            )}
+            {!isLoadingRuns && !runsError && filteredRuns.length === 0 && (
+              <div className="px-4 py-12 text-center text-xs text-[#8a9ab7]">
+                {runs.length === 0 ? 'No pipeline runs found.' : 'No runs match your filters.'}
+              </div>
+            )}
             {filteredRuns.map((run) => {
               const active = run.id === selectedRunId
               const tone = statusTone(run.status)
@@ -219,11 +308,13 @@ function RunHistoryPage() {
                         <span className="max-w-[95px] truncate font-mono">{String(run.id).slice(0, 8)}...</span>
                         <span className="flex items-center gap-1">
                           <CalendarDays size={9} />
-                          {formatCompactDate(run.started_at)}
+                          {formatCompactDate(run.started_at || run.updated_at)}
                         </span>
                         <span className="ml-auto flex items-center gap-1 whitespace-nowrap">
                           <Clock size={9} />
-                          {formatRelativeTime(run.updated_at || run.completed_at || run.started_at)}
+                          {run.hydration_fallback && !run.status_authoritative
+                            ? 'Refreshing details'
+                            : formatRelativeTime(run.updated_at || run.completed_at || run.started_at)}
                         </span>
                       </div>
                     </div>
@@ -269,11 +360,20 @@ function RunHistoryPage() {
                     <InfoRow icon={Info} label="Project Name" value={selectedRun.project_name || selectedRun.brd_filename || '-'} />
                     <InfoRow icon={Info} label="Project Description" value={selectedRun.project_description || 'NA'} />
                     <InfoRow icon={Info} label="Source" value={formatSource(selectedRun.source)} />
-                    <InfoRow icon={Info} label="Database Type" value={selectedRun.database_type || '-'} />
+                    <InfoRow icon={Info} label="Database Type" value={selectedRun.database_type || selectedRun.db_type || '-'} />
                     <InfoRow icon={Info} label="Database Name" value={selectedRun.database_name || '-'} />
                     <InfoRow icon={CalendarDays} label="Started" value={formatFullDate(selectedRun.started_at)} />
                     <InfoRow icon={CalendarDays} label="Last Updated" value={formatFullDate(selectedRun.completed_at || selectedRun.updated_at || selectedRun.started_at)} />
-                    <InfoRow icon={FileText} label="Knowledge Base" value={selectedRun.knowledge_base || 'Not used'} />
+                    <InfoRow
+                      icon={FileText}
+                      label="Knowledge Base"
+                      value={
+                        selectedRun.knowledge_base ||
+                        selectedRun.knowledge_base_id ||
+                        selectedRun.domain_profile ||
+                        (selectedRun.use_domain_knowledge_base ? 'Enabled' : 'Not used')
+                      }
+                    />
                   </div>
                 )}
               </div>
@@ -730,6 +830,7 @@ function StatusPill({ status, tone, large = false }) {
 
 function statusLabel(status) {
   const rawValue = String(status || '').toUpperCase()
+  if (rawValue === 'UNKNOWN') return 'Refreshing'
   const value = ['SUCCESS', 'PIPELINE_COMPLETED'].includes(rawValue)
     ? 'Completed'
     : rawValue.replace(/_/g, ' ').trim()
@@ -743,9 +844,26 @@ function formatSource(value) {
   return 'Database'
 }
 
+function parseBackendDate(value) {
+  if (!value) return null
+  if (value instanceof Date) return value
+  const raw = String(value).trim()
+  // Azure SQL DATETIME values arrive without an offset even though they are
+  // stored as UTC. JavaScript otherwise interprets them as browser-local time.
+  const normalized =
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw) &&
+    !/(?:Z|[+-]\d{2}:\d{2})$/i.test(raw)
+      ? `${raw}Z`
+      : raw
+  const date = new Date(normalized)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
 function formatCompactDate(value) {
   if (!value) return 'Unknown'
-  return new Date(value).toLocaleString('en-IN', {
+  const date = parseBackendDate(value)
+  if (!date) return 'Unknown'
+  return date.toLocaleString('en-IN', {
     day: '2-digit',
     month: 'short',
     year: 'numeric',
@@ -756,7 +874,9 @@ function formatCompactDate(value) {
 
 function formatRelativeTime(value) {
   if (!value) return ''
-  const elapsed = Math.max(0, Date.now() - new Date(value).getTime())
+  const date = parseBackendDate(value)
+  if (!date) return ''
+  const elapsed = Math.max(0, Date.now() - date.getTime())
   const minutes = Math.floor(elapsed / 60000)
   if (minutes < 1) return 'just now'
   if (minutes < 60) return `${minutes}m ago`
@@ -767,7 +887,9 @@ function formatRelativeTime(value) {
 
 function formatFullDate(value) {
   if (!value) return '-'
-  return new Date(value).toLocaleString('en-IN', {
+  const date = parseBackendDate(value)
+  if (!date) return '-'
+  return date.toLocaleString('en-IN', {
     day: '2-digit',
     month: 'short',
     year: 'numeric',

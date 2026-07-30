@@ -221,6 +221,24 @@ test('keeps unmarked Snowflake dbt runs on the legacy interleaved phase layout',
   ])
 })
 
+test('recognizes Snowflake dbt deployment mode when a sparse response omits the engine', () => {
+  const run = {
+    source: 'database',
+    target_warehouse: 'snowflake',
+    dbt_deployment_mode: 'generate_and_deploy',
+    database_flow_version: 'generation_first_v1',
+    pipeline_steps: [
+      { key: 'gold_code_execution', label: 'Snowflake dbt Deployment & Build', state: 'RUNNING' },
+    ],
+  }
+
+  const phases = getPhaseGroups(run, getPipelineSteps(run))
+  const target = phases.find((phase) => phase.label === 'Target Execution')
+
+  expect(target?.steps).toHaveLength(1)
+  expect(target?.steps[0]?.label).toBe('Snowflake dbt Deployment & Build')
+})
+
 test('groups marked Snowflake dbt runs into generation and one deployment phase', () => {
   const run = {
     source: 'database',

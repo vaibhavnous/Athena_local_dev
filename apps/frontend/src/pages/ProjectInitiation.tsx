@@ -51,11 +51,13 @@ export default function ProjectInitiation() {
     <div className="flex h-full min-h-0 flex-col gap-5 bg-bg-base">
       <PageHeader eyebrow="Projects" title="Projects." description={`${projects.length} project${projects.length === 1 ? '' : 's'} configured for governed pipeline execution.`} icon={Folder}
         actions={<button type="button" className="btn-primary flex h-10 items-center justify-center gap-2 whitespace-nowrap" onClick={() => openForm()}><Plus size={15}/>New Project</button>} />
-      {(error || create.error || update.error || remove.error) && <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-950/20 p-3 text-xs text-red-400"><AlertTriangle size={14}/>{String((error || create.error || update.error || remove.error)?.message)}</div>}
-      <div className="relative w-full max-w-md"><Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"/><input aria-label="Search projects" className="input-field h-10 pl-9 text-sm" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search projects..."/></div>
-      {isLoading ? <div className="card flex items-center justify-center gap-2 p-12 text-sm text-text-tertiary"><Loader2 className="animate-spin" size={18}/>Loading projects...</div>
-      : filtered.length === 0 && search ? <div className="card flex flex-col items-center gap-3 p-12"><Search size={28} className="text-text-tertiary"/><p className="text-sm text-text-secondary">No matching projects</p></div>
-      : <div className="grid grid-cols-1 items-stretch gap-4 sm:grid-cols-2 lg:grid-cols-3">{filtered.map(project => <ProjectCard key={project.id} project={project} onOpen={() => navigate(`/app/project/${project.id}`)} onStart={() => navigate(`/app/project/${project.id}/new-run`)} onEdit={() => openForm(project)} onDelete={() => remove.mutate(project.id)} deleting={remove.isPending}/>)}<NewProjectCard onClick={() => openForm()}/></div>}
+      <div className="flex min-h-0 flex-1 flex-col gap-4">
+        {(error || create.error || update.error || remove.error) && <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-950/20 p-3 text-xs text-red-400"><AlertTriangle size={14}/>{String((error || create.error || update.error || remove.error)?.message)}</div>}
+        <div className="relative w-full max-w-md"><Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"/><input aria-label="Search projects" className="input-field h-10 pl-9 text-sm" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search projects..."/></div>
+        {isLoading ? <div className="card flex items-center justify-center gap-2 p-12 text-sm text-text-tertiary"><Loader2 className="animate-spin" size={18}/>Loading projects...</div>
+        : filtered.length === 0 && search ? <div className="card flex flex-col items-center gap-3 p-12"><Search size={28} className="text-text-tertiary"/><p className="text-sm text-text-secondary">No matching projects</p></div>
+        : <div className="grid grid-cols-1 items-stretch gap-4 sm:grid-cols-2 lg:grid-cols-3">{filtered.map(project => <ProjectCard key={project.id} project={project} onOpen={() => navigate(`/app/project/${project.id}`)} onStart={() => navigate(`/app/project/${project.id}/new-run`)} onEdit={() => openForm(project)} onDelete={() => remove.mutate(project.id)} deleting={remove.isPending}/>)}<NewProjectCard onClick={() => openForm()}/></div>}
+      </div>
       <AnimatePresence>{formOpen && <ProjectForm initial={editing} connections={connections} connectionsLoading={connectionsLoading} busy={create.isPending || update.isPending} onClose={() => setFormOpen(false)} onSave={save}/>}</AnimatePresence>
     </div>
   )

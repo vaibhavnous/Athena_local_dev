@@ -1,5 +1,5 @@
 import os
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from datetime import datetime, timezone
 import uuid
 from pathlib import Path
 from typing import Any, Dict
@@ -19,9 +19,6 @@ from api.models import PipelineRunRequest, StageContinueRequest
 from utilis.logger import logger
 
 router = APIRouter()
-RUN_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_STATUS_WORKERS", "2"))))
-
-
 def _with_project_execution_config(
     payload: PipelineRunRequest,
     project: Dict[str, Any],
@@ -128,6 +125,7 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "compliance_assessment_id": checkpoint.get("compliance_assessment_id"),
             "compliance_assessment_status": checkpoint.get("compliance_assessment_status"),
             "compliance_review_status": checkpoint.get("compliance_review_status"),
+            "hydration_fallback": True,
         },
     }
 
@@ -149,7 +147,12 @@ def _status_response(run_id: str, run: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest, owner_email: str | None = None) -> None:
+def _seed_run_checkpoint(
+    run_id: str,
+    payload: PipelineRunRequest,
+    owner_email: str | None = None,
+    project: Dict[str, Any] | None = None,
+) -> None:
     from services.pipeline_runtime import (
         DATABASE_GENERATION_FIRST_FLOW_VERSION,
         load_checkpoint_state,
@@ -165,6 +168,18 @@ def _seed_run_checkpoint(run_id: str, payload: PipelineRunRequest, owner_email: 
             **existing,
             "run_id": run_id,
             "project_id": existing.get("project_id") or payload.project_id,
+            "project_name": existing.get("project_name") or (project or {}).get("name"),
+            "project_description": existing.get("project_description") or (project or {}).get("description"),
+            "database_type": existing.get("database_type") or payload.database_type or (project or {}).get("db_type"),
+            "database_name": existing.get("database_name") or payload.database_name or (project or {}).get("database_name"),
+            "use_domain_knowledge_base": (
+                existing.get("use_domain_knowledge_base")
+                if existing.get("use_domain_knowledge_base") is not None
+                else bool((project or {}).get("use_domain_knowledge_base") or payload.use_domain_kb)
+            ),
+            "domain_profile": existing.get("domain_profile") or (project or {}).get("domain_profile"),
+            "knowledge_base_id": existing.get("knowledge_base_id") or (project or {}).get("knowledge_base_id"),
+            "started_at": existing.get("started_at") or datetime.now(timezone.utc).isoformat(),
             "dbt_project_object_name": (
                 existing.get("dbt_project_object_name")
                 or payload.dbt_project_object_name
@@ -317,10 +332,12 @@ def run_pipeline(payload: PipelineRunRequest, user: AuthUser = Depends(get_curre
     if not payload.brd_text.strip():
         raise HTTPException(status_code=400, detail="brd_text is required")
 
+    project = None
     if payload.project_id:
+        project = load_project_for_user(payload.project_id, user)
         payload = _with_project_execution_config(
             payload,
-            load_project_for_user(payload.project_id, user),
+            project,
         )
     else:
         payload = payload.model_copy(update={"dbt_project_object_name": None})
@@ -354,7 +371,7 @@ def run_pipeline(payload: PipelineRunRequest, user: AuthUser = Depends(get_curre
     )
 
     try:
-        _seed_run_checkpoint(run_id, payload, owner_email=user.email)
+        _seed_run_checkpoint(run_id, payload, owner_email=user.email, project=project)
     except Exception:
         logger.error("Failed to initialize checkpoint", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to initialize run checkpoint")
@@ -405,50 +422,79 @@ async def upload_brd(file: UploadFile = File(...)) -> Dict[str, Any]:
 # -------------------------
 # ✅ Pipeline Status
 # -------------------------
+@router.get("/pipeline/{run_id}/summary-status")
+def pipeline_summary_status(
+    run_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Return only fields needed by Run History status badges."""
+    if demo_enabled():
+        return demo_status(run_id)
+
+    from api.routers.runs_router import _status_from_checkpoint
+    from services.pipeline_runtime import load_checkpoint_fields
+
+    fields = load_checkpoint_fields(
+        run_id,
+        "run_id",
+        "status",
+        "background_stage",
+        "next_gate",
+        "next_review_key",
+        "next_stage_key",
+        "next_stage_label",
+        "resume_message",
+        "error",
+        "failed_background_stage",
+        "project_id",
+        "project_name",
+        "brd_filename",
+        "started_at",
+        "completed_at",
+        "updated_at",
+        "owner_email",
+        "created_by_email",
+        "submitted_by_email",
+        "user_email",
+    )
+    checkpoint = assert_run_access(run_id, user, checkpoint=fields)
+    status = _status_from_checkpoint(checkpoint)
+    return {
+        "run_id": run_id,
+        "status": status,
+        "run": {
+            "id": run_id,
+            "run_id": run_id,
+            **checkpoint,
+            "status": status,
+            "failed_stage_key": checkpoint.get("failed_background_stage"),
+            "hydration_fallback": False,
+            "status_authoritative": True,
+        },
+    }
+
+
 @router.get("/pipeline/{run_id}/status")
 def pipeline_status(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
         return demo_status(run_id)
 
-    from api.services.ui_service import ui_run
     from services.pipeline_runtime import load_checkpoint_state
 
     try:
-        try:
-            checkpoint = load_checkpoint_state(run_id) or {}
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail="Failed to verify run access") from exc
+        checkpoint = load_checkpoint_state(run_id) or {}
         checkpoint = assert_run_access(run_id, user, checkpoint=checkpoint)
-        # Active polling must use the checkpoint snapshot. Full UI hydration reads
-        # multiple artifact/log tables and can take longer than the 1.5s UI poll.
-        # Falling back to it here caused alternating stale and current stage payloads.
-        if checkpoint.get("background_stage"):
-            from api.routers.runs_router import _fallback_run_detail
+        from api.routers.runs_router import _fallback_run_detail
 
-            return _status_response(run_id, _fallback_run_detail(run_id, checkpoint))
-
-        timeout_seconds = max(1, int(os.getenv("ATHENA_STATUS_ENDPOINT_TIMEOUT_SECONDS", "5")))
-        future = RUN_STATUS_EXECUTOR.submit(ui_run, run_id)
-        run = future.result(timeout=timeout_seconds)
+        # Status polling must remain checkpoint-only. Full UI hydration touches
+        # artifact and review tables and can outlive its HTTP timeout, starving
+        # the pipeline worker and Run History database requests.
+        return _status_response(run_id, _fallback_run_detail(run_id, checkpoint))
     except HTTPException:
         raise
-    except FutureTimeoutError:
-        logger.warning("Pipeline status hydration timed out; returning fallback status", extra={"run_id": run_id})
-        try:
-            checkpoint = load_checkpoint_state(run_id) or {}
-        except Exception:
-            checkpoint = {}
-        return _fallback_status_payload(run_id, checkpoint=checkpoint)
     except Exception:
         logger.error("Failed to fetch pipeline status", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to fetch run status")
-
-    result_state = run["status"]
-
-    if result_state == "NOT_FOUND":
-        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
-
-    return _status_response(run_id, run)
 
 
 # -------------------------

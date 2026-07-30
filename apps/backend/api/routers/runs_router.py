@@ -1,7 +1,11 @@
 import json
 import os
+import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,7 +23,56 @@ from utilis.logger import logger
 router = APIRouter()
 RUN_LIST_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_LIST_WORKERS", "2"))))
 RUN_SUMMARY_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_SUMMARY_WORKERS", "2"))))
-RUN_DETAIL_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_RUN_DETAIL_WORKERS", "2"))))
+RUN_LIST_RETRY_LOCK = threading.Lock()
+RUN_LIST_RETRY_AFTER = 0.0
+RUN_LIST_RETRY_DELAY_SECONDS = max(30, int(os.getenv("ATHENA_RUNS_RETRY_DELAY_SECONDS", "120")))
+RUN_ID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _utc_timestamp(value: Any) -> Any:
+    """Serialize timezone-less SQL datetimes as UTC, not browser-local time."""
+    if not isinstance(value, datetime):
+        return value
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _with_project_metadata(payload: Dict[str, Any], user: AuthUser) -> Dict[str, Any]:
+    project_id = str(payload.get("project_id") or "").strip()
+    # The checkpoint already carries the project snapshot used by Run History.
+    # Avoid another remote project-table lookup on every status/detail refresh.
+    if not project_id or payload.get("project_name"):
+        return payload
+    try:
+        from api.auth import load_project_for_user
+
+        project = load_project_for_user(project_id, user)
+    except Exception:
+        logger.warning("Unable to enrich run with project metadata", extra={"project_id": project_id})
+        return payload
+    return {
+        **payload,
+        "project_name": payload.get("project_name") or project.get("name"),
+        "project_description": payload.get("project_description") or project.get("description"),
+        "database_type": payload.get("database_type") or payload.get("db_type") or project.get("db_type"),
+        "database_name": payload.get("database_name") or project.get("database_name"),
+        "use_domain_knowledge_base": (
+            _as_bool(payload.get("use_domain_knowledge_base"))
+            or _as_bool(project.get("use_domain_knowledge_base"))
+        ),
+        "domain_profile": payload.get("domain_profile") or project.get("domain_profile"),
+        "knowledge_base_id": payload.get("knowledge_base_id") or project.get("knowledge_base_id"),
+    }
 
 
 def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -28,8 +81,15 @@ def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "id": run_id,
         "run_id": run_id,
         "project_id": row.get("project_id"),
+        "project_name": row.get("project_name"),
+        "project_description": row.get("project_description"),
         "brd_filename": row.get("brd_filename") or run_id,
         "source": row.get("source") or "database",
+        "database_type": row.get("database_type") or row.get("db_type"),
+        "database_name": row.get("database_name"),
+        "use_domain_knowledge_base": _as_bool(row.get("use_domain_knowledge_base")),
+        "domain_profile": row.get("domain_profile"),
+        "knowledge_base_id": row.get("knowledge_base_id"),
         "target_warehouse": row.get("target_warehouse"),
         "execution_engine": row.get("execution_engine") or "native",
         "dbt_deployment_mode": row.get("dbt_deployment_mode") or "generate_only",
@@ -42,8 +102,8 @@ def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "status": row.get("status") or "UNKNOWN",
         "provider": row.get("provider") or "azure_openai",
         "deployment": row.get("deployment"),
-        "started_at": row.get("started_at") or row.get("last_activity"),
-        "completed_at": row.get("completed_at"),
+        "started_at": _utc_timestamp(row.get("started_at")),
+        "completed_at": _utc_timestamp(row.get("completed_at")),
         "cache_hit": "NONE",
         "cache_score": 0,
         "extraction_path": "ATHENA_GRAPH",
@@ -56,7 +116,7 @@ def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "failed_stage_key": None,
         "failed_stage_label": None,
         "error": row.get("error"),
-        "updated_at": row.get("updated_at") or row.get("last_activity"),
+        "updated_at": _utc_timestamp(row.get("updated_at") or row.get("last_activity")),
         "script_counts": {"bronze": 0, "silver": 0, "gold": 0},
         "sftp_entity": row.get("sftp_entity"),
         "source_row_count": row.get("source_row_count"),
@@ -65,7 +125,70 @@ def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "compliance_assessment_id": row.get("compliance_assessment_id"),
         "compliance_assessment_status": row.get("compliance_assessment_status"),
         "compliance_review_status": row.get("compliance_review_status"),
+        "hydration_fallback": True,
+        "status_authoritative": False,
     }
+
+
+def _local_run_history(limit: int) -> List[Dict[str, Any]]:
+    """Build a non-blocking recent-run index from the structured local log.
+
+    This is intentionally a history-list fallback only. Selecting a run still
+    loads its authoritative checkpoint/status from the API.
+    """
+    log_path = Path(__file__).resolve().parents[2] / "pipeline_logs.json"
+    if not log_path.exists():
+        return []
+
+    runs: Dict[str, Dict[str, Any]] = {}
+    try:
+        with log_path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                try:
+                    item = json.loads(raw_line)
+                except (TypeError, ValueError):
+                    continue
+                run_id = str(item.get("run_id") or "").strip()
+                if not RUN_ID_PATTERN.fullmatch(run_id):
+                    continue
+
+                timestamp = item.get("timestamp")
+                row = runs.setdefault(
+                    run_id,
+                    {
+                        "run_id": run_id,
+                        "started_at": timestamp,
+                        "last_activity": timestamp,
+                        "source": item.get("source") or "database",
+                        "status": "UNKNOWN",
+                    },
+                )
+                if timestamp:
+                    row["last_activity"] = timestamp
+                if item.get("source"):
+                    row["source"] = item["source"]
+
+                message = str(item.get("message") or "")
+                status_match = re.search(r"\bstatus=([A-Za-z_]+)", message)
+                if status_match:
+                    row["status"] = _status_from_checkpoint({"status": status_match.group(1)})
+                lowered = message.lower()
+                if "pipeline aborted" in lowered:
+                    row["status"] = "ABORTED"
+                elif "pipeline completed" in lowered or "pipeline complete" in lowered:
+                    row["status"] = "SUCCESS"
+                elif "pipeline failed" in lowered:
+                    row["status"] = "FAILED"
+    except OSError:
+        logger.warning("Unable to read local run history fallback", exc_info=True)
+        return []
+
+    ordered = sorted(
+        runs.values(),
+        key=lambda row: str(row.get("last_activity") or ""),
+        reverse=True,
+    )
+    return [_fallback_run_summary(row) for row in ordered[:limit]]
 
 
 def _status_from_checkpoint(checkpoint: Dict[str, Any]) -> str:
@@ -96,9 +219,18 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         checkpoint = load_checkpoint_state(run_id) or {}
     return {
         **_fallback_run_summary(row),
+        "hydration_fallback": False,
+        "status_authoritative": True,
         "brd_filename": checkpoint.get("brd_filename") or checkpoint.get("display_name") or row.get("brd_filename") or run_id,
         "source": checkpoint.get("source") or row.get("source") or "database",
         "project_id": checkpoint.get("project_id") or row.get("project_id"),
+        "project_name": checkpoint.get("project_name") or row.get("project_name"),
+        "project_description": checkpoint.get("project_description") or row.get("project_description"),
+        "database_type": checkpoint.get("database_type") or checkpoint.get("db_type") or row.get("database_type") or row.get("db_type"),
+        "database_name": checkpoint.get("database_name") or row.get("database_name"),
+        "use_domain_knowledge_base": _as_bool(checkpoint.get("use_domain_knowledge_base")),
+        "domain_profile": checkpoint.get("domain_profile") or row.get("domain_profile"),
+        "knowledge_base_id": checkpoint.get("knowledge_base_id") or row.get("knowledge_base_id"),
         "target_warehouse": checkpoint.get("target_warehouse") or row.get("target_warehouse"),
         "execution_engine": checkpoint.get("execution_engine") or row.get("execution_engine") or "native",
         "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or row.get("dbt_deployment_mode") or "generate_only",
@@ -111,8 +243,8 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "status": _status_from_checkpoint(checkpoint),
         "provider": checkpoint.get("provider") or row.get("provider") or "azure_openai",
         "deployment": checkpoint.get("deployment") or row.get("deployment"),
-        "started_at": checkpoint.get("started_at") or row.get("started_at") or row.get("last_activity"),
-        "completed_at": checkpoint.get("completed_at"),
+        "started_at": _utc_timestamp(checkpoint.get("started_at") or row.get("started_at")),
+        "completed_at": _utc_timestamp(checkpoint.get("completed_at")),
         "next_gate": checkpoint.get("next_gate"),
         "next_review_key": checkpoint.get("next_review_key"),
         "resume_message": checkpoint.get("resume_message"),
@@ -120,7 +252,11 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "failed_stage_key": checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key"),
         "failed_stage_label": checkpoint.get("failed_stage_label"),
         "error": checkpoint.get("error") or row.get("error"),
-        "updated_at": checkpoint.get("updated_at") or checkpoint.get("checkpoint_at") or row.get("last_activity"),
+        "updated_at": _utc_timestamp(
+            checkpoint.get("updated_at")
+            or checkpoint.get("checkpoint_at")
+            or row.get("last_activity")
+        ),
         "sftp_entity": checkpoint.get("sftp_entity") or row.get("sftp_entity"),
         "source_row_count": checkpoint.get("source_row_count") or row.get("source_row_count"),
         "source_columns": checkpoint.get("source_columns") or row.get("source_columns") or [],
@@ -218,6 +354,23 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
     if current_step and external_execution and external_execution.get("message"):
         current_step = {**current_step, "detail": external_execution.get("message")}
 
+    checkpoint_snapshot = {
+        key: checkpoint.get(key)
+        for key in (
+            "run_id",
+            "status",
+            "background_stage",
+            "next_gate",
+            "next_review_key",
+            "next_stage_key",
+            "next_stage_label",
+            "resume_message",
+            "updated_at",
+            "completed_at",
+        )
+        if key in checkpoint
+    }
+
     return {
         **_fallback_run_summary(
             {
@@ -233,13 +386,24 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
                 "provider": checkpoint.get("provider"),
                 "deployment": checkpoint.get("deployment"),
                 "error": checkpoint.get("error"),
+                "started_at": checkpoint.get("started_at"),
+                "completed_at": checkpoint.get("completed_at"),
                 "updated_at": checkpoint.get("updated_at") or checkpoint.get("checkpoint_at"),
+                "project_name": checkpoint.get("project_name"),
+                "project_description": checkpoint.get("project_description"),
+                "database_type": checkpoint.get("database_type") or checkpoint.get("db_type"),
+                "database_name": checkpoint.get("database_name"),
+                "use_domain_knowledge_base": checkpoint.get("use_domain_knowledge_base"),
+                "domain_profile": checkpoint.get("domain_profile"),
+                "knowledge_base_id": checkpoint.get("knowledge_base_id"),
                 "sftp_entity": checkpoint.get("sftp_entity"),
                 "source_row_count": checkpoint.get("source_row_count"),
                 "source_columns": checkpoint.get("source_columns"),
             }
         ),
-        "checkpoint": checkpoint,
+        "hydration_fallback": True,
+        "status_authoritative": bool(checkpoint),
+        "checkpoint": checkpoint_snapshot,
         "execution_ready": checkpoint.get("execution_ready"),
         "awaiting_stage_confirmation": checkpoint.get("awaiting_stage_confirmation"),
         "next_stage_key": checkpoint.get("next_stage_key"),
@@ -275,6 +439,8 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
 # -------------------------
 @router.get("/runs")
 def runs(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
+    global RUN_LIST_RETRY_AFTER
+
     if demo_enabled():
         return demo_runs()
 
@@ -282,16 +448,23 @@ def runs(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
 
     try:
         # ✅ configurable timeout with safe minimum
-        timeout_seconds = max(1, int(os.getenv("ATHENA_RUNS_ENDPOINT_TIMEOUT_SECONDS", "5")))
+        timeout_seconds = max(1, int(os.getenv("ATHENA_RUNS_ENDPOINT_TIMEOUT_SECONDS", "10")))
         run_limit = max(1, min(100, int(os.getenv("ATHENA_RUNS_LIST_LIMIT", "10"))))
         fast_summary = str(os.getenv("ATHENA_RUNS_FAST_SUMMARY", "true")).lower() not in {"0", "false", "no"}
         deadline = time.monotonic() + timeout_seconds
 
         logger.debug("Fetching runs list", extra={"timeout_seconds": timeout_seconds, "limit": run_limit})
 
+        with RUN_LIST_RETRY_LOCK:
+            retry_after = RUN_LIST_RETRY_AFTER
+        if user.user_type == "Admin" and time.monotonic() < retry_after:
+            return _local_run_history(run_limit)
+
         list_kwargs = {} if user.user_type == "Admin" else {"owner_email": user.email}
         future = RUN_LIST_EXECUTOR.submit(list_runs, run_limit, **list_kwargs)
         rows = future.result(timeout=timeout_seconds)
+        with RUN_LIST_RETRY_LOCK:
+            RUN_LIST_RETRY_AFTER = 0.0
 
         results: List[Dict[str, Any]] = []
 
@@ -305,6 +478,24 @@ def runs(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
                 except Exception:
                     logger.warning("Failed to build checkpoint run summary; returning fallback summary", extra={"run_id": run_id})
                     results.append(_fallback_run_summary(row))
+            if user.user_type == "Admin":
+                local_by_id = {
+                    str(item.get("run_id")): item
+                    for item in _local_run_history(max(run_limit, len(results)))
+                }
+                results = [
+                    {
+                        **summary,
+                        "status": (
+                            local_by_id.get(str(summary.get("run_id")), {}).get("status")
+                            if str(summary.get("status") or "UNKNOWN").upper() == "UNKNOWN"
+                            else summary.get("status")
+                        ) or "UNKNOWN",
+                        "started_at": summary.get("started_at")
+                        or local_by_id.get(str(summary.get("run_id")), {}).get("started_at"),
+                    }
+                    for summary in results
+                ]
             return results
 
         for row in rows:
@@ -342,10 +533,18 @@ def runs(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
             future.cancel()
         except Exception:
             pass
+        if user.user_type == "Admin":
+            with RUN_LIST_RETRY_LOCK:
+                RUN_LIST_RETRY_AFTER = time.monotonic() + RUN_LIST_RETRY_DELAY_SECONDS
+            return _local_run_history(run_limit)
         raise HTTPException(status_code=503, detail="Run list temporarily unavailable")
 
     except Exception:
         logger.error("Failed to fetch runs", exc_info=True)
+        if user.user_type == "Admin":
+            with RUN_LIST_RETRY_LOCK:
+                RUN_LIST_RETRY_AFTER = time.monotonic() + RUN_LIST_RETRY_DELAY_SECONDS
+            return _local_run_history(run_limit)
         raise HTTPException(status_code=503, detail="Failed to fetch runs")
 
 
@@ -357,19 +556,13 @@ def run_detail(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[
     if demo_enabled():
         return demo_run(run_id, include_scripts=True)
 
-    from api.services.ui_service import ui_run
-    from services.pipeline_runtime import load_checkpoint_state
-
     try:
         checkpoint = assert_run_access(run_id, user)
-        timeout_seconds = max(1, int(os.getenv("ATHENA_RUN_DETAIL_TIMEOUT_SECONDS", "8")))
-        future = RUN_DETAIL_EXECUTOR.submit(ui_run, run_id, include_scripts=True)
-        return future.result(timeout=timeout_seconds)
+        # Run History needs the persisted state immediately. Generated scripts
+        # are loaded by /run-scripts only when the user opens the code viewer.
+        return _with_project_metadata(_fallback_run_detail(run_id, checkpoint), user)
     except HTTPException:
         raise
-    except FutureTimeoutError:
-        logger.warning("GET /runs/{run_id} detail timed out; returning fallback detail", extra={"run_id": run_id})
-        return _fallback_run_detail(run_id, checkpoint)
     except Exception:
         logger.error(
             "Failed to fetch run detail",
@@ -382,7 +575,7 @@ def run_detail(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[
             raise
         except Exception:
             checkpoint = {}
-        return _fallback_run_detail(run_id, checkpoint)
+        return _with_project_metadata(_fallback_run_detail(run_id, checkpoint), user)
 
 
 @router.get("/run-scripts/{run_id}")

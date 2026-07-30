@@ -2,23 +2,110 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Play, RefreshCcw, RotateCcw, Square, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Code2, Copy, Download, FileText, Loader2, Play, RefreshCcw, RotateCcw, Square, X } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import PipelineLogsPanel from '../components/pipeline/PipelineLogsPanel'
 import { PageHeader } from '../components/shared/DashboardLayout'
-import { formatPipelineStepLabel, getPhaseGroups, getPipelineSteps, isGenerationFirstDatabaseRun, isSnowflakeDbtRun, normalizeState, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
-import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
-import { abortRun, continueStage, getRun, getRunStatus, getRuns, getRunScripts, restartRun, resumeFromFailure, retryFailedStage } from '../api/athenaApi'
+import { formatPipelineStepLabel, getGateDisplayName, getPhaseGroups, getPipelineSteps, isGenerationFirstDatabaseRun, isSnowflakeDbtRun, normalizeState, statusTone, summarizeRunSource } from '../utils/pipelinePhases'
+import { isDemoFallbackRun } from '../utils/demoFallbacks'
+import {
+  abortRun,
+  continueStage,
+  fetchKpiReviews,
+  getBronzeReview,
+  getEnrichmentReviews,
+  getGoldReview,
+  getPipelineKpis,
+  getRunStatus,
+  getRunScripts,
+  getSilverMergeKeyReview,
+  getSilverReview,
+  getTableReviews,
+  restartRun,
+  resumeFromFailure,
+  retryFailedStage,
+} from '../api/athenaApi'
+import { isTransientReadError } from '../utils/apiErrors'
+import { activeReviewKey, hasRenderableReviewData } from '../utils/reviewReadiness'
 
 const ACTIVE_RUN_REFRESH_INTERVAL_MS = 5000
 const ACTIVE_RUN_FAST_REFRESH_INTERVAL_MS = 1500
+const REVIEW_READY_POLL_INTERVAL_MS = 1500
+const HIDDEN_CODE_REVIEW_STEPS = new Set(['gate4', 'gate5', 'gold_review'])
 
-function isTimeoutError(error) {
-  return error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '')
+async function fetchReviewPayload(runId, reviewKey) {
+  if (reviewKey === 'silver_merge_key_review') return getSilverMergeKeyReview(runId)
+  if (reviewKey === 'gold_review') return getGoldReview(runId)
+  if (reviewKey === 5) return getSilverReview(runId)
+  if (reviewKey === 4) return getBronzeReview(runId)
+  if (reviewKey === 3) return getEnrichmentReviews(runId)
+  if (reviewKey === 2) return getTableReviews(runId)
+  const review = await fetchKpiReviews(runId)
+  return hasRenderableReviewData(review, 1) ? review : getPipelineKpis(runId)
 }
 
-function isTransientReadError(error) {
-  return isTimeoutError(error) || Number(error?.status) === 503
+function reviewPath(runId, reviewKey) {
+  const encodedRunId = encodeURIComponent(runId)
+  return typeof reviewKey === 'string'
+    ? `/app/hitl?runId=${encodedRunId}&review=${encodeURIComponent(reviewKey)}`
+    : `/app/hitl?runId=${encodedRunId}&gate=${reviewKey}`
+}
+
+export function reviewWaitPatchFromLogs(logs = []) {
+  for (let index = logs.length - 1; index >= 0; index -= 1) {
+    const log = logs[index] || {}
+    const text = [log.stage, log.step_name, log.message].filter(Boolean).join(' ')
+    const status = /\bstatus[=:]\s*([A-Z_]+)/i.exec(text)?.[1]?.toUpperCase()
+    if (status && ['RUNNING', 'PROCESSING', 'COMPLETED', 'SUCCESS', 'FAILED', 'ABORTED', 'CANCELLED'].includes(status)) {
+      return null
+    }
+    if (status !== 'HITL_WAIT' && !/\bHITL_WAIT\b/i.test(text)) continue
+
+    if (/\bsilver_merge_key_review\b/i.test(text)) {
+      return {
+        status: 'HITL_WAIT',
+        next_gate: 0,
+        next_review_key: 'silver_merge_key_review',
+        background_stage: 'silver_merge_key_review',
+        resume_message: 'Silver Merge Key Review is loading.',
+      }
+    }
+    if (/\bgold_review\b/i.test(text)) {
+      return {
+        status: 'HITL_WAIT',
+        next_gate: 0,
+        next_review_key: 'gold_review',
+        background_stage: 'gold_review',
+        resume_message: 'Gold Code Review is loading.',
+      }
+    }
+
+    const gate = Number(/\bgate([1-5])\b/i.exec(text)?.[1] || 0)
+    if (gate) {
+      return {
+        status: 'HITL_WAIT',
+        next_gate: gate,
+        next_review_key: null,
+        background_stage: `gate${gate}`,
+        resume_message: `${getGateDisplayName(gate, '')} is loading.`,
+      }
+    }
+  }
+  return null
+}
+
+export function pipelineActivityFromLogs(logs = []) {
+  for (let index = logs.length - 1; index >= 0; index -= 1) {
+    const log = logs[index] || {}
+    const stage = String(log.stage || log.step_name || '').toLowerCase()
+    if (stage.endsWith('_router') || stage === 'runs_router') continue
+    const text = [log.stage, log.step_name, log.message].filter(Boolean).join(' ').toUpperCase()
+    if (/\b(PIPELINE_COMPLETED|COMPLETED PIPELINE|STATUS[=:]\s*(FAILED|ABORTED|CANCELLED|CANCELED))\b/.test(text)) {
+      return false
+    }
+    return true
+  }
+  return null
 }
 
 function shouldUseStatusRefresh(run) {
@@ -48,7 +135,7 @@ function furthestActivePhase(phases = []) {
 function PipelineMonitor() {
   const navigate = useNavigate()
   const location = useLocation()
-  const { runs, activeRunId, setActiveRun, setRuns, updateRun, setServerOnline, addNotification, addRun } = useAthenaStore()
+  const { runs, activeRunId, setActiveRun, updateRun, setServerOnline, addNotification, addRun } = useAthenaStore()
   const pendingRun = location.state?.pendingRun || null
   const routedActiveRunId = location.state?.activeRunId || null
   const storeActiveRun = activeRunId ? runs.find((run) => run.id === activeRunId) || null : null
@@ -74,21 +161,22 @@ function PipelineMonitor() {
         : null,
     [activeRun]
   )
-  const runsRequestInFlightRef = useRef(false)
   const activeRunRequestInFlightRef = useRef(false)
+  const reviewAutoOpenSessionRef = useRef(new Set())
   const lastLogTriggeredRefreshRef = useRef(0)
-  const latestRunsRef = useRef(runs)
   const latestActiveRunRef = useRef(activeRun)
+  const [preparingReviewKey, setPreparingReviewKey] = useState(null)
+  const [observedPipelineActivity, setObservedPipelineActivity] = useState(false)
   const actualSteps = useMemo(() => getPipelineSteps(activeRun), [activeRun])
   const actualPhases = useMemo(() => getPhaseGroups(activeRun, actualSteps), [activeRun, actualSteps])
 
   useEffect(() => {
-    latestRunsRef.current = runs
-  }, [runs])
-
-  useEffect(() => {
     latestActiveRunRef.current = activeRun
   }, [activeRun])
+
+  useEffect(() => {
+    setObservedPipelineActivity(false)
+  }, [activeRunStableId])
 
   useEffect(() => {
     if (!pendingRun || !activeRun?.id || suppressStaleActiveRun) return
@@ -106,10 +194,8 @@ function PipelineMonitor() {
 
     activeRunRequestInFlightRef.current = true
     try {
-      const currentRun = latestActiveRunRef.current
-      const data = shouldUseStatusRefresh(currentRun)
-        ? ((await getRunStatus(activeRunStableId))?.run || await getRun(activeRunStableId))
-        : await getRun(activeRunStableId)
+      const data = (await getRunStatus(activeRunStableId))?.run
+      if (!data) throw new Error('Run status response did not include a run snapshot.')
       updateRun(activeRunStableId, data)
       setServerOnline(true)
       return true
@@ -126,64 +212,18 @@ function PipelineMonitor() {
     }
   }, [activeRunStableId, activeRunIsDemoFallback, updateRun, setServerOnline])
 
-  const handleLogsUpdated = useCallback(() => {
+  const handleLogsUpdated = useCallback((newLogs = []) => {
+    const activity = pipelineActivityFromLogs(newLogs)
+    if (activity !== null) setObservedPipelineActivity(activity)
+    const reviewPatch = reviewWaitPatchFromLogs(newLogs)
+    if (reviewPatch && activeRunStableId) {
+      updateRun(activeRunStableId, reviewPatch)
+    }
     const now = Date.now()
     if (now - lastLogTriggeredRefreshRef.current < 2000) return
     lastLogTriggeredRefreshRef.current = now
     void refreshActiveRunNow()
-  }, [refreshActiveRunNow])
-
-  useEffect(() => {
-    let cancelled = false
-    let timer: number | null = null
-
-    const scheduleNext = (delay = 8000) => {
-      if (!cancelled) {
-        timer = window.setTimeout(refreshRuns, delay)
-      }
-    }
-
-    const refreshRuns = async () => {
-      const currentRuns = latestRunsRef.current || []
-      if (ENABLE_DEMO_FALLBACKS && currentRuns.length > 0 && currentRuns.every((run) => isDemoFallbackRun(run))) {
-        setRuns(getDemoRuns())
-        scheduleNext(2000)
-        return
-      }
-
-      if (runsRequestInFlightRef.current) {
-        scheduleNext()
-        return
-      }
-
-      runsRequestInFlightRef.current = true
-      try {
-        const data = await getRuns()
-        if (!cancelled && Array.isArray(data)) {
-          setRuns(data)
-          setServerOnline(true)
-        }
-      } catch (error) {
-        if (!cancelled) {
-          if (!isTransientReadError(error)) {
-            setServerOnline(false)
-            console.warn('[PipelineMonitor] Failed to refresh runs', error)
-          } else {
-            console.debug('[PipelineMonitor] Runs refresh timed out; keeping existing data')
-          }
-        }
-      } finally {
-        runsRequestInFlightRef.current = false
-        scheduleNext()
-      }
-    }
-
-    refreshRuns()
-    return () => {
-      cancelled = true
-      if (timer !== null) window.clearTimeout(timer)
-    }
-  }, [setRuns, setServerOnline])
+  }, [activeRunStableId, refreshActiveRunNow, updateRun])
 
   useEffect(() => {
     if (!activeRunStableId || activeRunIsDemoFallback) return
@@ -211,17 +251,98 @@ function PipelineMonitor() {
     }
   }, [activeRunStableId, activeRunIsDemoFallback, refreshActiveRunNow])
 
-  // pipelinePhases is the single renderer contract; re-inferring completion here
-  // previously promoted a review artifact into completed Silver execution.
-  const renderedPhases = actualPhases
+  useEffect(() => {
+    const reviewKey = activeReviewKey(activeRun)
+    const reviewStatus = normalizeState(activeRun?.status)
+    const reviewWaiting = ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(reviewStatus)
+    if (!activeRunStableId || activeRunIsDemoFallback) return
+    if (!reviewKey || !reviewWaiting) {
+      setPreparingReviewKey(null)
+      for (const sessionKey of reviewAutoOpenSessionRef.current) {
+        if (sessionKey.startsWith(`${activeRunStableId}:`)) {
+          reviewAutoOpenSessionRef.current.delete(sessionKey)
+        }
+      }
+      return
+    }
+
+    const sessionKey = `${activeRunStableId}:${reviewKey}`
+    if (reviewAutoOpenSessionRef.current.has(sessionKey)) return
+    setPreparingReviewKey(reviewKey)
+
+    let cancelled = false
+    let timer: number | null = null
+    const isFileSource = ['sftp', 'adls_gen2'].includes(String(activeRun?.source || '').toLowerCase())
+
+    const scheduleNext = () => {
+      if (!cancelled) timer = window.setTimeout(checkReviewReady, REVIEW_READY_POLL_INTERVAL_MS)
+    }
+
+    const openPreparedReview = (payload) => {
+      if (cancelled) return
+      updateRun(activeRunStableId, payload)
+      setPreparingReviewKey(null)
+      reviewAutoOpenSessionRef.current.add(sessionKey)
+      setActiveRun(activeRunStableId)
+      navigate(reviewPath(activeRunStableId, reviewKey), {
+        state: { backgroundLocation: location },
+      })
+    }
+
+    const checkReviewReady = async () => {
+      try {
+        const currentRun = latestActiveRunRef.current
+        if (hasRenderableReviewData(currentRun, reviewKey, isFileSource)) {
+          openPreparedReview(currentRun)
+          return
+        }
+
+        const payload = await fetchReviewPayload(activeRunStableId, reviewKey)
+        if (hasRenderableReviewData(payload, reviewKey, isFileSource)) {
+          openPreparedReview(payload)
+          return
+        }
+      } catch (error) {
+        if (!isTransientReadError(error)) {
+          console.debug('[PipelineMonitor] Review artifacts are not ready yet', error)
+        }
+      }
+      scheduleNext()
+    }
+
+    checkReviewReady()
+    return () => {
+      cancelled = true
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [
+    activeRun,
+    activeRunIsDemoFallback,
+    activeRunStableId,
+    location,
+    navigate,
+    setActiveRun,
+    updateRun,
+  ])
+
+  const renderedPhases = useMemo(
+    () => markNextPendingStage(
+      actualPhases
+        .map((phase) => buildPipelineDisplayPhase(phase, actualSteps, activeRun))
+        .map((phase) => markPreparingReview(phase, preparingReviewKey)),
+      activeRun,
+      observedPipelineActivity,
+    ),
+    [activeRun, actualPhases, actualSteps, observedPipelineActivity, preparingReviewKey]
+  )
 
   const defaultExpandedPhase = useMemo(() => {
-    if (!actualPhases?.length) return 'phase-1'
-    const active = furthestActivePhase(actualPhases)
+    if (!renderedPhases?.length) return 'phase-1'
+    const active = furthestActivePhase(renderedPhases)
     if (active?.phase) return active.phase.id
-    const firstIncomplete = actualPhases.find((phase) => phase.completed < phase.total)
-    return firstIncomplete?.id || actualPhases[actualPhases.length - 1].id
-  }, [actualPhases])
+    const firstIncomplete = renderedPhases.find((phase) => phase.completed < phase.total)
+    return firstIncomplete?.id || renderedPhases[renderedPhases.length - 1].id
+  }, [renderedPhases])
 
   const [expandedPhase, setExpandedPhase] = useState(defaultExpandedPhase)
   const autoExpandedPhaseRef = useRef(defaultExpandedPhase)
@@ -274,7 +395,7 @@ function PipelineMonitor() {
           gold: payload?.gold,
         })
       } catch (error) {
-        if (!cancelled && !isTimeoutError(error)) {
+        if (!cancelled && !isTransientReadError(error)) {
           console.warn('[PipelineMonitor] Failed to load run scripts', error)
         }
       }
@@ -333,7 +454,7 @@ function PipelineMonitor() {
     setFailureActionSubmitting('retry')
     try {
       await retryFailedStage(activeRun.id)
-      const refreshed = await getRun(activeRun.id)
+      const refreshed = (await getRunStatus(activeRun.id))?.run
       updateRun(activeRun.id, refreshed)
       addNotification({
         type: 'success',
@@ -358,7 +479,7 @@ function PipelineMonitor() {
     setFailureActionSubmitting('resume')
     try {
       await resumeFromFailure(activeRun.id)
-      const refreshed = await getRun(activeRun.id)
+      const refreshed = (await getRunStatus(activeRun.id))?.run
       updateRun(activeRun.id, refreshed)
       addNotification({
         type: 'success',
@@ -383,7 +504,7 @@ function PipelineMonitor() {
     setFailureActionSubmitting('restart')
     try {
       const restarted = await restartRun(activeRun.id)
-      const nextRun = await getRun(restarted.run_id)
+      const nextRun = (await getRunStatus(restarted.run_id))?.run
       addRun(nextRun)
       setActiveRun(nextRun.id)
       addNotification({
@@ -419,7 +540,7 @@ function PipelineMonitor() {
         stage_confirmation: null,
         resume_message: continuation?.resume_message || `${stageConfirmation?.next_stage_label || 'The next stage'} is starting.`,
       })
-      const refreshed = await getRun(activeRun.id)
+      const refreshed = (await getRunStatus(activeRun.id))?.run
       updateRun(activeRun.id, refreshed)
       addNotification({
         type: 'success',
@@ -477,7 +598,7 @@ function PipelineMonitor() {
     setRerunningStepKey(step.key)
     try {
       const restarted = await restartRun(activeRun.id)
-      const nextRun = await getRun(restarted.run_id)
+      const nextRun = (await getRunStatus(restarted.run_id))?.run
       addRun(nextRun)
       setActiveRun(nextRun.id)
       addNotification({
@@ -555,81 +676,84 @@ function PipelineMonitor() {
         title="Live pipeline monitor."
         description={<span>BRD: <strong className="font-semibold text-text-secondary">{monitorRun.brd_filename || runLabel}</strong>{' '}Run ID: <strong className="font-semibold text-text-secondary">{monitorRun.id}</strong></span>}
         actions={
-          <button
-            type="button"
-            onClick={handleCancelRun}
-            disabled={stageConfirmSubmitting || ['COMPLETED', 'FAILED', 'ABORTED', 'CANCELLED', 'CANCELED'].includes(normalizeState(monitorRun.status))}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 text-xs font-semibold text-red-400 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Square size={12} />
-            {stageConfirmSubmitting ? 'Cancelling...' : 'Cancel Run'}
-          </button>
+          <div className="flex items-center gap-2">
+            <StatusPill status={monitorRun.status} tone={statusTone(monitorRun.status)} />
+            <button
+              type="button"
+              onClick={handleCancelRun}
+              disabled={stageConfirmSubmitting || ['COMPLETED', 'FAILED', 'ABORTED', 'CANCELLED', 'CANCELED'].includes(normalizeState(monitorRun.status))}
+              className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 text-xs font-semibold text-red-400 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Square size={12} />
+              {stageConfirmSubmitting ? 'Cancelling...' : 'Cancel Run'}
+            </button>
+          </div>
         }
         compact
       />
 
         {isFailedRun && dismissedFailureBannerFor !== monitorRun.id && (
-          <div className="rounded-2xl border border-red-500/35 bg-[#17111d] px-6 py-5 shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
-            <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div className="flex min-w-0 items-start gap-4">
-              <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border border-red-500/30 bg-red-500/10 text-red-400">
-                <AlertTriangle size={18} />
+          <div className="rounded-lg border border-red-500/35 bg-[#17111d] px-4 py-3 shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex min-w-0 items-start gap-3">
+              <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/10 text-red-400">
+                <AlertTriangle size={15} />
               </div>
               <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
                   <div className="flex min-w-0 items-center gap-2 font-semibold text-white">
-                    <FileText size={15} className="text-[#b8c3d9]" />
+                    <FileText size={13} className="text-[#b8c3d9]" />
                     <span className="max-w-[420px] truncate">{monitorRun.brd_filename || 'BRD File Name'}</span>
                   </div>
-                  <span className="rounded-lg border border-red-500/35 bg-red-500/12 px-2.5 py-1 text-xs font-semibold text-red-400">
+                  <span className="rounded-md border border-red-500/35 bg-red-500/12 px-2 py-0.5 text-[10px] font-semibold text-red-400">
                     Failed
                   </span>
                   <span className="text-[#d4d9e5]">at `{failureSummary.failedStage}`</span>
                   <span className="text-[#9da7bb]">{failureSummary.progressLabel}</span>
                 </div>
                 {monitorRun?.error && (
-                  <div className="mt-2 max-w-[920px] truncate text-sm text-red-300/90">
+                  <div className="mt-1 max-w-[920px] truncate text-xs text-red-300/90">
                     {monitorRun.error}
                   </div>
                 )}
-                <div className="mt-2 flex items-center gap-2 text-sm text-[#9da7bb]">
-                  <Clock3 size={14} />
+                <div className="mt-1 flex items-center gap-1.5 text-xs text-[#9da7bb]">
+                  <Clock3 size={12} />
                   {failureSummary.timeAgo}
                 </div>
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3 xl:justify-end">
+            <div className="flex flex-wrap items-center gap-2 xl:justify-end">
               <button
                 onClick={handleRetryFailedStage}
                 disabled={failureActionSubmitting !== ''}
-                className="inline-flex h-11 items-center gap-2 rounded-xl border border-amber-500/35 bg-amber-500/10 px-5 text-sm font-semibold text-amber-400 transition-colors hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-amber-500/35 bg-amber-500/10 px-3 text-xs font-semibold text-amber-400 transition-colors hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <RotateCcw size={16} />
+                <RotateCcw size={13} />
                 {failureActionSubmitting === 'retry' ? 'Retrying...' : 'Retry Failed Stage'}
               </button>
               <button
                 onClick={handleResumeFromFailure}
                 disabled={failureActionSubmitting !== ''}
-                className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#3f82ff]/40 bg-[#3f82ff]/10 px-5 text-sm font-semibold text-[#3f82ff] transition-colors hover:bg-[#3f82ff]/15 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#3f82ff]/40 bg-[#3f82ff]/10 px-3 text-xs font-semibold text-[#3f82ff] transition-colors hover:bg-[#3f82ff]/15 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <Play size={16} />
+                <Play size={13} />
                 {failureActionSubmitting === 'resume' ? 'Resuming...' : 'Resume from Failure'}
               </button>
               <button
                 onClick={handleRestartFailedRun}
                 disabled={failureActionSubmitting !== ''}
-                className="inline-flex h-11 items-center gap-2 rounded-xl border border-[#2e394d] bg-[#101827] px-5 text-sm font-semibold text-white transition-colors hover:bg-[#152033] disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[#2e394d] bg-[#101827] px-3 text-xs font-semibold text-white transition-colors hover:bg-[#152033] disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <RefreshCcw size={16} />
+                <RefreshCcw size={13} />
                 {failureActionSubmitting === 'restart' ? 'Restarting...' : 'Restart'}
               </button>
               <button
                 onClick={() => setDismissedFailureBannerFor(monitorRun.id)}
-                className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#2e394d] bg-transparent text-[#8d96a9] transition-colors hover:bg-white/5 hover:text-white"
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#2e394d] bg-transparent text-[#8d96a9] transition-colors hover:bg-white/5 hover:text-white"
                 aria-label="Dismiss failure banner"
               >
-                <X size={16} />
+                <X size={14} />
               </button>
             </div>
             </div>
@@ -638,6 +762,15 @@ function PipelineMonitor() {
 
       <div className="flex flex-col gap-4 md:min-h-0 md:flex-1 md:flex-row">
         <section className="flex min-h-[360px] flex-col overflow-hidden rounded-lg border border-[#253044] bg-[#080e1d] md:min-h-0 md:w-1/3 md:flex-shrink-0">
+          <div className="flex shrink-0 items-center justify-between border-b border-[#253044] bg-gradient-to-r from-[#111827] to-[#111827]/50 px-4 py-3">
+            <div>
+              <h4 className="text-sm font-semibold text-gray-100">Pipeline Stages</h4>
+              <p className="mt-1 text-xs text-gray-500">Live stage progress and review gates</p>
+            </div>
+            <span className="rounded-md border border-[#253044] bg-[#0b1120] px-2 py-1 text-[10px] font-medium text-[#8a9ab7]">
+              {renderedPhases.length} phases
+            </span>
+          </div>
           <div className="min-h-0 flex-1 divide-y divide-[#253044] overflow-y-auto">
             {renderedPhases.map((phase, index) => {
               const expanded = expandedPhase === phase.id
@@ -651,7 +784,7 @@ function PipelineMonitor() {
                     }`}
                   >
                     <div className="flex min-w-0 flex-1 items-center gap-3">
-                      <PhaseNumber index={index + 1} tone={tone} status={phase.status} />
+                      <PhaseNumber index={index + 1} tone={tone} />
                       <div className="min-w-0">
                         <div className={`text-xs font-semibold leading-tight ${expanded || tone !== 'slate' ? 'text-white' : 'text-[#7d8daa]'}`}>
                           {phase.label}
@@ -860,18 +993,7 @@ function buildFailureSummary(run) {
   }
 }
 
-function RunningRing() {
-  return (
-    <span
-      aria-hidden="true"
-      data-running-indicator="rotation"
-      className="pointer-events-none absolute -inset-1 rounded-full border-2 border-transparent border-t-[#3f82ff] animate-spin motion-reduce:animate-none"
-    />
-  )
-}
-
-function PhaseNumber({ index, tone, status }) {
-  const running = String(status || '').toLowerCase() === 'running'
+function PhaseNumber({ index, tone }) {
   const toneClass =
     tone === 'emerald'
       ? 'border-emerald-500/40 text-emerald-400'
@@ -885,7 +1007,6 @@ function PhaseNumber({ index, tone, status }) {
 
   return (
     <div className="relative h-7 w-7 flex-shrink-0">
-      {running && <RunningRing />}
       <div className={`relative flex h-7 w-7 items-center justify-center rounded-full border-2 bg-[#080e1d] text-[11px] font-bold ${toneClass}`}>
         {tone === 'emerald' ? <CheckCircle2 size={13} /> : index}
       </div>
@@ -959,8 +1080,11 @@ function StepRow({ step, index = 0, isLast = false, onOpenReview, onRerun, rerun
             ? 'border-red-400 bg-red-500/10 text-red-400'
             : 'border-[#253044] bg-[#0b1120] text-[#64748b]'
         }`}>
-          {running && <RunningRing />}
-          {complete ? <CheckCircle2 size={12} /> : <Circle size={running ? 8 : 10} className={running ? 'animate-pulse' : ''} />}
+          {complete
+            ? <CheckCircle2 size={12} />
+            : running
+            ? <Loader2 size={12} className="animate-spin" data-running-indicator="rotation" />
+            : <Circle size={10} />}
         </div>
         {!isLast && <div className={`mt-1 w-px flex-1 ${complete ? 'bg-emerald-500/30' : 'bg-[#253044]'}`} />}
       </div>
@@ -968,6 +1092,12 @@ function StepRow({ step, index = 0, isLast = false, onOpenReview, onRerun, rerun
         <div className={`min-w-0 truncate text-xs font-medium leading-tight ${complete || waiting || running ? 'text-[#d1d5db]' : 'text-[#6b7280]'}`}>
           {step.label}
         </div>
+        {step.preparingReview && (
+          <span className="shrink-0 text-[10px] font-medium text-[#3f82ff]">Loading…</span>
+        )}
+        {step.inferredProgress && (
+          <span className="shrink-0 text-[10px] font-medium text-[#3f82ff]">Starting…</span>
+        )}
         {complete && onRerun && (
           <button
             type="button"
@@ -1056,6 +1186,68 @@ function formatScriptBody(script) {
   const body = script?.body || '# Script body is not available.'
   if (!script?.dimension_body) return body
   return `${body}\n\n# ---------------- Gold dimension script ----------------\n\n${script.dimension_body}`
+}
+
+export function markPreparingReview(phase, reviewKey) {
+  if (!reviewKey) return phase
+  const stepKey = typeof reviewKey === 'number' ? `gate${reviewKey}` : reviewKey
+  let matched = false
+  const steps = (phase.steps || []).map((step) => {
+    if (step.key !== stepKey) return step
+    matched = true
+    return {
+      ...step,
+      state: 'RUNNING',
+      complete: false,
+      preparingReview: true,
+      detail: 'Review content is loading.',
+    }
+  })
+  if (!matched) return phase
+
+  return {
+    ...phase,
+    steps,
+    completed: steps.filter((step) => isCompletedStepState(step.state)).length,
+    total: steps.length,
+    status: 'Running',
+  }
+}
+
+export function markNextPendingStage(phases = [], run = null, observedPipelineActivity = false) {
+  const runState = normalizeState(run?.status)
+  const terminal = ['COMPLETED', 'FAILED', 'ABORTED', 'CANCELLED', 'CANCELED', 'HITL_WAIT'].includes(runState)
+  if (terminal || (runState !== 'RUNNING' && !observedPipelineActivity)) return phases
+
+  const hasExplicitActiveStage = phases.some((phase) =>
+    (phase.steps || []).some((step) =>
+      ['RUNNING', 'HITL_WAIT', 'FAILED'].includes(normalizeState(step.state))
+    )
+  )
+  if (hasExplicitActiveStage) return phases
+
+  let promoted = false
+  return phases.map((phase) => {
+    const steps = (phase.steps || []).map((step) => {
+      if (promoted || normalizeState(step.state) !== 'PENDING') return step
+      promoted = true
+      return {
+        ...step,
+        state: 'RUNNING',
+        complete: false,
+        inferredProgress: true,
+        detail: step.detail || 'The previous stage completed. Waiting for the backend to report this stage.',
+      }
+    })
+    if (!steps.some((step) => step.inferredProgress)) return phase
+    return {
+      ...phase,
+      steps,
+      completed: steps.filter((step) => isCompletedStepState(step.state)).length,
+      total: steps.length,
+      status: 'Running',
+    }
+  })
 }
 
 export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
@@ -1206,6 +1398,7 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
     ]
   }
 
+  displaySteps = displaySteps.filter((step) => !HIDDEN_CODE_REVIEW_STEPS.has(step.key))
   displaySteps = clampLinearStepStates(displaySteps)
 
   const completed = displaySteps.filter((step) => isCompletedStepState(step.state)).length
@@ -1220,6 +1413,7 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
 
   return {
     ...phase,
+    label: phase.label === 'Code Generation & Reviews' ? 'Code Generation' : phase.label,
     steps: displaySteps,
     completed,
     total: displaySteps.length,

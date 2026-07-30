@@ -560,6 +560,7 @@ def test_pipeline_status_fallback_treats_completed_databricks_gold_as_terminal()
     assert payload["run"]["awaiting_stage_confirmation"] is False
     assert payload["run"]["next_stage_key"] is None
     assert payload["run"]["next_stage_label"] is None
+    assert payload["run"]["hydration_fallback"] is True
 
 
 def test_pipeline_status_fallback_treats_databricks_gold_warnings_as_terminal():
@@ -809,6 +810,7 @@ def test_generation_first_fallback_keeps_pending_gold_review():
 
     assert detail["status"] == "HITL_WAIT"
     assert detail["next_review_key"] == "gold_review"
+    assert detail["hydration_fallback"] is True
 
 
 def test_bronze_review_normalizes_legacy_feed_lineage_fields():
