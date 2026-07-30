@@ -4,6 +4,7 @@ import {
   getPipelineLogsSinceWithLimit,
 } from '../api/athenaApi'
 import useAthenaStore from '../store/useAthenaStore'
+import { isTransientReadError } from '../utils/apiErrors'
 
 export interface PipelineLog {
   log_id: string
@@ -19,6 +20,17 @@ export interface PipelineLog {
 }
 
 type NewLogsHandler = (logs: PipelineLog[]) => void
+const REFRESH_DELAYED_MESSAGE = 'Live refresh delayed — retrying.'
+
+export function nextLogRefreshFailure(error: any, previousFailures = 0) {
+  const failureCount = previousFailures + 1
+  const transient = isTransientReadError(error)
+  return {
+    failureCount,
+    error: transient ? null : (error?.message ?? 'Fetch error'),
+    warning: transient && failureCount >= 2 ? REFRESH_DELAYED_MESSAGE : null,
+  }
+}
 
 function stableLogKey(log: PipelineLog) {
   return [
@@ -45,6 +57,7 @@ export function usePipelineLogs(
   const serverOnline = useAthenaStore((s) => s.serverOnline)
   const logIdsRef = useRef(new Set<string>())
   const isFetchingRef = useRef(false)
+  const refreshFailuresRef = useRef(0)
   const onNewLogsRef = useRef<NewLogsHandler | undefined>(onNewLogs)
   const lastLogTimestampRef = useRef<string | null>(null)
   const activeRunIdRef = useRef<string | null>(runId || null)
@@ -58,6 +71,7 @@ export function usePipelineLogs(
   const [isLoadingLogs, setIsLoadingLogs] = useState(false)
   const [isRefreshingLogs, setIsRefreshingLogs] = useState(false)
   const [logsError, setLogsError] = useState<string | null>(null)
+  const [refreshWarning, setRefreshWarning] = useState<string | null>(null)
   const [lastLogTimestamp, setLastLogTimestamp] = useState<string | null>(null)
   const [terminalLogs] = useState<{ message: string; timestamp: string }[]>([])
 
@@ -86,10 +100,16 @@ export function usePipelineLogs(
           ? await getPipelineLogsSinceWithLimit(targetRunId, since, 300)
           : await getPipelineLogs(targetRunId, 300)
         if (!isCurrentLogRequest(targetRunId, activeRunIdRef.current)) return []
+        refreshFailuresRef.current = 0
+        setLogsError(null)
+        setRefreshWarning(null)
         return Array.isArray(data?.logs) ? (data.logs as PipelineLog[]) : []
       } catch (error: any) {
         if (isCurrentLogRequest(targetRunId, activeRunIdRef.current)) {
-          setLogsError(error?.message ?? 'Fetch error')
+          const failure = nextLogRefreshFailure(error, refreshFailuresRef.current)
+          refreshFailuresRef.current = failure.failureCount
+          setLogsError(failure.error)
+          setRefreshWarning(failure.warning)
         }
         return []
       } finally {
@@ -154,6 +174,8 @@ export function usePipelineLogs(
     setDiscoveryError(null)
     setLogs([])
     setLogsError(null)
+    setRefreshWarning(null)
+    refreshFailuresRef.current = 0
     lastLogTimestampRef.current = null
     setLastLogTimestamp(null)
   }, [runId])
@@ -200,6 +222,7 @@ export function usePipelineLogs(
     isLoadingLogs,
     isRefreshingLogs,
     logsError,
+    refreshWarning,
     lastLogTimestamp,
     terminalLogs,
     fetchLogs,

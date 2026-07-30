@@ -65,7 +65,7 @@ interface Props {
 export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdated }: Props) {
   const getRunById = useAthenaStore((s) => s.getRunById)
   const run = getRunById(runId || '')
-  const { discoveredRunId, isDiscovering, discoveryError, logs, isLoadingLogs, logsError } =
+  const { discoveredRunId, isDiscovering, discoveryError, logs, isLoadingLogs, logsError, refreshWarning } =
     usePipelineLogs(runId, isActive, onLogsUpdated)
 
   const [filterLevel, setFilterLevel] = useState('ALL')
@@ -73,13 +73,13 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedLog, setSelectedLog] = useState<PipelineLog | null>(null)
 
-  const logsEndRef = useRef<HTMLDivElement>(null)
+  const logsScrollRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll on new logs
+  // Keep the newest event visible without scrolling an outer page container.
   useEffect(() => {
-    if (discoveredRunId && logs.length > 0) {
-      logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }
+    const container = logsScrollRef.current
+    if (!discoveredRunId || !container || logs.length === 0) return
+    container.scrollTop = container.scrollHeight
   }, [logs, discoveredRunId])
 
   // Derived data
@@ -109,7 +109,7 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.2 }}
-        className="flex h-full min-h-[460px] w-full flex-col overflow-hidden rounded-lg border border-bg-border bg-bg-card lg:min-h-0"
+        className="flex h-full min-h-[460px] w-full flex-col overflow-hidden rounded-lg border border-bg-border bg-bg-card md:min-h-0"
       >
         {/* Header */}
         <div className="px-4 py-3 border-b border-bg-border flex items-center justify-between bg-gradient-to-r from-bg-card to-bg-card/50">
@@ -209,7 +209,7 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
               </div>
 
               {/* Logs list */}
-              <div className="flex-1 overflow-auto">
+              <div ref={logsScrollRef} className="flex-1 overflow-auto">
                 {isLoadingLogs && (
                   <div className="flex items-center gap-2 px-4 py-3 bg-blue-500/10 border-b border-blue-500/20">
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
@@ -224,7 +224,13 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
                   </div>
                 )}
 
-                {logs.length === 0 && !isLoadingLogs && !logsError && (
+                {refreshWarning && !logsError && (
+                  <div className="mx-4 mt-4 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2">
+                    <p className="text-xs font-medium text-amber-300">{refreshWarning}</p>
+                  </div>
+                )}
+
+                {logs.length === 0 && !isLoadingLogs && !logsError && !refreshWarning && (
                   <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
                     <p className="text-sm text-gray-400 font-medium">No logs yet</p>
                     <p className="text-xs text-gray-500 mt-1">Logs will appear as the pipeline executes</p>
@@ -262,7 +268,6 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
                 )}
               </div>
 
-              <div ref={logsEndRef} />
             </div>
           )}
         </div>

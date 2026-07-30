@@ -702,14 +702,14 @@ def test_load_checkpoint_fields_uses_json_value_projection(monkeypatch):
     assert recorded["closed"] is True
 
 
-def test_list_runs_uses_lightweight_checkpoint_index(monkeypatch):
-    recorded = {}
+def test_list_runs_uses_lightweight_run_registry(monkeypatch):
+    recorded = {"queries": []}
 
     class StubCursor:
         timeout = None
 
-        def execute(self, query):
-            recorded["query"] = query
+        def execute(self, query, *parameters):
+            recorded["queries"].append(query)
 
         def fetchall(self):
             return [("run-fast", "2026-07-14T18:00:00")]
@@ -730,23 +730,27 @@ def test_list_runs_uses_lightweight_checkpoint_index(monkeypatch):
         "last_activity": "2026-07-14T18:00:00",
         "checkpoint": {},
     }]
-    assert "full_state_json" not in recorded["query"]
-    assert "ai_store" not in recorded["query"]
+    assert "ORDER BY checkpoint_at" not in recorded["queries"][0]
+    assert "brd_run_registry" in recorded["queries"][0]
+    assert "kpi_checkpoints" not in recorded["queries"][0]
+    assert all("ai_store" not in query for query in recorded["queries"])
     assert recorded["closed"] is True
 
 
 def test_list_runs_filters_owner_before_top_limit(monkeypatch):
-    recorded = {}
+    recorded = {"queries": [], "parameters": []}
 
     class StubCursor:
         timeout = None
 
         def execute(self, query, *parameters):
-            recorded["query"] = query
-            recorded["parameters"] = parameters
+            recorded["queries"].append(query)
+            recorded["parameters"].append(parameters)
 
         def fetchall(self):
-            return [("owned-run", "2026-07-27T10:00:00")]
+            if len(recorded["queries"]) == 1:
+                return [("owned-run", "2026-07-27T10:00:00")]
+            return [("owned-run", *([None] * 34))]
 
     class StubConnection:
         def cursor(self):
@@ -760,8 +764,41 @@ def test_list_runs_filters_owner_before_top_limit(monkeypatch):
     runs = pipeline_runtime.list_runs(10, owner_email=" Client@Example.com ")
 
     assert runs[0]["run_id"] == "owned-run"
-    assert recorded["query"].index("WHERE") < recorded["query"].index("GROUP BY")
-    assert recorded["parameters"] == ("client@example.com",)
+    assert "LOWER(COALESCE" in recorded["queries"][0]
+    assert recorded["parameters"][0] == ("client@example.com",)
+
+
+def test_list_runs_does_not_hydrate_checkpoint_payloads(monkeypatch):
+    calls = []
+
+    class StubCursor:
+        timeout = None
+
+        def execute(self, query, *parameters):
+            calls.append(query)
+
+        def fetchall(self):
+            return [("run-visible", "2026-07-30T04:50:00")]
+
+    class StubConnection:
+        def cursor(self):
+            return StubCursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pipeline_runtime, "get_connection", lambda: StubConnection())
+
+    runs = pipeline_runtime.list_runs(10)
+
+    assert runs == [{
+        "run_id": "run-visible",
+        "last_activity": "2026-07-30T04:50:00",
+        "checkpoint": {},
+    }]
+    assert "ORDER BY checkpoint_at" not in calls[0]
+    assert len(calls) == 1
+    assert "JSON_VALUE" not in calls[0]
 
 
 def test_run_pipeline_background_database_flow_saves_completed(monkeypatch):

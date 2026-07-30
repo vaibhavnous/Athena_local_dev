@@ -32,50 +32,16 @@ import { MOCK_KPIS_LIST } from '../data/mockData'
 import { useAuth } from '../context/AuthContext'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { getGateDisplayName, isGenerationFirstDatabaseRun } from '../utils/pipelinePhases'
-import { expandMergedCodeReviewItems } from '../utils/codeReviewArtifacts'
+import { expandMergedCodeReviewItems, mergeCodeReviewItems } from '../utils/codeReviewArtifacts'
+import { hasGate2ReviewItems, hasRenderableReviewData } from '../utils/reviewReadiness'
+
+export { hasGate2ReviewItems, hasRenderableReviewData } from '../utils/reviewReadiness'
 
 const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const REVIEW_HYDRATION_ATTEMPTS = 20
 const REVIEW_HYDRATION_DELAY_MS = 1000
 const REVIEW_RUN_POLL_DELAY_MS = 1500
 const ENABLE_DEMO_REVIEW_FALLBACKS = ENABLE_DEMO_FALLBACKS
-
-export function hasRenderableReviewData(review, gate, isFileSource) {
-  if (!review) return false
-
-  if (gate === 1) {
-    if (Array.isArray(review)) return review.length > 0
-    return Boolean((review?.kpis || []).length)
-  }
-  if (gate === 2) {
-    return hasGate2ReviewItems(review, isFileSource)
-  }
-  if (gate === 3) {
-    return Boolean(
-      (review?.enriched_columns || []).length ||
-      (review?.enriched_joins || []).length ||
-      (review?.feed_semantic_summary || []).length ||
-      Object.keys(review?.enriched_metadata || {}).length ||
-      Object.keys(review?.semantic_counts || {}).length ||
-      (review?.pii_columns || []).length ||
-      (review?.join_key_columns || []).length ||
-      (review?.measure_columns || []).length ||
-      review?.resume_message ||
-      Number(review?.next_gate || 0) === 3
-    )
-  }
-  if (gate === 4) return Boolean((review?.bronze_review_artifact?.feeds || []).length)
-  if (gate === 'silver_merge_key_review') return Boolean((review?.silver_merge_key_review_artifact?.feeds || []).length)
-  if (gate === 'gold_review') return Boolean((review?.gold_review_artifact?.items || []).length)
-  if (gate === 5) return Boolean((review?.silver_review_artifact?.items || []).length)
-  return false
-}
-
-export function hasGate2ReviewItems(review, isFileSource) {
-  return isFileSource
-    ? getSftpFeeds(review).length > 0
-    : Boolean((review?.nominated_tables || []).length)
-}
 
 async function waitForRenderableReview(fetcher, gate, isFileSource = false, attempts = REVIEW_HYDRATION_ATTEMPTS) {
   let latest = null
@@ -831,6 +797,23 @@ function HitlQueue({ onClose = null }) {
           return
         }
 
+        if (isGate4 && hasRenderableReviewData(currentRun, 4)) {
+          setBronzeReview(currentRun)
+          return
+        }
+        if (isSilverMergeKeyReview && hasRenderableReviewData(currentRun, 'silver_merge_key_review')) {
+          setSilverMergeKeyReview(currentRun)
+          return
+        }
+        if (isGoldReview && hasRenderableReviewData(currentRun, 'gold_review')) {
+          setGoldReview(currentRun)
+          return
+        }
+        if (isGate5 && hasRenderableReviewData(currentRun, 5)) {
+          setSilverReview(currentRun)
+          return
+        }
+
         if (isGate3) {
           const review = await waitForRenderableReview(() => getEnrichmentReviews(selectedRunId), 3)
           if (!isCurrentHydration()) return
@@ -1092,7 +1075,7 @@ function HitlQueue({ onClose = null }) {
     [silverMergeKeyReview]
   )
   const bronzeCodeReviewItems = useMemo(
-    () => buildBronzeCodeReviewItems(bronzeReviewFeeds),
+    () => mergeCodeReviewItems(buildBronzeCodeReviewItems(bronzeReviewFeeds), 'bronze'),
     [bronzeReviewFeeds]
   )
   const silverMergeKeyReviewItems = useMemo(
@@ -1100,11 +1083,11 @@ function HitlQueue({ onClose = null }) {
     [silverMergeKeyReviewFeeds]
   )
   const silverCodeReviewItems = useMemo(
-    () => buildSilverCodeReviewItems(silverReviewItems),
+    () => mergeCodeReviewItems(buildSilverCodeReviewItems(silverReviewItems), 'silver'),
     [silverReviewItems]
   )
   const goldCodeReviewItems = useMemo(
-    () => buildGoldCodeReviewItems(goldReviewItems),
+    () => mergeCodeReviewItems(buildGoldCodeReviewItems(goldReviewItems), 'gold'),
     [goldReviewItems]
   )
   const activeCodeReviewItems = isGate4 ? bronzeCodeReviewItems : isSilverMergeKeyReview ? silverMergeKeyReviewItems : isGate5 ? silverCodeReviewItems : isGoldReview ? goldCodeReviewItems : []
@@ -1128,6 +1111,11 @@ function HitlQueue({ onClose = null }) {
   const isCodeReview = isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview
   const allCurrentItemsReviewed = isGate3 ? allSemanticReviewed : isCodeReview ? allCodeReviewItemsReviewed : allKpisReviewed
   const gateReviewReady = isGate4 ? bronzeReviewFeeds.length > 0 : isSilverMergeKeyReview ? silverMergeKeyReviewFeeds.length > 0 : isGate5 ? silverReviewItems.length > 0 : isGoldReview ? goldReviewItems.length > 0 : false
+  const currentCodeReviewReady =
+    (isGate4 && hasRenderableReviewData(currentRun, 4)) ||
+    (isSilverMergeKeyReview && hasRenderableReviewData(currentRun, 'silver_merge_key_review')) ||
+    (isGate5 && hasRenderableReviewData(currentRun, 5)) ||
+    (isGoldReview && hasRenderableReviewData(currentRun, 'gold_review'))
   const canSubmitReview = isReviewableRun && (isGate2
     ? (isSftpRun ? totalFeedCount > 0 : (tableReview?.nominated_tables || []).length > 0)
     : isGate3
@@ -1168,6 +1156,30 @@ function HitlQueue({ onClose = null }) {
     setActiveRun(null)
     navigate('/app/data-discovery', { replace: true })
   }, [navigate, setActiveRun, setSearchParams, shouldRedirectDemoKpiReview])
+
+  useEffect(() => {
+    if (
+      !selectedRunId ||
+      !isReviewableRun ||
+      !isCodeReview ||
+      currentCodeReviewReady ||
+      isDemoFallbackRun(currentRun)
+    ) return
+
+    setActiveRun(selectedRunId)
+    navigate('/app/data-discovery', {
+      replace: true,
+      state: { activeRunId: selectedRunId },
+    })
+  }, [
+    currentCodeReviewReady,
+    currentRun,
+    isCodeReview,
+    isReviewableRun,
+    navigate,
+    selectedRunId,
+    setActiveRun,
+  ])
 
   const refreshRunAfterSubmitError = async (fallbackMessage) => {
     if (!selectedRunId) return null
@@ -1443,7 +1455,8 @@ function HitlQueue({ onClose = null }) {
   }
 
   const handleSubmit = async () => {
-    if (!isGate2 && !allCurrentItemsReviewed) {
+    const requiresItemDecisions = !isCodeReview || isSilverMergeKeyReview
+    if (!isGate2 && requiresItemDecisions && !allCurrentItemsReviewed) {
       if (isGate3) {
         setSemanticValidationError('Review every semantic item before submitting.')
       } else {
@@ -1577,7 +1590,7 @@ function HitlQueue({ onClose = null }) {
         if (!bronzeCodeReviewItems.length) {
           throw new Error(`${gate4Name} is not ready yet. Bronze scripts are still being generated.`)
         }
-        const reviewAction = codeReviewGateDecision
+        const reviewAction = codeReviewGateDecision || 'APPROVED'
         await submitBronzeReview(selectedRunId, reviewAction, buildCodeReviewArtifact('bronze', codeReviewDraftItems, bronzeReview, codeReviewDecisions))
         updateRun(selectedRunId, {
           id: selectedRunId,
@@ -1681,7 +1694,7 @@ function HitlQueue({ onClose = null }) {
         if (!silverCodeReviewItems.length) {
           throw new Error(`${gate5Name} is not ready yet. Silver scripts are still being generated.`)
         }
-        const reviewAction = codeReviewGateDecision
+        const reviewAction = codeReviewGateDecision || 'APPROVED'
         await submitSilverReview(selectedRunId, reviewAction, buildCodeReviewArtifact('silver', codeReviewDraftItems, silverReview, codeReviewDecisions))
         updateRun(selectedRunId, {
             id: selectedRunId,
@@ -1734,7 +1747,7 @@ function HitlQueue({ onClose = null }) {
         if (!goldCodeReviewItems.length) {
           throw new Error('Gold Code Review is not ready yet. Gold scripts are still being generated.')
         }
-        const reviewAction = codeReviewGateDecision
+        const reviewAction = codeReviewGateDecision || 'APPROVED'
         await submitGoldReview(selectedRunId, reviewAction, buildCodeReviewArtifact('gold', codeReviewDraftItems, goldReview, codeReviewDecisions))
         updateRun(selectedRunId, {
           id: selectedRunId,
@@ -1831,6 +1844,10 @@ function HitlQueue({ onClose = null }) {
   }
 
   if (shouldRedirectDemoKpiReview) {
+    return null
+  }
+
+  if (selectedRunId && isReviewableRun && isCodeReview && !gateReviewReady) {
     return null
   }
 
@@ -2313,7 +2330,6 @@ function HitlQueue({ onClose = null }) {
               description={`Review ${silverMergeKeyReviewFeeds.length} merge-key set${silverMergeKeyReviewFeeds.length !== 1 ? 's' : ''} before Silver generation continues.`}
               lineageLabel="View Source -> Bronze -> Silver Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
-              emptyMessage="Merge-key review data is not loaded yet. Keep the monitor open while the backend prepares this review."
               items={silverMergeKeyReviewItems}
               loading={hydrating}
               reviewedCount={reviewedCodeReviewCount}
@@ -2337,7 +2353,6 @@ function HitlQueue({ onClose = null }) {
               description={`Review ${goldReviewItems.length} generated Gold script${goldReviewItems.length !== 1 ? 's' : ''} in one merged file before final execution.`}
               lineageLabel="View Source -> Bronze -> Silver -> Gold Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
-              emptyMessage="Gold scripts are not loaded yet. Keep the monitor open while Gold Code Review is prepared."
               items={goldCodeReviewItems}
               loading={hydrating}
               reviewedCount={reviewedCodeReviewCount}
@@ -2352,7 +2367,7 @@ function HitlQueue({ onClose = null }) {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed}
+              disabled={submitting || !gateReviewReady}
               submitLabel="Submit & Execute Gold"
             />
             ) : isGate5 ? (
@@ -2361,7 +2376,6 @@ function HitlQueue({ onClose = null }) {
               description={`Review ${silverReviewItems.length} generated script${silverReviewItems.length !== 1 ? 's' : ''} in one merged file before the pipeline continues.`}
               lineageLabel="View Source -> Bronze -> Silver Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
-              emptyMessage={`Silver scripts are not loaded yet. Keep the monitor open while ${gate5Name} is prepared.`}
               items={silverCodeReviewItems}
               loading={hydrating}
               reviewedCount={reviewedCodeReviewCount}
@@ -2376,7 +2390,7 @@ function HitlQueue({ onClose = null }) {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed}
+              disabled={submitting || !gateReviewReady}
               submitLabel="Submit & View Generated Code"
             />
             ) : isGate4 ? (
@@ -2385,7 +2399,6 @@ function HitlQueue({ onClose = null }) {
               description={`Review ${bronzeReviewFeeds.length} generated script${bronzeReviewFeeds.length !== 1 ? 's' : ''} in one merged file before the pipeline continues.`}
               lineageLabel="View Source -> Bronze Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
-              emptyMessage={`Bronze scripts are not loaded yet. Keep the monitor open while ${gate4Name} is prepared.`}
               items={bronzeCodeReviewItems}
               loading={hydrating}
               reviewedCount={reviewedCodeReviewCount}
@@ -2400,7 +2413,7 @@ function HitlQueue({ onClose = null }) {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed}
+              disabled={submitting || !gateReviewReady}
               submitLabel="Submit & Generate Silver"
             />
             ) : isGate3 ? (
@@ -3266,7 +3279,6 @@ export default HitlQueue
 function CodeReviewPanel({
   title,
   description,
-  emptyMessage,
   items,
   reviewedCount,
   totalCount,
@@ -3403,10 +3415,6 @@ function CodeReviewPanel({
         {loading && draftItems.length === 0 ? (
           <div className="flex min-h-[180px] items-center justify-center rounded-2xl border border-[#22304b] bg-[#0b1424] p-6 text-sm text-[#9fb0ca]">
             <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin text-[#4fa3ff]" /> Loading generated review artifacts…</span>
-          </div>
-        ) : draftItems.length === 0 ? (
-          <div className="rounded-2xl border border-[#22304b] bg-[#0b1424] p-4 text-sm text-[#c6d2e8]">
-            {emptyMessage}
           </div>
         ) : (
           draftItems.map((item) => (
@@ -3837,7 +3845,7 @@ function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
         script_body: item.code,
         primary_keys: item.primaryKeys || item.mergeKeys || [],
         merge_keys: item.mergeKeys || item.primaryKeys || [],
-        review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || 'PENDING',
+        review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || (item.decisionKey ? 'APPROVED' : 'PENDING'),
       })),
     }
   }
@@ -3851,7 +3859,7 @@ function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
         script_body: item.code,
         primary_keys: item.primaryKeys || item.mergeKeys || [],
         merge_keys: item.mergeKeys || item.primaryKeys || [],
-        review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || 'PENDING',
+        review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || (item.decisionKey ? 'APPROVED' : 'PENDING'),
         review_type: 'silver_merge_key',
       })),
     }
@@ -3864,7 +3872,7 @@ function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
         ...(item.reviewPayload || {}),
         generated_gold_script: item.code,
         script_body: item.code,
-        review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || 'PENDING',
+        review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || (item.decisionKey ? 'APPROVED' : 'PENDING'),
       })),
     }
   }
@@ -3878,7 +3886,7 @@ function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
       primary_keys: item.primaryKeys || item.mergeKeys || [],
       merge_keys: item.mergeKeys || item.primaryKeys || [],
       merge_key_source: item.mergeKeySource || item.reviewPayload?.merge_key_source || 'reviewed_gate4',
-      review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || 'PENDING',
+      review_status: decisions[item.decisionKey || item.key] || item.reviewStatus || (item.decisionKey ? 'APPROVED' : 'PENDING'),
     })),
   }
 }

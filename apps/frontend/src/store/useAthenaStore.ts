@@ -116,7 +116,21 @@ function preserveProgressFields(existing: any, merged: any) {
 }
 
 function mergeRunPreservingDetail(existing: any, incoming: any): any {
-  if (!existing) return incoming
+  if (!existing) {
+    if (
+      incoming?.hydration_fallback &&
+      incoming?.status_authoritative !== true &&
+      normalizeRunStatus(incoming?.status) === 'FAILED'
+    ) {
+      return {
+        ...incoming,
+        status: 'RUNNING',
+        error: null,
+        pending_failure_confirmation: true,
+      }
+    }
+    return incoming
+  }
   if (!incoming) return existing
 
   const incomingHasDetail = hasUsefulRunDetail(incoming)
@@ -128,10 +142,15 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
     merged.brd_filename = existing.brd_filename
   }
   const incomingStatus = normalizeRunStatus(incoming?.status)
+  const incomingFallback = incoming?.hydration_fallback === true
+  const suppressFallbackFailure =
+    incomingFallback &&
+    incoming?.status_authoritative !== true &&
+    incomingStatus === 'FAILED'
   const hasIncomingStatus = incoming?.status !== undefined && incoming?.status !== null
   const incomingActive = incomingStatus === 'RUNNING'
   const incomingTerminal =
-    incomingStatus === 'FAILED' ||
+    (!suppressFallbackFailure && incomingStatus === 'FAILED') ||
     incomingStatus === 'COMPLETED' ||
     incomingStatus === 'ABORTED' ||
     incomingStatus === 'CANCELLED' ||
@@ -139,7 +158,32 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
   const incomingPausedOrTerminal =
     incomingStatus === 'HITL_WAIT' ||
     incomingTerminal
+
+  if (incomingFallback) {
+    for (const key of [
+      'target_warehouse',
+      'execution_engine',
+      'dbt_deployment_mode',
+      'database_flow_version',
+      'pipeline_flow_version',
+      'flow_version',
+      'generation_first_execution',
+    ]) {
+      if (existing[key] !== undefined && existing[key] !== null && existing[key] !== '') {
+        merged[key] = existing[key]
+      }
+    }
+  }
+
+  if (suppressFallbackFailure) {
+    merged.status = existing.status || 'RUNNING'
+    merged.error = existing.error || null
+    merged.pending_failure_confirmation = true
+  } else {
+    merged.pending_failure_confirmation = false
+  }
   const clearsExecutionGate =
+    !suppressFallbackFailure &&
     Object.prototype.hasOwnProperty.call(incoming, 'stage_confirmation') &&
     incoming.stage_confirmation === null &&
     (

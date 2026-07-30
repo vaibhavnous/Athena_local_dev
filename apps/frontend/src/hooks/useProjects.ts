@@ -3,17 +3,32 @@ import { projectService, ProjectInput } from '../services/projectService'
 
 export const PROJECTS_KEY = ['projects']
 export const useProjects = () => useQuery({ queryKey: PROJECTS_KEY, queryFn: projectService.getAll })
-export const useProject = (id?: string) => useQuery({
-  queryKey: [...PROJECTS_KEY, id],
-  queryFn: () => projectService.getOne(id!),
-  enabled: !!id,
-})
+export const useProject = (id?: string) => {
+  const client = useQueryClient()
+  return useQuery({
+    queryKey: [...PROJECTS_KEY, id],
+    queryFn: () => projectService.getOne(id!),
+    enabled: !!id,
+    retry: false,
+    initialData: () => {
+      const cachedProjects = client.getQueryData(PROJECTS_KEY) as any[] | undefined
+      return cachedProjects?.find((project) => String(project.id) === String(id))
+    },
+    initialDataUpdatedAt: () => client.getQueryState(PROJECTS_KEY)?.dataUpdatedAt,
+  })
+}
 
 export const useCreateProject = () => {
   const client = useQueryClient()
   return useMutation({
     mutationFn: (data: ProjectInput) => projectService.create(data),
-    onSuccess: () => client.invalidateQueries({ queryKey: PROJECTS_KEY }),
+    onSuccess: (project) => {
+      client.setQueryData([...PROJECTS_KEY, project.id], project)
+      client.setQueryData(PROJECTS_KEY, (current: any[] | undefined) => (
+        current ? [project, ...current.filter((item) => item.id !== project.id)] : [project]
+      ))
+      client.invalidateQueries({ queryKey: PROJECTS_KEY })
+    },
   })
 }
 
@@ -21,7 +36,13 @@ export const useUpdateProject = () => {
   const client = useQueryClient()
   return useMutation({
     mutationFn: ({ id, data }: { id: string; data: ProjectInput }) => projectService.update(id, data),
-    onSuccess: () => client.invalidateQueries({ queryKey: PROJECTS_KEY }),
+    onSuccess: (project) => {
+      client.setQueryData([...PROJECTS_KEY, project.id], project)
+      client.setQueryData(PROJECTS_KEY, (current: any[] | undefined) => (
+        current?.map((item) => item.id === project.id ? project : item) || [project]
+      ))
+      client.invalidateQueries({ queryKey: PROJECTS_KEY })
+    },
   })
 }
 

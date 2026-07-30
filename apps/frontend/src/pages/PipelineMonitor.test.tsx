@@ -43,14 +43,16 @@ jest.mock('../components/pipeline/PipelineLogsPanel', () => () => <div>Pipeline 
 jest.mock('../components/shared/PythonCodeDialog', () => () => null)
 jest.mock('../components/shared/DashboardLayout', () => ({ PageHeader: () => <div>Header</div> }))
 
-import PipelineMonitor, { buildPipelineDisplayPhase } from './PipelineMonitor'
-import { getRun } from '../api/athenaApi'
+import PipelineMonitor, { buildPipelineDisplayPhase, markNextPendingStage, markPreparingReview, pipelineActivityFromLogs, reviewWaitPatchFromLogs } from './PipelineMonitor'
+import { getRunStatus } from '../api/athenaApi'
 
 test('hydrates detailed stages for the active run', async () => {
-  ;(getRun as jest.Mock).mockResolvedValue({
-    id: 'run-1',
-    status: 'HITL_WAIT',
-    stages: [{ id: 'stage_01', name: 'Ingestion', status: 'COMPLETED' }],
+  ;(getRunStatus as jest.Mock).mockResolvedValue({
+    run: {
+      id: 'run-1',
+      status: 'HITL_WAIT',
+      stages: [{ id: 'stage_01', name: 'Ingestion', status: 'COMPLETED' }],
+    },
   })
 
   const view = render(<PipelineMonitor />)
@@ -63,12 +65,112 @@ test('hydrates detailed stages for the active run', async () => {
 })
 
 test('shows rotating markers for the active phase and stage', () => {
-  ;(getRun as jest.Mock).mockImplementation(() => new Promise(() => {}))
+  ;(getRunStatus as jest.Mock).mockImplementation(() => new Promise(() => {}))
 
   const view = render(<PipelineMonitor />)
 
-  expect(view.container.querySelectorAll('[data-running-indicator="rotation"]')).toHaveLength(2)
+  expect(view.container.querySelectorAll('[data-running-indicator="rotation"]')).toHaveLength(1)
   view.unmount()
+})
+
+test('recovers the pending review gate from HITL checkpoint logs', () => {
+  expect(reviewWaitPatchFromLogs([
+    {
+      stage: 'gate2',
+      message: 'END Table Review stage=gate2 status=HITL_WAIT duration_s=2.1',
+    },
+  ])).toMatchObject({
+    status: 'HITL_WAIT',
+    next_gate: 2,
+    background_stage: 'gate2',
+  })
+})
+
+test('shows a review gate as loading while its content is prepared', () => {
+  const phase = markPreparingReview({
+    id: 'phase-2',
+    status: 'Review',
+    completed: 1,
+    total: 2,
+    steps: [
+      { key: 'nomination', state: 'COMPLETED' },
+      { key: 'gate2', state: 'HITL_WAIT' },
+    ],
+  }, 2)
+
+  expect(phase.status).toBe('Running')
+  expect(phase.steps[1]).toMatchObject({
+    state: 'RUNNING',
+    preparingReview: true,
+  })
+})
+
+test('shows the next pending stage as starting while an active run awaits backend progress', () => {
+  const phases = markNextPendingStage([
+    {
+      id: 'phase-1',
+      status: 'Pending',
+      completed: 2,
+      total: 5,
+      steps: [
+        { key: 'ingestion', state: 'COMPLETED' },
+        { key: 'memory', state: 'COMPLETED' },
+        { key: 'requirements', state: 'PENDING' },
+        { key: 'kpis', state: 'PENDING' },
+        { key: 'gate1', state: 'PENDING' },
+      ],
+    },
+  ], { status: 'RUNNING' })
+
+  expect(phases[0].status).toBe('Running')
+  expect(phases[0].steps[2]).toMatchObject({
+    key: 'requirements',
+    state: 'RUNNING',
+    inferredProgress: true,
+  })
+  expect(phases[0].steps[3].state).toBe('PENDING')
+})
+
+test('does not infer a next stage when the backend already reports an active stage', () => {
+  const phases = markNextPendingStage([
+    {
+      id: 'phase-1',
+      status: 'Running',
+      steps: [
+        { key: 'requirements', state: 'RUNNING' },
+        { key: 'kpis', state: 'PENDING' },
+      ],
+    },
+  ], { status: 'RUNNING' })
+
+  expect(phases[0].steps[1]).not.toHaveProperty('inferredProgress')
+})
+
+test('uses execution logs to infer progress when detail hydration reports UNKNOWN', () => {
+  const phases = markNextPendingStage([
+    {
+      id: 'phase-1',
+      status: 'Pending',
+      steps: [
+        { key: 'memory', state: 'COMPLETED' },
+        { key: 'requirements', state: 'PENDING' },
+      ],
+    },
+  ], { status: 'UNKNOWN' }, true)
+
+  expect(phases[0].steps[1]).toMatchObject({
+    state: 'RUNNING',
+    inferredProgress: true,
+  })
+})
+
+test('recognizes stage logs but ignores run-detail timeout warnings as pipeline activity', () => {
+  expect(pipelineActivityFromLogs([
+    { stage: 'memory_lookup', message: 'END memory lookup' },
+  ])).toBe(true)
+  expect(pipelineActivityFromLogs([
+    { stage: 'runs_router', message: 'GET run detail timed out' },
+  ])).toBeNull()
 })
 
 test('renders the SFTP metadata-bootstrap phase in the latest monitor UI', () => {
@@ -93,9 +195,36 @@ test('renders the SFTP metadata-bootstrap phase in the latest monitor UI', () =>
     'Validate Plan Freshness',
     'Metadata Code Generation',
     'Bronze Code Generation',
-    'Bronze Review',
   ])
   expect(display.status).toBe('Running')
+})
+
+test('keeps code review gates out of the monitor substage list', () => {
+  const phase = {
+    id: 'phase-3',
+    label: 'Code Generation & Reviews',
+    status: 'Review',
+    steps: [
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
+      { key: 'silver_merge_key_resolution', state: 'COMPLETED' },
+      { key: 'silver_merge_key_review', state: 'COMPLETED' },
+      { key: 'silver', state: 'COMPLETED' },
+      { key: 'gate5', state: 'COMPLETED' },
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'HITL_WAIT' },
+    ],
+  }
+
+  const display = buildPipelineDisplayPhase(phase, phase.steps, { source: 'database' })
+
+  expect(display.steps.map((step) => step.key)).toEqual([
+    'bronze',
+    'silver_merge_key_resolution',
+    'silver_merge_key_review',
+    'silver',
+    'gold',
+  ])
 })
 
 test('renders one gated Snowflake dbt deployment step', () => {

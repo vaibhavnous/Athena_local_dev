@@ -23,18 +23,20 @@ test('saves an edited generated-code draft', () => {
 })
 
 test.each(['BRONZE', 'SILVER', 'GOLD'])('uses the shared %s code review layout', (type) => {
+  const onSubmit = jest.fn()
   render(
     <CodeReviewEditorModal
       item={{ type, fileName: `${type.toLowerCase()}_transform.sql`, code: 'CREATE TABLE demo;' }}
       onClose={jest.fn()}
       onSave={jest.fn()}
-      onSubmit={jest.fn()}
+      onSubmit={onSubmit}
     />
   )
 
   expect(screen.getByRole('heading', { name: new RegExp(`Code Review.*${type.toLowerCase()}`) })).toBeInTheDocument()
   expect(screen.getAllByText(`${type.toLowerCase()}_transform.sql`).length).toBeGreaterThan(0)
-  expect(screen.getByRole('button', { name: 'Submit & Run Stage' })).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Submit & Run Stage' }))
+  expect(onSubmit).toHaveBeenCalledTimes(1)
 })
 
 test('keeps the Athena desktop modal width instead of expanding across the viewport', () => {

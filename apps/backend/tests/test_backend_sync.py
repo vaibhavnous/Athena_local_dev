@@ -144,13 +144,13 @@ def test_ui_status_uses_reconciled_context_over_stale_checkpoint_pause():
     assert run_ui_service.status_from_context(context) == "SUCCESS"
 
 
-def test_pipeline_status_endpoint_syncs_with_ui_service(monkeypatch):
+def test_pipeline_status_endpoint_uses_checkpoint_snapshot(monkeypatch):
     monkeypatch.setattr(
-        "api.services.ui_service.ui_run",
+        "services.pipeline_runtime.load_checkpoint_state",
         lambda run_id: {
             "status": "SUCCESS",
             "run_id": run_id,
-            "stages": [{"key": "gold", "status": "COMPLETED"}],
+            "gold_generation_status": "COMPLETED",
         },
     )
 
@@ -161,18 +161,37 @@ def test_pipeline_status_endpoint_syncs_with_ui_service(monkeypatch):
     assert body["run_id"] == "run-sync"
     assert body["status"] == "SUCCESS"
     assert body["state"]["life_cycle_state"] == "TERMINATED"
-    assert body["run"]["stages"][0]["key"] == "gold"
+    assert body["run"]["pipeline_steps"]
 
 
-def test_run_detail_endpoint_returns_scripts_from_ui_layer(monkeypatch):
+def test_pipeline_summary_status_returns_only_history_fields(monkeypatch):
     monkeypatch.setattr(
-        "api.services.ui_service.ui_run",
-        lambda run_id, include_scripts=True: {
+        "services.pipeline_runtime.load_checkpoint_fields",
+        lambda run_id, *fields: {
+            "run_id": run_id,
+            "status": "FAILED",
+            "brd_filename": "history-run",
+            "error": "Stage failed",
+        },
+    )
+
+    response = client.get("/pipeline/run-history/summary-status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run"]["status"] == "FAILED"
+    assert body["run"]["brd_filename"] == "history-run"
+    assert "pipeline_steps" not in body["run"]
+    assert "checkpoint" not in body["run"]
+
+
+def test_run_detail_endpoint_uses_checkpoint_and_loads_scripts_separately(monkeypatch):
+    monkeypatch.setattr(
+        "api.routers.runs_router.assert_run_access",
+        lambda run_id, user, checkpoint=None: {
             "run_id": run_id,
             "status": "SUCCESS",
-            "bronze": {"scripts": [{"name": "bronze.py"}]},
-            "silver": {"scripts": []},
-            "gold": {"scripts": []},
+            "bronze_generation_status": "COMPLETED",
         },
     )
 
@@ -181,7 +200,8 @@ def test_run_detail_endpoint_returns_scripts_from_ui_layer(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["run_id"] == "run-sync"
-    assert body["bronze"]["scripts"][0]["name"] == "bronze.py"
+    assert body["status"] == "SUCCESS"
+    assert body["bronze"]["scripts"] == []
 
 
 def test_mocked_pipeline_progression_stays_in_sync(monkeypatch):
@@ -193,22 +213,13 @@ def test_mocked_pipeline_progression_stays_in_sync(monkeypatch):
     }
     decisions = []
 
-    def fake_ui_run(run_id):
-        return {
-            "run_id": run_id,
-            "status": state["status"],
-            "next_gate": state["next_gate"],
-            "resume_message": state["resume_message"],
-            "stages": [{"key": "gate1", "status": state["status"]}],
-        }
-
     def fake_update_hitl_item(queue_id, action, **kwargs):
         decisions.append((queue_id, action))
         state["status"] = "SUCCESS"
         state["next_gate"] = None
         state["resume_message"] = "Pipeline completed."
 
-    monkeypatch.setattr("api.services.ui_service.ui_run", fake_ui_run)
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: dict(state))
     monkeypatch.setattr("utilis.db.update_hitl_item", fake_update_hitl_item)
     monkeypatch.setattr("api.services.kpi_service.maybe_resume_gate1", lambda run_id: None)
 

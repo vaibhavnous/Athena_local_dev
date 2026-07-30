@@ -275,7 +275,7 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
       </div>}
 
       {decision && onClearDecision && (
-        <button type="button" onClick={() => onClearDecision(id)} className="mt-3 text-xs text-text-tertiary transition-colors hover:text-text-primary">← Change decision</button>
+        <button type="button" onClick={() => onClearDecision(id)} className="mt-3 block w-fit text-xs text-text-tertiary transition-colors hover:text-text-primary">← Change decision</button>
       )}
 
       {editorOpen && (

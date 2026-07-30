@@ -186,9 +186,11 @@ export function isFileSource(run) {
 }
 
 export function isSnowflakeDbtRun(run) {
+  const executionEngine = String(run?.execution_engine || '').toLowerCase()
+  const deploymentMode = String(run?.dbt_deployment_mode || '').toLowerCase()
   return (
     String(run?.target_warehouse || '').toLowerCase() === 'snowflake' &&
-    String(run?.execution_engine || 'native').toLowerCase() === 'dbt'
+    (executionEngine === 'dbt' || deploymentMode === 'generate_and_deploy')
   )
 }
 

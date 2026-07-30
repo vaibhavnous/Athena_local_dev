@@ -7,6 +7,7 @@ import time
 import uuid
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -710,10 +711,17 @@ def load_checkpoint_state(run_id: str) -> Optional[Dict[str, Any]]:
 
 
 def save_checkpoint_state(run_id: str, state: Dict[str, Any]) -> None:
+    persisted_state = dict(state)
+    now = datetime.now(timezone.utc).isoformat()
+    persisted_state["updated_at"] = now
+    normalized_status = str(persisted_state.get("status") or "").upper()
+    if normalized_status in {"SUCCESS", "COMPLETED", "PIPELINE_COMPLETED", "FAILED", "ABORTED", "CANCELLED", "CANCELED"}:
+        persisted_state["completed_at"] = persisted_state.get("completed_at") or now
+
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        state_json = json.dumps(state, default=str)
+        state_json = json.dumps(persisted_state, default=str)
         cursor.execute(
             f"""
             MERGE [{_pipeline_schema()}].[kpi_checkpoints] AS target
@@ -996,16 +1004,25 @@ def list_runs(
         filters.append("JSON_VALUE(full_state_json, '$.project_id') = ?")
         parameters.append(str(project_id).strip())
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
-    query = f"""
-        SELECT TOP ({safe_limit}) run_id, MAX(checkpoint_at) AS last_activity
-        FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
-        {where_clause}
-        GROUP BY run_id
-        ORDER BY MAX(checkpoint_at) DESC
-    """
-
-    def execute_index_query(cursor: Any) -> None:
-        cursor.execute(query, *parameters)
+    # Run history must not scan the large checkpoint JSON payload table just to
+    # discover run IDs.  The ingestion pipeline already maintains the compact
+    # run registry for this purpose (the same split used by the Athena app).
+    # Checkpoint JSON is projected only for the small set of selected run IDs.
+    if filters:
+        index_query = f"""
+            SELECT TOP ({safe_limit}) registry.run_id, registry.[timestamp] AS last_activity
+            FROM [{_pipeline_schema()}].[brd_run_registry] AS registry WITH (READUNCOMMITTED)
+            INNER JOIN [{_pipeline_schema()}].[kpi_checkpoints] AS cp WITH (READUNCOMMITTED)
+                ON cp.run_id = registry.run_id
+            WHERE {' AND '.join(condition.replace('full_state_json', 'cp.full_state_json') for condition in filters)}
+            ORDER BY registry.[timestamp] DESC
+        """
+    else:
+        index_query = f"""
+            SELECT TOP ({safe_limit}) run_id, [timestamp] AS last_activity
+            FROM [{_pipeline_schema()}].[brd_run_registry] WITH (READUNCOMMITTED)
+            ORDER BY [timestamp] DESC
+        """
 
     conn = get_connection()
     try:
@@ -1015,41 +1032,31 @@ def list_runs(
         except Exception:
             # Some drivers may not expose cursor timeout; ignore.
             pass
-        # ponytail: history may briefly show an in-flight checkpoint; remove the
-        # hint once the metadata database uses snapshot isolation.
-        execute_index_query(cursor)
-        rows = cursor.fetchall()
-        # ponytail: current runs are checkpoint-backed; querying four legacy
-        # stores when this table is empty made an empty history wait for timeout.
-        return [
-            {
+        cursor.execute(index_query, *parameters)
+        index_rows = cursor.fetchall()
+        base_rows = []
+        for row in index_rows:
+            if not row or not row[0]:
+                continue
+            base_rows.append({
                 "run_id": row[0],
                 "last_activity": row[1],
-                # Avoid loading the potentially large checkpoint blob for the list.
-                # The selected run's detail request hydrates the complete state.
                 "checkpoint": {},
+            })
+        base_rows.sort(
+            key=lambda row: str(row.get("last_activity") or ""),
+            reverse=True,
+        )
+        if not base_rows:
+            return []
+
+        return [
+            {
+                **row,
+                "checkpoint": row.get("checkpoint") or {},
             }
-            for row in rows
-            if row and row[0]
+            for row in base_rows
         ]
-    except Exception as exc:
-        # If the combined query is slow (missing indexes / large tables), fall back
-        # to a cheaper query so the UI can still hydrate.
-        try:
-            cursor = conn.cursor()
-            try:
-                cursor.timeout = max(1, int(os.getenv("ATHENA_SQL_QUERY_TIMEOUT_SECONDS", "5")))
-            except Exception:
-                pass
-            execute_index_query(cursor)
-            rows = cursor.fetchall()
-            return [
-                {"run_id": row[0], "last_activity": row[1]}
-                for row in rows
-                if row and row[0]
-            ]
-        except Exception:
-            raise
     finally:
         conn.close()
 

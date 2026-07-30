@@ -1,52 +1,26 @@
 // @ts-nocheck
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Outlet, useLocation, useNavigate } from 'react-router-dom'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Outlet, useLocation } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, Clock3, PlayCircle, X } from 'lucide-react'
 import Sidebar from './Sidebar'
 import Topbar from './Topbar'
 import StageGateDialog from '../pipeline/StageGateDialog'
 import useAthenaStore from '../../store/useAthenaStore'
 import usePipelineSocket from '../../hooks/usePipelineSocket'
-import { abortRun, continueStage, getRun, getRuns } from '../../api/athenaApi'
+import { abortRun, continueStage, getRuns } from '../../api/athenaApi'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../../utils/demoFallbacks'
-import { getGateDisplayName, getPhaseGroups, isSnowflakeDbtRun, normalizeState, summarizeRunSource } from '../../utils/pipelinePhases'
+import { isSnowflakeDbtRun, normalizeState } from '../../utils/pipelinePhases'
+import { isTransientReadError } from '../../utils/apiErrors'
 
-const PAUSED_BANNER_DISMISSALS_KEY = 'athena.pausedBannerDismissals'
-const PAUSED_BANNER_DELAY_MS = 2500
-const REVIEW_READY_NOTIFICATIONS_KEY = 'athena.reviewReadyNotifications'
-const REVIEW_READY_NOTIFICATION_DELAY_MS = 3000
 const RUNS_POLL_SUCCESS_MS = 10000
 const RUNS_POLL_ERROR_BASE_MS = 15000
 const RUNS_POLL_ERROR_MAX_MS = 60000
-const RUNS_HYDRATION_WARN_INTERVAL_MS = 60000
-
-function loadJsonMap(key) {
-  if (typeof window === 'undefined') return {}
-  try {
-    const raw = window.localStorage.getItem(key)
-    const parsed = raw ? JSON.parse(raw) : {}
-    return parsed && typeof parsed === 'object' ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
-function persistJsonMap(key, value) {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value))
-  } catch {
-    // ignore localStorage errors
-  }
-}
 
 /**
  * Root application shell — Topbar + Sidebar + main content area.
  * Manages the notification toast stack.
  */
 function AppShell() {
-  const navigate = useNavigate()
   const location = useLocation()
   const {
     runs,
@@ -64,20 +38,12 @@ function AppShell() {
 
   const runsRequestInFlightRef = useRef(false)
   const runsHydrationFailuresRef = useRef(0)
-  const lastRunsHydrationWarningRef = useRef(0)
   const latestRunsRef = useRef(runs)
   const latestActiveRunIdRef = useRef(activeRunId)
   const demoRunsSeededRef = useRef(false)
   const demoRunsNotifiedRef = useRef(false)
-  const pausedDetailKeyRef = useRef<string | null>(null)
-  const reviewAutoOpenSessionRef = useRef({})
   const mainScrollRef = useRef(null)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
-  const [dismissedPausedBanners, setDismissedPausedBanners] = useState(() => loadJsonMap(PAUSED_BANNER_DISMISSALS_KEY))
-  const [reviewReadyNotifications, setReviewReadyNotifications] = useState(() => loadJsonMap(REVIEW_READY_NOTIFICATIONS_KEY))
-  const [pausedRunDetail, setPausedRunDetail] = useState(null)
-  const [readyPausedBannerKey, setReadyPausedBannerKey] = useState<string | null>(null)
-  const [verifiedPausedBannerKey, setVerifiedPausedBannerKey] = useState<string | null>(null)
   const [stageGateBusy, setStageGateBusy] = useState(false)
 
   useLayoutEffect(() => {
@@ -143,10 +109,9 @@ function AppShell() {
             RUNS_POLL_ERROR_MAX_MS,
             RUNS_POLL_ERROR_BASE_MS * Math.max(1, failureCount)
           )
-          setServerOnline(false)
-          const now = Date.now()
-          if (now - lastRunsHydrationWarningRef.current > RUNS_HYDRATION_WARN_INTERVAL_MS) {
-            lastRunsHydrationWarningRef.current = now
+          const transient = isTransientReadError(error)
+          if (!transient) setServerOnline(false)
+          if (!transient && failureCount >= 2) {
             console.warn('[AppShell] Failed to hydrate backend runs; keeping last known UI state', error)
           }
 
@@ -154,10 +119,10 @@ function AppShell() {
           const hasOnlyFallbackRuns =
             hasAnyRuns && latestRunsRef.current.every((run) => isDemoFallbackRun(run))
 
-          if (ENABLE_DEMO_FALLBACKS && hasOnlyFallbackRuns) {
+          if (!transient && ENABLE_DEMO_FALLBACKS && hasOnlyFallbackRuns) {
             const demoRuns = getDemoRuns()
             setRuns(demoRuns)
-          } else if (ENABLE_DEMO_FALLBACKS && !hasAnyRuns && !demoRunsSeededRef.current) {
+          } else if (!transient && ENABLE_DEMO_FALLBACKS && !hasAnyRuns && !demoRunsSeededRef.current) {
             const demoRuns = getDemoRuns()
             setRuns(demoRuns)
             demoRunsSeededRef.current = true
@@ -184,271 +149,6 @@ function AppShell() {
       if (timer !== null) window.clearTimeout(timer)
     }
   }, [activeRunId, addNotification, setRuns, setActiveRun, setServerOnline])
-
-  const pausedRun = useMemo(() => {
-    if (!activeRunId) return null
-    const activeRun = activeRunId ? (runs || []).find((run) => run.id === activeRunId) : null
-    if (isReviewPausedRun(activeRun)) return activeRun
-    return null
-  }, [activeRunId, runs])
-
-  const pausedRunId = pausedRun?.id || null
-  const pausedRunGate = Number(pausedRun?.next_gate || 0)
-  const pausedRunReviewKey = pausedRun?.next_review_key || ''
-  const pausedBannerKey = pausedRunId && (pausedRunGate || pausedRunReviewKey)
-    ? `${pausedRunId}:${pausedRunReviewKey || pausedRunGate}`
-    : null
-
-  useEffect(() => {
-    if (!pausedRunId || !pausedBannerKey) {
-      pausedDetailKeyRef.current = null
-      setPausedRunDetail(null)
-      setReadyPausedBannerKey(null)
-      setVerifiedPausedBannerKey(null)
-      return
-    }
-
-    let cancelled = false
-    if (pausedDetailKeyRef.current !== pausedBannerKey) {
-      pausedDetailKeyRef.current = pausedBannerKey
-      setPausedRunDetail(null)
-      setVerifiedPausedBannerKey(null)
-    }
-
-    setPausedRunDetail(pausedRun)
-    if (isDemoFallbackRun(pausedRun)) {
-      setVerifiedPausedBannerKey(pausedBannerKey)
-      return
-    }
-
-    const hydratePausedRun = async () => {
-      try {
-        const detail = await getRun(pausedRunId)
-        if (cancelled) return
-
-        const detailGate = Number(detail?.next_gate || 0)
-        const detailReviewKey = detail?.next_review_key || ''
-        const expectedGate = pausedRunGate
-        const expectedReviewKey = pausedRunReviewKey
-        const expectedGateKey = expectedReviewKey || (
-          expectedGate === 1 ? 'gate1' :
-          expectedGate === 2 ? 'gate2' :
-          expectedGate === 3 ? 'gate3' :
-          expectedGate === 4 ? 'gate4' :
-          expectedGate === 5 ? 'gate5' :
-          null
-        )
-
-        const detailSteps = [
-          ...(detail?.pipeline_steps || []),
-          ...(detail?.stages || []).map((stage) => ({
-            key: stage?.key,
-            state: stage?.state || stage?.status,
-          })),
-        ]
-        const status = normalizeState(detail?.status)
-        const resolvedReviewKey = detailReviewKey || expectedReviewKey
-        const resolvedGate = detailGate || expectedGate
-        const gateStepReady = expectedGateKey
-          ? detailSteps.some(
-              (step) => step?.key === expectedGateKey && ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(normalizeState(step?.state))
-            ) || (
-              resolvedGate === expectedGate &&
-              ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(status)
-            )
-          : false
-
-        const reviewPaused = isReviewPausedRun(detail) || (
-          ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(status) &&
-          Boolean(resolvedReviewKey || resolvedGate)
-        )
-        const gateMatches = expectedReviewKey
-          ? resolvedReviewKey === expectedReviewKey
-          : resolvedGate === expectedGate
-
-        if (gateMatches && reviewPaused && gateStepReady) {
-          setPausedRunDetail(detail)
-          setVerifiedPausedBannerKey(pausedBannerKey)
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.warn('[AppShell] Failed to hydrate paused run detail', error)
-        }
-      }
-    }
-
-    hydratePausedRun()
-    return () => {
-      cancelled = true
-    }
-  }, [pausedBannerKey, pausedRun, pausedRunGate, pausedRunId, pausedRunReviewKey])
-
-  useEffect(() => {
-    if (!pausedRunDetail || !pausedBannerKey || verifiedPausedBannerKey !== pausedBannerKey) {
-      setReadyPausedBannerKey(null)
-      return
-    }
-
-    const timer = window.setTimeout(() => {
-      setReadyPausedBannerKey(pausedBannerKey)
-    }, PAUSED_BANNER_DELAY_MS)
-
-    return () => {
-      window.clearTimeout(timer)
-    }
-  }, [pausedBannerKey, pausedRunDetail, verifiedPausedBannerKey])
-
-  const pausedRunSummary = useMemo(() => {
-    const bannerRun = pausedRunDetail || pausedRun
-    if (!bannerRun) return null
-    const gate = Number(bannerRun.next_gate || 0)
-    const reviewKey = bannerRun.next_review_key || ''
-    const phases = getPhaseGroups(bannerRun)
-    const total = phases.reduce((sum, phase) => sum + (phase.total || 0), 0)
-    const completed = phases.reduce((sum, phase) => sum + (phase.completed || 0), 0)
-    return {
-      gate,
-      reviewKey,
-      gateLabel: reviewKey === 'silver_merge_key_review'
-        ? 'Silver Merge Key Review'
-        : reviewKey === 'gold_review'
-          ? 'Gold Code Review'
-          : getGateDisplayName(gate, bannerRun.source),
-      progressLabel: total > 0 ? `${completed}/${total} stages done` : 'Pipeline paused',
-      timeAgo: formatTimeAgo(bannerRun.updated_at || bannerRun.started_at || bannerRun.created_at),
-      resumeMessage: bannerRun.resume_message || 'Pipeline progress is saved. Resume review when you are ready.',
-    }
-  }, [pausedRun, pausedRunDetail])
-  const pausedGateLabel = pausedRunSummary?.gateLabel || ''
-  const pausedResumeMessage = pausedRunSummary?.resumeMessage || ''
-  const isPausedBannerStillCurrent = useCallback((key) => {
-    if (!key) return false
-    return latestRunsRef.current.some((run) => {
-      if (!isReviewPausedRun(run)) return false
-      return `${run.id}:${run.next_review_key || Number(run.next_gate || 0)}` === key
-    })
-  }, [])
-
-  useEffect(() => {
-    const pausedKeys = (runs || [])
-      .filter(isReviewPausedRun)
-      .map((run) => `${run.id}:${run.next_review_key || Number(run.next_gate || 0)}`)
-    if (!pausedKeys.length) return
-    setDismissedPausedBanners((current) => {
-      const activeKeys = new Set(pausedKeys)
-      const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
-      const changed = Object.keys(next).length !== Object.keys(current).length
-      if (changed) persistJsonMap(PAUSED_BANNER_DISMISSALS_KEY, next)
-      return changed ? next : current
-    })
-    const activeKeys = new Set(pausedKeys)
-    reviewAutoOpenSessionRef.current = Object.fromEntries(
-      Object.entries(reviewAutoOpenSessionRef.current || {}).filter(([key]) => activeKeys.has(key))
-    )
-    setReviewReadyNotifications((current) => {
-      const next = Object.fromEntries(Object.entries(current).filter(([key]) => activeKeys.has(key)))
-      const changed = Object.keys(next).length !== Object.keys(current).length
-      if (changed) persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
-      return changed ? next : current
-    })
-  }, [runs])
-
-  useEffect(() => {
-    if (!pausedRun || !pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return
-    if (verifiedPausedBannerKey !== pausedBannerKey) return
-    if (reviewAutoOpenSessionRef.current?.[pausedBannerKey]) return
-
-    const timer = window.setTimeout(() => {
-      if (!isPausedBannerStillCurrent(pausedBannerKey)) return
-      const reviewRun = pausedRunDetail || pausedRun
-      setActiveRun(reviewRun.id || reviewRun.run_id)
-      navigate(reviewPathForPausedRun(reviewRun))
-      addNotification({
-        type: 'amber',
-        title: `${pausedGateLabel} opened automatically`,
-        message: pausedResumeMessage,
-        duration: 5000,
-      })
-      reviewAutoOpenSessionRef.current = {
-        ...(reviewAutoOpenSessionRef.current || {}),
-        [pausedBannerKey]: true,
-      }
-    }, 800)
-
-    return () => window.clearTimeout(timer)
-  }, [
-    addNotification,
-    isPausedBannerStillCurrent,
-    navigate,
-    pausedBannerKey,
-    pausedGateLabel,
-    pausedResumeMessage,
-    pausedRun,
-    pausedRunDetail,
-    pausedRunSummary,
-    setActiveRun,
-    verifiedPausedBannerKey,
-  ])
-
-  useEffect(() => {
-    if (!pausedRunDetail || !pausedBannerKey || !pausedRunSummary) return
-    if (readyPausedBannerKey !== pausedBannerKey) return
-    if (reviewReadyNotifications[pausedBannerKey]) return
-
-    const timer = window.setTimeout(() => {
-      if (!isPausedBannerStillCurrent(pausedBannerKey)) return
-      addNotification({
-        type: 'amber',
-        title: `${pausedGateLabel} ready for review`,
-        message: pausedResumeMessage,
-        duration: 6000,
-      })
-
-      setReviewReadyNotifications((current) => {
-        if (current[pausedBannerKey]) return current
-        const next = { ...current, [pausedBannerKey]: true }
-        persistJsonMap(REVIEW_READY_NOTIFICATIONS_KEY, next)
-        return next
-      })
-    }, REVIEW_READY_NOTIFICATION_DELAY_MS)
-
-    return () => window.clearTimeout(timer)
-  }, [
-    addNotification,
-    isPausedBannerStillCurrent,
-    pausedBannerKey,
-    pausedRunDetail,
-    pausedGateLabel,
-    pausedResumeMessage,
-    pausedRunSummary,
-    readyPausedBannerKey,
-    reviewReadyNotifications,
-  ])
-
-  const isPausedBannerVisible = Boolean(
-    pausedRun &&
-    pausedRunDetail &&
-    pausedBannerKey &&
-    readyPausedBannerKey === pausedBannerKey &&
-    !dismissedPausedBanners[pausedBannerKey]
-  )
-
-  const dismissPausedBanner = () => {
-    if (!pausedBannerKey) return
-    setDismissedPausedBanners((current) => {
-      const next = { ...current, [pausedBannerKey]: true }
-      persistJsonMap(PAUSED_BANNER_DISMISSALS_KEY, next)
-      return next
-    })
-  }
-
-  const handleResumePausedRun = () => {
-    if (!pausedRun) return
-    setActiveRun(pausedRun.id)
-    navigate(reviewPathForPausedRun(pausedRun), {
-      state: location.pathname === '/app/data-discovery' ? { backgroundLocation: location } : undefined,
-    })
-  }
 
   const activeRun = activeRunId ? runs.find((run) => run.id === activeRunId) : null
   const stageConfirmation = activeRun?.stage_confirmation
@@ -543,52 +243,6 @@ function AppShell() {
       >
         <Topbar onOpenNavigation={() => setMobileSidebarOpen(true)} />
         <main ref={mainScrollRef} className="flex-1 overflow-auto bg-[#080e1d] p-3 sm:p-4">
-          {isPausedBannerVisible && pausedRun && pausedRunSummary && (
-            <div className="mb-5 rounded-xl border border-amber-500/40 bg-[#19171d] px-4 py-3 shadow-[0_12px_40px_rgba(0,0,0,0.18)]">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div className="flex min-w-0 items-center gap-4">
-                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
-                    <AlertTriangle size={16} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-3 text-sm">
-                      <div className="truncate font-semibold text-white">
-                        {summarizeRunSource(pausedRun)}
-                      </div>
-                      <span className="rounded-lg border border-amber-500/35 bg-amber-500/12 px-2.5 py-1 text-[11px] font-semibold text-amber-300">
-                        {pausedRunSummary.gateLabel} Pending
-                      </span>
-                      <span className="text-[#d4d9e5]">{pausedRunSummary.progressLabel}</span>
-                      <span className="flex items-center gap-1 text-[#9da7bb]">
-                        <Clock3 size={13} />
-                        {pausedRunSummary.timeAgo}
-                      </span>
-                    </div>
-                    <div className="mt-1 text-xs text-slate-400">
-                      {pausedRunSummary.resumeMessage} Progress is saved automatically.
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    onClick={handleResumePausedRun}
-                    className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#2f5fb2] bg-[#102144] px-4 text-sm font-semibold text-[#9fc0ff] transition-colors hover:bg-[#14305f]"
-                  >
-                    <PlayCircle size={15} />
-                    Resume {pausedRunSummary.gateLabel}
-                  </button>
-                  <button
-                    onClick={dismissPausedBanner}
-                    className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/5 hover:text-white"
-                    title="Dismiss paused pipeline banner"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
           <Outlet />
         </main>
       </motion.div>
@@ -637,70 +291,10 @@ function AppShell() {
   )
 }
 
-function formatTimeAgo(value) {
-  if (!value) return 'just now'
-  const diff = Date.now() - new Date(value).getTime()
-  const seconds = Math.max(0, Math.floor(diff / 1000))
-  const minutes = Math.floor(seconds / 60)
-  const hours = Math.floor(minutes / 60)
-  const days = Math.floor(hours / 24)
-  if (days > 0) return `${days}d ago`
-  if (hours > 0) return `${hours}h ago`
-  if (minutes > 0) return `${minutes}m ago`
-  return 'just now'
-}
-
 function hasReviewGate(run) {
   if (run?.next_review_key) return true
   const gate = Number(run?.next_gate || 0)
   return gate >= 1 && gate <= 5
-}
-
-function hasRenderableRunDetail(run) {
-  return Boolean(
-    (Array.isArray(run?.stages) && run.stages.length > 0) ||
-    (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length > 0) ||
-    run?.stage_confirmation ||
-    Number(run?.next_gate || 0) > 0 ||
-    run?.next_review_key ||
-    run?.bronze ||
-    run?.silver ||
-    run?.gold
-  )
-}
-
-function isSuppressedInitialReviewRun(run) {
-  const runId = String(run?.id || run?.run_id || '')
-  return (
-    Number(run?.next_gate || 0) === 1 &&
-    (
-      runId === 'run_a3f8c2' ||
-      isDemoFallbackRun(run) ||
-      Boolean(run?.demo_review_fallback) ||
-      String(run?.review_fallback_reason || '').toLowerCase().includes('fallback')
-    )
-  )
-}
-
-function isReviewPausedRun(run) {
-  if (isSuppressedInitialReviewRun(run)) return false
-  const status = normalizeState(run?.status)
-  const reviewStatuses = ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW']
-  return (
-    hasRenderableRunDetail(run) &&
-    hasReviewGate(run) &&
-    !run?.stage_confirmation?.awaiting_confirmation &&
-    status !== 'PAUSED_FOR_STAGE_CONFIRMATION' &&
-    reviewStatuses.includes(status)
-  )
-}
-
-function reviewPathForPausedRun(run) {
-  const runId = encodeURIComponent(run.id || run.run_id)
-  if (run?.next_review_key) {
-    return `/app/hitl?runId=${runId}&review=${encodeURIComponent(run.next_review_key)}`
-  }
-  return `/app/hitl?runId=${runId}&gate=${Number(run.next_gate || 0)}`
 }
 
 /** Individual toast card */
