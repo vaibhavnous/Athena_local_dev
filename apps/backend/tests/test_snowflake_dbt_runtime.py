@@ -648,7 +648,7 @@ def test_generation_first_dbt_gold_review_finalizes_then_pauses(monkeypatch):
     assert result["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
     assert result["execution_ready"] is True
     assert result["next_stage_key"] == "gold_code_execution"
-    assert result["next_stage_label"] == "Snowflake dbt Deployment & Build"
+    assert result["next_stage_label"] == "Deployment"
     assert result["stage_confirmation"]["last_completed_stage_key"] == "gold_review"
     assert result["snowflake_dbt_artifact_set_hash"] == "reviewed-hash"
     assert "snowflake_bronze_source_load_status" not in result
@@ -1038,7 +1038,7 @@ def test_generation_first_dbt_pipeline_steps_put_one_deployment_after_gold_revie
     assert "bronze_code_execution" not in keys
     assert "silver_code_execution" not in keys
     assert keys[-1] == "gold_code_execution"
-    assert by_key["gold_code_execution"]["label"] == "Snowflake dbt Deployment & Build"
+    assert by_key["gold_code_execution"]["label"] == "Deployment"
 
 
 def test_dbt_gold_bundle_does_not_expose_native_dimension_companion():

@@ -228,15 +228,15 @@ test('recognizes Snowflake dbt deployment mode when a sparse response omits the 
     dbt_deployment_mode: 'generate_and_deploy',
     database_flow_version: 'generation_first_v1',
     pipeline_steps: [
-      { key: 'gold_code_execution', label: 'Snowflake dbt Deployment & Build', state: 'RUNNING' },
+      { key: 'gold_code_execution', label: 'Deployment', state: 'RUNNING' },
     ],
   }
 
   const phases = getPhaseGroups(run, getPipelineSteps(run))
-  const target = phases.find((phase) => phase.label === 'Snowflake dbt Deployment & Build')
+  const target = phases.find((phase) => phase.label === 'Code Execution & Report Generation')
 
   expect(target?.steps).toHaveLength(1)
-  expect(target?.steps[0]?.label).toBe('Snowflake dbt Deployment & Build')
+  expect(target?.steps[0]?.label).toBe('Deployment')
 })
 
 test('groups marked Snowflake dbt runs into generation and one deployment phase', () => {
@@ -261,7 +261,7 @@ test('groups marked Snowflake dbt runs into generation and one deployment phase'
       { key: 'gate5', state: 'COMPLETED' },
       { key: 'gold', state: 'COMPLETED' },
       { key: 'gold_review', state: 'COMPLETED' },
-      { key: 'gold_code_execution', label: 'Snowflake dbt Deployment & Build', state: 'PENDING' },
+      { key: 'gold_code_execution', label: 'Deployment', state: 'PENDING' },
     ],
   }
 
@@ -271,12 +271,12 @@ test('groups marked Snowflake dbt runs into generation and one deployment phase'
     'Discovery & Requirement Intelligence',
     'Source & Metadata Intelligence',
     'Code Generation & Reviews',
-    'Snowflake dbt Deployment & Build',
+    'Code Execution & Report Generation',
   ])
-  expect(phases.find((phase) => phase.label === 'Snowflake dbt Deployment & Build')?.steps).toHaveLength(1)
-  expect(phases.find((phase) => phase.label === 'Snowflake dbt Deployment & Build')?.steps[0]).toMatchObject({
+  expect(phases.find((phase) => phase.label === 'Code Execution & Report Generation')?.steps).toHaveLength(1)
+  expect(phases.find((phase) => phase.label === 'Code Execution & Report Generation')?.steps[0]).toMatchObject({
     key: 'gold_code_execution',
-    label: 'Snowflake dbt Deployment & Build',
+    label: 'Deployment',
     state: 'PENDING',
   })
 })

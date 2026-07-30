@@ -27,9 +27,14 @@ def quote_ident(value: str) -> str:
 
 
 def layer_targets(extra_targets: Iterable[str]) -> list[tuple[str, str]]:
+    bronze_database = (
+        os.getenv("SNOWFLAKE_BRONZE_CATALOG")
+        or os.getenv("SNOWFLAKE_DATABASE")
+        or "ATHENA_DB"
+    )
     targets = [
         (
-            os.getenv("SNOWFLAKE_BRONZE_CATALOG") or os.getenv("SNOWFLAKE_DATABASE") or "ATHENA_DB",
+            bronze_database,
             os.getenv("SNOWFLAKE_BRONZE_SCHEMA") or "BRONZE",
         ),
         (
@@ -44,6 +49,9 @@ def layer_targets(extra_targets: Iterable[str]) -> list[tuple[str, str]]:
             os.getenv("SNOWFLAKE_GOLD_SCHEMA") or "GOLD",
         ),
     ]
+    raw_schema = str(os.getenv("SNOWFLAKE_RAW_SCHEMA") or "").strip()
+    if raw_schema:
+        targets.insert(0, (bronze_database, raw_schema))
     for item in extra_targets:
         parts = [part.strip() for part in str(item or "").split(".")]
         if len(parts) != 2 or not all(parts):
@@ -106,13 +114,13 @@ def fetch_objects(cur, database: str, schema: str) -> list[tuple[str, str]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Drop generated Athena Snowflake Bronze/Silver/Gold tables/views.")
+    parser = argparse.ArgumentParser(description="Drop generated Athena Snowflake Raw/Bronze/Silver/Gold tables/views.")
     parser.add_argument("--execute", action="store_true", help="Actually drop objects. Omit for dry-run.")
     parser.add_argument(
         "--target",
         action="append",
         default=[],
-        help="Extra DATABASE.SCHEMA to clean, repeatable. Defaults to configured Bronze/Silver/Gold schemas.",
+        help="Extra DATABASE.SCHEMA to clean, repeatable. Defaults to configured Raw/Bronze/Silver/Gold schemas.",
     )
     args = parser.parse_args()
 

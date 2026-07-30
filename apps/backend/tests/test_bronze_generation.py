@@ -590,6 +590,7 @@ def test_snowflake_bronze_generation_skips_llm_by_default(monkeypatch):
 def test_snowflake_dbt_bronze_refreshes_models_from_current_tables(monkeypatch, tmp_path):
     monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
     monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
+    monkeypatch.setenv("SNOWFLAKE_RAW_SCHEMA", "RAW")
     monkeypatch.delenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", raising=False)
     monkeypatch.chdir(tmp_path)
 
@@ -622,11 +623,15 @@ def test_snowflake_dbt_bronze_refreshes_models_from_current_tables(monkeypatch, 
     assert first_model.name == "bronze_claiminformation.sql"
     assert first_result["code_generation_format"] == "dbt"
     assert first_result["dbt_alias"] == "bronze_ClaimInformation"
-    assert "{{ source('athena_db_bronze', 'raw_claiminformation') }}" in first_sql
+    assert "{{ source('athena_db_raw', 'raw_claiminformation') }}" in first_sql
     assert first_result["snowflake_landing_database"] == "ATHENA_DB"
-    assert first_result["snowflake_landing_schema"] == "BRONZE"
+    assert first_result["snowflake_landing_schema"] == "RAW"
     assert first_result["snowflake_landing_table"] == "raw_ClaimInformation"
     assert "CREATE TABLE" not in first_sql
+    sources_yml = Path(first["snowflake_dbt_sources_path"]).read_text(encoding="utf-8")
+    assert 'database: "ATHENA_DB"' in sources_yml
+    assert 'schema: "RAW"' in sources_yml
+    assert 'identifier: "raw_ClaimInformation"' in sources_yml
 
     reviewed_sql = first_sql + "\n-- reviewed bronze\n"
     reviewed = bronze_gen.sync_snowflake_dbt_bronze_review(
@@ -721,6 +726,29 @@ def test_snowflake_dbt_bronze_refreshes_models_from_current_tables(monkeypatch, 
     assert not renamed_model.exists()
     assert Path(empty["snowflake_dbt_sources_path"]).exists()
     assert Path(empty["snowflake_dbt_bronze_schema_path"]).exists()
+
+
+def test_snowflake_dbt_bronze_landing_schema_defaults_to_bronze(monkeypatch, tmp_path):
+    monkeypatch.delenv("SNOWFLAKE_RAW_SCHEMA", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    result = bronze_gen._generate_one_table(
+        run_id="run-dbt-legacy-landing",
+        table_ref={
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table_name": "Claims",
+        },
+        bronze_catalog="ATHENA_DB",
+        bronze_schema="BRONZE",
+        target_warehouse="snowflake",
+        execution_engine="dbt",
+    )
+
+    assert result["snowflake_landing_schema"] == "BRONZE"
+    assert "{{ source('athena_db_bronze', 'raw_claims') }}" in Path(
+        result["script_path"]
+    ).read_text(encoding="utf-8")
 
 
 def test_snowflake_dbt_bronze_rejects_sanitized_model_name_collision(monkeypatch, tmp_path):

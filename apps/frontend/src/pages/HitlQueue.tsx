@@ -2,7 +2,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { AlertTriangle, CheckCircle, CheckCircle2, ChevronDown, ChevronRight, Copy, Database, Download, Inbox, KeyRound, Loader2, PlusCircle, RotateCcw, Send, Shield, Table2, Timer, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle, CheckCircle2, ChevronDown, ChevronRight, Copy, Database, Download, FileCode2, Inbox, KeyRound, Loader2, Pencil, PlusCircle, RotateCcw, Send, Shield, Table2, Timer, XCircle } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
 import KpiReviewCard from '../components/hitl/KpiReviewCard'
 import EditKpiModal from '../components/hitl/EditKpiModal'
@@ -2288,7 +2288,7 @@ function HitlQueue({ onClose = null }) {
             isSilverMergeKeyReview ? (
             <CodeReviewPanel
               title="Silver Merge Key Review"
-              description={`Review ${silverMergeKeyReviewFeeds.length} merge-key set${silverMergeKeyReviewFeeds.length !== 1 ? 's' : ''} before Silver generation continues.`}
+              description={`Review ${silverMergeKeyReviewFeeds.length} merge key item${silverMergeKeyReviewFeeds.length !== 1 ? 's' : ''} before the pipeline continues.`}
               lineageLabel="View Source -> Bronze -> Silver Lineage"
               onViewLineage={() => navigate(`/app/data-migration?runId=${encodeURIComponent(selectedRunId)}`)}
               items={silverMergeKeyReviewItems}
@@ -2306,7 +2306,8 @@ function HitlQueue({ onClose = null }) {
               onSubmit={handleSubmit}
               submitting={submitting}
               disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed}
-              submitLabel="Submit & Generate Silver"
+              submitLabel="Submit & Continue"
+              hitlGateStyle
             />
             ) : isGoldReview ? (
             <CodeReviewPanel
@@ -3258,6 +3259,7 @@ function CodeReviewPanel({
   onDraftItemsChange,
   sessionKey,
   loading,
+  hitlGateStyle = false,
 }) {
   const [expandedKey, setExpandedKey] = useState(null)
   const [draftItems, setDraftItems] = useState(items)
@@ -3266,7 +3268,7 @@ function CodeReviewPanel({
   useEffect(() => {
     setDraftItems(items)
     onDraftItemsChange?.(items)
-    setExpandedKey(null)
+    setExpandedKey(hitlGateStyle ? items[0]?.key || null : null)
     // Reset only when the reviewer actually changes run/gate.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey])
@@ -3281,7 +3283,9 @@ function CodeReviewPanel({
       onDraftItemsChange?.(next)
       return next
     })
-    setExpandedKey((current) => (items.some((item) => item.key === current) ? current : null))
+    setExpandedKey((current) => (
+      items.some((item) => item.key === current) ? current : hitlGateStyle ? items[0]?.key || null : null
+    ))
     // Track item identity only; preserving edited draft code while parent objects refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemKeys])
@@ -3337,21 +3341,23 @@ function CodeReviewPanel({
 
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22, ease: 'easeOut' }} className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#0f1829] shadow-2xl">
-      <div className="flex shrink-0 flex-col gap-4 border-b border-[#1d2940] bg-[#101726] p-6 md:flex-row md:items-center md:justify-between">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#163b74] text-[#4fa3ff]">
-            <Copy size={20} />
+      <div className={`flex shrink-0 flex-col gap-4 border-b border-[#1d2940] bg-[#101726] md:flex-row md:items-center md:justify-between ${hitlGateStyle ? 'px-6 py-5' : 'p-6'}`}>
+        <div className={`flex items-center ${hitlGateStyle ? 'gap-4' : 'gap-3'}`}>
+          <div className={`flex items-center justify-center text-[#4fa3ff] ${hitlGateStyle ? 'h-12 w-12 rounded-[10px] bg-[#152b50]' : 'h-10 w-10 rounded-lg bg-[#163b74]'}`}>
+            {hitlGateStyle ? <FileCode2 size={22} /> : <Copy size={20} />}
           </div>
           <div>
-            <h2 className="text-xl font-extrabold text-white">{title}</h2>
-            <p className="text-sm text-[#c6d2e8]">{description}</p>
+            <h2 className={`${hitlGateStyle ? 'text-[22px]' : 'text-xl'} font-extrabold text-white`}>{title}</h2>
+            <p className={`${hitlGateStyle ? 'mt-1' : ''} text-sm text-[#c6d2e8]`}>{description}</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <span className={`inline-flex h-10 items-center rounded-lg border px-3 text-xs font-bold ${decisionTone}`}>
-            {decisionLabel}
-          </span>
-          {onViewLineage && (
+          {!hitlGateStyle && (
+            <span className={`inline-flex h-10 items-center rounded-lg border px-3 text-xs font-bold ${decisionTone}`}>
+              {decisionLabel}
+            </span>
+          )}
+          {!hitlGateStyle && onViewLineage && (
             <button
               type="button"
               onClick={onViewLineage}
@@ -3364,7 +3370,7 @@ function CodeReviewPanel({
           <button
             type="button"
             onClick={onAutoApprovePending}
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#202b3a] px-4 text-sm font-bold text-[#c6d2e8] transition-colors hover:bg-[#263449] hover:text-white"
+            className={`inline-flex items-center gap-2 rounded-lg bg-[#202b3a] px-4 text-sm font-bold text-[#c6d2e8] transition-colors hover:bg-[#263449] hover:text-white ${hitlGateStyle ? 'h-11' : 'h-10'}`}
           >
             <CheckCircle size={14} className="text-[#12b886]" />
             Auto-Approve Pending
@@ -3395,6 +3401,7 @@ function CodeReviewPanel({
               submitting={submitting}
               submitDisabled={disabled}
               submitLabel={submitLabel}
+              hitlGateStyle={hitlGateStyle}
             />
           ))
         )}
@@ -3405,7 +3412,7 @@ function CodeReviewPanel({
           <span className="font-semibold text-white">{reviewedCount}</span> / {totalCount} items reviewed
         </p>
         <div className="flex items-center gap-3">
-          <div className="flex flex-wrap items-center gap-2">
+          {!hitlGateStyle && <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => onSetAllDecision('APPROVED')}
@@ -3451,7 +3458,7 @@ function CodeReviewPanel({
                 Regenerate
               </span>
             </button>
-          </div>
+          </div>}
           <button type="button" onClick={onPause} className="btn-secondary">
             Pause Pipeline
           </button>
@@ -3461,7 +3468,7 @@ function CodeReviewPanel({
             disabled={disabled}
             className="inline-flex items-center gap-2 rounded-lg bg-accent-blue px-5 py-3 text-sm font-bold text-white shadow-lg transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {submitting ? <Loader2 size={15} className="animate-spin" /> : <Copy size={15} />}
+            {submitting ? <Loader2 size={15} className="animate-spin" /> : hitlGateStyle ? <FileCode2 size={15} /> : <Copy size={15} />}
             {submitting ? 'Submitting...' : submitLabel}
           </button>
         </div>
@@ -3470,16 +3477,17 @@ function CodeReviewPanel({
   )
 }
 
-function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysChange, onApprove, onReject, onRegenerate, onClear, decision, onSubmit, submitting, submitDisabled, submitLabel }) {
+function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysChange, onApprove, onReject, onRegenerate, onClear, decision, onSubmit, submitting, submitDisabled, submitLabel, hitlGateStyle = false }) {
   const approved = decision === 'APPROVED'
   const rejected = decision === 'REJECTED'
   const regenerate = decision === 'REGENERATE'
   const isMergeKeyReview = item.type === 'MERGE_KEY'
   const [showRejectInput, setShowRejectInput] = useState(false)
   const [rejectionReason, setRejectionReason] = useState('')
+  const [editingMergeKeys, setEditingMergeKeys] = useState(false)
 
   return (
-    <div className={`rounded-xl border p-5 transition-colors ${
+    <div className={`${hitlGateStyle ? 'rounded-[16px] p-6' : 'rounded-xl p-5'} border transition-colors ${
       approved
         ? 'border-[#1f6658] bg-[#103033]'
         : rejected
@@ -3491,8 +3499,8 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
-            <Copy size={15} className="flex-shrink-0 text-[#4fa3ff]" />
-            <h3 className="truncate text-sm font-extrabold text-white">{item.title}</h3>
+            {hitlGateStyle ? <FileCode2 size={17} className="flex-shrink-0 text-[#4fa3ff]" /> : <Copy size={15} className="flex-shrink-0 text-[#4fa3ff]" />}
+            <h3 className={`truncate font-extrabold text-white ${hitlGateStyle ? 'font-mono text-[16px]' : 'text-sm'}`}>{item.title}</h3>
             <span className="rounded-full bg-[#334155] px-2 py-1 text-[10px] font-extrabold text-[#d7dfed]">
               {item.type}
             </span>
@@ -3508,18 +3516,19 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
         {decision && <span className={`text-xs font-semibold ${approved ? 'text-[#31d49f]' : rejected ? 'text-[#ff647f]' : 'text-[#78a9ff]'}`}>{approved ? '✓ Approved' : rejected ? '× Rejected' : 'Regenerate'}</span>}
         <button
           type="button"
-          onClick={onToggle}
+          onClick={hitlGateStyle && isMergeKeyReview ? () => setEditingMergeKeys((current) => !current) : onToggle}
+          aria-pressed={hitlGateStyle && isMergeKeyReview ? editingMergeKeys : undefined}
           className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#202b3a] px-4 text-sm font-bold text-[#c6d2e8] transition-colors hover:bg-[#263449] hover:text-white"
         >
           {isMergeKeyReview
-            ? (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />)
+            ? (hitlGateStyle ? (editingMergeKeys ? <CheckCircle size={14} className="text-[#31d49f]" /> : <Pencil size={14} className="text-[#4fa3ff]" />) : (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />))
             : <Copy size={14} />}
-          {isMergeKeyReview ? (expanded ? 'Collapse' : 'Edit keys') : 'Review Code'}
+          {isMergeKeyReview ? (hitlGateStyle ? (editingMergeKeys ? 'Done' : 'Edit') : (expanded ? 'Collapse' : 'Edit keys')) : 'Review Code'}
         </button>
         </div>
       </div>
 
-      <CodeReviewSummary item={item} onMergeKeysChange={onMergeKeysChange} />
+      <CodeReviewSummary item={item} onMergeKeysChange={onMergeKeysChange} hitlGateStyle={hitlGateStyle} editingMergeKeys={editingMergeKeys} />
 
       <button
         type="button"
@@ -3527,7 +3536,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
         className="mt-4 inline-flex items-center gap-2 text-xs font-bold text-[#c6d2e8] hover:text-white"
       >
         <span className="text-[10px] text-[#91a4cb]">{expanded ? '⌃' : '⌄'}</span>
-        {isMergeKeyReview ? (expanded ? 'Hide details' : 'Review merge keys') : 'Open generated code'}
+        {isMergeKeyReview ? (expanded ? (hitlGateStyle ? 'Hide code' : 'Hide details') : (hitlGateStyle ? 'Show code' : 'Review merge keys')) : 'Open generated code'}
       </button>
 
       {expanded && isMergeKeyReview && (
@@ -3574,7 +3583,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
         />
       )}
 
-      {!decision && !showRejectInput && <div className="mt-4 grid gap-2 md:grid-cols-3">
+      {!decision && !showRejectInput && <div className={`mt-4 grid gap-2 ${hitlGateStyle ? 'md:grid-cols-2' : 'md:grid-cols-3'}`}>
         <button
           type="button"
           onClick={(event) => {
@@ -3588,7 +3597,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
               : 'border-emerald-500/35 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/15'
           }`}
         >
-          ✓ Approve
+          {hitlGateStyle ? <><CheckCircle size={15} /> Approve</> : '✓ Approve'}
         </button>
         <button
           type="button"
@@ -3604,9 +3613,9 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
               : 'border-red-500/35 bg-red-500/10 text-red-400 hover:bg-red-500/15'
           }`}
         >
-          × Reject
+          {hitlGateStyle ? <><XCircle size={15} /> Reject</> : '× Reject'}
         </button>
-        <button
+        {!hitlGateStyle && <button
           type="button"
           onClick={(event) => {
             event.stopPropagation()
@@ -3620,7 +3629,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
           }`}
         >
           Regenerate
-        </button>
+        </button>}
       </div>}
 
       {!decision && showRejectInput && (
@@ -3640,7 +3649,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
   )
 }
 
-function CodeReviewSummary({ item, onMergeKeysChange }) {
+function CodeReviewSummary({ item, onMergeKeysChange, hitlGateStyle = false, editingMergeKeys = false }) {
   const keys = item.mergeKeys || item.primaryKeys || []
   const candidates = (item.mergeKeyCandidates || []).filter((candidate) => !keys.includes(candidate))
   const canEditMergeKeys = item.type === 'BRONZE' || item.mergeKeysEditable
@@ -3652,14 +3661,14 @@ function CodeReviewSummary({ item, onMergeKeysChange }) {
   ].filter(([, value]) => value)
 
   return (
-    <div className="mt-4 rounded-xl border border-[#22304b] bg-[#0b1424] p-4">
+    <div className={`mt-4 border border-[#22304b] bg-[#0b1424] p-4 ${hitlGateStyle ? 'rounded-[10px]' : 'rounded-xl'}`}>
       {(keys.length > 0 || canEditMergeKeys) && (
         <div>
           <div className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wide text-[#9ca9bd]">
             <KeyRound size={13} className="text-[#69a0ff]" />
-            {item.type === 'BRONZE' ? 'Resolve Merge Keys' : 'Review Merge Keys'}
+            {item.type === 'BRONZE' ? 'Resolve Merge Keys' : hitlGateStyle ? 'Merge Keys' : 'Review Merge Keys'}
           </div>
-          {canEditMergeKeys ? (
+          {canEditMergeKeys && (!hitlGateStyle || editingMergeKeys) ? (
             <>
               <input
                 value={keys.join(', ')}
@@ -3680,6 +3689,7 @@ function CodeReviewSummary({ item, onMergeKeysChange }) {
                   {key}
                 </span>
               ))}
+              {keys.length === 0 && <span className="text-xs text-[#91a4cb]">No merge keys selected</span>}
             </div>
           )}
         </div>

@@ -1143,6 +1143,8 @@ def generate_snowflake_bronze_dbt_model(
     run_id: str,
     bronze_catalog: str,
     bronze_schema: str,
+    landing_database: str | None = None,
+    landing_schema: str | None = None,
     landing_table: str | None = None,
     cast_rules: Dict[str, str] | None = None,
     table_metadata: Dict[str, Any] | None = None,
@@ -1150,7 +1152,10 @@ def generate_snowflake_bronze_dbt_model(
     columns = _snowflake_columns(table_metadata=table_metadata, cast_rules=cast_rules)
     physical_alias = f"bronze_{table}"
     landing_table = landing_table or table
-    source_name = dbt_snowflake_runtime.dbt_source_name(bronze_catalog, bronze_schema)
+    source_name = dbt_snowflake_runtime.dbt_source_name(
+        landing_database or bronze_catalog,
+        landing_schema or bronze_schema,
+    )
     source_table_name = dbt_snowflake_runtime.dbt_source_table_name(landing_table)
     source_ref = dbt_snowflake_runtime.dbt_source_ref(source_name, source_table_name)
     business_columns = (
@@ -1728,7 +1733,7 @@ def _generate_one_table(
 
     if dbt_codegen:
         snowflake_landing_database = bronze_catalog
-        snowflake_landing_schema = bronze_schema
+        snowflake_landing_schema = str(os.getenv("SNOWFLAKE_RAW_SCHEMA") or bronze_schema).strip() or bronze_schema
         snowflake_landing_table = f"raw_{table_name}"
         dbt_model_name = dbt_snowflake_runtime.dbt_safe_name(f"bronze_{table_name}", prefix="bronze")
         dbt_alias = f"bronze_{table_name}"
@@ -1744,6 +1749,8 @@ def _generate_one_table(
             run_id=run_id,
             bronze_catalog=bronze_catalog,
             bronze_schema=bronze_schema,
+            landing_database=snowflake_landing_database,
+            landing_schema=snowflake_landing_schema,
             landing_table=snowflake_landing_table,
             cast_rules=cast_rules or {},
             table_metadata=table_metadata or {},

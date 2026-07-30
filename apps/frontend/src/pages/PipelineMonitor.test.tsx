@@ -230,10 +230,10 @@ test('keeps code review gates out of the monitor substage list', () => {
 test('renders one gated Snowflake dbt deployment step', () => {
   const phase = {
     id: 'phase-4',
-    label: 'Snowflake dbt Deployment & Build',
+    label: 'Code Execution & Report Generation',
     status: 'Pending',
     steps: [
-      { key: 'gold_code_execution', label: 'Snowflake dbt Deployment & Build', state: 'PENDING' },
+      { key: 'gold_code_execution', label: 'Deployment', state: 'PENDING' },
     ],
   }
   const run = {
@@ -249,7 +249,7 @@ test('renders one gated Snowflake dbt deployment step', () => {
   expect(display.steps).toHaveLength(1)
   expect(display.steps[0]).toMatchObject({
     key: 'gold_code_execution',
-    label: 'Snowflake dbt Deployment & Build',
+    label: 'Deployment',
     state: 'PENDING',
   })
 })

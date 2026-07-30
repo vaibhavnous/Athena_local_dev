@@ -2286,7 +2286,7 @@ def build_pipeline_steps(
             for layer in execution_layers:
                 execution_step = execution_steps[f"{layer}_code_execution"]
                 if generation_first_snowflake_dbt_flow(checkpoint):
-                    execution_step["label"] = "Snowflake dbt Deployment & Build"
+                    execution_step["label"] = "Deployment"
                     execution_step["detail"] = (
                         "Approved source data is landed, then the frozen dbt project is deployed and built in Snowflake"
                     )
@@ -4161,7 +4161,7 @@ def execute_generation_first_snowflake_dbt(
         "execution_ready": True,
         "background_stage": stage_key,
         "next_stage_key": stage_key,
-        "next_stage_label": "Snowflake dbt Deployment & Build",
+        "next_stage_label": "Deployment",
         "awaiting_stage_confirmation": False,
         "stage_confirmation": None,
         "failed_background_stage": None,
@@ -4203,7 +4203,7 @@ def execute_generation_first_snowflake_dbt(
             "background_stage": None,
             "failed_background_stage": None,
             "last_completed_stage_key": stage_key,
-            "last_completed_stage_label": "Snowflake dbt Deployment & Build",
+            "last_completed_stage_label": "Deployment",
             "next_stage_key": None,
             "next_stage_label": None,
             "stage_confirmation": None,
@@ -4224,7 +4224,7 @@ def execute_generation_first_snowflake_dbt(
             "background_stage": stage_key,
             "failed_background_stage": stage_key,
             "next_stage_key": stage_key,
-            "next_stage_label": "Snowflake dbt Deployment & Build",
+            "next_stage_label": "Deployment",
             "error": str(exc),
             "resume_message": (
                 "Snowflake dbt deployment or build failed. Retry reuses completed source landing "
@@ -4320,7 +4320,7 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
                     "last_completed_stage_key": "gold_review",
                     "last_completed_stage_label": "Gold Code Review",
                     "next_stage_key": "gold_code_execution",
-                    "next_stage_label": "Snowflake dbt Deployment & Build",
+                    "next_stage_label": "Deployment",
                     "resume_message": "All dbt models are reviewed and frozen. Start deployment and build when ready.",
                     "stage_confirmation": {
                         "enabled": True,
@@ -4328,7 +4328,7 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
                         "last_completed_stage_key": "gold_review",
                         "last_completed_stage_label": "Gold Code Review",
                         "next_stage_key": "gold_code_execution",
-                        "next_stage_label": "Snowflake dbt Deployment & Build",
+                        "next_stage_label": "Deployment",
                         "resume_message": "All dbt models are reviewed and frozen. Start deployment and build when ready.",
                     },
                 }

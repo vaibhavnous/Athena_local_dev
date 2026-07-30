@@ -1285,9 +1285,9 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeStep('gold', 'Gold Code Generation'),
       makeStep('gold_review', 'Gold Code Review'),
     ]
-  } else if (!fileFlow && ['Target Execution', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
+  } else if (!fileFlow && ['Target Execution', 'Code Execution & Report Generation', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
     displaySteps = isGenerationFirstDatabaseRun(run) && isSnowflakeDbtRun(run)
-      ? [makeStep('gold_code_execution', 'Snowflake dbt Deployment & Build')]
+      ? [makeStep('gold_code_execution', 'Deployment')]
       : [
           makeStep('bronze_code_execution', 'Bronze Target Execution'),
           makeStep('silver_code_execution', 'Silver Target Execution'),

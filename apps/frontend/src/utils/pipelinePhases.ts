@@ -128,7 +128,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     },
     {
       id: 'phase-4',
-      label: 'Snowflake dbt Deployment & Build',
+      label: 'Code Execution & Report Generation',
       keys: ['gold_code_execution'],
     },
   ],

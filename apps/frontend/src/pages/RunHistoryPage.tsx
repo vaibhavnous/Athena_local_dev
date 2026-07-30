@@ -565,13 +565,13 @@ function getHistoryDisplaySteps(phase) {
     ])
   }
 
-  if (['Target Execution', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
+  if (['Target Execution', 'Code Execution & Report Generation', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
     if (
       steps.length === 1 &&
       steps[0]?.key === 'gold_code_execution'
     ) {
       return clampLinearHistorySteps([
-        actual('gold_code_execution', 'Snowflake dbt Deployment & Build'),
+        actual('gold_code_execution', 'Deployment'),
       ])
     }
     return clampLinearHistorySteps([
