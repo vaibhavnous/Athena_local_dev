@@ -230,7 +230,7 @@ test('keeps code review gates out of the monitor substage list', () => {
 test('renders one gated Snowflake dbt deployment step', () => {
   const phase = {
     id: 'phase-4',
-    label: 'Target Execution',
+    label: 'Snowflake dbt Deployment & Build',
     status: 'Pending',
     steps: [
       { key: 'gold_code_execution', label: 'Snowflake dbt Deployment & Build', state: 'PENDING' },

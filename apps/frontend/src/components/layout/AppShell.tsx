@@ -42,6 +42,7 @@ function AppShell() {
   const latestActiveRunIdRef = useRef(activeRunId)
   const demoRunsSeededRef = useRef(false)
   const demoRunsNotifiedRef = useRef(false)
+  const consumedStageGatesRef = useRef(new Set())
   const mainScrollRef = useRef(null)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [stageGateBusy, setStageGateBusy] = useState(false)
@@ -160,12 +161,18 @@ function AppShell() {
     )
   )
   const dbtExecutionReady = executionReady && isSnowflakeDbtRun(activeRun)
+  const stageGateKey = [
+    activeRun?.id,
+    stageConfirmation?.last_completed_stage_key,
+    stageConfirmation?.next_stage_key,
+  ].filter(Boolean).join(':')
   const stageGateOpen = Boolean(
     activeRun &&
     location.pathname !== '/app/hitl' &&
     !hasReviewGate(activeRun) &&
     normalizeState(activeRun.status) === 'PAUSED_FOR_STAGE_CONFIRMATION' &&
-    stageConfirmation?.awaiting_confirmation
+    stageConfirmation?.awaiting_confirmation &&
+    !consumedStageGatesRef.current.has(stageGateKey)
   )
 
   const handleStageGateContinue = async (autoAdvance) => {
@@ -173,6 +180,7 @@ function AppShell() {
     setStageGateBusy(true)
     try {
       await continueStage(activeRunId, autoAdvance)
+      consumedStageGatesRef.current.add(stageGateKey)
       useAthenaStore.getState().updateRun(activeRunId, {
         status: 'PROCESSING',
         background_stage: stageConfirmation?.next_stage_key,

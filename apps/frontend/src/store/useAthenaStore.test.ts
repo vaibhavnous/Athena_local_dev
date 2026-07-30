@@ -1,8 +1,24 @@
 import useAthenaStore from './useAthenaStore'
 
 function resetStore() {
-  useAthenaStore.setState({ runs: [], activeRunId: null })
+  useAthenaStore.setState({ runs: [], activeRunId: null, notifications: [] })
 }
+
+test('does not stack an identical notification while it is already visible', () => {
+  resetStore()
+  const notification = {
+    type: 'error',
+    title: 'Review failed',
+    message: 'Please retry.',
+    duration: 0,
+  }
+
+  const firstId = useAthenaStore.getState().addNotification(notification)
+  const duplicateId = useAthenaStore.getState().addNotification(notification)
+
+  expect(duplicateId).toBe(firstId)
+  expect(useAthenaStore.getState().notifications).toHaveLength(1)
+})
 
 test('keeps a later phase when a slower status response reports an earlier phase', () => {
   resetStore()
@@ -303,7 +319,7 @@ test('accepts a failed status confirmed by the persisted checkpoint', () => {
   })
 })
 
-test('keeps authoritative Snowflake dbt settings during fallback hydration', () => {
+test('keeps authoritative Snowflake dbt settings during sparse run-list hydration', () => {
   resetStore()
   useAthenaStore.getState().addRun({
     id: 'run-snowflake-dbt',
@@ -318,14 +334,19 @@ test('keeps authoritative Snowflake dbt settings during fallback hydration', () 
 
   useAthenaStore.getState().setRuns([{
     id: 'run-snowflake-dbt',
-    status: 'RUNNING',
-    target_warehouse: 'snowflake',
+    status: 'UNKNOWN',
+    source: 'database',
+    target_warehouse: null,
     execution_engine: 'native',
     dbt_deployment_mode: 'generate_only',
-    hydration_fallback: true,
+    database_flow_version: null,
+    stages: [],
+    hydration_fallback: false,
+    status_authoritative: true,
   }])
 
   expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    target_warehouse: 'snowflake',
     execution_engine: 'dbt',
     dbt_deployment_mode: 'generate_and_deploy',
     database_flow_version: 'generation_first_v1',

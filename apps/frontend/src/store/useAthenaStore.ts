@@ -159,8 +159,9 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
     incomingStatus === 'HITL_WAIT' ||
     incomingTerminal
 
-  if (incomingFallback) {
+  if (incomingFallback || !incomingHasDetail) {
     for (const key of [
+      'source',
       'target_warehouse',
       'execution_engine',
       'dbt_deployment_mode',
@@ -539,6 +540,13 @@ const useAthenaStore = create<AthenaState>((set, get) => ({
   setUserRole: (role) => set({ userRole: role }),
 
   addNotification: (notification) => {
+    const duplicate = get().notifications.find((existing) =>
+      existing.type === (notification.type || 'info') &&
+      existing.title === (notification.title || '') &&
+      existing.message === (notification.message || '')
+    )
+    if (duplicate) return duplicate.id
+
     const id = ++notificationIdCounter
     const newNotification: Notification = {
       id,

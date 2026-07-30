@@ -569,7 +569,7 @@ def _fuse_results(
         if db not in source_set:
             continue
 
-        key = f"{db}.{row['schema_name']}.{row['table_name']}"
+        key = f"{db}.{row['schema_name']}.{row['table_name']}".casefold()
         fused[key] = {
             "database_name": db,
             "schema_name": row["schema_name"],
@@ -587,7 +587,7 @@ def _fuse_results(
         if db not in source_set:
             continue
 
-        key = f"{db}.{row['schema_name']}.{row['table_name']}"
+        key = f"{db}.{row['schema_name']}.{row['table_name']}".casefold()
 
         if key not in fused:
             fused[key] = {

@@ -269,7 +269,10 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) -> Dict[str, Any]:
     checkpoint = checkpoint or {}
-    from services.pipeline_runtime import build_pipeline_steps
+    from services.pipeline_runtime import (
+        apply_waiting_stage_state,
+        build_pipeline_steps,
+    )
 
     generation_first = checkpoint.get("database_flow_version") == "generation_first_v1"
     bronze_completed = bool(
@@ -313,6 +316,26 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         else None if gold_completed
         else checkpoint.get("next_review_key")
     )
+    checkpoint_status = str(checkpoint.get("status") or "").upper()
+    last_completed_stage_key = str(checkpoint.get("last_completed_stage_key") or "")
+    if checkpoint_status in {"HITL_WAIT", "PAUSED_FOR_HITL", "PENDING_REVIEW"}:
+        if not next_gate and not next_review_key:
+            next_gate = {
+                "gate1": 1,
+                "gate2": 2,
+                "gate3": 3,
+                "bronze": 4,
+                "gate4": 4,
+                "silver": 5,
+                "gate5": 5,
+            }.get(last_completed_stage_key)
+        if (
+            generation_first
+            and not next_gate
+            and not next_review_key
+            and last_completed_stage_key == "gold"
+        ):
+            next_review_key = "gold_review"
     pipeline_steps = build_pipeline_steps(
         source=str(checkpoint.get("source") or "database"),
         checkpoint=checkpoint,
@@ -327,11 +350,22 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         silver_generation_completed=silver_completed,
         gold_generation_completed=gold_completed,
     )
+    if not checkpoint.get("background_stage") and last_completed_stage_key:
+        completed_index = next(
+            (
+                index
+                for index, step in enumerate(pipeline_steps)
+                if step.get("key") == last_completed_stage_key
+            ),
+            None,
+        )
+        if completed_index is not None:
+            for step in pipeline_steps[:completed_index + 1]:
+                step["state"] = "COMPLETED"
+                step["complete"] = True
     waiting_gate_key = f"gate{next_gate}" if next_gate in {1, 2, 3, 4, 5} else None
     waiting_stage_key = str(next_review_key or waiting_gate_key or "") or None
     if waiting_stage_key:
-        from services.pipeline_runtime import apply_waiting_stage_state
-
         pipeline_steps = apply_waiting_stage_state(pipeline_steps, waiting_stage_key)
     fallback_status = checkpoint.get("status")
     if checkpoint.get("background_stage"):

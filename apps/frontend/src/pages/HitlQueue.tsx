@@ -1497,14 +1497,6 @@ function HitlQueue({ onClose = null }) {
         })
         setTableReview(null)
         setSelectedTables({})
-        addNotification({
-          type: 'success',
-          title: `${gate2Name} Submitted`,
-          message: isSftpRun
-            ? `Approved feeds were submitted for ${gate2Name}.`
-            : 'Approved tables were submitted. Metadata discovery and profiling are resuming.',
-          duration: 5000
-        })
         // Let the monitor show discovery, profiling and enrichment before Gate 3.
         // The backend detail response is the authority for when that review opens.
         returnToMonitor(selectedRunId)
@@ -1555,14 +1547,14 @@ function HitlQueue({ onClose = null }) {
         setSemanticDrafts({})
         setSemanticRejectionReasons({})
         setSemanticValidationError('')
-        addNotification({
-          type: hasRejectedSemanticItem ? 'error' : 'success',
-          title: hasRejectedSemanticItem ? `${gate3Name} Rejected` : `${gate3Name} Submitted`,
-          message: !hasRejectedSemanticItem
-            ? `${gate3Name} approved. Bronze generation is running in the background.`
-            : 'Run stopped.',
-          duration: 5000
-        })
+        if (hasRejectedSemanticItem) {
+          addNotification({
+            type: 'error',
+            title: `${gate3Name} Rejected`,
+            message: 'Run stopped.',
+            duration: 5000
+          })
+        }
         if (!hasRejectedSemanticItem && (currentRun?.compliance_enabled || selectedRunDetail?.compliance_enabled)) {
           setActiveRun(selectedRunId)
           navigate('/app/compliance-governance', { state: { activeRunId: selectedRunId } })
@@ -1615,12 +1607,6 @@ function HitlQueue({ onClose = null }) {
         })
         setBronzeReview(null)
         setCodeReviewDraftItems([])
-        addNotification({
-          type: 'success',
-          title: `${gate4Name} Submitted`,
-          message: 'Bronze review was submitted. Pipeline is resuming.',
-          duration: 5000
-        })
         setSilverMergeKeyReview(null)
         returnToMonitor(selectedRunId)
       } catch (error) {
@@ -1665,12 +1651,6 @@ function HitlQueue({ onClose = null }) {
         })
         setSilverMergeKeyReview(null)
         setCodeReviewDraftItems([])
-        addNotification({
-          type: 'success',
-          title: 'Silver Merge Key Review Submitted',
-          message: 'Silver Merge Key Review was submitted. Pipeline is resuming.',
-          duration: 5000
-        })
         setSilverReview(null)
         returnToMonitor(selectedRunId)
       } catch (error) {
@@ -1719,12 +1699,6 @@ function HitlQueue({ onClose = null }) {
         })
         setSilverReview(null)
         setCodeReviewDraftItems([])
-        addNotification({
-          type: 'success',
-          title: `${gate5Name} Submitted`,
-          message: 'Silver review was submitted. Pipeline is resuming.',
-          duration: 5000
-        })
         returnToMonitor(selectedRunId)
       } catch (error) {
         await refreshRunAfterSubmitError(`${gate5Name} submit did not complete. Waiting on backend state.`)
@@ -1772,12 +1746,6 @@ function HitlQueue({ onClose = null }) {
         })
         setGoldReview(null)
         setCodeReviewDraftItems([])
-        addNotification({
-          type: 'success',
-          title: 'Gold Code Review Submitted',
-          message: 'Gold review was submitted. Pipeline is resuming.',
-          duration: 5000
-        })
         returnToMonitor(selectedRunId)
       } catch (error) {
         await refreshRunAfterSubmitError('Gold Code Review submit did not complete. Waiting on backend state.')
@@ -1818,13 +1786,6 @@ function HitlQueue({ onClose = null }) {
           type: 'amber',
           title: 'Decisions Recorded Locally',
           message: 'KPIs were loaded from fallback data. Database update was skipped.',
-          duration: 5000
-        })
-      } else {
-        addNotification({
-          type: 'success',
-          title: 'Decisions Saved',
-          message: `${decisions.length} KPI decision${decisions.length !== 1 ? 's' : ''} saved. Pipeline resuming.`,
           duration: 5000
         })
       }

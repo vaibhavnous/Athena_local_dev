@@ -261,6 +261,190 @@ def test_active_pipeline_status_uses_checkpoint_snapshot(monkeypatch):
     assert response.json()["run"]["pipeline_steps"]
 
 
+@pytest.mark.parametrize(
+    ("last_completed_stage_key", "waiting_stage_key", "next_gate", "next_review_key"),
+    [
+        ("gate1", "gate1", 1, None),
+        ("gate2", "gate2", 2, None),
+        ("gate3", "gate3", 3, None),
+        ("bronze", "gate4", 4, None),
+        ("silver", "gate5", 5, None),
+        ("gold", "gold_review", None, "gold_review"),
+    ],
+)
+def test_checkpoint_fallback_reconstructs_each_database_review_frontier(
+    last_completed_stage_key,
+    waiting_stage_key,
+    next_gate,
+    next_review_key,
+):
+    from api.routers.runs_router import _fallback_run_detail
+
+    checkpoint = {
+        "run_id": "run-review-frontier",
+        "source": "database",
+        "target_warehouse": "databricks",
+        "execution_engine": "native",
+        "database_flow_version": "generation_first_v1",
+        "status": "HITL_WAIT",
+        "last_completed_stage_key": last_completed_stage_key,
+        "brd_text": "Build reviewed medallion tables.",
+        "memory_lookup_status": "COMPLETED",
+        "extracted_requirements": {"requirements": ["Create curated claims data."]},
+        "extracted_kpis": [{"name": "Claim Count"}],
+        "bronze_generation_status": (
+            "COMPLETED"
+            if last_completed_stage_key in {"bronze", "silver", "gold"}
+            else None
+        ),
+        "silver_generation_status": (
+            "COMPLETED"
+            if last_completed_stage_key in {"silver", "gold"}
+            else None
+        ),
+        "gold_generation_status": (
+            "COMPLETED"
+            if last_completed_stage_key == "gold"
+            else None
+        ),
+    }
+
+    detail = _fallback_run_detail("run-review-frontier", checkpoint)
+    steps = detail["pipeline_steps"]
+    waiting_index = next(
+        index for index, step in enumerate(steps)
+        if step["key"] == waiting_stage_key
+    )
+
+    assert detail["status"] == "HITL_WAIT"
+    assert detail["next_gate"] == next_gate
+    assert detail["next_review_key"] == next_review_key
+    assert all(step["state"] == "COMPLETED" for step in steps[:waiting_index])
+    assert steps[waiting_index]["state"] == "HITL_WAIT"
+    assert all(step["state"] == "PENDING" for step in steps[waiting_index + 1:])
+
+
+def test_checkpoint_fallback_preserves_silver_merge_key_review_frontier():
+    from api.routers.runs_router import _fallback_run_detail
+
+    detail = _fallback_run_detail(
+        "run-merge-review",
+        {
+            "run_id": "run-merge-review",
+            "source": "database",
+            "target_warehouse": "snowflake",
+            "execution_engine": "dbt",
+            "dbt_deployment_mode": "generate_and_deploy",
+            "database_flow_version": "generation_first_v1",
+            "status": "HITL_WAIT",
+            "last_completed_stage_key": "bronze",
+            "next_review_key": "silver_merge_key_review",
+            "bronze_generation_status": "COMPLETED",
+        },
+    )
+    steps = detail["pipeline_steps"]
+    waiting_index = next(
+        index for index, step in enumerate(steps)
+        if step["key"] == "silver_merge_key_review"
+    )
+
+    assert all(step["state"] == "COMPLETED" for step in steps[:waiting_index])
+    assert steps[waiting_index]["state"] == "HITL_WAIT"
+    assert all(step["state"] == "PENDING" for step in steps[waiting_index + 1:])
+
+
+def test_checkpoint_fallback_does_not_add_gold_review_to_legacy_flow():
+    from api.routers.runs_router import _fallback_run_detail
+
+    detail = _fallback_run_detail(
+        "run-legacy-gold",
+        {
+            "run_id": "run-legacy-gold",
+            "source": "database",
+            "target_warehouse": "databricks",
+            "status": "HITL_WAIT",
+            "last_completed_stage_key": "gold",
+            "gold_generation_status": "COMPLETED",
+        },
+    )
+
+    assert detail["next_review_key"] is None
+    assert "gold_review" not in {
+        step["key"] for step in detail["pipeline_steps"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "execution_engine", "dbt_mode", "active_stage"),
+    [
+        ("database", "databricks", "native", None, "kpis"),
+        ("database", "snowflake", "native", None, "kpis"),
+        ("database", "snowflake", "dbt", "generate_and_deploy", "kpis"),
+        ("sftp", "databricks", "native", None, "schema"),
+        ("adls_gen2", "snowflake", "native", None, "schema"),
+    ],
+)
+def test_checkpoint_fallback_shows_active_stage_for_supported_flows(
+    source,
+    target,
+    execution_engine,
+    dbt_mode,
+    active_stage,
+):
+    from api.routers.runs_router import _fallback_run_detail
+
+    detail = _fallback_run_detail(
+        "run-active-frontier",
+        {
+            "run_id": "run-active-frontier",
+            "source": source,
+            "target_warehouse": target,
+            "execution_engine": execution_engine,
+            "dbt_deployment_mode": dbt_mode,
+            "database_flow_version": (
+                "generation_first_v1"
+                if source == "database"
+                else None
+            ),
+            "status": "RUNNING",
+            "background_stage": active_stage,
+        },
+    )
+    steps = detail["pipeline_steps"]
+    active_index = next(
+        index for index, step in enumerate(steps)
+        if step["key"] == active_stage
+    )
+
+    assert all(step["state"] == "COMPLETED" for step in steps[:active_index])
+    assert steps[active_index]["state"] == "RUNNING"
+    assert all(step["state"] == "PENDING" for step in steps[active_index + 1:])
+
+
+def test_checkpoint_fallback_keeps_just_completed_stage_successful():
+    from api.routers.runs_router import _fallback_run_detail
+
+    detail = _fallback_run_detail(
+        "run-stage-complete",
+        {
+            "run_id": "run-stage-complete",
+            "source": "database",
+            "target_warehouse": "databricks",
+            "execution_engine": "native",
+            "database_flow_version": "generation_first_v1",
+            "status": "RUNNING",
+            "background_stage": None,
+            "last_completed_stage_key": "requirements",
+            "next_stage_key": "kpis",
+        },
+    )
+    by_key = {step["key"]: step for step in detail["pipeline_steps"]}
+
+    assert by_key["requirements"]["state"] == "COMPLETED"
+    assert by_key["requirements"]["complete"] is True
+    assert by_key["kpis"]["state"] == "PENDING"
+
+
 def test_snowflake_bronze_review_submission_reports_execution_stage(monkeypatch):
     submitted = {}
     monkeypatch.setattr(

@@ -258,11 +258,8 @@ function PipelineMonitor() {
     if (!activeRunStableId || activeRunIsDemoFallback) return
     if (!reviewKey || !reviewWaiting) {
       setPreparingReviewKey(null)
-      for (const sessionKey of reviewAutoOpenSessionRef.current) {
-        if (sessionKey.startsWith(`${activeRunStableId}:`)) {
-          reviewAutoOpenSessionRef.current.delete(sessionKey)
-        }
-      }
+      // Keep the session marker so a stale HITL snapshot cannot reopen a review
+      // that the user has already seen. Reviews remain available from the run card.
       return
     }
 
@@ -1288,7 +1285,7 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeStep('gold', 'Gold Code Generation'),
       makeStep('gold_review', 'Gold Code Review'),
     ]
-  } else if (!fileFlow && phase.label === 'Target Execution') {
+  } else if (!fileFlow && ['Target Execution', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
     displaySteps = isGenerationFirstDatabaseRun(run) && isSnowflakeDbtRun(run)
       ? [makeStep('gold_code_execution', 'Snowflake dbt Deployment & Build')]
       : [

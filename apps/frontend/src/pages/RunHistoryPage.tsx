@@ -565,7 +565,7 @@ function getHistoryDisplaySteps(phase) {
     ])
   }
 
-  if (phase.label === 'Target Execution') {
+  if (['Target Execution', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
     if (
       steps.length === 1 &&
       steps[0]?.key === 'gold_code_execution'

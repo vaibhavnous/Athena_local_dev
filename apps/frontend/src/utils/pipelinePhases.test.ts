@@ -233,7 +233,7 @@ test('recognizes Snowflake dbt deployment mode when a sparse response omits the 
   }
 
   const phases = getPhaseGroups(run, getPipelineSteps(run))
-  const target = phases.find((phase) => phase.label === 'Target Execution')
+  const target = phases.find((phase) => phase.label === 'Snowflake dbt Deployment & Build')
 
   expect(target?.steps).toHaveLength(1)
   expect(target?.steps[0]?.label).toBe('Snowflake dbt Deployment & Build')
@@ -271,10 +271,10 @@ test('groups marked Snowflake dbt runs into generation and one deployment phase'
     'Discovery & Requirement Intelligence',
     'Source & Metadata Intelligence',
     'Code Generation & Reviews',
-    'Target Execution',
+    'Snowflake dbt Deployment & Build',
   ])
-  expect(phases.find((phase) => phase.label === 'Target Execution')?.steps).toHaveLength(1)
-  expect(phases.find((phase) => phase.label === 'Target Execution')?.steps[0]).toMatchObject({
+  expect(phases.find((phase) => phase.label === 'Snowflake dbt Deployment & Build')?.steps).toHaveLength(1)
+  expect(phases.find((phase) => phase.label === 'Snowflake dbt Deployment & Build')?.steps[0]).toMatchObject({
     key: 'gold_code_execution',
     label: 'Snowflake dbt Deployment & Build',
     state: 'PENDING',

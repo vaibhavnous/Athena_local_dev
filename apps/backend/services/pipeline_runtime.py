@@ -2437,7 +2437,13 @@ def apply_waiting_stage_state(steps: List[Dict[str, Any]], gate_key: Optional[st
     if waiting_index is None:
         return steps
     for index, step in enumerate(steps):
-        if index > waiting_index:
+        if index < waiting_index:
+            # ponytail: the UI flow is linear; reaching a review proves every
+            # upstream stage completed. Replace this with dependency edges if
+            # the visible pipeline ever supports branching.
+            step["state"] = "COMPLETED"
+            step["complete"] = True
+        elif index > waiting_index:
             step["state"] = "PENDING"
             step["complete"] = False
     return steps
