@@ -284,6 +284,15 @@ def test_snowflake_gold_runtime_executes_generated_scripts(monkeypatch):
     assert fake_conn.closed is True
 
 
+def test_snowflake_gold_runtime_uses_persisted_dimension_body_when_file_is_unavailable():
+    assert snowflake_gold_runtime.validate_snowflake_dimension_script(
+        {
+            "dimension_script_path": "missing-after-deploy.sql",
+            "dimension_script_body": _dimension_sql(),
+        }
+    ).startswith("CREATE SCHEMA")
+
+
 def test_snowflake_gold_runtime_normalizes_timestamp_parse_for_existing_artifacts():
     sql = _gold_sql().replace(
         'GROUP BY "claim_status"',
