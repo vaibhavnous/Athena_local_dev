@@ -4,7 +4,6 @@ import { motion } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
 import {
   AlertCircle,
-  ArrowRightLeft,
   ArrowRight,
   Box,
   CheckCircle2,
