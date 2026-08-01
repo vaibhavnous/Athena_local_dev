@@ -345,10 +345,27 @@ def get_auth_service() -> AuthService:
     return _auth_service
 
 
+def auth_disabled() -> bool:
+    return os.getenv("ATHENA_AUTH_DISABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def temporary_auth_user() -> AuthUser:
+    return AuthUser(
+        uid="temporary-auth-disabled-user",
+        username="Marketplace Demo User",
+        email="marketplace-demo@astra.local",
+        userType="Client",
+        isActive=True,
+        canManageAccounts=False,
+    )
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     service: AuthService = Depends(get_auth_service),
 ) -> AuthUser:
+    if auth_disabled():
+        return temporary_auth_user()
     if not credentials or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

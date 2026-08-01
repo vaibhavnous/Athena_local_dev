@@ -18,12 +18,25 @@ type AuthContextValue = {
 const AuthContext = createContext<AuthContextValue | null>(null)
 const SESSION_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const SESSION_REFRESH_RETRY_MS = 60 * 1000
+const TEMPORARY_AUTH_USER: AuthUser = {
+  uid: 'temporary-auth-disabled-user',
+  username: 'Marketplace Demo User',
+  email: 'marketplace-demo@astra.local',
+  userType: 'Client',
+  isActive: true,
+  canManageAccounts: false,
+}
+
+export function authDisabled() {
+  return (process.env.REACT_APP_ATHENA_AUTH_DISABLED ?? 'false').toLowerCase() === 'true'
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const initialSession = useMemo(() => readSession(), [])
+  const isAuthDisabled = authDisabled()
+  const initialSession = useMemo(() => isAuthDisabled ? null : readSession(), [isAuthDisabled])
   const [user, setUser] = useState<AuthUser | null>(() => initialSession?.user ?? null)
   const [expiresAt, setExpiresAt] = useState(() => initialSession?.expiresAt ?? 0)
-  const [isLoading, setIsLoading] = useState(() => Boolean(initialSession?.accessToken))
+  const [isLoading, setIsLoading] = useState(() => !isAuthDisabled && Boolean(initialSession?.accessToken))
 
   const storeSession = (response: Awaited<ReturnType<typeof refreshAuthSession>>) => {
     const session: AuthSession = {
@@ -37,6 +50,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   useEffect(() => {
+    if (isAuthDisabled) {
+      clearSession()
+      setUser(TEMPORARY_AUTH_USER)
+      setExpiresAt(0)
+      setIsLoading(false)
+      return
+    }
+
     const session = readSession()
     if (!session) {
       setIsLoading(false)
@@ -57,7 +78,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .finally(() => setIsLoading(false))
     // Session restoration only runs once; subsequent renewals are scheduled below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [isAuthDisabled])
 
   useEffect(() => {
     const handleUnauthorized = () => {
@@ -87,12 +108,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [expiresAt, user])
 
   const login = async (email: string, password: string) => {
+    if (isAuthDisabled) return
     storeSession(await loginRequest({ email, password }))
   }
 
   const logout = () => {
     clearSession()
-    setUser(null)
+    setUser(isAuthDisabled ? TEMPORARY_AUTH_USER : null)
     setExpiresAt(0)
   }
 

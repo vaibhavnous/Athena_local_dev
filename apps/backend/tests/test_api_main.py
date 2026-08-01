@@ -29,11 +29,17 @@ def test_health_endpoint():
     assert embeddings["mode"] in {"blocked", "disabled", "enabled"}
 
 
-def test_business_endpoints_require_authentication():
+def test_business_endpoints_require_authentication_when_auth_is_enabled():
     override = app.dependency_overrides.pop(get_current_user)
+    previous = os.environ.get("ATHENA_AUTH_DISABLED")
+    os.environ["ATHENA_AUTH_DISABLED"] = "false"
     try:
         response = client.get("/settings")
     finally:
+        if previous is None:
+            os.environ.pop("ATHENA_AUTH_DISABLED", None)
+        else:
+            os.environ["ATHENA_AUTH_DISABLED"] = previous
         app.dependency_overrides[get_current_user] = override
 
     assert response.status_code == 401
