@@ -18,7 +18,6 @@ concurrency:
 
 env:
   REACT_APP_API_BASE_URL: https://astra-data-eecthacqb5eherhk.southindia-01.azurewebsites.net
-  REACT_APP_ATHENA_AUTH_DISABLED: "true"
   REACT_APP_ENABLE_DEMO_FALLBACKS: "false"
 
 jobs:
