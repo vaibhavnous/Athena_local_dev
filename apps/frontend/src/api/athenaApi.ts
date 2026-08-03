@@ -119,6 +119,8 @@ export const startRun = (payload: {
   maxKpis?: number
   devMode?: boolean
   use_domain_kb?: boolean
+  domain_profile?: string
+  knowledge_base_id?: string
   stage_confirmation_enabled?: boolean
   compliance_enabled?: boolean
   compliance_domain?: string

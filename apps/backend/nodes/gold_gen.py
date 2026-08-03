@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Tuple
 
 from state import Stage01State
 from utilis.db import ai_store_db_writer
-from utilis.domain_kb import get_domain_kb_config, load_domain_kb
+from utilis.domain_kb import KB_CONTENT_GOLD_RULE, get_domain_kb_config, load_domain_kb
 from utilis.generated_code_paths import generated_code_dir
 from utilis.logger import logger
 
@@ -335,6 +335,180 @@ def _llm_enabled_for_gold() -> bool:
     return any(str(os.getenv(key, "")).lower() in {"1", "true", "yes", "on"} for key in USE_LLM_ENV_KEYS)
 
 
+def _gold_kb_rule(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    if str(metadata.get("kb_content_type") or "").upper() != KB_CONTENT_GOLD_RULE:
+        return {}
+    raw = metadata.get("gold_rule_json")
+    if isinstance(raw, dict):
+        rule = dict(raw)
+    elif isinstance(raw, str) and 0 < len(raw) <= 4000:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        rule = dict(parsed) if isinstance(parsed, dict) else {}
+    else:
+        rule = {}
+    if not rule and metadata.get("rule_type") and metadata.get("rule_value"):
+        rule_type = str(metadata["rule_type"]).strip().lower()
+        if rule_type in {"aggregation", "time_grain"}:
+            rule[rule_type] = metadata["rule_value"]
+    if rule:
+        rule.setdefault("kpi_name", metadata.get("kpi_name"))
+        rule.setdefault("confidence", metadata.get("confidence"))
+        rule.setdefault("measure_column", metadata.get("column_name"))
+    return rule
+
+
+def _apply_gold_kb_rules(
+    mapping: Dict[str, Any],
+    kb_rows: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    result = dict(mapping)
+    result["measure"] = dict(mapping.get("measure") or {})
+    result["time"] = dict(mapping.get("time") or {})
+    audit: Dict[str, Any] = {
+        "rules_retrieved": len(kb_rows),
+        "rules_considered": 0,
+        "rules_applied": [],
+        "rules_rejected": [],
+        "changed_fields": [],
+    }
+    threshold = min(1.0, _env_float("ATHENA_GOLD_KB_MIN_RULE_CONFIDENCE", 0.85))
+    parsed_rules: List[Tuple[float, Dict[str, Any]]] = []
+    for row in kb_rows:
+        if not isinstance(row, dict):
+            continue
+        rule = _gold_kb_rule(row)
+        if not rule:
+            audit["rules_rejected"].append("invalid_or_unstructured_rule")
+            continue
+        try:
+            confidence = min(1.0, max(0.0, float(rule.get("confidence") or 0.0)))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        parsed_rules.append((confidence, rule))
+
+    locked_fields: set[str] = set()
+    kpi_key = _safe_identifier(str(mapping.get("kpi_name") or ""), "kpi")
+    allowed_aggregations = {"SUM", "AVG", "COUNT", "MIN", "MAX"}
+    allowed_grains = {"day", "week", "month", "quarter", "year"}
+
+    for confidence, rule in sorted(parsed_rules, key=lambda item: item[0], reverse=True):
+        audit["rules_considered"] += 1
+        raw_rule_kpi = str(rule.get("kpi_name") or "").strip()
+        if not raw_rule_kpi or _safe_identifier(raw_rule_kpi, "kpi") != kpi_key:
+            audit["rules_rejected"].append("kpi_mismatch")
+            continue
+        if confidence < threshold:
+            audit["rules_rejected"].append("below_confidence_threshold")
+            continue
+
+        applied_fields: List[str] = []
+        aggregation = str(rule.get("aggregation") or "").upper()
+        if aggregation and "aggregation" not in locked_fields:
+            certified_column = _silver_output_column_name(result["measure"].get("column"))
+            rule_column = _silver_output_column_name(rule.get("measure_column"))
+            if aggregation not in allowed_aggregations:
+                audit["rules_rejected"].append("unsupported_aggregation")
+            elif not rule_column or rule_column != certified_column:
+                audit["rules_rejected"].append("measure_column_mismatch")
+            else:
+                if str(result["measure"].get("aggregation") or "").upper() != aggregation:
+                    result["measure"]["aggregation"] = aggregation
+                    audit["changed_fields"].append("measure.aggregation")
+                locked_fields.add("aggregation")
+                applied_fields.append("aggregation")
+
+        grain = str(rule.get("time_grain") or "").lower()
+        if grain and "time_grain" not in locked_fields:
+            time_column = result["time"].get("column")
+            if grain not in allowed_grains:
+                audit["rules_rejected"].append("unsupported_time_grain")
+            elif not isinstance(time_column, dict) or not time_column.get("column"):
+                audit["rules_rejected"].append("missing_certified_time_column")
+            else:
+                if str(result["time"].get("grain") or "").lower() != grain:
+                    result["time"]["grain"] = grain
+                    audit["changed_fields"].append("time.grain")
+                locked_fields.add("time_grain")
+                applied_fields.append("time_grain")
+
+        requested_dimensions = rule.get("required_dimensions")
+        if isinstance(requested_dimensions, list) and "dimensions" not in locked_fields:
+            available = {
+                (_logical_table_name(item.get("table")), _silver_output_column_name(item.get("column"))): item
+                for item in result.get("grouping_dimensions") or []
+                if isinstance(item, dict) and item.get("column")
+            }
+            requested_keys = [
+                (_logical_table_name(item.get("table")), _silver_output_column_name(item.get("column")))
+                for item in requested_dimensions
+                if isinstance(item, dict) and item.get("column")
+            ]
+            if requested_keys and all(key in available for key in requested_keys):
+                date_dimensions = [
+                    item for item in result.get("grouping_dimensions") or []
+                    if isinstance(item, dict) and str(item.get("semantic_type") or "").upper() == "DATE"
+                ]
+                selected_dimensions: List[Dict[str, Any]] = []
+                seen_dimensions: set[Tuple[str, str]] = set()
+                for item in [*date_dimensions, *[available[key] for key in requested_keys]]:
+                    key = (_logical_table_name(item.get("table")), _silver_output_column_name(item.get("column")))
+                    if key not in seen_dimensions:
+                        selected_dimensions.append(item)
+                        seen_dimensions.add(key)
+                result["grouping_dimensions"] = selected_dimensions
+                audit["changed_fields"].append("grouping_dimensions")
+                locked_fields.add("dimensions")
+                applied_fields.append("required_dimensions")
+            elif requested_keys:
+                audit["rules_rejected"].append("non_contract_dimension")
+
+        requested_filters = rule.get("required_filters")
+        if isinstance(requested_filters, list):
+            certified_filters = {str(value).strip().casefold() for value in result.get("filters") or []}
+            if all(str(value).strip().casefold() in certified_filters for value in requested_filters):
+                applied_fields.append("required_filters")
+            elif requested_filters:
+                audit["rules_rejected"].append("non_contract_filter")
+
+        requested_joins = rule.get("required_joins")
+        if isinstance(requested_joins, list) and "joins" not in locked_fields:
+            def join_key(item: Dict[str, Any]) -> Tuple[str, str, str, str]:
+                return (
+                    _logical_table_name(item.get("left_table")),
+                    _silver_output_column_name(item.get("left_column")),
+                    _logical_table_name(item.get("right_table")),
+                    _silver_output_column_name(item.get("right_column")),
+                )
+
+            certified_joins = {
+                join_key(item): item
+                for item in result.get("join_paths") or []
+                if isinstance(item, dict) and item.get("certified") is True
+            }
+            requested_join_keys = [
+                join_key(item) for item in requested_joins if isinstance(item, dict)
+            ]
+            if requested_join_keys and all(key in certified_joins for key in requested_join_keys):
+                result["join_paths"] = [certified_joins[key] for key in requested_join_keys]
+                audit["changed_fields"].append("join_paths")
+                locked_fields.add("joins")
+                applied_fields.append("required_joins")
+            elif requested_join_keys:
+                audit["rules_rejected"].append("non_contract_join")
+
+        if rule.get("formula"):
+            audit["rules_rejected"].append("free_form_formula_not_executable")
+
+        if applied_fields:
+            audit["rules_applied"].append({"confidence": confidence, "fields": applied_fields})
+
+    audit["changed_fields"] = list(dict.fromkeys(audit["changed_fields"]))
+    return result, audit
+
+
 def _extract_code_block(value: str) -> str:
     text = str(value or "").strip()
     match = re.search(r"```(?:python)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
@@ -571,7 +745,7 @@ def _llm_prompt(
     dimension_contract: List[Dict[str, Any]],
     baseline: str,
     validation_feedback: str = "",
-    domain_reference_context: str = "",
+    validated_kb_guidance: Dict[str, Any] | None = None,
 ) -> str:
     measure = mapping.get("measure") or {}
     time_info = mapping.get("time") or {}
@@ -592,8 +766,18 @@ def _llm_prompt(
         f"Generated dimension contract: {json.dumps(dimension_contract, default=str)}",
         f"Target table: {_target_fact_table(gold_schema, _safe_identifier(str(mapping.get('kpi_name') or 'kpi'), 'kpi'))}",
     ]
-    if domain_reference_context:
-        prompt_parts.extend(["", "DOMAIN REFERENCE MODEL:", domain_reference_context])
+    if validated_kb_guidance and validated_kb_guidance.get("rules_applied"):
+        prompt_parts.extend([
+            "",
+            "Validated KB rule decisions:",
+            json.dumps(
+                {
+                    "changed_fields": validated_kb_guidance.get("changed_fields") or [],
+                    "rules_applied": validated_kb_guidance.get("rules_applied") or [],
+                },
+                default=str,
+            ),
+        ])
     prompt_parts.extend(
         [
             "",
@@ -621,7 +805,7 @@ def llm_generate_gold_code(
     gold_schema: str,
     dimension_contract: List[Dict[str, Any]],
     validation_feedback: str = "",
-    domain_reference_context: str = "",
+    validated_kb_guidance: Dict[str, Any] | None = None,
 ) -> str:
     baseline = generate_gold_script(mapping=mapping, run_id=run_id, gold_schema=gold_schema)
     prompt = _llm_prompt(
@@ -631,7 +815,7 @@ def llm_generate_gold_code(
         dimension_contract,
         baseline,
         validation_feedback,
-        domain_reference_context,
+        validated_kb_guidance,
     )
     provider = os.getenv("ATHENA_GOLD_LLM_PROVIDER", "azure_openai")
     model = os.getenv("ATHENA_GOLD_LLM_MODEL")
@@ -2012,6 +2196,8 @@ def _generate_one_mapping(
     target_warehouse: str,
     gold_catalog: str = "",
     use_domain_kb: bool,
+    knowledge_base_id: str | None = None,
+    domain_profile: str | None = None,
     dimension_contract: List[Dict[str, Any]] | None = None,
     include_dimension: bool = True,
     dbt_compatible: bool = False,
@@ -2027,7 +2213,10 @@ def _generate_one_mapping(
         if is_snowflake
         else _target_fact_table(gold_schema, kpi_id)
     )
-    kb_cfg = get_domain_kb_config()
+    kb_cfg = get_domain_kb_config(
+        knowledge_base_id=knowledge_base_id if use_domain_kb else None,
+        domain_profile=domain_profile,
+    )
     use_domain_kb = bool(use_domain_kb) and kb_cfg.enabled
     if use_domain_kb:
         kb_query_parts = [
@@ -2041,10 +2230,23 @@ def _generate_one_mapping(
             query_text=" ".join(kb_query_parts),
             top_k=kb_cfg.top_k_gold,
             max_chars=kb_cfg.max_chars_gold,
-            content_types=None,
+            content_types=[KB_CONTENT_GOLD_RULE],
+            knowledge_base_id=kb_cfg.knowledge_base_id,
+            domain_profile=kb_cfg.domain_profile,
         )
     else:
         kb_result = {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_cfg.knowledge_base_id}
+
+    kb_guidance = {
+        "rules_retrieved": 0,
+        "rules_considered": 0,
+        "rules_applied": [],
+        "rules_rejected": [],
+        "changed_fields": [],
+    }
+    if use_domain_kb:
+        mapping, kb_guidance = _apply_gold_kb_rules(mapping, kb_result.get("rows") or [])
+        mapping, source_table_guard = _sanitize_gold_mapping(mapping)
 
     if not _usable_mapping(mapping):
         return {
@@ -2063,8 +2265,11 @@ def _generate_one_mapping(
             "domain_knowledge_base": {
                 "enabled": use_domain_kb,
                 "knowledge_base_id": kb_result.get("knowledge_base_id"),
+                "index_name": kb_result.get("index_name") or kb_cfg.index_name,
                 "rows_retrieved": kb_result.get("rows_retrieved", 0),
-                "chars_injected": kb_result.get("chars_injected", 0),
+                "chars_retrieved": kb_result.get("chars_injected", 0),
+                "chars_injected": 0,
+                "rule_guidance": kb_guidance,
             },
         }
 
@@ -2132,7 +2337,7 @@ def _generate_one_mapping(
                 run_id=run_id,
                 gold_schema=gold_schema,
                 dimension_contract=dimension_contract,
-                domain_reference_context=str(kb_result.get("context_text") or ""),
+                validated_kb_guidance=kb_guidance,
             )
             _validate_databricks_gold_candidate(code, mapping, gold_schema, dimension_contract)
         except Exception as first_exc:
@@ -2143,7 +2348,7 @@ def _generate_one_mapping(
                     gold_schema=gold_schema,
                     dimension_contract=dimension_contract,
                     validation_feedback=str(first_exc),
-                    domain_reference_context=str(kb_result.get("context_text") or ""),
+                    validated_kb_guidance=kb_guidance,
                 )
                 _validate_databricks_gold_candidate(retry_code, mapping, gold_schema, dimension_contract)
                 code = retry_code
@@ -2222,8 +2427,11 @@ def _generate_one_mapping(
         "domain_knowledge_base": {
             "enabled": use_domain_kb,
             "knowledge_base_id": kb_result.get("knowledge_base_id"),
+            "index_name": kb_result.get("index_name") or kb_cfg.index_name,
             "rows_retrieved": kb_result.get("rows_retrieved", 0),
-            "chars_injected": kb_result.get("chars_injected", 0),
+            "chars_retrieved": kb_result.get("chars_injected", 0),
+            "chars_injected": 0,
+            "rule_guidance": kb_guidance,
         },
     }
 
@@ -2443,6 +2651,8 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
             gold_catalog=gold_catalog,
             target_warehouse=target_warehouse,
             use_domain_kb=bool(state.get("use_domain_kb")),
+            knowledge_base_id=state.get("knowledge_base_id"),
+            domain_profile=state.get("domain_profile"),
             dimension_contract=databricks_dimension_contract,
             include_dimension=False,
             dbt_compatible=dbt_codegen,

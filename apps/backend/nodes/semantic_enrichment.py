@@ -822,7 +822,10 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
     new_state = state.copy()
     discovered = state.get("discovered_metadata") or {}
     profiling = state.get("column_profiles") or {}
-    kb_cfg = get_domain_kb_config()
+    kb_cfg = get_domain_kb_config(
+        knowledge_base_id=state.get("knowledge_base_id") if state.get("use_domain_kb") else None,
+        domain_profile=state.get("domain_profile"),
+    )
     use_domain_kb = bool(state.get("use_domain_kb")) and kb_cfg.enabled
 
     table_names = []
@@ -838,6 +841,8 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
             top_k=kb_cfg.top_k_enrichment,
             max_chars=kb_cfg.max_chars_enrichment,
             content_types=[KB_CONTENT_TABLE, KB_CONTENT_PII, KB_CONTENT_MEASURE],
+            knowledge_base_id=kb_cfg.knowledge_base_id,
+            domain_profile=kb_cfg.domain_profile,
         )
     else:
         kb_result = {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_cfg.knowledge_base_id}
@@ -1075,6 +1080,7 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
         "domain_knowledge_base": {
             "enabled": use_domain_kb,
             "knowledge_base_id": kb_result.get("knowledge_base_id"),
+            "index_name": kb_result.get("index_name") or kb_cfg.index_name,
             "rows_retrieved": kb_result.get("rows_retrieved", 0),
             "chars_injected": kb_result.get("chars_injected", 0),
             "content_types": kb_result.get("content_types"),

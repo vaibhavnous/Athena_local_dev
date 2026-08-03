@@ -9,11 +9,8 @@ from pydantic import BaseModel, Field
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from pinecone import Pinecone
-
 from state import Stage01State
 from schema import KPISchema, KPISchemaItem, DerivationType
-from utilis.embeddings import get_embedding_model
 from utilis.logger import logger
 from utilis.db import ai_store_db_writer, config as db_config, insert_hitl_queue_items, get_pipeline_connection
 from nodes.req_extraction import get_llm, compute_cost_usd, TokenAccumulator, _strip_fences, handoff_validator
@@ -81,70 +78,6 @@ def _resolve_source_databases(state: Stage01State) -> List[str]:
     return [default_db] if default_db else []
 
 
-def _fetch_relevant_schema(brd_text: str, source_databases: List[str], top_k: int = 10) -> List[Dict[str, Any]]:
-    log_context = {"node": "kpi_extraction", "pass": "schema_grounding"}
-    model = get_embedding_model(log_context=log_context)
-    api_key = os.getenv("PINECONE_API_KEY", "").strip()
-    index_name = (os.getenv("PINECONE_SCHEMA_INDEX_NAME") or "metadata").strip()
-    if model is None or not api_key or not index_name:
-        logger.info("Embedding schema grounding unavailable", extra=log_context)
-        return []
-
-    try:
-        vector = model.embed_query(brd_text or "schema grounding")
-        matches = Pinecone(api_key=api_key).Index(index_name).query(
-            vector=vector,
-            top_k=top_k * 4,
-            include_metadata=True,
-            namespace="schema",
-        ).matches
-    except Exception as exc:
-        logger.warning("Embedding schema grounding failed: %s", exc, extra=log_context)
-        return []
-
-    source_set = {str(db).lower() for db in source_databases}
-    table_map: Dict[str, Dict[str, Any]] = {}
-    for match in matches or []:
-        metadata = getattr(match, "metadata", {}) or {}
-        db = str(metadata.get("database_name") or "").lower()
-        if source_set and db not in source_set:
-            continue
-        table_name = str(metadata.get("table_name") or "")
-        column_name = str(metadata.get("column_name") or "")
-        if not table_name:
-            continue
-        key = f"{db}.{metadata.get('schema_name')}.{table_name}"
-        entry = table_map.setdefault(
-            key,
-            {
-                "database_name": db,
-                "schema_name": metadata.get("schema_name"),
-                "table_name": table_name,
-                "columns": [],
-                "semantic_score": 0.0,
-            },
-        )
-        entry["semantic_score"] = max(entry["semantic_score"], float(getattr(match, "score", 0.0) or 0.0))
-        if column_name:
-            entry["columns"].append(column_name)
-
-    rows = list(table_map.values())
-    for row in rows:
-        row["columns"] = sorted(set(row["columns"]))
-    return sorted(rows, key=lambda row: row["semantic_score"], reverse=True)[:top_k]
-
-
-def _format_schema_context(schema_rows: List[Dict[str, Any]]) -> str:
-    if not schema_rows:
-        return "Available Data Schema:\n- No schema context found"
-
-    lines = ["Available Data Schema:"]
-    for row in schema_rows:
-        columns = ", ".join(row.get("columns", [])[:8]) or "no columns captured"
-        lines.append(f"- {row['table_name']} ({columns})")
-    return "\n".join(lines)
-
-
 def _format_file_source_context(state: Stage01State, context_text: str) -> str:
     source = str(state.get("source") or "").lower()
     if source not in {"sftp", "adls_gen2"}:
@@ -170,6 +103,22 @@ def _format_file_source_context(state: Stage01State, context_text: str) -> str:
     if context_text:
         lines.append("- Dataset summary: " + context_text[:1200])
     return "\n".join(lines)
+
+
+def _build_kpi_user_prompt(
+    requirements: Dict[str, Any],
+    rejected_kpis: List[str],
+    file_source_context: str = "",
+) -> str:
+    lines = [
+        f"Requirements: {json.dumps(requirements, indent=2)}",
+        file_source_context,
+        f"Rejected KPI names: {json.dumps(rejected_kpis)}",
+        "Extract KPIs only from the business requirements above.",
+    ]
+    if file_source_context:
+        lines.append("For file sources, use the available business columns only when they are explicitly relevant.")
+    return "\n".join(line for line in lines if line)
 
 
 def _coerce_kpi_payload(raw: Any) -> List[Dict[str, Any]]:
@@ -306,8 +255,6 @@ def build_kpi_extraction_node(
         context_text = state["context_text"]
         requirements = _build_requirements(state)
         source_databases = _resolve_source_databases(state)
-        relevant_schema = _fetch_relevant_schema(context_text, source_databases, top_k=10)
-        schema_context = _format_schema_context(relevant_schema)
         file_source_context = _format_file_source_context(state, context_text)
 
         llm = get_llm(provider=llm_provider)
@@ -317,12 +264,7 @@ def build_kpi_extraction_node(
         rejected_kpis = state.get("rejected_kpis", [])
 
         for attempt in range(max_retries + 1):
-            user_prompt = f"""Requirements: {json.dumps(requirements, indent=2)}
-{schema_context}
-{file_source_context}
-Rejected KPI names: {json.dumps(rejected_kpis)}
-Extract KPIs ONLY based on the available schema or file-source columns above.
-For file sources, every KPI must reference at least one available column when possible."""
+            user_prompt = _build_kpi_user_prompt(requirements, rejected_kpis, file_source_context)
 
             if attempt > 0:
                 user_prompt += f"\n\nPREV ERROR: {last_error}. Fix & ensure valid JSON array."

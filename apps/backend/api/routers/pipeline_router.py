@@ -31,6 +31,9 @@ def _with_project_execution_config(
     is_dbt_project = snowflake_database_project and selected_engine == "dbt"
     data = payload.model_dump()
     data.update(
+        use_domain_kb=bool(project.get("use_domain_knowledge_base")),
+        domain_profile=project.get("domain_profile"),
+        knowledge_base_id=project.get("knowledge_base_id"),
         execution_engine="dbt" if is_dbt_project else "native",
         dbt_deployment_mode="generate_and_deploy" if is_dbt_project else "generate_only",
         dbt_project_object_name=project.get("dbt_project_object_name") if is_dbt_project else None,
@@ -246,6 +249,8 @@ def _seed_run_checkpoint(
                 if existing.get("use_domain_kb") is not None
                 else bool(payload.use_domain_kb)
             ),
+            "domain_profile": existing.get("domain_profile") or payload.domain_profile,
+            "knowledge_base_id": existing.get("knowledge_base_id") or payload.knowledge_base_id,
             "stage_confirmation_enabled": (
                 existing.get("stage_confirmation_enabled")
                 if existing.get("stage_confirmation_enabled") is not None

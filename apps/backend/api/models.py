@@ -19,6 +19,8 @@ class PipelineRunRequest(BaseModel):
     maxKpis: Optional[int] = None
     devMode: Optional[bool] = None
     use_domain_kb: Optional[bool] = False
+    domain_profile: Optional[str] = Field(default=None, max_length=80)
+    knowledge_base_id: Optional[str] = Field(default=None, max_length=80)
     database_name: Optional[str] = None
     database_type: Optional[str] = None
     target_warehouse: Optional[str] = "databricks"
@@ -42,6 +44,15 @@ class PipelineRunRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_dbt_target(self) -> "PipelineRunRequest":
+        if self.use_domain_kb:
+            from utilis.domain_kb import get_domain_kb_config
+
+            kb_config = get_domain_kb_config(
+                knowledge_base_id=self.knowledge_base_id,
+                domain_profile=self.domain_profile,
+            )
+            self.knowledge_base_id = kb_config.knowledge_base_id
+            self.domain_profile = kb_config.domain_profile
         if self.execution_engine != "dbt":
             self.dbt_deployment_mode = "generate_only"
             self.force_dbt_deploy = False
@@ -84,6 +95,15 @@ class ProjectRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_dbt_project_target(self) -> "ProjectRequest":
+        if self.use_domain_knowledge_base:
+            from utilis.domain_kb import get_domain_kb_config
+
+            kb_config = get_domain_kb_config(
+                knowledge_base_id=self.knowledge_base_id,
+                domain_profile=self.domain_profile,
+            )
+            self.knowledge_base_id = kb_config.knowledge_base_id
+            self.domain_profile = kb_config.domain_profile
         if self.execution_engine != "dbt":
             self.dbt_deployment_mode = "generate_only"
             self.force_dbt_deploy = False
