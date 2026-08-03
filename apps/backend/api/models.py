@@ -51,8 +51,9 @@ class PipelineRunRequest(BaseModel):
                 knowledge_base_id=self.knowledge_base_id,
                 domain_profile=self.domain_profile,
             )
-            self.knowledge_base_id = kb_config.knowledge_base_id
-            self.domain_profile = kb_config.domain_profile
+            if self.knowledge_base_id:
+                self.knowledge_base_id = kb_config.knowledge_base_id
+            self.domain_profile = self.domain_profile or kb_config.domain_profile
         if self.execution_engine != "dbt":
             self.dbt_deployment_mode = "generate_only"
             self.force_dbt_deploy = False
@@ -102,8 +103,9 @@ class ProjectRequest(BaseModel):
                 knowledge_base_id=self.knowledge_base_id,
                 domain_profile=self.domain_profile,
             )
-            self.knowledge_base_id = kb_config.knowledge_base_id
-            self.domain_profile = kb_config.domain_profile
+            if self.knowledge_base_id:
+                self.knowledge_base_id = kb_config.knowledge_base_id
+            self.domain_profile = self.domain_profile or kb_config.domain_profile
         if self.execution_engine != "dbt":
             self.dbt_deployment_mode = "generate_only"
             self.force_dbt_deploy = False

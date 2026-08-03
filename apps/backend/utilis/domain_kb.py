@@ -73,23 +73,34 @@ def get_domain_kb_config(
         DEFAULT_KB_INDEX_NAME,
         "PINECONE_KNOWLEDGE_BASE_INDEX_NAME",
     )
+    requested_domain = str(domain_profile or "").strip()
+    if explicit_kb and requested_domain and requested_domain.casefold() != default_domain.casefold():
+        raise ValueError(
+            f"domain_profile '{requested_domain}' does not match knowledge_base_id '{kb_id}'"
+        )
     index_name = (
-        os.getenv(index_env)
-        or (routed_index if explicit_kb else None)
-        or os.getenv("PINECONE_KNOWLEDGE_BASE_INDEX_NAME")
-        or os.getenv("PINECONE_KB_INDEX_NAME")
-        or routed_index
+        (os.getenv(index_env) or routed_index)
+        if explicit_kb
+        else (
+            os.getenv("PINECONE_KNOWLEDGE_BASE_INDEX_NAME")
+            or os.getenv("PINECONE_KB_INDEX_NAME")
+            or DEFAULT_KB_INDEX_NAME
+        )
     )
     return DomainKBConfig(
         enabled=_env_enabled("ATHENA_USE_DOMAIN_KB"),
         index_name=index_name.strip(),
         knowledge_base_id=kb_id,
         domain_profile=(
-            str(domain_profile or "").strip()
-            or (default_domain if explicit_kb else os.getenv("ATHENA_DOMAIN_PROFILE", default_domain).strip())
-            or default_domain
+            default_domain
+            if explicit_kb
+            else requested_domain or os.getenv("ATHENA_DOMAIN_PROFILE", default_domain).strip() or default_domain
         ),
-        namespace=os.getenv("PINECONE_KNOWLEDGE_BASE_NAMESPACE", kb_id).strip() or kb_id,
+        namespace=(
+            kb_id
+            if explicit_kb
+            else os.getenv("PINECONE_KNOWLEDGE_BASE_NAMESPACE", kb_id).strip() or kb_id
+        ),
         top_k_enrichment=max(1, int(os.getenv("ATHENA_KB_TOP_K_ENRICHMENT", "8"))),
         top_k_gold=max(1, int(os.getenv("ATHENA_KB_TOP_K_GOLD", "10"))),
         max_chars_enrichment=max(500, int(os.getenv("ATHENA_KB_MAX_CHARS_ENRICHMENT", "4000"))),
@@ -402,7 +413,9 @@ def upsert_kb_rows_to_pinecone(
         try:
             index.delete(filter={"knowledge_base_id": {"$eq": cfg.knowledge_base_id}}, namespace=target_namespace)
         except Exception as exc:
-            logger.warning("Domain KB refresh delete skipped: %s", exc)
+            raise RuntimeError(
+                f"Domain KB refresh could not clear {cfg.knowledge_base_id} from {target_index_name}"
+            ) from exc
 
     if uses_integrated_embedding:
         pinecone_records = []

@@ -7,7 +7,7 @@ def _row(row_id="1", kb_id="PC_Insurance_V1"):
     return {
         "kb_row_id": row_id,
         "knowledge_base_id": kb_id,
-        "domain_profile": "Insurance",
+        "domain_profile": "Basel" if kb_id == "BASEL_DW_V1" else "Insurance",
         "kb_content_type": "TABLE_DEFINITION",
         "embedding_text": "claim table",
         "prompt_context": "claim table context",
@@ -30,3 +30,11 @@ def test_validate_and_group_rows_routes_both_kbs():
 def test_validate_and_group_rows_rejects_duplicate_ids():
     with pytest.raises(ValueError, match="Duplicate"):
         validate_and_group_rows([_row(), _row()])
+
+
+def test_validate_and_group_rows_rejects_domain_mismatch():
+    row = _row(kb_id="BASEL_DW_V1")
+    row["domain_profile"] = "Insurance"
+
+    with pytest.raises(ValueError, match="does not match"):
+        validate_and_group_rows([row])

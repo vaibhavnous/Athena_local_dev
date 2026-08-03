@@ -119,6 +119,12 @@ def validate_and_group_rows(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[s
             raise ValueError(f"Duplicate migration kb_row_id: {row_id}")
         if kb_id not in grouped:
             raise ValueError(f"Unsupported migration knowledge_base_id: {kb_id}")
+        expected_domain = KB_TARGETS[kb_id][0]
+        actual_domain = str(row.get("domain_profile") or "").strip()
+        if actual_domain.casefold() != expected_domain.casefold():
+            raise ValueError(
+                f"Migration row {position} domain_profile '{actual_domain}' does not match {kb_id}"
+            )
         seen_ids.add(row_id)
         grouped[kb_id].append(row)
     return grouped
