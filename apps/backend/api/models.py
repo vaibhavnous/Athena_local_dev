@@ -117,9 +117,21 @@ class Gate2DecisionPayload(BaseModel):
     approved_tables: List[str] = Field(default_factory=list)
 
 
+class Gate3ItemDecision(BaseModel):
+    item_id: str = Field(..., min_length=1, max_length=512)
+    decision: Literal["APPROVED", "REJECTED"]
+    rejection_reason: Optional[str] = Field(default=None, max_length=2000)
+
+
 class Gate3DecisionPayload(BaseModel):
     approve: bool = True
     enriched_metadata: Optional[Dict[str, Any]] = None
+    decisions: List[Gate3ItemDecision] = Field(default_factory=list)
+
+
+class Gate3DraftPayload(BaseModel):
+    edited_content: Dict[str, Any]
+    revision: Optional[str] = Field(default=None, min_length=64, max_length=64)
 
 
 class GenericGateDecisionPayload(BaseModel):

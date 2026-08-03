@@ -1,5 +1,44 @@
 export type ReviewKey = 1 | 2 | 3 | 4 | 5 | 'silver_merge_key_review' | 'gold_review'
 
+const SEMANTIC_TYPES = new Set([
+  'MEASURE', 'DIMENSION', 'ID', 'SURROGATE_KEY', 'DATE',
+  'AUDIT_TIMESTAMP', 'PII', 'FLAG', 'HIGH_CARD_TEXT', 'UNKNOWN',
+])
+
+export function semanticReviewValidationError(review: any): string | null {
+  const tableName = String(review?.qualified_table_name || review?.table_name || 'Semantic table').trim()
+  const columns = Array.isArray(review?.columns)
+    ? review.columns.filter((column: any) => column?.column_name !== '__TABLE_SUMMARY__')
+    : []
+  if (columns.length === 0) return `${tableName}: at least one semantic column is required.`
+
+  const displayNames = new Set<string>()
+  for (const column of columns) {
+    const columnName = String(column?.column_name || '').trim()
+    const label = columnName || 'Unnamed column'
+    const displayName = String(column?.suggested_display_name || '').trim()
+    const description = String(column?.business_description || '').trim()
+    const semanticType = String(column?.semantic_type || 'UNKNOWN').trim().toUpperCase()
+    const piiType = String(column?.pii_type || '').trim()
+
+    if (!columnName) return `${tableName}: every semantic column requires a column name.`
+    if (!displayName || displayName.length > 256) {
+      return `${label}: display name is required and must be at most 256 characters.`
+    }
+    const displayKey = displayName.toLowerCase()
+    if (displayNames.has(displayKey)) return `${tableName}: duplicate display name: ${displayName}.`
+    displayNames.add(displayKey)
+    if (!description || description.length > 1000) {
+      return `${label}: business description is required and must be at most 1000 characters.`
+    }
+    if (!SEMANTIC_TYPES.has(semanticType)) return `${label}: unsupported semantic type '${semanticType}'.`
+    if ((semanticType === 'PII' || Boolean(column?.is_pii_candidate)) && (!piiType || piiType === '-')) {
+      return `${label}: PII type is required when PII is selected.`
+    }
+  }
+  return null
+}
+
 export function getFileReviewFeeds(review: any) {
   if (Array.isArray(review?.candidate_feeds) && review.candidate_feeds.length > 0) {
     return review.candidate_feeds
@@ -23,6 +62,7 @@ export function hasRenderableReviewData(review: any, reviewKey: ReviewKey, isFil
   if (reviewKey === 2) return hasGate2ReviewItems(review, isFileSource)
   if (reviewKey === 3) {
     return Boolean(
+      (review?.semantic_tables || []).length ||
       (review?.enriched_columns || []).length ||
       (review?.enriched_joins || []).length ||
       (review?.feed_semantic_summary || []).length ||

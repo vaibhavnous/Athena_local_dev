@@ -1,12 +1,22 @@
 import React from 'react'
-import { render, waitFor } from '@testing-library/react'
+import { act, render, waitFor } from '@testing-library/react'
 
 const mockUpdateRun = jest.fn()
+const mockSetActiveRun = jest.fn()
+const mockNavigate = jest.fn()
+const mockLocation = { pathname: '/app/data-discovery', state: null }
+let mockActiveRun: any = {
+  id: 'run-1',
+  run_id: 'run-1',
+  status: 'RUNNING',
+  stages: [{ key: 'discovery', name: 'Metadata Discovery', status: 'RUNNING' }],
+}
 
 jest.mock('../api/athenaApi', () => ({
   abortRun: jest.fn(),
   continueStage: jest.fn(),
   retryFailedStage: jest.fn(),
+  fetchKpiReviews: jest.fn(),
   getRun: jest.fn(),
   getRunStatus: jest.fn(),
   getRuns: jest.fn().mockResolvedValue([]),
@@ -16,20 +26,15 @@ jest.mock('../api/athenaApi', () => ({
 }))
 jest.mock('react-router-dom', () => ({
   __esModule: true,
-  useLocation: () => ({ pathname: '/app/data-discovery', state: null }),
-  useNavigate: () => jest.fn(),
+  useLocation: () => mockLocation,
+  useNavigate: () => mockNavigate,
 }), { virtual: true })
 jest.mock('../store/useAthenaStore', () => ({
   __esModule: true,
   default: () => ({
-    runs: [{
-      id: 'run-1',
-      run_id: 'run-1',
-      status: 'RUNNING',
-      stages: [{ key: 'discovery', name: 'Metadata Discovery', status: 'RUNNING' }],
-    }],
+    runs: [mockActiveRun],
     activeRunId: 'run-1',
-    setActiveRun: jest.fn(),
+    setActiveRun: mockSetActiveRun,
     setRuns: jest.fn(),
     updateRun: mockUpdateRun,
     setServerOnline: jest.fn(),
@@ -44,7 +49,7 @@ jest.mock('../components/shared/PythonCodeDialog', () => () => null)
 jest.mock('../components/shared/DashboardLayout', () => ({ PageHeader: () => <div>Header</div> }))
 
 import PipelineMonitor, { buildPipelineDisplayPhase, markNextPendingStage, markPreparingReview, pipelineActivityFromLogs, reviewWaitPatchFromLogs } from './PipelineMonitor'
-import { getRunStatus } from '../api/athenaApi'
+import { fetchKpiReviews, getRunStatus } from '../api/athenaApi'
 
 test('hydrates detailed stages for the active run', async () => {
   ;(getRunStatus as jest.Mock).mockResolvedValue({
@@ -62,6 +67,46 @@ test('hydrates detailed stages for the active run', async () => {
     expect.objectContaining({ status: 'HITL_WAIT', stages: expect.any(Array) }),
   ))
   view.unmount()
+})
+
+test('does not cancel Gate 1 hydration when an unrelated run snapshot refreshes', async () => {
+  let finishKpiLoad
+  mockActiveRun = {
+    id: 'run-1',
+    run_id: 'run-1',
+    status: 'HITL_WAIT',
+    next_gate: 1,
+    source: 'database',
+    stages: [],
+  }
+  ;(getRunStatus as jest.Mock).mockImplementation(() => new Promise(() => {}))
+  ;(fetchKpiReviews as jest.Mock).mockImplementation(() => new Promise((resolve) => { finishKpiLoad = resolve }))
+  mockNavigate.mockClear()
+
+  const view = render(<PipelineMonitor />)
+  await waitFor(() => expect(fetchKpiReviews).toHaveBeenCalledTimes(1))
+
+  mockActiveRun = { ...mockActiveRun, updated_at: '2026-08-03T10:27:15Z' }
+  view.rerender(<PipelineMonitor />)
+  expect(fetchKpiReviews).toHaveBeenCalledTimes(1)
+
+  await act(async () => finishKpiLoad({
+    run_id: 'run-1',
+    source: 'database',
+    kpis: [{ queue_id: 'run-1:1:0', name: 'Claim Count' }],
+  }))
+  await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith(
+    '/app/hitl?runId=run-1&gate=1',
+    expect.any(Object),
+  ))
+  view.unmount()
+
+  mockActiveRun = {
+    id: 'run-1',
+    run_id: 'run-1',
+    status: 'RUNNING',
+    stages: [{ key: 'discovery', name: 'Metadata Discovery', status: 'RUNNING' }],
+  }
 })
 
 test('shows rotating markers for the active phase and stage', () => {

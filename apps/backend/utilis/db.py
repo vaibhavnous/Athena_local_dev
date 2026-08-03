@@ -695,6 +695,153 @@ def insert_hitl_queue_item(run_id: str, kpi: Dict[str, Any], gate_number: int = 
         conn.close()
 
 
+def ensure_hitl_queue_items(run_id: str, items: Iterable[Dict[str, Any]], gate_number: int) -> None:
+    """Insert missing, stably identified review items without overwriting reviewer work."""
+    items = list(items)
+    if not items:
+        return
+
+    db_conf = config["azure_sql"]
+    schema = db_conf["pipeline_schema"]
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT item_id
+            FROM [{schema}].[hitl_review_queue] WITH (UPDLOCK, HOLDLOCK)
+            WHERE run_id = ? AND gate_number = ?
+            """,
+            run_id,
+            gate_number,
+        )
+        existing_ids = {str(row.item_id) for row in cursor.fetchall()}
+        for item in items:
+            item_id = str(item.get("item_id") or "").strip()
+            if not item_id or item_id in existing_ids:
+                continue
+            cursor.execute(
+                f"""
+                INSERT INTO [{schema}].[hitl_review_queue]
+                (item_id, run_id, gate_number, gate_status, original_content, queued_at)
+                VALUES (?, ?, ?, 'PENDING', ?, GETUTCDATE())
+                """,
+                item_id,
+                run_id,
+                gate_number,
+                json.dumps(item.get("content") or {}),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("HITL queue initialization failed for run_id=%s gate=%s", run_id, gate_number)
+        raise
+    finally:
+        conn.close()
+
+
+def get_hitl_items(run_id: str, gate_number: int) -> List[Dict[str, Any]]:
+    """Return every queue item for a run/gate, including persisted draft content."""
+    db_conf = config["azure_sql"]
+    schema = db_conf["pipeline_schema"]
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT item_id, gate_status, original_content, edited_content,
+                   rejection_reason, queued_at, decided_at
+            FROM [{schema}].[hitl_review_queue]
+            WHERE run_id = ? AND gate_number = ?
+            ORDER BY queued_at, item_id
+            """,
+            run_id,
+            gate_number,
+        )
+        return [
+            {
+                "item_id": str(row.item_id),
+                "gate_status": str(row.gate_status or "PENDING"),
+                "original_content": json.loads(row.original_content) if row.original_content else {},
+                "edited_content": json.loads(row.edited_content) if row.edited_content else None,
+                "revision": _hitl_content_revision(
+                    json.loads(row.edited_content or row.original_content or "{}")
+                ),
+                "rejection_reason": row.rejection_reason,
+                "queued_at": row.queued_at,
+                "decided_at": row.decided_at,
+            }
+            for row in cursor.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def _hitl_content_revision(content: Dict[str, Any]) -> str:
+    canonical = json.dumps(content or {}, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def save_hitl_item_draft(
+    run_id: str,
+    gate_number: int,
+    item_id: str,
+    edited_content: Dict[str, Any],
+    expected_revision: Optional[str] = None,
+) -> str:
+    """Persist a pending review draft with optional optimistic concurrency control."""
+    db_conf = config["azure_sql"]
+    schema = db_conf["pipeline_schema"]
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT original_content, edited_content, gate_status
+            FROM [{schema}].[hitl_review_queue] WITH (UPDLOCK, ROWLOCK)
+            WHERE run_id = ? AND gate_number = ? AND item_id = ?
+            """,
+            run_id,
+            gate_number,
+            item_id,
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise LookupError(f"HITL item not found: {item_id}")
+        if str(row.gate_status or "").upper() != "PENDING":
+            raise RuntimeError(f"HITL item is no longer editable: {item_id}")
+
+        current = json.loads(row.edited_content or row.original_content or "{}")
+        current_revision = _hitl_content_revision(current)
+        edited_revision = _hitl_content_revision(edited_content)
+        if expected_revision and expected_revision != current_revision and edited_revision != current_revision:
+            raise RuntimeError("This review item was changed by another reviewer. Refresh and try again.")
+        if edited_revision == current_revision:
+            conn.commit()
+            return current_revision
+
+        cursor.execute(
+            f"""
+            UPDATE [{schema}].[hitl_review_queue]
+            SET edited_content = ?
+            WHERE run_id = ? AND gate_number = ? AND item_id = ? AND gate_status = 'PENDING'
+            """,
+            json.dumps(edited_content),
+            run_id,
+            gate_number,
+            item_id,
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"HITL item is no longer editable: {item_id}")
+        conn.commit()
+        return edited_revision
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def get_pending_items(run_id: str, gate: int) -> List[Dict[str, Any]]:
     """Return pending HITL items for a run and gate."""
     db_conf = config["azure_sql"]
