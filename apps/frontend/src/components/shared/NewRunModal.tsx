@@ -554,15 +554,6 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                         readOnly
                                       />
                                     </Field>
-                                    {executionEngineValue === 'dbt' && (
-                                      <Field label="dbt Run Mode" compact>
-                                        <input
-                                          className="input-field h-11 cursor-not-allowed opacity-80"
-                                          value={dbtDeploymentModeValue === 'generate_and_deploy' ? 'Deploy and build in Snowflake' : 'Generate only'}
-                                          readOnly
-                                        />
-                                      </Field>
-                                    )}
                                   </>
                                 )}
                                 <div className="rounded-lg border border-bg-border bg-bg-base p-3">
