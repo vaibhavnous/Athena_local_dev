@@ -19,7 +19,7 @@ import DataMigration from './pages/DataMigration'
 import NewRunPage from './pages/NewRunPage'
 import ComplianceGovernance from './pages/ComplianceGovernance'
 import useThemeStore from './store/useThemeStore'
-import { AuthProvider, authDisabled } from './context/AuthContext'
+import { AuthProvider } from './context/AuthContext'
 
 function AppRoutes() {
   const location = useLocation()
@@ -29,7 +29,7 @@ function AppRoutes() {
     <>
       <Routes location={backgroundLocation || location}>
         <Route path="/" element={<LandingPage />} />
-        <Route path="/login" element={authDisabled() ? <Navigate to="/app" replace /> : <LoginPage />} />
+        <Route path="/login" element={<LoginPage />} />
         <Route path="/app" element={<ProtectedRoute><AppShell /></ProtectedRoute>}>
           <Route index element={<DashboardPage />} />
           <Route path="data-discovery" element={<PipelineMonitor />} />

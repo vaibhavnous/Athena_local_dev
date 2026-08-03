@@ -16,7 +16,6 @@ jest.mock('./components/layout/AppShell', () => ({
 jest.mock('./context/AuthContext', () => ({
   __esModule: true,
   AuthProvider: ({ children }) => <>{children}</>,
-  authDisabled: () => true,
   useAuth: () => ({
     user: {
       uid: 'test-user',

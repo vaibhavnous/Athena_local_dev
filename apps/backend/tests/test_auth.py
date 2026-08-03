@@ -5,7 +5,7 @@ import uuid
 import pytest
 from fastapi import HTTPException
 
-from api.auth import AuthService, AuthUser, CreateUserRequest, UpdateUserRequest, assert_run_access, get_current_user
+from api.auth import AuthService, AuthUser, CreateUserRequest, UpdateUserRequest, assert_run_access
 
 
 class FakeAuthRepository:
@@ -67,16 +67,6 @@ def auth(monkeypatch):
     monkeypatch.setenv("ASTRA_JWT_SECRET", "test-secret-that-is-at-least-32-bytes-long")
     repository = FakeAuthRepository()
     return AuthService(repository), repository
-
-
-def test_auth_can_be_temporarily_disabled(monkeypatch):
-    monkeypatch.setenv("ATHENA_AUTH_DISABLED", "true")
-
-    user = get_current_user(credentials=None, service=None)
-
-    assert user.uid == "temporary-auth-disabled-user"
-    assert user.user_type == "Client"
-    assert user.can_manage_accounts is False
 
 
 def test_login_issues_token_that_resolves_current_user(auth):

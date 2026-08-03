@@ -23,7 +23,6 @@ function CurrentUser() {
 }
 
 beforeEach(() => {
-  process.env.REACT_APP_ATHENA_AUTH_DISABLED = 'false'
   jest.useFakeTimers()
   jest.setSystemTime(new Date('2026-07-23T10:00:00Z'))
   window.localStorage.setItem('astra.auth.session', JSON.stringify({
@@ -40,26 +39,8 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers()
-  delete process.env.REACT_APP_ATHENA_AUTH_DISABLED
   window.localStorage.clear()
   jest.clearAllMocks()
-})
-
-test('uses the temporary user without refreshing when authentication is disabled', async () => {
-  process.env.REACT_APP_ATHENA_AUTH_DISABLED = 'true'
-
-  render(
-    <AuthProvider>
-      <CurrentUser />
-    </AuthProvider>,
-  )
-
-  await act(async () => {
-    await Promise.resolve()
-  })
-  expect(screen.getByText('marketplace-demo@astra.local')).toBeInTheDocument()
-  expect(refreshAuthSession).not.toHaveBeenCalled()
-  expect(window.localStorage.getItem('astra.auth.session')).toBeNull()
 })
 
 test('renews an active session before its token expires', async () => {
