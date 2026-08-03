@@ -15,6 +15,7 @@ DEV_MODE = os.getenv("DEV_MODE", "").strip().lower() in {"1", "true", "yes", "on
 
 _EMBEDDING_MODEL: Optional[Any] = None
 _EMBEDDING_PROVIDER: Optional[str] = None
+_DIMENSIONED_EMBEDDING_MODELS: Dict[int, Any] = {}
 
 
 class _OpenAIEmbeddingAdapter:
@@ -23,9 +24,11 @@ class _OpenAIEmbeddingAdapter:
         *,
         client: Any,
         model_name: str,
+        dimensions: Optional[int] = None,
     ) -> None:
         self._client = client
         self._model_name = model_name
+        self._dimensions = dimensions
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
@@ -33,10 +36,10 @@ class _OpenAIEmbeddingAdapter:
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        response = self._client.embeddings.create(
-            model=self._model_name,
-            input=texts,
-        )
+        request = {"model": self._model_name, "input": texts}
+        if self._dimensions is not None:
+            request["dimensions"] = self._dimensions
+        response = self._client.embeddings.create(**request)
         rows = sorted(response.data, key=lambda item: item.index)
         return [list(item.embedding) for item in rows]
 
@@ -98,7 +101,11 @@ def _log_probe(message: str, log_context: Optional[dict], level: str = "info", *
     getattr(logger, level)(message, *args, extra=extra)
 
 
-def _build_azure_embedding_model(config: Dict[str, Any], log_context: Optional[dict]) -> Optional[Any]:
+def _build_azure_embedding_model(
+    config: Dict[str, Any],
+    log_context: Optional[dict],
+    dimensions: Optional[int] = None,
+) -> Optional[Any]:
     if not config["azure_configured"]:
         return None
     try:
@@ -117,7 +124,11 @@ def _build_azure_embedding_model(config: Dict[str, Any], log_context: Optional[d
             timeout=10.0,
             max_retries=1,
         )
-        model = _OpenAIEmbeddingAdapter(client=client, model_name=config["azure_deployment"])
+        model = _OpenAIEmbeddingAdapter(
+            client=client,
+            model_name=config["azure_deployment"],
+            dimensions=dimensions,
+        )
         model.embed_query("athena embedding healthcheck")
         return model
     except Exception as exc:
@@ -125,7 +136,11 @@ def _build_azure_embedding_model(config: Dict[str, Any], log_context: Optional[d
         return None
 
 
-def _build_openai_embedding_model(config: Dict[str, Any], log_context: Optional[dict]) -> Optional[Any]:
+def _build_openai_embedding_model(
+    config: Dict[str, Any],
+    log_context: Optional[dict],
+    dimensions: Optional[int] = None,
+) -> Optional[Any]:
     if not config["openai_configured"]:
         return None
     try:
@@ -142,7 +157,11 @@ def _build_openai_embedding_model(config: Dict[str, Any], log_context: Optional[
             timeout=10.0,
             max_retries=1,
         )
-        model = _OpenAIEmbeddingAdapter(client=client, model_name=config["openai_model"])
+        model = _OpenAIEmbeddingAdapter(
+            client=client,
+            model_name=config["openai_model"],
+            dimensions=dimensions,
+        )
         model.embed_query("athena embedding healthcheck")
         return model
     except Exception as exc:
@@ -177,10 +196,17 @@ def _build_local_embedding_model(log_context: Optional[dict]) -> Optional[Any]:
         return None
 
 
-def get_embedding_model(*, log_context: Optional[dict] = None) -> Optional[Any]:
+def get_embedding_model(
+    *,
+    log_context: Optional[dict] = None,
+    dimensions: Optional[int] = None,
+) -> Optional[Any]:
     global _EMBEDDING_MODEL, _EMBEDDING_PROVIDER
 
-    if _EMBEDDING_MODEL is not None:
+    requested_dimensions = max(1, int(dimensions)) if dimensions is not None else None
+    if requested_dimensions is not None and requested_dimensions in _DIMENSIONED_EMBEDDING_MODELS:
+        return _DIMENSIONED_EMBEDDING_MODELS[requested_dimensions]
+    if requested_dimensions is None and _EMBEDDING_MODEL is not None:
         return _EMBEDDING_MODEL
 
     config = get_embedding_provider_config()
@@ -193,11 +219,14 @@ def get_embedding_model(*, log_context: Optional[dict] = None) -> Optional[Any]:
         _log_probe("Semantic indexing deferred; embeddings are disabled", log_context)
         return None
 
-    azure_model = _build_azure_embedding_model(config, log_context)
+    azure_model = _build_azure_embedding_model(config, log_context, requested_dimensions)
     if azure_model is not None:
-        _EMBEDDING_MODEL = azure_model
         _EMBEDDING_PROVIDER = "azure_openai"
-        return _EMBEDDING_MODEL
+        if requested_dimensions is not None:
+            _DIMENSIONED_EMBEDDING_MODELS[requested_dimensions] = azure_model
+        else:
+            _EMBEDDING_MODEL = azure_model
+        return azure_model
 
     if config["azure_configured"] and not config["allow_local_fallback"]:
         _EMBEDDING_PROVIDER = None
@@ -208,11 +237,14 @@ def get_embedding_model(*, log_context: Optional[dict] = None) -> Optional[Any]:
         )
         return None
 
-    openai_model = _build_openai_embedding_model(config, log_context)
+    openai_model = _build_openai_embedding_model(config, log_context, requested_dimensions)
     if openai_model is not None:
-        _EMBEDDING_MODEL = openai_model
         _EMBEDDING_PROVIDER = "openai"
-        return _EMBEDDING_MODEL
+        if requested_dimensions is not None:
+            _DIMENSIONED_EMBEDDING_MODELS[requested_dimensions] = openai_model
+        else:
+            _EMBEDDING_MODEL = openai_model
+        return openai_model
 
     if not config["allow_local_fallback"]:
         _EMBEDDING_PROVIDER = None
@@ -238,3 +270,4 @@ def reset_embedding_model_cache() -> None:
     global _EMBEDDING_MODEL, _EMBEDDING_PROVIDER
     _EMBEDDING_MODEL = None
     _EMBEDDING_PROVIDER = None
+    _DIMENSIONED_EMBEDDING_MODELS.clear()

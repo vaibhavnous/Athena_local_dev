@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -17,10 +18,15 @@ KB_CONTENT_TABLE = "TABLE_DEFINITION"
 KB_CONTENT_FK = "FK_PATTERN"
 KB_CONTENT_PII = "PII_PATTERN"
 KB_CONTENT_MEASURE = "MEASURE_PATTERN"
+KB_CONTENT_GOLD_RULE = "GOLD_RULE"
 
 DEFAULT_KB_INDEX_NAME = "knowledgebase"
 DEFAULT_KB_ID = "PC_Insurance_V1"
 DEFAULT_DOMAIN_PROFILE = "Insurance"
+KB_TARGETS = {
+    "PC_Insurance_V1": ("Insurance", "insurancekb", "PINECONE_INSURANCE_KB_INDEX_NAME"),
+    "BASEL_DW_V1": ("Basel", "beselkb", "PINECONE_BASEL_KB_INDEX_NAME"),
+}
 
 @dataclass(frozen=True)
 class DomainKBConfig:
@@ -39,17 +45,50 @@ def _env_enabled(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def get_domain_kb_config() -> DomainKBConfig:
-    kb_id = os.getenv("ATHENA_KB_ID", DEFAULT_KB_ID).strip() or DEFAULT_KB_ID
+def _confidence(value: Any) -> float:
+    try:
+        return min(1.0, max(0.0, float(value or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _metadata_json(value: Any, max_chars: int = 4000) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, separators=(",", ":"), default=str)[:max_chars]
+    return str(value or "")[:max_chars]
+
+
+def get_domain_kb_config(
+    *,
+    knowledge_base_id: Optional[str] = None,
+    domain_profile: Optional[str] = None,
+) -> DomainKBConfig:
+    explicit_kb = str(knowledge_base_id or "").strip()
+    kb_id = explicit_kb or os.getenv("ATHENA_KB_ID", DEFAULT_KB_ID).strip() or DEFAULT_KB_ID
+    target = KB_TARGETS.get(kb_id)
+    if explicit_kb and target is None:
+        raise ValueError(f"Unsupported knowledge_base_id: {kb_id}")
+    default_domain, routed_index, index_env = target or (
+        DEFAULT_DOMAIN_PROFILE,
+        DEFAULT_KB_INDEX_NAME,
+        "PINECONE_KNOWLEDGE_BASE_INDEX_NAME",
+    )
+    index_name = (
+        os.getenv(index_env)
+        or (routed_index if explicit_kb else None)
+        or os.getenv("PINECONE_KNOWLEDGE_BASE_INDEX_NAME")
+        or os.getenv("PINECONE_KB_INDEX_NAME")
+        or routed_index
+    )
     return DomainKBConfig(
         enabled=_env_enabled("ATHENA_USE_DOMAIN_KB"),
-        index_name=(
-            os.getenv("PINECONE_KNOWLEDGE_BASE_INDEX_NAME")
-            or os.getenv("PINECONE_KB_INDEX_NAME")
-            or DEFAULT_KB_INDEX_NAME
-        ),
+        index_name=index_name.strip(),
         knowledge_base_id=kb_id,
-        domain_profile=os.getenv("ATHENA_DOMAIN_PROFILE", DEFAULT_DOMAIN_PROFILE).strip() or DEFAULT_DOMAIN_PROFILE,
+        domain_profile=(
+            str(domain_profile or "").strip()
+            or (default_domain if explicit_kb else os.getenv("ATHENA_DOMAIN_PROFILE", default_domain).strip())
+            or default_domain
+        ),
         namespace=os.getenv("PINECONE_KNOWLEDGE_BASE_NAMESPACE", kb_id).strip() or kb_id,
         top_k_enrichment=max(1, int(os.getenv("ATHENA_KB_TOP_K_ENRICHMENT", "8"))),
         top_k_gold=max(1, int(os.getenv("ATHENA_KB_TOP_K_GOLD", "10"))),
@@ -81,6 +120,14 @@ def _pinecone_index_description(index_name: str) -> Dict[str, Any]:
 
 def _index_uses_integrated_embedding(index_name: str) -> bool:
     return bool(_pinecone_index_description(index_name).get("embed"))
+
+
+def _index_dimension(index_name: str) -> Optional[int]:
+    value = _pinecone_index_description(index_name).get("dimension")
+    try:
+        return max(1, int(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _stable_id(*parts: Any) -> str:
@@ -323,15 +370,31 @@ def upsert_kb_rows_to_pinecone(
     *,
     index_name: Optional[str] = None,
     namespace: Optional[str] = None,
+    knowledge_base_id: Optional[str] = None,
+    domain_profile: Optional[str] = None,
     refresh: bool = True,
 ) -> Dict[str, Any]:
-    cfg = get_domain_kb_config()
+    row_kb_ids = {str(row.get("knowledge_base_id") or "").strip() for row in kb_rows}
+    row_kb_ids.discard("")
+    if len(row_kb_ids) > 1:
+        raise ValueError("A Pinecone upsert batch must contain exactly one knowledge_base_id")
+    kb_id = str(knowledge_base_id or next(iter(row_kb_ids), "")).strip() or None
+    cfg = get_domain_kb_config(
+        knowledge_base_id=kb_id,
+        domain_profile=domain_profile,
+    )
     target_index_name = index_name or cfg.index_name
     target_namespace = namespace or cfg.namespace
 
     active_rows = [row for row in kb_rows if row.get("is_active", True)]
     if not active_rows:
-        return {"rows_upserted": 0, "kb_hash": compute_kb_fingerprint(kb_rows), "index_name": target_index_name}
+        return {
+            "rows_upserted": 0,
+            "kb_hash": compute_kb_fingerprint(kb_rows, cfg.knowledge_base_id),
+            "index_name": target_index_name,
+            "namespace": target_namespace,
+            "knowledge_base_id": cfg.knowledge_base_id,
+        }
 
     index = _pinecone_index(target_index_name)
     uses_integrated_embedding = _index_uses_integrated_embedding(target_index_name)
@@ -358,9 +421,15 @@ def upsert_kb_rows_to_pinecone(
                     "embedding_text": str(row["embedding_text"])[:2000],
                     "prompt_context": str(row["prompt_context"])[:2000],
                     "is_active": bool(row.get("is_active", True)),
+                    "kpi_name": str(row.get("kpi_name") or "")[:200],
+                    "gold_rule_json": _metadata_json(row.get("gold_rule_json")),
+                    "rule_type": str(row.get("rule_type") or "")[:100],
+                    "rule_value": str(row.get("rule_value") or "")[:1000],
+                    "confidence": _confidence(row.get("confidence")),
                 }
             )
-        index.upsert_records(records=pinecone_records, namespace=target_namespace)
+        for offset in range(0, len(pinecone_records), 96):
+            index.upsert_records(records=pinecone_records[offset:offset + 96], namespace=target_namespace)
         return {
             "rows_upserted": len(pinecone_records),
             "kb_hash": compute_kb_fingerprint(active_rows, cfg.knowledge_base_id),
@@ -370,7 +439,10 @@ def upsert_kb_rows_to_pinecone(
             "integrated_embedding": True,
         }
 
-    model = get_embedding_model(log_context={"node": "domain_kb", "stage": "index"})
+    model = get_embedding_model(
+        log_context={"node": "domain_kb", "stage": "index"},
+        dimensions=_index_dimension(target_index_name),
+    )
     if model is None:
         raise RuntimeError("Domain KB embedding model is unavailable")
 
@@ -389,10 +461,16 @@ def upsert_kb_rows_to_pinecone(
             "embedding_text": str(row["embedding_text"])[:2000],
             "prompt_context": str(row["prompt_context"])[:2000],
             "is_active": bool(row.get("is_active", True)),
+            "kpi_name": str(row.get("kpi_name") or "")[:200],
+            "gold_rule_json": _metadata_json(row.get("gold_rule_json")),
+            "rule_type": str(row.get("rule_type") or "")[:100],
+            "rule_value": str(row.get("rule_value") or "")[:1000],
+            "confidence": _confidence(row.get("confidence")),
         }
         pinecone_vectors.append({"id": str(row["kb_row_id"]), "values": vector, "metadata": metadata})
 
-    index.upsert(vectors=pinecone_vectors, namespace=target_namespace)
+    for offset in range(0, len(pinecone_vectors), 100):
+        index.upsert(vectors=pinecone_vectors[offset:offset + 100], namespace=target_namespace)
     return {
         "rows_upserted": len(pinecone_vectors),
         "kb_hash": compute_kb_fingerprint(active_rows, cfg.knowledge_base_id),
@@ -407,16 +485,30 @@ def build_and_upsert_client_db_kb(
     *,
     database_name: Optional[str] = None,
     schema_name: Optional[str] = None,
+    knowledge_base_id: Optional[str] = None,
+    domain_profile: Optional[str] = None,
+    index_name: Optional[str] = None,
+    namespace: Optional[str] = None,
     refresh: bool = True,
 ) -> Dict[str, Any]:
-    cfg = get_domain_kb_config()
+    cfg = get_domain_kb_config(
+        knowledge_base_id=knowledge_base_id,
+        domain_profile=domain_profile,
+    )
     kb_rows = create_kb_from_schema(
         database_name=database_name,
         schema_name=schema_name,
         knowledge_base_id=cfg.knowledge_base_id,
         domain_profile=cfg.domain_profile,
     )
-    result = upsert_kb_rows_to_pinecone(kb_rows, refresh=refresh)
+    result = upsert_kb_rows_to_pinecone(
+        kb_rows,
+        index_name=index_name or cfg.index_name,
+        namespace=namespace or cfg.namespace,
+        knowledge_base_id=cfg.knowledge_base_id,
+        domain_profile=cfg.domain_profile,
+        refresh=refresh,
+    )
     result["rows_generated"] = len(kb_rows)
     return result
 
@@ -428,11 +520,21 @@ def load_domain_kb(
     max_chars: int,
     content_types: Optional[Sequence[str]] = None,
     knowledge_base_id: Optional[str] = None,
+    domain_profile: Optional[str] = None,
 ) -> Dict[str, Any]:
-    cfg = get_domain_kb_config()
-    kb_id = knowledge_base_id or cfg.knowledge_base_id
+    cfg = get_domain_kb_config(
+        knowledge_base_id=knowledge_base_id,
+        domain_profile=domain_profile,
+    )
+    kb_id = cfg.knowledge_base_id
     if not cfg.enabled:
-        return {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_id}
+        return {
+            "context_text": "",
+            "rows_retrieved": 0,
+            "chars_injected": 0,
+            "knowledge_base_id": kb_id,
+            "index_name": cfg.index_name,
+        }
 
     filter_payload: Dict[str, Any] = {
         "knowledge_base_id": {"$eq": kb_id},
@@ -449,7 +551,18 @@ def load_domain_kb(
                 top_k=max(1, int(top_k)),
                 inputs={"text": str(query_text or "domain knowledge")},
                 filter=filter_payload,
-                fields=["prompt_context", "knowledge_base_id", "kb_content_type", "table_name", "column_name"],
+                fields=[
+                    "prompt_context",
+                    "knowledge_base_id",
+                    "kb_content_type",
+                    "table_name",
+                    "column_name",
+                    "kpi_name",
+                    "gold_rule_json",
+                    "rule_type",
+                    "rule_value",
+                    "confidence",
+                ],
             )
             result = getattr(response, "result", None)
             if result is None and isinstance(response, dict):
@@ -458,9 +571,18 @@ def load_domain_kb(
             if matches is None and isinstance(result, dict):
                 matches = result.get("hits", [])
         else:
-            model = get_embedding_model(log_context={"node": "domain_kb", "stage": "query"})
+            model = get_embedding_model(
+                log_context={"node": "domain_kb", "stage": "query"},
+                dimensions=_index_dimension(cfg.index_name),
+            )
             if model is None:
-                return {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_id}
+                return {
+                    "context_text": "",
+                    "rows_retrieved": 0,
+                    "chars_injected": 0,
+                    "knowledge_base_id": kb_id,
+                    "index_name": cfg.index_name,
+                }
             vector = model.embed_query(str(query_text or "domain knowledge"))
             response = index.query(
                 vector=vector,
@@ -491,11 +613,20 @@ def load_domain_kb(
             "rows_retrieved": len(rows),
             "chars_injected": len(context_text),
             "knowledge_base_id": kb_id,
+            "index_name": cfg.index_name,
             "content_types": list(content_types) if content_types else None,
+            "rows": rows,
         }
     except Exception as exc:
         logger.warning("Domain KB retrieval skipped: %s", exc)
-        return {"context_text": "", "rows_retrieved": 0, "chars_injected": 0, "knowledge_base_id": kb_id}
+        return {
+            "context_text": "",
+            "rows_retrieved": 0,
+            "chars_injected": 0,
+            "knowledge_base_id": kb_id,
+            "index_name": cfg.index_name,
+            "error": str(exc),
+        }
 
 
 def keyword_rank_kb_rows(
