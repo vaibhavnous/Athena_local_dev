@@ -264,3 +264,74 @@ test('requires PII type before saving or approving an Aadhaar candidate', async 
     columns: [expect.objectContaining({ pii_type: 'AADHAAR_NUMBER' })],
   }))
 })
+
+test('allows a non-PII sensitive-document flag without a PII type', () => {
+  const onApprove = jest.fn()
+  render(
+    <SemanticReviewCard
+      item={{
+        queue_id: 'table-aadhaar-flag',
+        item_detail: {
+          table_name: 'claims',
+          columns: [{
+            column_name: 'IS_AADHAAR_ATTACHED',
+            suggested_display_name: 'Is Aadhaar Attached',
+            semantic_type: 'FLAG',
+            business_description: 'Indicates whether Aadhaar documentation is attached to the claim.',
+            is_pii_candidate: false,
+            pii_type: null,
+          }],
+        },
+      }}
+      localDecision={null}
+      rejectionReason=""
+      onApprove={onApprove}
+      onReject={jest.fn()}
+      onClearDecision={jest.fn()}
+      onDraftChange={jest.fn()}
+    />
+  )
+
+  expect(screen.queryByText(/PII type is required/)).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+  expect(onApprove).toHaveBeenCalledWith('table-aadhaar-flag', expect.objectContaining({
+    columns: [expect.objectContaining({ semantic_type: 'FLAG', is_pii_candidate: false })],
+  }))
+})
+
+test('renders distinct display names for ID and name columns', () => {
+  render(
+    <SemanticReviewCard
+      item={{
+        queue_id: 'table-channel-groups',
+        item_detail: {
+          table_name: 'policy_transactions',
+          columns: [
+            {
+              column_name: 'CHANNEL_GROUP_ID',
+              suggested_display_name: 'Channel Group ID',
+              semantic_type: 'ID',
+              business_description: 'Identifier for the policy transaction channel group.',
+            },
+            {
+              column_name: 'CHANNEL_GROUP_NAME',
+              suggested_display_name: 'Channel Group Name',
+              semantic_type: 'DIMENSION',
+              business_description: 'Business name of the policy transaction channel group.',
+            },
+          ],
+        },
+      }}
+      localDecision={null}
+      rejectionReason=""
+      onApprove={jest.fn()}
+      onReject={jest.fn()}
+      onClearDecision={jest.fn()}
+      onDraftChange={jest.fn()}
+    />
+  )
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show columns (2)' }))
+  expect(screen.getByText('Channel Group ID')).toBeInTheDocument()
+  expect(screen.getByText('Channel Group Name')).toBeInTheDocument()
+})

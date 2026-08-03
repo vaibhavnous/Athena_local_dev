@@ -67,13 +67,22 @@ def test_business_display_names_humanize_technical_identifiers():
     assert semantic._business_display_name("CUSTOMER_PII_FLAG") == "Customer PII Flag"
 
 
-def test_rules_flag_incomplete_aadhaar_pii_for_human_review():
-    column = semantic._fallback_enrichment(_column("S_AADHAAR_ATTACHED", "bit"), source="RULES")
+def test_rules_distinguish_sensitive_values_from_presence_flags():
+    for column in (
+        semantic._fallback_enrichment(_column("S_AADHAAR_ATTACHED", "bit"), source="RULES"),
+        semantic._fallback_enrichment(
+            _column("IS_AADHAAR_ATTACHED", "varchar", profile_tier="FLAG"),
+            source="RULES",
+        ),
+    ):
+        assert column["semantic_type"] == "FLAG"
+        assert column["is_pii_candidate"] is False
+        assert column["pii_type"] is None
+        assert column["needs_review"] is False
 
-    assert column["semantic_type"] == "FLAG"
-    assert column["is_pii_candidate"] is True
-    assert column["pii_type"] is None
-    assert column["needs_review"] is True
+    identifier = semantic._fallback_enrichment(_column("AADHAAR_NUMBER"), source="RULES")
+    assert identifier["is_pii_candidate"] is True
+    assert identifier["needs_review"] is True
 
 
 def test_llm_batch_retries_incomplete_output_and_never_sends_raw_samples():
@@ -92,7 +101,11 @@ def test_llm_batch_retries_incomplete_output_and_never_sends_raw_samples():
 
     results = semantic._enrich_batch(
         columns,
-        {"business_objective": "Analyze claims", "data_domains": ["insurance"]},
+        {
+            "business_objective": "Analyze claims",
+            "data_domains": ["insurance"],
+            "domain_knowledge_context": "Claims use settlement-specific insurance terminology.",
+        },
         llm,
         semantic.TokenAccumulator(),
         max_retries=1,
@@ -104,6 +117,164 @@ def test_llm_batch_retries_incomplete_output_and_never_sends_raw_samples():
     prompt = llm.calls[0]["messages"][1].content
     assert "secret@example.com" not in prompt
     assert "pattern=A{6}@A{7}.A{3}" in prompt
+    assert "Claims use settlement-specific insurance terminology." in prompt
+
+
+def test_node_audits_kb_context_only_when_sent_to_llm(monkeypatch):
+    llm = FakeLLM([{"enriched_columns": [_llm_column("ClaimAmount", "MEASURE")]}])
+    kb_config = SimpleNamespace(
+        enabled=True,
+        knowledge_base_id="PC_Insurance_V1",
+        domain_profile="Insurance",
+        index_name="insurancekb",
+        top_k_enrichment=8,
+        max_chars_enrichment=5000,
+    )
+    monkeypatch.setattr(semantic, "get_domain_kb_config", lambda **_: kb_config)
+    monkeypatch.setattr(
+        semantic,
+        "load_domain_kb",
+        lambda **_: {
+            "context_text": "Insurance KB measure guidance",
+            "rows_retrieved": 2,
+            "chars_injected": 29,
+            "knowledge_base_id": kb_config.knowledge_base_id,
+            "index_name": kb_config.index_name,
+            "content_types": ["MEASURE_PATTERN"],
+        },
+    )
+    monkeypatch.setattr(semantic, "get_llm", lambda **_: llm)
+    monkeypatch.setattr(semantic, "ai_store_db_writer", lambda **_: None)
+
+    result = semantic.semantic_enrichment_node({
+        "run_id": "run-kb",
+        "fingerprint": "fp-kb",
+        "use_domain_kb": True,
+        "knowledge_base_id": kb_config.knowledge_base_id,
+        "domain_profile": kb_config.domain_profile,
+        "discovered_metadata": {
+            "primary_keys": [],
+            "foreign_keys": [],
+            "table_relationships": [],
+            "tables": [{
+                "database_name": "insurance",
+                "schema_name": "dbo",
+                "table_name": "claims",
+                "columns": [{"column_name": "ClaimAmount", "data_type": "decimal"}],
+            }],
+        },
+        "column_profiles": {"column_profiles": []},
+    })
+
+    audit = result["enriched_metadata"]["domain_knowledge_base"]
+    assert "Insurance KB measure guidance" in llm.calls[0]["messages"][1].content
+    assert audit["rows_retrieved"] == 2
+    assert audit["chars_retrieved"] == len("Insurance KB measure guidance")
+    assert audit["chars_injected"] == len("Insurance KB measure guidance")
+
+
+def test_kb_audit_does_not_claim_injection_when_semantic_llm_is_disabled(monkeypatch):
+    kb_config = SimpleNamespace(
+        enabled=True,
+        knowledge_base_id="PC_Insurance_V1",
+        domain_profile="Insurance",
+        index_name="insurancekb",
+        top_k_enrichment=8,
+        max_chars_enrichment=5000,
+    )
+    monkeypatch.setenv("SEMANTIC_LLM_ENABLED", "false")
+    monkeypatch.setattr(semantic, "get_domain_kb_config", lambda **_: kb_config)
+    monkeypatch.setattr(
+        semantic,
+        "load_domain_kb",
+        lambda **_: {
+            "context_text": "Retrieved but unused KB context",
+            "rows_retrieved": 1,
+            "knowledge_base_id": kb_config.knowledge_base_id,
+            "index_name": kb_config.index_name,
+        },
+    )
+    monkeypatch.setattr(semantic, "ai_store_db_writer", lambda **_: None)
+
+    result = semantic.semantic_enrichment_node({
+        "run_id": "run-kb-disabled-llm",
+        "fingerprint": "fp-kb-disabled-llm",
+        "use_domain_kb": True,
+        "discovered_metadata": {
+            "primary_keys": [],
+            "foreign_keys": [],
+            "table_relationships": [],
+            "tables": [{
+                "database_name": "insurance",
+                "schema_name": "dbo",
+                "table_name": "claims",
+                "columns": [{"column_name": "ClaimAmount", "data_type": "decimal"}],
+            }],
+        },
+        "column_profiles": {"column_profiles": []},
+    })
+
+    audit = result["enriched_metadata"]["domain_knowledge_base"]
+    assert audit["chars_retrieved"] == len("Retrieved but unused KB context")
+    assert audit["chars_injected"] == 0
+
+
+def test_llm_retries_display_name_collision_with_rule_enrichment(monkeypatch):
+    duplicate = _llm_column(
+        "CHANNEL_GROUP_NAME",
+        "DIMENSION",
+        table_name="policy_transactions",
+        suggested_display_name="Channel Group ID",
+    )
+    corrected = {**duplicate, "suggested_display_name": "Channel Group Name"}
+    llm = FakeLLM([
+        {"enriched_columns": [duplicate]},
+        {"enriched_columns": [corrected]},
+    ])
+    monkeypatch.setattr(semantic, "get_llm", lambda **_: llm)
+    monkeypatch.setattr(semantic, "ai_store_db_writer", lambda **_: None)
+
+    result = semantic.semantic_enrichment_node({
+        "run_id": "run-distinct-display-names",
+        "fingerprint": "fp-distinct-display-names",
+        "discovered_metadata": {
+            "primary_keys": [],
+            "foreign_keys": [],
+            "table_relationships": [],
+            "tables": [{
+                "database_name": "insurance",
+                "schema_name": "dbo",
+                "table_name": "policy_transactions",
+                "columns": [
+                    {"column_name": "CHANNEL_GROUP_ID", "data_type": "int"},
+                    {"column_name": "CHANNEL_GROUP_NAME", "data_type": "varchar"},
+                ],
+            }],
+        },
+        "column_profiles": {"column_profiles": [
+            {**_column("CHANNEL_GROUP_ID", "int", table_name="policy_transactions"), "profile_tier": "ID"},
+            {**_column("CHANNEL_GROUP_NAME", table_name="policy_transactions"), "profile_tier": "DIMENSION"},
+        ]},
+    })
+
+    columns = {column["column_name"]: column for column in result["enriched_metadata"]["columns"]}
+    assert len(llm.calls) == 2
+    assert columns["CHANNEL_GROUP_ID"]["suggested_display_name"] == "Channel Group ID"
+    assert columns["CHANNEL_GROUP_NAME"]["suggested_display_name"] == "Channel Group Name"
+
+
+def test_final_display_name_guard_repairs_cross_source_collision():
+    columns = [
+        {**_column("CHANNEL_GROUP_ID", "int", table_name="policy_transactions"), "suggested_display_name": "Channel Group ID"},
+        {**_column("CHANNEL_GROUP_NAME", table_name="policy_transactions"), "suggested_display_name": "Channel Group ID", "confidence": 0.95},
+    ]
+
+    semantic._ensure_unique_display_names(columns)
+
+    assert columns[0]["suggested_display_name"] == "Channel Group ID"
+    assert columns[1]["suggested_display_name"] == "Channel Group Name"
+    assert columns[1]["display_name_source"] == "COLUMN_NAME_FALLBACK"
+    assert columns[1]["needs_review"] is True
 
 
 def test_node_uses_real_llm_for_ambiguous_columns_and_preserves_certified_keys(monkeypatch):

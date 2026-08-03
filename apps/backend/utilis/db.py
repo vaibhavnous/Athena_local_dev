@@ -91,9 +91,14 @@ def _get_pyodbc():
         ) from exc
 
 
-def artifact_storage_fingerprint(fingerprint: str, artifact_type: str) -> str:
-    """Return the physical ai_store PK for one logical BRD artifact."""
-    raw = f"{fingerprint}:{artifact_type}"
+def artifact_storage_fingerprint(
+    fingerprint: str,
+    artifact_type: str,
+    *,
+    run_id: Optional[str] = None,
+) -> str:
+    """Return the physical ai_store key, optionally isolated to one pipeline run."""
+    raw = f"{run_id}:{fingerprint}:{artifact_type}" if run_id else f"{fingerprint}:{artifact_type}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -538,30 +543,26 @@ def ai_store_db_writer(
         now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
         # Extract fingerprint from payload if not provided explicitly.
-        # Identity is fingerprint + artifact_type so one BRD can safely store
-        # requirements, KPIs, nominations, metadata, profiles, etc. separately.
+        # The logical fingerprint supports lineage/cache lookup. Physical ownership
+        # is run-scoped so concurrent runs of the same input cannot steal artifacts.
         base_fingerprint = fingerprint or payload.get("fingerprint") or run_id
-        storage_fingerprint = artifact_storage_fingerprint(base_fingerprint, artifact_type)
+        storage_fingerprint = artifact_storage_fingerprint(
+            base_fingerprint,
+            artifact_type,
+            run_id=run_id,
+        )
         payload.setdefault("fingerprint", base_fingerprint)
         payload.setdefault("storage_fingerprint", f"{base_fingerprint}:{artifact_type}")
         cost_usd = payload.get("cost_usd")
 
+        serialized_payload = json.dumps(payload)
         cursor.execute(
             f"""
-            SELECT COUNT(1)
-            FROM [{schema}].[ai_store]
-            WHERE fingerprint = ?
-            """,
-            (storage_fingerprint,),
-        )
-        record_exists = cursor.fetchone()[0] > 0
-
-        if record_exists:
-            cursor.execute(
-                f"""
-                UPDATE [{schema}].[ai_store]
-                SET
-                    run_id = ?,
+            MERGE [{schema}].[ai_store] WITH (HOLDLOCK) AS target
+            USING (VALUES (?)) AS source (fingerprint)
+            ON target.fingerprint = source.fingerprint
+            WHEN MATCHED THEN
+                UPDATE SET
                     stage = ?,
                     artifact_type = ?,
                     payload = ?,
@@ -575,49 +576,42 @@ def ai_store_db_writer(
                     output_tokens = ?,
                     cost_usd = ?,
                     stored_at = ?
-                WHERE fingerprint = ?
-                """,
-                run_id,
-                stage,
-                artifact_type,
-                json.dumps(payload),
-                schema_version,
-                prompt_version,
-                faithfulness_status,
-                faithfulness_warn_count,
-                retry_count,
-                token_count,
-                input_tokens,
-                output_tokens,
-                cost_usd,
-                now,
-                storage_fingerprint,
-            )
-        else:
-            cursor.execute(
-                f"""
-                INSERT INTO [{schema}].[ai_store]
-                (run_id, fingerprint, stage, artifact_type, payload, schema_version, prompt_version,
-                 faithfulness_status, faithfulness_warn_count, retry_count, token_count, input_tokens,
-                 output_tokens, cost_usd, stored_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                run_id,
-                storage_fingerprint,
-                stage,
-                artifact_type,
-                json.dumps(payload),
-                schema_version,
-                prompt_version,
-                faithfulness_status,
-                faithfulness_warn_count,
-                retry_count,
-                token_count,
-                input_tokens,
-                output_tokens,
-                cost_usd,
-                now,
-            )
+            WHEN NOT MATCHED THEN
+                INSERT (run_id, fingerprint, stage, artifact_type, payload, schema_version, prompt_version,
+                        faithfulness_status, faithfulness_warn_count, retry_count, token_count, input_tokens,
+                        output_tokens, cost_usd, stored_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            storage_fingerprint,
+            stage,
+            artifact_type,
+            serialized_payload,
+            schema_version,
+            prompt_version,
+            faithfulness_status,
+            faithfulness_warn_count,
+            retry_count,
+            token_count,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            now,
+            run_id,
+            storage_fingerprint,
+            stage,
+            artifact_type,
+            serialized_payload,
+            schema_version,
+            prompt_version,
+            faithfulness_status,
+            faithfulness_warn_count,
+            retry_count,
+            token_count,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            now,
+        )
 
         conn.commit()
 

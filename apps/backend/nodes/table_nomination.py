@@ -133,15 +133,23 @@ def _load_keyword_expansion_cache(cache_fingerprint: str) -> Dict[str, Set[str]]
             or db_config.get("azure_sql", {}).get("schema_name")
             or "dbo"
         )
-        storage_fingerprint = artifact_storage_fingerprint(cache_fingerprint, KEYWORD_EXPANSION_ARTIFACT_TYPE)
+        storage_fingerprint = artifact_storage_fingerprint(
+            cache_fingerprint,
+            KEYWORD_EXPANSION_ARTIFACT_TYPE,
+            run_id=cache_fingerprint,
+        )
+        legacy_storage_fingerprint = artifact_storage_fingerprint(
+            cache_fingerprint,
+            KEYWORD_EXPANSION_ARTIFACT_TYPE,
+        )
         cursor.execute(
             f"""
             SELECT TOP 1 payload
             FROM [{schema}].[ai_store]
-            WHERE fingerprint = ? AND artifact_type = ?
+            WHERE fingerprint IN (?, ?) AND artifact_type = ?
             ORDER BY stored_at DESC
             """,
-            (storage_fingerprint, KEYWORD_EXPANSION_ARTIFACT_TYPE),
+            (storage_fingerprint, legacy_storage_fingerprint, KEYWORD_EXPANSION_ARTIFACT_TYPE),
         )
         row = cursor.fetchone()
         if not row or not row[0]:

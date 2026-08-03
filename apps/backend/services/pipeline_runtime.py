@@ -3077,10 +3077,17 @@ def _gate2_execution_scope(tables: List[Dict[str, Any]], approved_keys: List[str
 def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]:
     from nodes.hitl import hitl_table_review_node
 
-    tables = fetch_json_artifact(run_id, "TABLE_NOMINATIONS").get("nominations", []) or []
+    checkpoint_state = load_checkpoint_state(run_id) or {}
+    tables = (
+        fetch_json_artifact(run_id, "TABLE_NOMINATIONS").get("nominations", [])
+        or checkpoint_state.get("nominated_tables")
+        or []
+    )
     approved = _gate2_execution_scope(tables, approved_keys)
 
-    resumed_input = load_checkpoint_state(run_id) or {"run_id": run_id}
+    resumed_input = dict(checkpoint_state or {"run_id": run_id})
+    resumed_input.pop("error", None)
+    resumed_input.pop("failed_background_stage", None)
     resumed_input["human_table_decision"] = "COMPLETED"
     resumed_input["certified_tables"] = approved
     with timed_stage("gate2_hitl_certification", run_id=run_id, node="api"):
