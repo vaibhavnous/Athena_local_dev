@@ -42,8 +42,8 @@ SCORE_LOOKUP_SWEEP = 0.70
 REASON_DUAL_MATCH = "Dual Match (Keyword + Semantic)"
 REASON_LEXICAL_ONLY = "Exact Schema Keyword Match"
 REASON_SEMANTIC_ONLY = "Semantic Vector Match"
-REASON_FK_RESOLVED = "FK Resolution (related to nominated table)"
-REASON_LOOKUP_SWEEP = "Lookup Table Sweep (dim/ref/lkp)"
+REASON_FK_RESOLVED = "Supporting table connected by a foreign key to a nominated KPI source"
+REASON_LOOKUP_SWEEP = "Small domain lookup table related to the nominated KPI scope"
 
 LOOKUP_PREFIXES = ("dim_", "ref_", "lkp_", "lookup_", "code_", "type_")
 LOOKUP_MAX_ROWS = 10_000
@@ -51,12 +51,18 @@ NOISE_PREFIXES = ("tmp_", "log_", "audit_")
 
 SYNONYMS: Dict[str, List[str]] = {
     "claim": ["claim", "claims", "settlement", "loss"],
-    "premium": ["premium", "payment", "amount"],
+    "premium": ["premium", "premiums"],
     "policy": ["policy", "contract", "coverage"],
     "customer": ["customer", "member", "client", "insured"],
     "revenue": ["revenue", "sales", "income"],
     "ratio": ["ratio", "rate", "percentage"],
     "identifier": ["identifier", "id", "key", "reference"],
+}
+
+GENERIC_KPI_WORDS = {
+    "all", "amount", "and", "average", "avg", "based", "breakdown", "by", "count",
+    "current", "daily", "for", "frequency", "from", "metric", "monthly", "number", "of", "overall",
+    "per", "percentage", "rate", "ratio", "sum", "the", "total", "value", "weekly", "yearly",
 }
 
 KEYWORD_EXPANSION_SYSTEM_MSG = (
@@ -83,9 +89,29 @@ def _build_keywords(kpi_names: List[str]) -> List[str]:
     for name in kpi_names:
         for token in re.split(r"[^a-zA-Z0-9_]", name):
             token = token.strip().lower()
-            if len(token) >= 3:
+            if len(token) >= 3 and token not in GENERIC_KPI_WORDS:
                 keywords.add(token)
     return sorted(keywords)
+
+
+def _matched_kpi_names(kpi_names: List[str], matched_terms: List[str]) -> List[str]:
+    matched = {str(term or "").casefold() for term in matched_terms if str(term or "").strip()}
+    return sorted(
+        {
+            kpi_name
+            for kpi_name in kpi_names
+            if matched.intersection(_build_keywords([kpi_name]))
+        },
+        key=str.casefold,
+    )
+
+
+def _relevance_band(score: float) -> str:
+    if score >= 0.75:
+        return "HIGH"
+    if score >= 0.5:
+        return "MEDIUM"
+    return "LOW"
 
 
 def _normalize(text: str) -> str:
@@ -611,8 +637,8 @@ def _fuse_results(
             fused[key]["matched_columns"].append(column_name)
 
     for row in fused.values():
-        row["matched_keywords"] = list(set(row.get("matched_keywords", [])))
-        row["matched_columns"] = list(set(row.get("matched_columns", [])))
+        row["matched_keywords"] = sorted(set(row.get("matched_keywords", [])))
+        row["matched_columns"] = sorted(set(row.get("matched_columns", [])))
 
     for row in fused.values():
         lex = row["lexical_score"]
@@ -623,25 +649,28 @@ def _fuse_results(
         domain_overlap = bool(table_tokens & domain_tokens)
 
         final_score = (
-            0.4 * lex
-            + 0.3 * sem
-            + 0.2 * coverage
+            0.35 * lex
+            + 0.25 * sem
+            + 0.15 * coverage
             + 0.1 * token_frequency
         )
 
         if not domain_overlap:
-            final_score *= 0.6
+            final_score *= 0.7
 
         if lex > 0 and sem > 0:
-            final_score += 0.3
+            final_score += 0.05
 
         if row.get("matched_columns"):
-            final_score += 0.1
+            final_score += 0.03
 
         if coverage < 0.3 and sem < 0.4:
-            final_score *= 0.6
+            final_score *= 0.7
 
-        row["confidence_score"] = round(final_score, 4)
+        # This is an absolute evidence score, not a probability. Do not normalize
+        # the top result to 1.0; that made every review look artificially certain.
+        row["confidence_score"] = round(min(0.99, max(0.0, final_score)), 4)
+        row["relevance_band"] = _relevance_band(row["confidence_score"])
 
         if sem > 0 and lex > 0:
             row["nomination_reason"] = REASON_DUAL_MATCH
@@ -652,11 +681,6 @@ def _fuse_results(
 
         row["matched_keywords"] = sorted(row["matched_keywords"])
         row["coverage_ratio"] = round(row.get("coverage_ratio", 0.0), 4)
-
-    max_score = max((row["confidence_score"] for row in fused.values()), default=0.0)
-    if max_score > 0:
-        for row in fused.values():
-            row["confidence_score"] = round(row["confidence_score"] / max_score, 4)
 
     logger.info(
         "Fusion complete: total=%d",
@@ -795,6 +819,39 @@ def _lookup_table_sweep(
     return swept
 
 
+def _prepare_review_evidence(item: Dict[str, Any], kpi_names: List[str]) -> Dict[str, Any]:
+    review_item = dict(item)
+    matched_terms = sorted({str(value) for value in item.get("matched_keywords", []) if str(value).strip()})
+    matched_kpis = _matched_kpi_names(kpi_names, matched_terms)
+    matched_columns = sorted({str(value) for value in item.get("matched_columns", []) if str(value).strip()})
+    method = str(item.get("nomination_reason") or "")
+
+    review_item["nomination_method"] = method
+    review_item["matched_business_terms"] = matched_terms
+    # The existing Table Review labels this field "Matching KPIs", so send KPI
+    # names here rather than internal search tokens such as claim or amount.
+    review_item["matched_keywords"] = matched_kpis
+    review_item["matched_columns"] = matched_columns
+    review_item["relevance_band"] = _relevance_band(float(item.get("confidence_score") or 0.0))
+
+    if method in {REASON_DUAL_MATCH, REASON_LEXICAL_ONLY, REASON_SEMANTIC_ONLY}:
+        kpi_text = ", ".join(matched_kpis) if matched_kpis else "the certified KPI set"
+        evidence = []
+        if matched_columns:
+            evidence.append("schema fields " + ", ".join(matched_columns[:5]))
+        if matched_terms:
+            evidence.append("business terms " + ", ".join(matched_terms[:5]))
+        if method in {REASON_DUAL_MATCH, REASON_SEMANTIC_ONLY}:
+            evidence.append("semantic similarity")
+        review_item["nomination_reason"] = (
+            f"Relevant to {kpi_text} based on " + "; ".join(evidence)
+            if evidence
+            else f"Relevant to {kpi_text} based on semantic schema evidence"
+        )
+
+    return review_item
+
+
 def build_table_nomination_node() -> Callable[[Stage01State], Stage01State]:
     def table_nomination_node(state: Stage01State) -> Stage01State:
         log_context = {"run_id": state.get("run_id", "unknown"), "node": "table_nomination"}
@@ -856,7 +913,11 @@ def build_table_nomination_node() -> Callable[[Stage01State], Stage01State]:
         for row in _lookup_table_sweep(source_databases, {item["table_name"] for item in fused.values()}, domain_tokens):
             fused[f"{row['database_name']}.{row['schema_name']}.{row['table_name']}"] = row
 
-        all_nominations = sorted(fused.values(), key=lambda item: item["confidence_score"], reverse=True)
+        review_nominations = [
+            _prepare_review_evidence(item, kpi_names)
+            for item in fused.values()
+        ]
+        all_nominations = sorted(review_nominations, key=lambda item: item["confidence_score"], reverse=True)
         validated = NominationSchema(nominations=[NominationItem(**nom) for nom in all_nominations])
 
         payload = {
