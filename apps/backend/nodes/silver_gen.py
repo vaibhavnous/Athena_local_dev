@@ -435,6 +435,16 @@ def _table_name_from_ref(item: Dict[str, Any]) -> str:
     return str(item.get("table") or item.get("table_name") or "").strip()
 
 
+SYSTEM_TABLES = {
+    "sysdiagrams",
+}
+
+
+def _is_business_table(table_name: str) -> bool:
+    normalized = str(table_name or "").strip().lower()
+    return bool(normalized) and normalized not in SYSTEM_TABLES and not normalized.startswith("sys")
+
+
 def _snowflake_quote_identifier(value: str) -> str:
     cleaned = str(value or "").strip()
     if not cleaned:
@@ -503,7 +513,7 @@ def _resolve_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
             ):
                 continue
         table_name = _table_name_from_ref(item)
-        if not table_name:
+        if not _is_business_table(table_name):
             continue
         run_id = str(state.get("run_id") or "run")
         bronze_model_name = (
@@ -602,14 +612,51 @@ def _key_columns(enriched_columns: List[Dict[str, Any]]) -> List[str]:
     return list(dict.fromkeys(
         _normalized_column_name(column)
         for column in enriched_columns
-        if str(column.get("semantic_type") or "") in {"ID", "SURROGATE_KEY"}
+        if _semantic_type(column) in {"ID", "SURROGATE_KEY"}
         and _normalized_column_name(column)
     ))
 
 
 COLUMN_NAME_CORRECTIONS = {
+    "agen_t_category_name": "agent_category_name",
+    "claimid": "claim_id",
+    "garageid": "garage_id",
+    "garagetypeid": "garage_type_id",
+    "hospitalid": "hospital_id",
+    "paidamount": "paid_amount",
+    "paiddate": "paid_date",
+    "paymentid": "payment_id",
     "rererence_id": "reference_id",
+    "servicetax": "service_tax",
+    "updatenum": "update_num",
 }
+
+
+def _semantic_type(column: Dict[str, Any]) -> str:
+    name = _normalized_column_name(column)
+    source_name = _source_column_name(column)
+    semantic = str(column.get("semantic_type") or "").upper()
+    if semantic:
+        return semantic
+    if name.endswith("_id") or source_name.endswith("id"):
+        return "ID"
+    if any(token in name for token in ("amount", "premium", "reserve", "tax", "sum_insured")):
+        return "MEASURE"
+    return ""
+
+
+def _effective_data_type(column: Dict[str, Any]) -> str:
+    name = _normalized_column_name(column)
+    source_name = _source_column_name(column)
+    data_type = str(column.get("data_type") or column.get("type") or "").strip().lower()
+    semantic = _semantic_type(column)
+    if semantic in {"ID", "SURROGATE_KEY"} or name.endswith("_id") or source_name.endswith("id"):
+        return "bigint"
+    if name == "branch_office_name":
+        return "varchar"
+    if any(token in name for token in ("amount", "premium", "reserve", "tax", "sum_insured")):
+        return "decimal"
+    return data_type
 
 
 def _normalized_column_name(column: Dict[str, Any]) -> str:
@@ -663,7 +710,7 @@ def generate_silver_script(
     string_columns = list(dict.fromkeys(
         _normalized_column_name(column)
         for column in enriched_columns
-        if str(column.get("data_type") or "").lower() in {"varchar", "nvarchar", "text", "char", "nchar"}
+        if _effective_data_type(column) in {"varchar", "nvarchar", "text", "char", "nchar"}
     ))
     pii_columns = list(dict.fromkeys(
         _normalized_column_name(column)
@@ -672,7 +719,7 @@ def generate_silver_script(
     ))
     key_columns = _key_columns(enriched_columns)
     cast_rules = {
-        _normalized_column_name(column): _datatype_cast(str(column.get("data_type") or ""))
+        _normalized_column_name(column): _datatype_cast(_effective_data_type(column))
         for column in enriched_columns
     }
     cast_rules = {key: value for key, value in cast_rules.items() if key and value}
@@ -912,9 +959,9 @@ print(f"SUCCESS: Silver upsert completed for {{TARGET_TABLE}}")
 
 def _snowflake_type_from_metadata(column: Dict[str, Any]) -> str:
     explicit_type = str(column.get("type") or "").strip()
-    if explicit_type:
+    if explicit_type and _effective_data_type(column) == str(column.get("type") or "").strip().lower():
         return explicit_type
-    data_type = str(column.get("data_type") or "").strip().lower()
+    data_type = _effective_data_type(column)
     precision = column.get("numeric_precision")
     scale = column.get("numeric_scale")
     max_length = column.get("character_maximum_length") or column.get("max_length")
@@ -949,7 +996,7 @@ def _snowflake_column_expr(column: Dict[str, Any]) -> str:
     target_name = _normalized_column_name(column)
     source_name = _source_column_name(column)
     source_ref = f"GET_IGNORE_CASE(OBJECT_CONSTRUCT_KEEP_NULL(src.*), {_snowflake_string_literal(source_name)})"
-    data_type = str(column.get("data_type") or "").strip().lower()
+    data_type = _effective_data_type(column)
     target_type = _snowflake_type_from_metadata(column)
 
     if data_type in {"varchar", "nvarchar", "char", "nchar", "text", "ntext", "string"}:
@@ -2038,6 +2085,8 @@ def _kimball_candidates(columns: List[Dict[str, Any]], certified_joins: List[Dic
     for column in columns:
         if not isinstance(column, dict):
             continue
+        if column.get("is_pii_candidate") or column.get("is_pii") or str(column.get("semantic_type") or "").upper() == "PII":
+            continue
         candidate = {
             "table": str(column.get("table_name") or ""),
             "column": str(column.get("column_name") or ""),
@@ -2079,7 +2128,9 @@ def _kimball_plan_prompt(
     return (
         "Design a Kimball Gold model. Return only JSON matching this exact shape. "
         "Use only candidate IDs. Do not invent IDs, columns, joins, or aggregations. "
-        "fact_grain must include every selected dimension ID and include period_start only when time_id is set."
+        "fact_grain must include every selected dimension ID and include period_start only when time_id is set. "
+        "Every selected table must be reachable from the measure table through selected certified joins. "
+        "Never use many-to-many joins, PII columns, duplicate dimensions, or a weaker measure."
         + retry_context
         + "\nKPI=" + json.dumps(kpi, default=str)
         + "\nCURRENT_MAPPING=" + json.dumps(mapping, default=str)
@@ -2147,27 +2198,78 @@ def _validate_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]
     measure_meta = index.get((str(measure.get("table") or "").casefold(), str(measure.get("column") or "").casefold()))
     if not measure_meta or str(measure_meta.get("semantic_type") or "").upper() not in {"MEASURE", "FLAG"}:
         raise ValueError("Kimball plan selected an invalid measure")
+    if measure_meta.get("is_pii_candidate") or measure_meta.get("is_pii"):
+        raise ValueError("Kimball plan selected a PII measure")
     if str(measure.get("aggregation") or "").upper() not in {"SUM", "AVG", "MIN", "MAX", "COUNT"}:
         raise ValueError("Kimball plan selected an unsupported aggregation")
+    aggregation = str(measure.get("aggregation") or "").upper()
+    numeric_types = {
+        "int", "integer", "smallint", "tinyint", "bigint", "float", "real", "double",
+        "decimal", "numeric", "number", "money", "smallmoney",
+    }
+    measure_type = _effective_data_type(measure_meta)
+    if aggregation in {"SUM", "AVG"} and measure_type and measure_type not in numeric_types:
+        raise ValueError("Kimball plan selected a non-numeric measure for numeric aggregation")
     dimensions = plan.get("dimensions") or []
     if not isinstance(dimensions, list) or len(dimensions) > 12:
         raise ValueError("Kimball plan has an invalid dimension list")
+    dimension_keys = [
+        (str(item.get("table") or "").casefold(), str(item.get("column") or "").casefold())
+        for item in dimensions
+    ]
+    if len(dimension_keys) != len(set(dimension_keys)):
+        raise ValueError("Kimball plan selected duplicate dimensions")
+    if len({table for table, _ in dimension_keys if table}) > _max_gold_dimension_tables():
+        raise ValueError("Kimball plan selected too many dimension tables")
     for item in dimensions:
         meta = index.get((str(item.get("table") or "").casefold(), str(item.get("column") or "").casefold()))
         if not meta or str(meta.get("semantic_type") or "").upper() not in {"DIMENSION", "DATE", "FLAG"}:
             raise ValueError("Kimball plan selected an invalid dimension")
+        if meta.get("is_pii_candidate") or meta.get("is_pii"):
+            raise ValueError("Kimball plan selected a PII dimension")
     time = plan.get("time") or {}
     if time:
         meta = index.get((str(time.get("table") or "").casefold(), str(time.get("column") or "").casefold()))
         if not meta or str(meta.get("semantic_type") or "").upper() not in {"DATE", "AUDIT_TIMESTAMP"}:
             raise ValueError("Kimball plan selected an invalid time column")
+        if meta.get("is_pii_candidate") or meta.get("is_pii"):
+            raise ValueError("Kimball plan selected a PII time column")
         if str(time.get("grain") or "").lower() not in {"day", "week", "month", "quarter", "year"}:
             raise ValueError("Kimball plan selected an invalid time grain")
-    certified = {tuple(str(j.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column")) for j in certified_joins if isinstance(j, dict)}
+    certified = {
+        tuple(str(j.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column"))
+        for j in certified_joins
+        if isinstance(j, dict) and j.get("certified") is True
+    }
+    selected_edges: List[Tuple[str, str]] = []
     for join in plan.get("join_paths") or []:
         signature = tuple(str(join.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column"))
         if signature not in certified:
             raise ValueError("Kimball plan selected a non-certified join")
+        cardinality = re.sub(r"\s+", "", str(join.get("cardinality") or "").casefold())
+        if cardinality in {"many_to_many", "many-to-many", "m:m", "n:n", "*:*"}:
+            raise ValueError("Kimball plan selected a many-to-many join")
+        selected_edges.append((signature[0], signature[2]))
+    measure_table = str(measure.get("table") or "").casefold()
+    required_tables = {table for table, _ in dimension_keys if table}
+    if time:
+        required_tables.add(str(time.get("table") or "").casefold())
+    reachable = {measure_table}
+    changed = True
+    while changed:
+        changed = False
+        for left_table, right_table in selected_edges:
+            if left_table in reachable and right_table not in reachable:
+                reachable.add(right_table)
+                changed = True
+            elif right_table in reachable and left_table not in reachable:
+                reachable.add(left_table)
+                changed = True
+    unreachable = sorted(required_tables - reachable)
+    if unreachable:
+        raise ValueError("Kimball plan selected tables unreachable from the measure: " + ", ".join(unreachable))
+    if selected_edges and any(left not in reachable or right not in reachable for left, right in selected_edges):
+        raise ValueError("Kimball plan selected a disconnected join path")
     expected_grain = {str(item.get("column") or "") for item in dimensions}
     if time:
         expected_grain.add("period_start")
@@ -2217,10 +2319,16 @@ def _llm_kimball_plan(
         None,
     )
     best = _best_measure_for_kpi(kpi, columns)
-    if selected_meta and best and _score_column_for_kpi(kpi, selected_meta) < _score_column_for_kpi(kpi, best):
+    if selected_meta and best and (
+        str(selected_meta.get("table_name") or "").casefold(),
+        str(selected_meta.get("column_name") or "").casefold(),
+    ) != (
+        str(best.get("table_name") or "").casefold(),
+        str(best.get("column_name") or "").casefold(),
+    ):
         raise ValueError(
-            "Kimball plan selected a weaker KPI measure than the deterministic semantic match: "
-            f"{selected.get('column')} < {best.get('column_name')}"
+            "Kimball plan changed the deterministic KPI measure: "
+            f"{selected.get('column')} != {best.get('column_name')}"
         )
     expected_aggregation = _infer_aggregation(_extract_kpi_name(kpi), selected_meta)
     if expected_aggregation != "RATIO" and str(selected.get("aggregation") or "").upper() != expected_aggregation:

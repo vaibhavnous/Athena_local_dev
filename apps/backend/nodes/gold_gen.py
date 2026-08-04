@@ -79,6 +79,7 @@ def _databricks_contract_columns(mapping: Dict[str, Any], dimension_contract: Li
             )
     for spec in dimension_contract:
         columns.update(_silver_output_column_name(name) for name in spec.get("source_columns") or spec.get("columns") or [])
+        columns.update(_silver_output_column_name(name) for name in spec.get("attribute_columns") or [])
         entity = _safe_identifier(spec.get("entity"), "dimension")
         columns.add(f"{entity}_key")
     columns.update(
@@ -145,6 +146,18 @@ def _candidate_string_literals(tree: ast.AST) -> List[str]:
     return values
 
 
+def _candidate_assignments(tree: ast.AST) -> Dict[str, Any]:
+    assignments: Dict[str, Any] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        try:
+            assignments[node.targets[0].id] = ast.literal_eval(node.value)
+        except (TypeError, ValueError):
+            continue
+    return assignments
+
+
 def _validate_databricks_gold_candidate(
     code: str,
     mapping: Dict[str, Any],
@@ -163,6 +176,28 @@ def _validate_databricks_gold_candidate(
     if missing:
         raise ValueError("LLM Gold code dropped the approved source or target table")
 
+    dimension_columns = list(dict.fromkeys(
+        str(item.get("column") or "").strip()
+        for item in mapping.get("grouping_dimensions") or []
+        if isinstance(item, dict) and str(item.get("column") or "").strip()
+    ))
+    time_info = mapping.get("time") or {}
+    raw_time_column = time_info.get("column") if isinstance(time_info, dict) else None
+    time_column = raw_time_column.get("column") if isinstance(raw_time_column, dict) else None
+    expected_assignments = {
+        "KPI_NAME": str(mapping.get("kpi_name") or "KPI"),
+        "SOURCE_TABLE": str(mapping.get("source_silver_table") or ""),
+        "TARGET_TABLE": _target_fact_table(
+            gold_schema, _safe_identifier(str(mapping.get("kpi_name") or "kpi"), "kpi")
+        ),
+        "MEASURE_COLUMN": str((mapping.get("measure") or {}).get("column") or ""),
+        "MEASURE_AGGREGATION": str((mapping.get("measure") or {}).get("aggregation") or "SUM").upper(),
+        "DIMENSION_COLUMNS": dimension_columns,
+        "TIME_COLUMN": time_column,
+        "TIME_GRAIN": str(time_info.get("grain") or "month"),
+        "BUSINESS_FILTERS": list(mapping.get("filters") or []),
+        "JOIN_PATHS": list(mapping.get("join_paths") or []),
+    }
     literals = _candidate_string_literals(tree)
     approved_tables = _databricks_contract_tables(mapping, gold_schema, dimension_contract)
     referenced_tables = {
@@ -196,6 +231,38 @@ def _validate_databricks_gold_candidate(
     if unknown_columns:
         raise ValueError("LLM Gold code referenced non-contract columns: " + ", ".join(unknown_columns[:10]))
 
+    assignments = _candidate_assignments(tree)
+    drifted = [
+        name for name, expected in expected_assignments.items()
+        if name not in assignments or assignments[name] != expected
+    ]
+    if drifted:
+        raise ValueError("LLM Gold code changed contract constants: " + ", ".join(drifted))
+
+    allowed_imports = {
+        "re", "delta.tables", "pyspark.sql", "pyspark.sql.functions", "pyspark.sql.types",
+    }
+    imported_modules = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    imported_modules.update(
+        str(node.module or "") for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+    )
+    unknown_imports = sorted(module for module in imported_modules if module not in allowed_imports)
+    if unknown_imports:
+        raise ValueError("LLM Gold code imported non-approved modules: " + ", ".join(unknown_imports))
+    forbidden_calls = {
+        node.func.id.casefold()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id.casefold() in {"eval", "exec", "compile", "open", "__import__"}
+    }
+    if forbidden_calls:
+        raise ValueError("LLM Gold code uses dynamic or filesystem execution: " + ", ".join(sorted(forbidden_calls)))
+
     measure = mapping.get("measure") or {}
     aggregation = str(measure.get("aggregation") or "SUM").casefold()
     measure_column = _silver_output_column_name(measure.get("column")).casefold()
@@ -212,8 +279,36 @@ def _validate_databricks_gold_candidate(
     )
     if any(marker not in normalized for marker in required_markers):
         raise ValueError("LLM Gold code must preserve deterministic MERGE/upsert behavior")
-    if "dq_max_null_ratio" not in normalized or "silver_upsert_key" not in normalized:
+    called_methods = {
+        node.func.attr.casefold()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    required_methods = {"groupby", "agg", "merge", "whenmatchedupdateall", "whennotmatchedinsertall", "tableexists"}
+    if not required_methods.issubset(called_methods):
+        raise ValueError("LLM Gold code changed the required aggregation or merge structure")
+    if "target.gold_upsert_key = source.gold_upsert_key" not in {value.casefold() for value in literals}:
+        raise ValueError("LLM Gold code changed the deterministic Gold merge key")
+    required_assignments = {
+        "DQ_MAX_NULL_RATIO", "DQ_MAX_DIMENSION_CARDINALITY", "DQ_MAX_DIMENSION_KEY_NULL_RATIO",
+        "DQ_MAX_SOURCE_AGE_DAYS", "DQ_MAX_JOIN_MULTIPLIER",
+    }
+    if not required_assignments.issubset(assignments):
+        raise ValueError("LLM Gold code removed configured data-quality thresholds")
+    if (
+        "dq_max_null_ratio" not in normalized
+        or "silver_upsert_key" not in normalized
+        or "dq_max_dimension_key_null_ratio" not in normalized
+        or "dimension_key_columns" not in normalized
+        or "dq_max_join_multiplier" not in normalized
+        or "duplicate_key_exists" not in normalized
+    ):
         raise ValueError("LLM Gold code must preserve the runtime data-quality guards")
+    governance_markers = (
+        "delta.enablechangedatafeed", "comment on table", "set tags", "check (gold_upsert_key is not null)", "cluster by",
+    )
+    if any(marker not in normalized for marker in governance_markers):
+        raise ValueError("LLM Gold code must preserve Gold governance and Delta optimization")
     forbidden = re.search(r"\b(drop|truncate|delete|grant|revoke)\b", normalized)
     if forbidden:
         raise ValueError(f"LLM Gold code contains forbidden operation: {forbidden.group(1).upper()}")
@@ -411,10 +506,14 @@ def _dimension_specs(mapping: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "source_table": source_table,
                 "logical_table": table,
                 "columns": [],
+                "attribute_columns": [],
                 "source_columns": [],
             },
         )
-        if column not in spec["columns"]:
+        if item.get("dimension_attribute"):
+            if column not in spec["attribute_columns"]:
+                spec["attribute_columns"].append(column)
+        elif column not in spec["columns"]:
             spec["columns"].append(column)
             spec["source_columns"].append(_silver_output_column_name(column))
     return list(grouped.values())
@@ -470,7 +569,9 @@ def _allowed_llm_source_columns(mapping: Dict[str, Any]) -> set[str]:
     return columns
 
 
-def _shared_dimension_mapping(mappings: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _shared_dimension_mapping(
+    mappings: List[Dict[str, Any]], enriched_metadata: Dict[str, Any] | None = None
+) -> Dict[str, Any]:
     """Build one idempotent dimension contract for the whole Gold run."""
     dimensions: List[Dict[str, Any]] = []
     seen: set[Tuple[str, str]] = set()
@@ -493,12 +594,45 @@ def _shared_dimension_mapping(mappings: List[Dict[str, Any]]) -> Dict[str, Any]:
                 seen.add(key)
     ranked_tables = sorted(table_scores, key=lambda table: (-table_scores[table], table))
     kept_tables = set(ranked_tables[:_max_gold_dimension_tables()])
+    selected_dimensions = [
+        item for item in dimensions if str(item.get("table") or "").casefold() in kept_tables
+    ]
+    selected_keys = {
+        (str(item.get("table") or "").casefold(), str(item.get("column") or "").casefold())
+        for item in selected_dimensions
+    }
+    source_by_table = {
+        str(item.get("table") or "").casefold(): str(item.get("source_silver_table") or "")
+        for item in selected_dimensions
+    }
+    for column in (enriched_metadata or {}).get("columns", []):
+        if not isinstance(column, dict):
+            continue
+        table = str(column.get("table_name") or "").strip()
+        name = _silver_output_column_name(column.get("column_name"))
+        key = (table.casefold(), name.casefold())
+        if (
+            table.casefold() not in kept_tables
+            or key in selected_keys
+            or str(column.get("semantic_type") or "").upper() != "DIMENSION"
+            or column.get("is_pii_candidate")
+            or column.get("is_primary_key")
+        ):
+            continue
+        selected_dimensions.append(
+            {
+                "table": table,
+                "column": name,
+                "semantic_type": "DIMENSION",
+                "source_silver_table": source_by_table.get(table.casefold(), ""),
+                "dimension_attribute": True,
+            }
+        )
+        selected_keys.add(key)
     return {
         "kpi_name": "Shared Gold Dimensions",
         "source_silver_table": source_table,
-        "grouping_dimensions": [
-            item for item in dimensions if str(item.get("table") or "").casefold() in kept_tables
-        ],
+        "grouping_dimensions": selected_dimensions,
     }
 
 
@@ -605,8 +739,10 @@ def _llm_prompt(
             "- Follow Kimball star schema principles.",
             "- Join current dim_<name> tables and use surrogate keys in the fact table.",
             "- Only join dimension tables and keys listed in Generated dimension contract.",
-            "- Preserve the baseline runtime data-quality guards and idempotent Delta MERGE.",
-            "- Never use append-only writes or invent source columns, tables, or surrogate keys.",
+            "- Preserve every uppercase contract constant from the baseline exactly.",
+            "- Preserve the baseline runtime data-quality guards, governance operations, and idempotent Delta MERGE.",
+            "- Import only re, Delta, and PySpark modules already present in the baseline.",
+            "- Never use dynamic execution, filesystem access, append-only writes, or invented source columns, tables, or surrogate keys.",
         ]
     )
     if validation_feedback:
@@ -666,7 +802,7 @@ def llm_generate_snowflake_gold_code(
     )
     prompt = f"""Generate production Snowflake SQL for this Gold KPI.
 Return only SQL. Preserve the exact source and target tables, dimensional groupings,
-metadata columns, and MERGE/upsert behavior from the baseline. Do not use Python,
+metadata columns, gold_upsert_key MERGE condition, and aggregation grain from the baseline. Do not use Python,
 Spark, or Databricks syntax. Do not invent columns.
 Use only exact case-sensitive identifiers from Canonical Silver columns when reading
 the source table. Copy those identifiers exactly from the baseline.
@@ -803,6 +939,24 @@ def _validate_snowflake_gold_candidate(code: str, mapping: Dict[str, Any], targe
     aggregation = str((mapping.get("measure") or {}).get("aggregation") or "SUM").upper()
     if aggregation in {"SUM", "AVG", "MIN", "MAX", "COUNT"} and f"{aggregation}(" not in upper:
         raise ValueError(f"LLM Gold SQL does not preserve the required {aggregation} aggregation")
+    structural_sql = _sql_without_comments(code)
+    normalized_structure = structural_sql.replace('"', "").casefold()
+    required_structure = (
+        "gold_upsert_key",
+        "when matched then update",
+        "when not matched then insert",
+    )
+    if any(marker not in normalized_structure for marker in required_structure):
+        raise ValueError("LLM Gold SQL changed deterministic MERGE/upsert behavior")
+    if not re.search(
+        r"\bON\s+target\.?gold_upsert_key\s*=\s*source\.?gold_upsert_key\b",
+        normalized_structure,
+        re.IGNORECASE,
+    ):
+        raise ValueError("LLM Gold SQL changed the deterministic Gold merge key")
+    has_declared_grain = bool(mapping.get("grouping_dimensions")) or bool((mapping.get("time") or {}).get("column"))
+    if has_declared_grain and not re.search(r"\bGROUP\s+BY\b", structural_sql, re.IGNORECASE):
+        raise ValueError("LLM Gold SQL dropped the declared dimensional grain")
 
 
 def _usable_mapping(mapping: Dict[str, Any]) -> bool:
@@ -1059,9 +1213,11 @@ Expected runtime: Spark / Databricks with Delta support
 DO NOT EDIT MANUALLY
 """
 
+import re
+
 from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, lit, sha2, to_timestamp
+from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, lit, max, sha2, to_timestamp
 
 spark = SparkSession.builder.getOrCreate()
 
@@ -1073,6 +1229,55 @@ except Exception:
 SOURCE_TABLE = {source_table!r}
 SILVER_SCHEMA = {silver_schema!r}
 DIMENSIONS = {_literal(specs)}
+
+def _sql_literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+def _best_effort_sql(statement, feature):
+    try:
+        spark.sql(statement)
+    except Exception as exc:
+        print(f"WARNING: Could not apply {{feature}}: {{exc}}")
+
+def _govern_dimension(target_table, key_column, natural_columns):
+    spark.sql(
+        f"ALTER TABLE {{target_table}} SET TBLPROPERTIES ("
+        "'delta.enableChangeDataFeed' = 'true', "
+        "'athena.layer' = 'gold', "
+        "'athena.table_type' = 'dimension')"
+    )
+    _best_effort_sql(
+        f"COMMENT ON TABLE {{target_table}} IS "
+        + _sql_literal(f"Conformed Gold dimension for {{dim.get('logical_table') or entity}}"),
+        "dimension table comment",
+    )
+    _best_effort_sql(
+        f"ALTER TABLE {{target_table}} SET TAGS ('layer' = 'gold', 'table_type' = 'dimension')",
+        "Unity Catalog tags",
+    )
+    column_comments = {{
+        key_column: "Stable surrogate key for this dimension",
+        "natural_key_hash": "Hash of the certified natural key columns",
+        "attribute_hash": "Hash used to detect descriptive attribute changes",
+        "effective_from": "Timestamp when this dimension row became current",
+        "effective_to": "Timestamp when this dimension row stops being current",
+        "is_current": "Current-row indicator",
+    }}
+    for name, comment in column_comments.items():
+        _best_effort_sql(
+            f"ALTER TABLE {{target_table}} ALTER COLUMN `{{name}}` COMMENT {{_sql_literal(comment)}}",
+            f"column comment for {{name}}",
+        )
+    constraint_name = "pk_" + entity[:80]
+    _best_effort_sql(
+        f"ALTER TABLE {{target_table}} ADD CONSTRAINT {{constraint_name}} "
+        f"PRIMARY KEY (`{{key_column}}`) NOT ENFORCED",
+        "informational primary key",
+    )
+    _best_effort_sql(
+        f"ALTER TABLE {{target_table}} CLUSTER BY (`{{natural_columns[0]}}`)",
+        "liquid clustering",
+    )
 
 if not SOURCE_TABLE:
     raise ValueError("Missing dimension source table.")
@@ -1109,12 +1314,21 @@ for dim in DIMENSIONS:
 
     src = spark.table(dim_source_table)
     natural_columns = _resolve_columns(src, dim.get("columns", []))
+    attribute_columns = [
+        name for name in _resolve_columns(src, dim.get("attribute_columns", []))
+        if name not in natural_columns
+    ]
 
     if not natural_columns:
         print(f"WARNING: Skipping dimension {{target_table}} because no source columns are available")
         continue
 
-    staged = src.select(*[col(name) for name in natural_columns]).dropDuplicates()
+    if attribute_columns:
+        staged = src.groupBy(*[col(name) for name in natural_columns]).agg(
+            *[max(col(name)).alias(name) for name in attribute_columns]
+        )
+    else:
+        staged = src.select(*[col(name) for name in natural_columns]).dropDuplicates()
     source_count = src.count()
     dimension_count = staged.count()
     if source_count and dimension_count >= source_count:
@@ -1126,7 +1340,7 @@ for dim in DIMENSIONS:
     staged = (
         staged
         .withColumn("natural_key_hash", _hash_columns(staged, natural_columns))
-        .withColumn("attribute_hash", _hash_columns(staged, natural_columns))
+        .withColumn("attribute_hash", _hash_columns(staged, attribute_columns or natural_columns))
         .withColumn(key_column, sha2(col("natural_key_hash"), 256))
         .withColumn("effective_from", current_timestamp())
         .withColumn("effective_to", to_timestamp(lit("9999-12-31 23:59:59")))
@@ -1141,27 +1355,20 @@ for dim in DIMENSIONS:
             .option("overwriteSchema", "true")
             .saveAsTable(target_table)
         )
+        _govern_dimension(target_table, key_column, natural_columns)
         print(f"SUCCESS: Created dimension {{target_table}}")
         continue
 
-    current_dim = spark.table(target_table).filter(col("is_current") == 1)
-    new_rows = (
-        staged.alias("s")
-        .join(
-            current_dim.select("natural_key_hash").alias("d"),
-            col("s.natural_key_hash") == col("d.natural_key_hash"),
-            "left_anti",
-        )
-        .select("s.*")
-    )
-
     (
-        new_rows.write
-        .format("delta")
-        .mode("append")
-        .saveAsTable(target_table)
+        DeltaTable.forName(spark, target_table)
+        .alias("target")
+        .merge(staged.alias("source"), "target.natural_key_hash = source.natural_key_hash")
+        .whenMatchedUpdateAll(condition="target.attribute_hash <> source.attribute_hash")
+        .whenNotMatchedInsertAll()
+        .execute()
     )
 
+    _govern_dimension(target_table, key_column, natural_columns)
     print(f"SUCCESS: Dimension merge completed for {{target_table}}")
 '''
 
@@ -1173,6 +1380,7 @@ def generate_gold_script(
     gold_schema: str,
 ) -> str:
     kpi_name = str(mapping.get("kpi_name") or "KPI")
+    kpi_description = str(mapping.get("kpi_description") or f"Certified Gold KPI: {kpi_name}")
     kpi_id = _safe_identifier(kpi_name, "kpi")
     source_table = str(mapping["source_silver_table"])
     target_table = _target_fact_table(gold_schema, kpi_id)
@@ -1194,6 +1402,7 @@ def generate_gold_script(
     source_logical_table = _logical_table_from_silver(source_table)
     dq_max_null_ratio = min(1.0, _env_float("ATHENA_GOLD_MAX_MEASURE_NULL_RATIO", 0.2))
     dq_max_dimension_cardinality = _env_int("ATHENA_GOLD_MAX_DIMENSION_CARDINALITY", 1_000_000, 1)
+    dq_max_dimension_key_null_ratio = min(1.0, _env_float("ATHENA_GOLD_MAX_DIMENSION_KEY_NULL_RATIO", 0.0))
     dq_max_source_age_days = _env_int("ATHENA_GOLD_MAX_SOURCE_AGE_DAYS", 0)
     dq_max_join_multiplier = _env_float("ATHENA_GOLD_MAX_JOIN_MULTIPLIER", 1.05, 1.0)
 
@@ -1218,6 +1427,8 @@ Expected runtime: Spark / Databricks with Delta support
 DO NOT EDIT MANUALLY
 """
 
+import re
+
 from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import approx_count_distinct, avg, coalesce, col, concat_ws, count, current_date, current_timestamp, datediff, date_trunc, expr, lit, max, min, sha2, sum, to_date
@@ -1232,6 +1443,8 @@ except Exception:
 
 RUN_ID = {run_id!r}
 KPI_NAME = {kpi_name!r}
+KPI_DESCRIPTION = {kpi_description!r}
+CONSTRAINT_ID = {kpi_id[:60]!r}
 SOURCE_TABLE = {source_table!r}
 TARGET_TABLE = {target_table!r}
 VALUE_COLUMN = {value_alias!r}
@@ -1247,8 +1460,72 @@ BUSINESS_FILTERS = {_literal(filters)}
 JOIN_PATHS = {_literal(join_paths)}
 DQ_MAX_NULL_RATIO = {dq_max_null_ratio!r}
 DQ_MAX_DIMENSION_CARDINALITY = {dq_max_dimension_cardinality!r}
+DQ_MAX_DIMENSION_KEY_NULL_RATIO = {dq_max_dimension_key_null_ratio!r}
 DQ_MAX_SOURCE_AGE_DAYS = {dq_max_source_age_days!r}
 DQ_MAX_JOIN_MULTIPLIER = {dq_max_join_multiplier!r}
+
+def _sql_literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+def _best_effort_sql(statement, feature):
+    try:
+        spark.sql(statement)
+    except Exception as exc:
+        print(f"WARNING: Could not apply {{feature}} to {{TARGET_TABLE}}: {{exc}}")
+
+def _govern_fact_table(dimension_keys):
+    spark.sql(
+        f"ALTER TABLE {{TARGET_TABLE}} SET TBLPROPERTIES ("
+        "'delta.enableChangeDataFeed' = 'true', "
+        "'athena.layer' = 'gold', "
+        "'athena.table_type' = 'fact', "
+        f"'athena.kpi_name' = {{_sql_literal(KPI_NAME)}})"
+    )
+    _best_effort_sql(
+        f"COMMENT ON TABLE {{TARGET_TABLE}} IS {{_sql_literal(KPI_DESCRIPTION)}}",
+        "table comment",
+    )
+    _best_effort_sql(
+        f"ALTER TABLE {{TARGET_TABLE}} SET TAGS ('layer' = 'gold', 'table_type' = 'fact')",
+        "Unity Catalog tags",
+    )
+    column_comments = {{
+        VALUE_COLUMN: f"Aggregated value for {{KPI_NAME}}",
+        "kpi_name": "Certified business KPI name",
+        "gold_upsert_key": "Stable hash of the declared fact grain",
+        "gold_run_id": "Pipeline run that last produced this row",
+        "gold_processed_timestamp": "Timestamp when this row was last processed",
+    }}
+    for name, comment in column_comments.items():
+        if name in result.columns:
+            _best_effort_sql(
+                f"ALTER TABLE {{TARGET_TABLE}} ALTER COLUMN `{{name}}` COMMENT {{_sql_literal(comment)}}",
+                f"column comment for {{name}}",
+            )
+    _best_effort_sql(
+        f"ALTER TABLE {{TARGET_TABLE}} ADD CONSTRAINT ck_{{CONSTRAINT_ID}}_key "
+        "CHECK (gold_upsert_key IS NOT NULL)",
+        "not-null business-key check",
+    )
+    _best_effort_sql(
+        f"ALTER TABLE {{TARGET_TABLE}} ADD CONSTRAINT pk_{{CONSTRAINT_ID}} "
+        "PRIMARY KEY (`gold_upsert_key`) NOT ENFORCED",
+        "informational primary key",
+    )
+    for key_column in dimension_keys:
+        entity = key_column.removesuffix("_key")
+        _best_effort_sql(
+            f"ALTER TABLE {{TARGET_TABLE}} ADD CONSTRAINT fk_{{entity[:60]}} "
+            f"FOREIGN KEY (`{{key_column}}`) REFERENCES {gold_schema}.dim_{{entity}} (`{{key_column}}`) NOT ENFORCED",
+            "informational foreign key",
+        )
+    cluster_columns = [name for name in ["period_start", *dimension_keys] if name in result.columns][:4]
+    if cluster_columns:
+        cluster_sql = ", ".join(f"`{{name}}`" for name in cluster_columns)
+        _best_effort_sql(
+            f"ALTER TABLE {{TARGET_TABLE}} CLUSTER BY ({{cluster_sql}})",
+            "liquid clustering",
+        )
 
 if not spark.catalog.tableExists(SOURCE_TABLE):
     raise ValueError(f"Missing silver source table: {{SOURCE_TABLE}}")
@@ -1342,7 +1619,7 @@ def _sql_like_filter(condition):
     text = str(condition or "").strip()
     if not text or len(text) > 500:
         return False
-    return bool(__import__("re").search(r"(=|<>|!=|>=|<=|>|<|\\bIN\\b|\\bLIKE\\b|\\bIS\\b)", text, __import__("re").IGNORECASE))
+    return bool(re.search(r"(=|<>|!=|>=|<=|>|<|\\bIN\\b|\\bLIKE\\b|\\bIS\\b)", text, re.IGNORECASE))
 
 for condition in BUSINESS_FILTERS:
     if _sql_like_filter(condition):
@@ -1420,6 +1697,7 @@ DIMENSION_COLUMNS = resolved_dimension_columns
 
 group_columns = []
 dimension_raw_columns = set()
+dimension_key_columns = []
 for dim in DIMENSION_SPECS:
     entity = dim["entity"]
     target_dim_table = "{gold_schema}.dim_" + entity
@@ -1433,6 +1711,7 @@ for dim in DIMENSION_SPECS:
         join_columns = [name for name in natural_columns if name in dim_df.columns]
         if join_columns and key_column in dim_df.columns:
             df = df.join(dim_df.select(*join_columns, key_column), join_columns, "left")
+            dimension_key_columns.append(key_column)
             group_columns.append(col(key_column))
         else:
             print(f"WARNING: Dimension {{target_dim_table}} is missing required natural/key columns")
@@ -1445,6 +1724,16 @@ group_columns.extend([
     for name in DIMENSION_COLUMNS
     if name in set(df.columns) and name not in dimension_raw_columns
 ])
+
+dimension_key_columns = list(dict.fromkeys(dimension_key_columns))
+for key_column in dimension_key_columns:
+    null_count = df.filter(col(key_column).isNull()).count()
+    null_ratio = null_count / source_row_count
+    if null_ratio > DQ_MAX_DIMENSION_KEY_NULL_RATIO:
+        raise ValueError(
+            f"Gold dimension key {{key_column}} unresolved for {{null_ratio:.2%}} "
+            f"of {{SOURCE_TABLE}} rows; check dimension natural keys and certified join paths"
+        )
 
 if TIME_COLUMN and TIME_COLUMN in available_columns:
     group_columns.append({_date_grain_expr(time_grain)})
@@ -1501,7 +1790,129 @@ else:
         writer = writer.partitionBy("period_start")
     writer.saveAsTable(TARGET_TABLE)
 
+_govern_fact_table(dimension_key_columns)
 print(f"SUCCESS: Gold KPI generation completed for {{TARGET_TABLE}}")
+'''
+
+
+def generate_consolidated_gold_script(
+    *, mappings: List[Dict[str, Any]], run_id: str, gold_schema: str
+) -> str:
+    metrics = [
+        {
+            "kpi_name": str(mapping.get("kpi_name") or "KPI"),
+            "source_table": _target_fact_table(
+                gold_schema,
+                _safe_identifier(str(mapping.get("kpi_name") or "kpi"), "kpi"),
+            ),
+            "value_column": _result_column_name(str(mapping.get("kpi_name") or "KPI")),
+        }
+        for mapping in mappings
+        if _usable_mapping(mapping)
+    ]
+    target_table = f"{gold_schema}.fact_kpi_metrics"
+    return f'''
+"""
+AUTO-GENERATED CONSOLIDATED GOLD KPI FACT
+
+Target table: {target_table}
+Expected runtime: Spark / Databricks with Delta support
+
+DO NOT EDIT MANUALLY
+"""
+
+from functools import reduce
+
+from delta.tables import DeltaTable
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, lit, sha2, struct, to_json
+from pyspark.sql.types import TimestampType
+
+spark = SparkSession.builder.getOrCreate()
+
+RUN_ID = {run_id!r}
+TARGET_TABLE = {target_table!r}
+METRICS = {_literal(metrics)}
+
+frames = []
+for metric in METRICS:
+    source_table = metric["source_table"]
+    value_column = metric["value_column"]
+    if not spark.catalog.tableExists(source_table):
+        raise ValueError(f"Missing prerequisite Gold KPI fact: {{source_table}}")
+    source = spark.table(source_table)
+    required = {{value_column, "gold_upsert_key"}}
+    missing = required.difference(source.columns)
+    if missing:
+        raise ValueError(f"Gold KPI fact {{source_table}} is missing columns: {{sorted(missing)}}")
+    context_columns = [
+        name for name in source.columns
+        if name not in {{value_column, "kpi_name", "gold_run_id", "gold_processed_timestamp", "gold_upsert_key"}}
+    ]
+    dimension_keys = [name for name in context_columns if name.endswith("_key")]
+    dimensions = [name for name in context_columns if name != "period_start"]
+    period_start = col("period_start").cast(TimestampType()) if "period_start" in source.columns else lit(None).cast(TimestampType())
+    dimension_context = to_json(struct(*[col(name) for name in dimensions])) if dimensions else lit("{{}}")
+    dimension_key_context = to_json(struct(*[col(name) for name in dimension_keys])) if dimension_keys else lit("{{}}")
+    frames.append(
+        source.select(
+            lit(metric["kpi_name"]).alias("kpi_name"),
+            col(value_column).cast("decimal(38,10)").alias("kpi_value"),
+            period_start.alias("period_start"),
+            dimension_context.alias("dimension_context"),
+            dimension_key_context.alias("dimension_key_context"),
+            col("gold_upsert_key").alias("source_gold_upsert_key"),
+        )
+    )
+
+if not frames:
+    raise ValueError("No executable KPI facts were supplied for consolidation")
+
+result = reduce(lambda left, right: left.unionByName(right), frames)
+result = (
+    result
+    .withColumn("gold_run_id", lit(RUN_ID))
+    .withColumn("gold_processed_timestamp", current_timestamp())
+    .withColumn(
+        "gold_upsert_key",
+        sha2(concat_ws("||", col("kpi_name"), coalesce(col("source_gold_upsert_key"), lit("__NULL__"))), 256),
+    )
+)
+
+if spark.catalog.tableExists(TARGET_TABLE):
+    (
+        DeltaTable.forName(spark, TARGET_TABLE)
+        .alias("target")
+        .merge(result.alias("source"), "target.gold_upsert_key = source.gold_upsert_key")
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
+else:
+    result.write.format("delta").mode("overwrite").saveAsTable(TARGET_TABLE)
+
+spark.sql(
+    f"ALTER TABLE {{TARGET_TABLE}} SET TBLPROPERTIES ("
+    "'delta.enableChangeDataFeed' = 'true', "
+    "'athena.layer' = 'gold', "
+    "'athena.table_type' = 'consolidated_fact')"
+)
+for statement, feature in [
+    (f"COMMENT ON TABLE {{TARGET_TABLE}} IS 'Consolidated certified KPI metrics at their declared dimensional grain'", "table comment"),
+    (f"ALTER TABLE {{TARGET_TABLE}} SET TAGS ('layer' = 'gold', 'table_type' = 'consolidated_fact')", "Unity Catalog tags"),
+    (f"ALTER TABLE {{TARGET_TABLE}} ALTER COLUMN `kpi_value` COMMENT 'Comparable decimal value of the certified KPI'", "measure column comment"),
+    (f"ALTER TABLE {{TARGET_TABLE}} ALTER COLUMN `dimension_context` COMMENT 'JSON object containing the KPI dimensional grain'", "dimension context comment"),
+    (f"ALTER TABLE {{TARGET_TABLE}} ALTER COLUMN `dimension_key_context` COMMENT 'JSON object containing resolved dimension surrogate keys'", "dimension key comment"),
+    (f"ALTER TABLE {{TARGET_TABLE}} ADD CONSTRAINT ck_fact_kpi_metrics_key CHECK (gold_upsert_key IS NOT NULL)", "business-key check"),
+    (f"ALTER TABLE {{TARGET_TABLE}} ADD CONSTRAINT pk_fact_kpi_metrics PRIMARY KEY (`gold_upsert_key`) NOT ENFORCED", "informational primary key"),
+    (f"ALTER TABLE {{TARGET_TABLE}} CLUSTER BY (`period_start`, `kpi_name`)", "liquid clustering"),
+]:
+    try:
+        spark.sql(statement)
+    except Exception as exc:
+        print(f"WARNING: Could not apply {{feature}} to {{TARGET_TABLE}}: {{exc}}")
+
+print(f"SUCCESS: Consolidated Gold KPI fact completed for {{TARGET_TABLE}}")
 '''
 
 
@@ -2430,7 +2841,14 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         gold_catalog = str(state.get("gold_catalog") or "")
         gold_schema = str(state.get("gold_schema") or os.getenv("GOLD_SCHEMA", "gold"))
     generated_at = datetime.utcnow().isoformat()
-    shared_dimension_mapping = _shared_dimension_mapping(mappings)
+    enriched_metadata = (
+        state.get("enrichment_review_artifact")
+        or state.get("enriched_metadata")
+        or {}
+    )
+    if isinstance(enriched_metadata, dict) and "enrichment_artifact" in enriched_metadata:
+        enriched_metadata = enriched_metadata.get("enrichment_artifact") or {}
+    shared_dimension_mapping = _shared_dimension_mapping(mappings, enriched_metadata)
     databricks_dimension_contract = (
         _dimension_specs(shared_dimension_mapping) if target_warehouse == "databricks" else []
     )
@@ -2451,15 +2869,61 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         if isinstance(mapping, dict)
     ]
 
+    if target_warehouse == "databricks" and not dbt_codegen:
+        approved_targets = {
+            str(item.get("target_table") or "").casefold()
+            for item in results
+            if item.get("status") == "APPROVED"
+        }
+        consolidated_mappings = [
+            mapping
+            for mapping in mappings
+            if _target_fact_table(
+                gold_schema,
+                _safe_identifier(str(mapping.get("kpi_name") or "kpi"), "kpi"),
+            ).casefold() in approved_targets
+        ]
+        if len(consolidated_mappings) > 1:
+            consolidated_code = generate_consolidated_gold_script(
+                mappings=consolidated_mappings,
+                run_id=run_id,
+                gold_schema=gold_schema,
+            )
+            _validate_python(consolidated_code)
+            output_dir = _gold_output_dir_for(target_warehouse)
+            os.makedirs(output_dir, exist_ok=True)
+            consolidated_path = os.path.join(
+                output_dir, f"gold_fact_kpi_metrics_{_run_slug(run_id)}.py"
+            )
+            with open(consolidated_path, "w", encoding="utf-8") as f:
+                f.write(consolidated_code)
+            results.append(
+                {
+                    "run_id": run_id,
+                    "kpi_name": "Consolidated KPI Metrics",
+                    "source_table": ", ".join(
+                        _target_fact_table(
+                            gold_schema,
+                            _safe_identifier(str(mapping.get("kpi_name") or "kpi"), "kpi"),
+                        )
+                        for mapping in consolidated_mappings
+                    ),
+                    "target_table": f"{gold_schema}.fact_kpi_metrics",
+                    "script_path": consolidated_path,
+                    "dimension_script_path": None,
+                    "status": "APPROVED",
+                    "script_language": "python",
+                    "target_warehouse": "databricks",
+                    "generation_mode": "deterministic_consolidation",
+                    "code_generation_format": "native",
+                    "dimension_count": 0,
+                    "kimball_dimension_count": 0,
+                    "dimension_contract": [],
+                }
+            )
+
     # ponytail: one shared mart artifact avoids generating/executing the same
     # source-table grain DIM/FCT tables once per KPI.
-    enriched_metadata = (
-        state.get("enrichment_review_artifact")
-        or state.get("enriched_metadata")
-        or {}
-    )
-    if isinstance(enriched_metadata, dict) and "enrichment_artifact" in enriched_metadata:
-        enriched_metadata = enriched_metadata.get("enrichment_artifact") or {}
     source_table_grain_specs = _source_table_grain_specs(contract, mappings, enriched_metadata)
     shared_dimension_code = ""
     if not dbt_codegen and target_warehouse == "snowflake" and source_table_grain_specs:
