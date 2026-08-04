@@ -3058,14 +3058,17 @@ def _gate2_execution_scope(tables: List[Dict[str, Any]], approved_keys: List[str
     # Keep them in the execution scope even when the reviewer selected only the
     # fact tables; otherwise they disappear before Bronze/Silver generation.
     dimension_prefixes = ("dim_", "ref_", "lkp_", "lookup_", "code_", "type_")
-    dimension_reasons = {"FK Resolution (related to nominated table)"}
+    dimension_methods = {
+        "FK Resolution (related to nominated table)",
+        "Supporting table connected by a foreign key to a nominated KPI source",
+    }
     fact_keys = {_table_key(item) for item in approved}
     if fact_keys:
         approved_keys_seen = set(fact_keys)
         for item in tables:
             table_name = str(item.get("table_name") or item.get("table") or "").strip().lower()
-            reason = str(item.get("nomination_reason") or "").strip()
-            if (table_name.startswith(dimension_prefixes) or reason in dimension_reasons) and _table_key(item) not in approved_keys_seen:
+            method = str(item.get("nomination_method") or item.get("nomination_reason") or "").strip()
+            if (table_name.startswith(dimension_prefixes) or method in dimension_methods) and _table_key(item) not in approved_keys_seen:
                 approved.append(item)
                 approved_keys_seen.add(_table_key(item))
 

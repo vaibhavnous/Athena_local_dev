@@ -55,8 +55,14 @@ class NominationItem(BaseModel):
     database_name: str = Field(..., min_length=1, description="Source database name")
     nomination_reason: str = Field(..., min_length=1, description="Human-readable match reason")
     confidence_score: float = Field(..., ge=0.0, le=1.0, description="Fusion confidence score")
-    matched_keywords: List[str] = Field(default_factory=list, description="Keywords matched in table or columns")
+    matched_keywords: List[str] = Field(default_factory=list, description="Certified KPI names supported by this table")
+    matched_business_terms: List[str] = Field(default_factory=list, description="Non-generic search terms matched in table or columns")
+    matched_columns: List[str] = Field(default_factory=list, description="Physical schema columns providing nomination evidence")
     coverage_ratio: float = Field(default=0.0, ge=0.0, le=1.0, description="Ratio of keywords covered by this table")
+    lexical_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Absolute lexical evidence score")
+    semantic_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Absolute semantic evidence score")
+    relevance_band: str = Field(default="LOW", pattern=r"^(HIGH|MEDIUM|LOW)$", description="Absolute relevance band")
+    nomination_method: str = Field(default="", description="Stable nomination strategy used before evidence was summarized")
 
     @field_validator("confidence_score")
     @classmethod

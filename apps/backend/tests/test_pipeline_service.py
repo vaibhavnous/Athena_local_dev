@@ -459,6 +459,19 @@ def test_gate2_scope_keeps_lookup_and_fk_dimension_tables():
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "claim_information", "nomination_reason": "Dual Match (Keyword + Semantic)"},
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "dim_policy", "nomination_reason": "Lookup Table Sweep (dim/ref/lkp)"},
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy_type", "nomination_reason": "FK Resolution (related to nominated table)"},
+        {
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table_name": "policy_history",
+            "nomination_method": "FK Resolution (related to nominated table)",
+            "nomination_reason": "Supporting table connected by a foreign key to a nominated KPI source",
+        },
+        {
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table_name": "policy_status",
+            "nomination_reason": "Supporting table connected by a foreign key to a nominated KPI source",
+        },
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "audit_log", "nomination_reason": "Lookup Table Sweep (dim/ref/lkp)"},
     ]
 
@@ -468,6 +481,8 @@ def test_gate2_scope_keeps_lookup_and_fk_dimension_tables():
         "claim_information",
         "dim_policy",
         "policy_type",
+        "policy_history",
+        "policy_status",
     ]
 
 
