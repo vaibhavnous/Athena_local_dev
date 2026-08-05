@@ -82,6 +82,15 @@ function AppShell() {
     }
 
     const loadRuns = async () => {
+      const pollingActiveRun = latestRunsRef.current.find(
+        (run) => run.id === latestActiveRunIdRef.current
+      )
+      const activeStatus = normalizeState(pollingActiveRun?.status)
+      if (['RUNNING', 'HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(activeStatus)) {
+        scheduleNext()
+        return
+      }
+
       if (runsRequestInFlightRef.current) {
         scheduleNext()
         return

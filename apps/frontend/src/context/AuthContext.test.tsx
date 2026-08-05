@@ -1,10 +1,11 @@
 import React from 'react'
 import { act, render, screen } from '@testing-library/react'
-import { refreshAuthSession } from '../api/athenaApi'
+import { createDemoSession, refreshAuthSession } from '../api/athenaApi'
 import { AuthProvider, useAuth } from './AuthContext'
 
 jest.mock('../api/athenaApi', () => ({
   login: jest.fn(),
+  createDemoSession: jest.fn(),
   refreshAuthSession: jest.fn(),
 }))
 
@@ -35,12 +36,39 @@ beforeEach(() => {
     expires_in: 3600,
     user,
   })
+  ;(createDemoSession as jest.Mock).mockResolvedValue({
+    access_token: 'demo-session-token',
+    expires_in: 3600,
+    user: { ...user, email: 'demo@astra.local', userType: 'Client', canManageAccounts: false },
+  })
 })
 
 afterEach(() => {
+  delete process.env.REACT_APP_AUTH_MODE
+  delete process.env.REACT_APP_AUTH_DEMO_MODE
   jest.useRealTimers()
   window.localStorage.clear()
   jest.clearAllMocks()
+})
+
+test('replaces any cached identity with an expiring restricted backend demo session', async () => {
+  process.env.REACT_APP_AUTH_MODE = 'demo'
+
+  render(
+    <AuthProvider>
+      <CurrentUser />
+    </AuthProvider>,
+  )
+
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+
+  expect(screen.getByText('demo@astra.local')).toBeInTheDocument()
+  expect(createDemoSession).toHaveBeenCalledTimes(1)
+  expect(refreshAuthSession).not.toHaveBeenCalled()
+  expect(window.localStorage.getItem('astra.auth.session')).toContain('demo-session-token')
 })
 
 test('renews an active session before its token expires', async () => {

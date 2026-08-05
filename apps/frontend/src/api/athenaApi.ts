@@ -1,8 +1,10 @@
 import axios from 'axios'
 import { getApiBaseUrl } from './baseUrl'
-import { clearSession, getAccessToken, type AuthUser, type UserType } from '../auth/session'
+import { clearSession, getAccessToken, writeSession, type AuthUser, type UserType } from '../auth/session'
+import { isDemoAuthEnabled } from '../auth/demoAuth'
 
 const API_BASE_URL = getApiBaseUrl()
+let demoSessionPromise: Promise<LoginResponse> | null = null
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -33,11 +35,37 @@ api.interceptors.request.use(
 // Response interceptor — normalize errors
 api.interceptors.response.use(
   (response) => response.data,
-  (error) => {
+  async (error) => {
     if (error.response?.status === 401) {
+      const originalRequest = error.config as (typeof error.config & { _demoAuthRetried?: boolean }) | undefined
+      const isSessionRequest = originalRequest?.url?.includes('/auth/demo-session')
+        || originalRequest?.url?.includes('/auth/login')
+
+      if (isDemoAuthEnabled() && originalRequest && !originalRequest._demoAuthRetried && !isSessionRequest) {
+        originalRequest._demoAuthRetried = true
+        try {
+          if (!demoSessionPromise) {
+            demoSessionPromise = (api.post('/auth/demo-session') as unknown as Promise<LoginResponse>)
+              .then((session) => {
+                persistAuthSession(session)
+                window.dispatchEvent(new Event('astra:session-updated'))
+                return session
+              })
+              .finally(() => {
+                demoSessionPromise = null
+              })
+          }
+          const session = await demoSessionPromise
+          originalRequest.headers.Authorization = `Bearer ${session.access_token}`
+          return api.request(originalRequest)
+        } catch {
+          // Fall through to the normal unauthorized handling below.
+        }
+      }
+
       clearSession()
       window.dispatchEvent(new Event('astra:unauthorized'))
-      if (window.location.pathname !== '/login') {
+      if (!isDemoAuthEnabled() && window.location.pathname !== '/login') {
         const next = `${window.location.pathname}${window.location.search}`
         window.location.assign(`/login?next=${encodeURIComponent(next)}`)
       }
@@ -60,6 +88,14 @@ export interface LoginResponse {
   user: AuthUser
 }
 
+export function persistAuthSession(response: LoginResponse) {
+  writeSession({
+    accessToken: response.access_token,
+    user: response.user,
+    expiresAt: Date.now() + response.expires_in * 1000,
+  })
+}
+
 export interface UserPayload {
   username: string
   email: string
@@ -69,6 +105,9 @@ export interface UserPayload {
 
 export const login = (payload: { email: string; password: string }) =>
   api.post('/auth/login', payload) as unknown as Promise<LoginResponse>
+
+export const createDemoSession = () =>
+  api.post('/auth/demo-session') as unknown as Promise<LoginResponse>
 
 export const getCurrentUser = () =>
   api.get('/auth/me') as unknown as Promise<AuthUser>

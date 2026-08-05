@@ -32,7 +32,20 @@ import { activeReviewKey, hasRenderableReviewData } from '../utils/reviewReadine
 const ACTIVE_RUN_REFRESH_INTERVAL_MS = 5000
 const ACTIVE_RUN_FAST_REFRESH_INTERVAL_MS = 1500
 const REVIEW_READY_POLL_INTERVAL_MS = 1500
+const INTERRUPTED_FAILURE_CONFIRM_MS = 15000
 const HIDDEN_CODE_REVIEW_STEPS = new Set(['gate4', 'gate5', 'gold_review'])
+
+export function isInterruptedRunFailure(run) {
+  if (normalizeState(run?.status) !== 'FAILED') return false
+  const errorType = String(run?.error_type || run?.checkpoint?.error_type || '').toLowerCase()
+  const message = String(run?.error || run?.error_message || run?.resume_message || '').toLowerCase()
+  return Boolean(
+    run?.interrupted_by_backend_restart ||
+    run?.checkpoint?.interrupted_by_backend_restart ||
+    errorType === 'interruptedrun' ||
+    message.includes('backend process restarted while this run was active')
+  )
+}
 
 async function fetchReviewPayload(runId, reviewKey) {
   if (reviewKey === 'silver_merge_key_review') return getSilverMergeKeyReview(runId)
@@ -163,9 +176,13 @@ function PipelineMonitor() {
     [activeRun]
   )
   const activeRunRequestInFlightRef = useRef(false)
+  const interruptedFailureConfirmationRef = useRef({ runId: null, count: 0, firstSeenAt: 0 })
   const reviewAutoOpenSessionRef = useRef(new Set())
   const lastLogTriggeredRefreshRef = useRef(0)
   const latestActiveRunRef = useRef(activeRun)
+  const pendingReviewKey = activeReviewKey(activeRun)
+  const pendingReviewStatus = normalizeState(activeRun?.status)
+  const pendingReviewSource = String(activeRun?.source || '').toLowerCase()
   const [preparingReviewKey, setPreparingReviewKey] = useState(null)
   const [observedPipelineActivity, setObservedPipelineActivity] = useState(false)
   const actualSteps = useMemo(() => getPipelineSteps(activeRun), [activeRun])
@@ -197,6 +214,23 @@ function PipelineMonitor() {
     try {
       const data = (await getRunStatus(activeRunStableId))?.run
       if (!data) throw new Error('Run status response did not include a run snapshot.')
+      if (isInterruptedRunFailure(data)) {
+        const previous = interruptedFailureConfirmationRef.current
+        const sameRun = previous.runId === activeRunStableId
+        const confirmation = {
+          runId: activeRunStableId,
+          count: sameRun ? previous.count + 1 : 1,
+          firstSeenAt: sameRun ? previous.firstSeenAt : Date.now(),
+        }
+        interruptedFailureConfirmationRef.current = confirmation
+        const confirmedLongEnough = Date.now() - confirmation.firstSeenAt >= INTERRUPTED_FAILURE_CONFIRM_MS
+        if (confirmation.count < 3 || !confirmedLongEnough) {
+          setServerOnline(true)
+          return true
+        }
+      } else {
+        interruptedFailureConfirmationRef.current = { runId: null, count: 0, firstSeenAt: 0 }
+      }
       updateRun(activeRunStableId, data)
       setServerOnline(true)
       return true
@@ -253,8 +287,8 @@ function PipelineMonitor() {
   }, [activeRunStableId, activeRunIsDemoFallback, refreshActiveRunNow])
 
   useEffect(() => {
-    const reviewKey = activeReviewKey(activeRun)
-    const reviewStatus = normalizeState(activeRun?.status)
+    const reviewKey = pendingReviewKey
+    const reviewStatus = pendingReviewStatus
     const reviewWaiting = ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(reviewStatus)
     if (!activeRunStableId || activeRunIsDemoFallback) return
     if (!reviewKey || !reviewWaiting) {
@@ -270,7 +304,7 @@ function PipelineMonitor() {
 
     let cancelled = false
     let timer: number | null = null
-    const isFileSource = ['sftp', 'adls_gen2'].includes(String(activeRun?.source || '').toLowerCase())
+    const isFileSource = ['sftp', 'adls_gen2'].includes(pendingReviewSource)
 
     const scheduleNext = () => {
       if (!cancelled) timer = window.setTimeout(checkReviewReady, REVIEW_READY_POLL_INTERVAL_MS)
@@ -278,7 +312,10 @@ function PipelineMonitor() {
 
     const openPreparedReview = (payload) => {
       if (cancelled) return
-      updateRun(activeRunStableId, payload)
+      const preparedPayload = typeof reviewKey === 'number'
+        ? { ...payload, next_gate: reviewKey, next_review_key: null }
+        : { ...payload, next_gate: 0, next_review_key: reviewKey }
+      updateRun(activeRunStableId, preparedPayload)
       setPreparingReviewKey(null)
       reviewAutoOpenSessionRef.current.add(sessionKey)
       setActiveRun(activeRunStableId)
@@ -314,20 +351,25 @@ function PipelineMonitor() {
       if (timer !== null) window.clearTimeout(timer)
     }
   }, [
-    activeRun,
     activeRunIsDemoFallback,
     activeRunStableId,
     location,
     navigate,
+    pendingReviewKey,
+    pendingReviewSource,
+    pendingReviewStatus,
     setActiveRun,
     updateRun,
   ])
 
   const renderedPhases = useMemo(
     () => markNextPendingStage(
-      actualPhases
-        .map((phase) => buildPipelineDisplayPhase(phase, actualSteps, activeRun))
-        .map((phase) => markPreparingReview(phase, preparingReviewKey)),
+      normalizePipelineTimeline(
+        actualPhases
+          .map((phase) => buildPipelineDisplayPhase(phase, actualSteps, activeRun))
+          .map((phase) => markPreparingReview(phase, preparingReviewKey)),
+        activeRun,
+      ),
       activeRun,
       observedPipelineActivity,
     ),
@@ -1236,10 +1278,17 @@ function formatScriptBody(script) {
 export function markPreparingReview(phase, reviewKey) {
   if (!reviewKey) return phase
   const stepKey = typeof reviewKey === 'number' ? `gate${reviewKey}` : reviewKey
-  let matched = false
-  const steps = (phase.steps || []).map((step) => {
-    if (step.key !== stepKey) return step
-    matched = true
+  const matchedIndex = (phase.steps || []).findIndex((step) => step.key === stepKey)
+  if (matchedIndex < 0) return phase
+
+  const steps = (phase.steps || []).map((step, index) => {
+    if (index < matchedIndex && ['RUNNING', 'HITL_WAIT'].includes(normalizeState(step.state))) {
+      return { ...step, state: 'COMPLETED', complete: true }
+    }
+    if (index > matchedIndex && ['RUNNING', 'HITL_WAIT'].includes(normalizeState(step.state))) {
+      return { ...step, state: 'PENDING', complete: false }
+    }
+    if (index !== matchedIndex) return step
     return {
       ...step,
       state: 'RUNNING',
@@ -1248,7 +1297,6 @@ export function markPreparingReview(phase, reviewKey) {
       detail: 'Review content is loading.',
     }
   })
-  if (!matched) return phase
 
   return {
     ...phase,
@@ -1257,6 +1305,52 @@ export function markPreparingReview(phase, reviewKey) {
     total: steps.length,
     status: 'Running',
   }
+}
+
+export function normalizePipelineTimeline(phases = [], run = null) {
+  const candidates = []
+  phases.forEach((phase, phaseIndex) => {
+    ;(phase.steps || []).forEach((step, stepIndex) => {
+      const state = normalizeState(step.state)
+      if (['RUNNING', 'HITL_WAIT', 'FAILED'].includes(state)) {
+        candidates.push({ phaseIndex, stepIndex, state, preparingReview: Boolean(step.preparingReview) })
+      }
+    })
+  })
+  if (candidates.length <= 1) return phases
+
+  const runState = normalizeState(run?.status)
+  const preferred =
+    (runState === 'FAILED' && [...candidates].reverse().find((item) => item.state === 'FAILED')) ||
+    ([...candidates].reverse().find((item) => item.preparingReview)) ||
+    (runState === 'HITL_WAIT' && [...candidates].reverse().find((item) => item.state === 'HITL_WAIT')) ||
+    candidates[candidates.length - 1]
+
+  return phases.map((phase, phaseIndex) => {
+    const steps = (phase.steps || []).map((step, stepIndex) => {
+      const state = normalizeState(step.state)
+      if (!['RUNNING', 'HITL_WAIT', 'FAILED'].includes(state)) return step
+      if (phaseIndex === preferred.phaseIndex && stepIndex === preferred.stepIndex) return step
+      const beforePreferred =
+        phaseIndex < preferred.phaseIndex ||
+        (phaseIndex === preferred.phaseIndex && stepIndex < preferred.stepIndex)
+      return beforePreferred
+        ? { ...step, state: 'COMPLETED', complete: true, preparingReview: false }
+        : { ...step, state: 'PENDING', complete: false, preparingReview: false }
+    })
+    const completed = steps.filter((step) => isCompletedStepState(step.state)).length
+    const active = steps.find((step) => ['RUNNING', 'HITL_WAIT', 'FAILED'].includes(normalizeState(step.state)))
+    const status = active
+      ? normalizeState(active.state) === 'FAILED'
+        ? 'Failed'
+        : normalizeState(active.state) === 'HITL_WAIT'
+          ? 'Review'
+          : 'Running'
+      : steps.length > 0 && completed === steps.length
+        ? 'Done'
+        : 'Pending'
+    return { ...phase, steps, completed, total: steps.length, status }
+  })
 }
 
 export function markNextPendingStage(phases = [], run = null, observedPipelineActivity = false) {

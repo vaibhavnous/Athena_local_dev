@@ -20,6 +20,11 @@ import NewRunPage from './pages/NewRunPage'
 import ComplianceGovernance from './pages/ComplianceGovernance'
 import useThemeStore from './store/useThemeStore'
 import { AuthProvider } from './context/AuthContext'
+import { isDemoAuthEnabled } from './auth/demoAuth'
+
+function LoginRoute() {
+  return isDemoAuthEnabled() ? <Navigate to="/app" replace /> : <LoginPage />
+}
 
 function AppRoutes() {
   const location = useLocation()
@@ -29,7 +34,7 @@ function AppRoutes() {
     <>
       <Routes location={backgroundLocation || location}>
         <Route path="/" element={<LandingPage />} />
-        <Route path="/login" element={<LoginPage />} />
+        <Route path="/login" element={<LoginRoute />} />
         <Route path="/app" element={<ProtectedRoute><AppShell /></ProtectedRoute>}>
           <Route index element={<DashboardPage />} />
           <Route path="data-discovery" element={<PipelineMonitor />} />

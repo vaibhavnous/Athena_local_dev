@@ -40,18 +40,21 @@ def test_business_endpoints_require_authentication():
     assert response.json()["detail"] == "Authentication required"
 
 
-def test_configuration_rejects_client_users():
+def test_client_can_read_project_source_options_but_not_admin_settings():
     override = app.dependency_overrides[get_current_user]
     app.dependency_overrides[get_current_user] = lambda: AuthUser(
         uid="client-user", username="Client User", email="client@example.com", userType="Client"
     )
     try:
-        response = client.get("/settings")
+        configurations_response = client.get("/configurations")
+        settings_response = client.get("/settings")
     finally:
         app.dependency_overrides[get_current_user] = override
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Administrator access required"
+    assert configurations_response.status_code == 200
+    assert any(item["dbType"] == "azure_sql" for item in configurations_response.json())
+    assert settings_response.status_code == 403
+    assert settings_response.json()["detail"] == "Administrator access required"
 
 
 def test_silver_merge_key_review_get_returns_checkpoint_artifact(monkeypatch):
@@ -863,7 +866,7 @@ def test_retry_failed_stage_submits_file_resume(monkeypatch):
     assert recorded["background_fn"] == "continue_file_pipeline_job"
 
 
-def test_runs_returns_503_on_timeout(monkeypatch):
+def test_client_runs_returns_503_on_timeout(monkeypatch):
     class StubFuture:
         def result(self, timeout):
             raise FutureTimeoutError()
@@ -872,9 +875,16 @@ def test_runs_returns_503_on_timeout(monkeypatch):
         def submit(self, fn, *args, **kwargs):
             return StubFuture()
 
+    monkeypatch.setattr("api.routers.runs_router.RUN_LIST_RETRY_AFTER", 0.0)
     monkeypatch.setattr("api.routers.runs_router.RUN_LIST_EXECUTOR", StubExecutor())
-
-    response = client.get("/runs")
+    override = app.dependency_overrides[get_current_user]
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="demo-client", username="Demo Client", email="demo@example.com", userType="Client"
+    )
+    try:
+        response = client.get("/runs")
+    finally:
+        app.dependency_overrides[get_current_user] = override
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Run list temporarily unavailable"
@@ -895,6 +905,7 @@ def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
         return {"run_id": run_id, "status": "SUCCESS"}
 
     monkeypatch.setenv("ATHENA_RUNS_FAST_SUMMARY", "false")
+    monkeypatch.setattr("api.routers.runs_router.RUN_LIST_RETRY_AFTER", 0.0)
     monkeypatch.setattr("api.routers.runs_router.RUN_LIST_EXECUTOR", StubExecutor())
     monkeypatch.setattr("api.services.ui_service.ui_run_summary", fake_summary)
 
@@ -909,6 +920,7 @@ def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
 
 def test_runs_uses_fast_checkpoint_summary_by_default(monkeypatch):
     monkeypatch.delenv("ATHENA_RUNS_FAST_SUMMARY", raising=False)
+    monkeypatch.setattr("api.routers.runs_router.RUN_LIST_RETRY_AFTER", 0.0)
     monkeypatch.setattr(
         "services.pipeline_runtime.list_runs",
         lambda limit: [{"run_id": "run-fast", "last_activity": "2026-06-30T00:00:00Z"}],

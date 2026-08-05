@@ -18,10 +18,12 @@ def test_gold_llm_candidate_rejects_noncanonical_silver_column_case():
     }
     sql = '''
 CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
-CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_average" ("value" NUMBER);
+CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_average" ("value" NUMBER, "gold_upsert_key" VARCHAR);
 MERGE INTO "ATHENA_DB"."GOLD"."fact_average" target
-USING (SELECT AVG("PaidAmount") AS "value" FROM "ATHENA_DB"."SILVER"."silver_claims") source
-ON 1 = 0 WHEN NOT MATCHED THEN INSERT ("value") VALUES (source."value");
+USING (SELECT AVG("PaidAmount") AS "value", MD5('__ALL__') AS "gold_upsert_key" FROM "ATHENA_DB"."SILVER"."silver_claims") source
+ON target."gold_upsert_key" = source."gold_upsert_key"
+WHEN MATCHED THEN UPDATE SET target."value" = source."value"
+WHEN NOT MATCHED THEN INSERT ("value", "gold_upsert_key") VALUES (source."value", source."gold_upsert_key");
 '''
 
     try:
@@ -39,10 +41,12 @@ def test_gold_llm_candidate_repairs_canonical_silver_column_case():
     }
     sql = '''
 CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
-CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_average" ("value" NUMBER);
+CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_average" ("value" NUMBER, "gold_upsert_key" VARCHAR);
 MERGE INTO "ATHENA_DB"."GOLD"."fact_average" target
-USING (SELECT AVG("PaidAmount") AS "value" FROM "ATHENA_DB"."SILVER"."silver_claims") source
-ON 1 = 0 WHEN NOT MATCHED THEN INSERT ("value") VALUES (source."value");
+USING (SELECT AVG("PaidAmount") AS "value", MD5('__ALL__') AS "gold_upsert_key" FROM "ATHENA_DB"."SILVER"."silver_claims") source
+ON target."gold_upsert_key" = source."gold_upsert_key"
+WHEN MATCHED THEN UPDATE SET target."value" = source."value"
+WHEN NOT MATCHED THEN INSERT ("value", "gold_upsert_key") VALUES (source."value", source."gold_upsert_key");
 '''
 
     repaired = _canonicalize_snowflake_gold_identifiers(sql, mapping)
@@ -58,10 +62,12 @@ def test_gold_llm_candidate_repairs_corrected_count_identifier():
     }
     sql = '''
 CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
-CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_unique" ("value" NUMBER);
+CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_unique" ("value" NUMBER, "gold_upsert_key" VARCHAR);
 MERGE INTO "ATHENA_DB"."GOLD"."fact_unique" AS target
-USING (SELECT COUNT(DISTINCT "RERERENCE_ID") AS "value" FROM "ATHENA_DB"."SILVER"."silver_policy_transactions") AS source
-ON 1 = 0 WHEN NOT MATCHED THEN INSERT ("value") VALUES (source."value");
+USING (SELECT COUNT(DISTINCT "RERERENCE_ID") AS "value", MD5('__ALL__') AS "gold_upsert_key" FROM "ATHENA_DB"."SILVER"."silver_policy_transactions") AS source
+ON target."gold_upsert_key" = source."gold_upsert_key"
+WHEN MATCHED THEN UPDATE SET target."value" = source."value"
+WHEN NOT MATCHED THEN INSERT ("value", "gold_upsert_key") VALUES (source."value", source."gold_upsert_key");
 '''
 
     repaired = _canonicalize_snowflake_gold_identifiers(sql, mapping)

@@ -22,11 +22,16 @@ export function hasRenderableReviewData(review: any, reviewKey: ReviewKey, isFil
   }
   if (reviewKey === 2) return hasGate2ReviewItems(review, isFileSource)
   if (reviewKey === 3) {
+    const metadata = review?.enriched_metadata || {}
     return Boolean(
       (review?.enriched_columns || []).length ||
       (review?.enriched_joins || []).length ||
       (review?.feed_semantic_summary || []).length ||
-      Object.keys(review?.enriched_metadata || {}).length ||
+      (review?.semantic_tables || []).length ||
+      (review?.tables || []).length ||
+      (metadata?.columns || []).length ||
+      (metadata?.semantic_tables || []).length ||
+      (metadata?.tables || []).length ||
       Object.keys(review?.semantic_counts || {}).length ||
       (review?.pii_columns || []).length ||
       (review?.join_key_columns || []).length ||

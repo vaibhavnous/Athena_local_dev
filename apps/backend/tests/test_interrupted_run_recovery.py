@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from services.pipeline_runtime import _interrupted_checkpoint_state
+from services.pipeline_runtime import _finalize_interrupted_run_recovery, _interrupted_checkpoint_state
 
 
 def test_interrupted_checkpoint_state_preserves_failed_stage_for_retry():
@@ -33,3 +33,38 @@ def test_interrupted_execution_between_layers_recovers_next_execution_stage():
     recovered = _interrupted_checkpoint_state(state, "Backend process restarted while this run was active.")
 
     assert recovered["failed_background_stage"] == "silver_code_execution"
+
+
+def test_recovery_recheck_does_not_fail_a_checkpoint_replaced_by_continuing_worker(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "SUCCESS"},
+    )
+    monkeypatch.setattr("services.pipeline_runtime.save_checkpoint_state", lambda run_id, state: saved.append(state))
+
+    changed = _finalize_interrupted_run_recovery("run-continued", "old-token", "restart")
+
+    assert changed is False
+    assert saved == []
+
+
+def test_recovery_recheck_fails_only_untouched_active_checkpoint(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "status": "RUNNING",
+            "background_stage": "gold_code_execution",
+            "restart_recovery_token": "recovery-token",
+        },
+    )
+    monkeypatch.setattr("services.pipeline_runtime.save_checkpoint_state", lambda run_id, state: saved.append(state))
+
+    changed = _finalize_interrupted_run_recovery("run-stopped", "recovery-token", "restart")
+
+    assert changed is True
+    assert saved[0]["status"] == "FAILED"
+    assert saved[0]["failed_background_stage"] == "gold_code_execution"
+    assert "restart_recovery_token" not in saved[0]

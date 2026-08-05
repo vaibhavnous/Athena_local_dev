@@ -56,6 +56,21 @@ function formatDuration(value: unknown) {
   return `${numeric.toFixed(2)}s`
 }
 
+export function isInternalPipelineLog(log: PipelineLog) {
+  const stage = String(log?.stage || '').toLowerCase()
+  const message = String(log?.message || '').toLowerCase()
+  if (['checkpoint', 'runs_router', 'pipeline_router'].includes(stage)) return true
+  return [
+    'saving checkpoint context=',
+    'checkpoint save finished context=',
+    'checkpoint save failed context=',
+    'ignored stale checkpoint write',
+    'failed to fetch pipeline status',
+    'failed to fetch run scripts',
+    'get /runs/{run_id}',
+  ].some((marker) => message.includes(marker))
+}
+
 interface Props {
   runId?: string | null
   isActive?: boolean
@@ -65,13 +80,17 @@ interface Props {
 export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdated }: Props) {
   const getRunById = useAthenaStore((s) => s.getRunById)
   const run = getRunById(runId || '')
-  const { discoveredRunId, isDiscovering, discoveryError, logs, isLoadingLogs, logsError, refreshWarning } =
+  const {
+    discoveredRunId, isDiscovering, discoveryError, logs, isLoadingLogs,
+    logsError, refreshWarning, refreshFailureCount, lastSuccessfulRefreshAt,
+  } =
     usePipelineLogs(runId, isActive, onLogsUpdated)
 
   const [filterLevel, setFilterLevel] = useState('ALL')
   const [filterStage, setFilterStage] = useState('ALL')
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedLog, setSelectedLog] = useState<PipelineLog | null>(null)
+  const [connectionClock, setConnectionClock] = useState(() => Date.now())
 
   const logsScrollRef = useRef<HTMLDivElement>(null)
 
@@ -82,11 +101,18 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
     container.scrollTop = container.scrollHeight
   }, [logs, discoveredRunId])
 
+  useEffect(() => {
+    if (!discoveredRunId) return
+    const timer = window.setInterval(() => setConnectionClock(Date.now()), 2000)
+    return () => window.clearInterval(timer)
+  }, [discoveredRunId])
+
   // Derived data
-  const stageSet = new Set(logs.map((l) => formatStageLabel(l.stage)).filter(Boolean))
+  const userFacingLogs = logs.filter((log) => !isInternalPipelineLog(log))
+  const stageSet = new Set(userFacingLogs.map((l) => formatStageLabel(l.stage)).filter(Boolean))
   const uniqueStages = ['ALL', ...Array.from(stageSet as Set<string>)]
 
-  const filteredLogs = logs.filter((log) => {
+  const filteredLogs = userFacingLogs.filter((log) => {
     if (filterLevel !== 'ALL' && normalizeLevel(log.log_level) !== filterLevel) return false
     if (filterStage !== 'ALL' && formatStageLabel(log.stage) !== filterStage) return false
     if (
@@ -99,6 +125,11 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
     }
     return true
   })
+  const connectionIsFresh = Boolean(
+    lastSuccessfulRefreshAt &&
+    refreshFailureCount === 0 &&
+    connectionClock - lastSuccessfulRefreshAt < 7000,
+  )
 
   if (!isActive) return null
 
@@ -125,8 +156,11 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
             {isDiscovering && (
               <StatusBadge color="blue" pulse label="Loading..." />
             )}
-            {discoveredRunId && !isDiscovering && (
+            {discoveredRunId && !isDiscovering && connectionIsFresh && (
               <StatusBadge color="green" label="Live" />
+            )}
+            {discoveredRunId && !isDiscovering && !connectionIsFresh && !discoveryError && (
+              <StatusBadge color="yellow" pulse label="Reconnecting" />
             )}
             {discoveryError && (
               <StatusBadge color="red" label="Error" />
@@ -203,7 +237,7 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
                   <div className="flex items-center gap-1 text-xs text-gray-400">
                     <span className="font-medium">{filteredLogs.length}</span>
                     <span>/</span>
-                    <span className="font-medium">{logs.length}</span>
+                    <span className="font-medium">{userFacingLogs.length}</span>
                   </div>
                 </div>
               </div>
@@ -230,14 +264,14 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
                   </div>
                 )}
 
-                {logs.length === 0 && !isLoadingLogs && !logsError && !refreshWarning && (
+                {userFacingLogs.length === 0 && !isLoadingLogs && !logsError && !refreshWarning && (
                   <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
                     <p className="text-sm text-gray-400 font-medium">No logs yet</p>
                     <p className="text-xs text-gray-500 mt-1">Logs will appear as the pipeline executes</p>
                   </div>
                 )}
 
-                {filteredLogs.length === 0 && logs.length > 0 && !isLoadingLogs && (
+                {filteredLogs.length === 0 && userFacingLogs.length > 0 && !isLoadingLogs && (
                   <div className="flex-1 flex flex-col items-center justify-center p-8">
                     <p className="text-sm text-gray-400">No logs match your filters</p>
                   </div>

@@ -289,7 +289,10 @@ ATHENA_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 DEV_MODE=false
 ATHENA_MIN_STAGE_RUNTIME_SECONDS=4
 
-# Authentication (required)
+# Authentication: required shows login; demo starts a restricted session automatically.
+ASTRA_AUTH_MODE=required
+ASTRA_AUTH_DEMO_EMAIL=demo@astra.local
+ASTRA_AUTH_DEMO_USERNAME=Astra Demo User
 ASTRA_AUTH_EMAIL=<primary-admin-email>
 ASTRA_AUTH_USERNAME=<primary-admin-name>
 ASTRA_AUTH_PASSWORD=<12+ characters with a letter, number, and special character>
@@ -305,6 +308,7 @@ Create `apps/frontend/.env.local` if needed:
 
 ```text
 REACT_APP_API_BASE_URL=http://127.0.0.1:8000
+REACT_APP_AUTH_MODE=required
 ```
 
 Notes:
@@ -368,6 +372,9 @@ AZURE_SQL_SOURCE_PASSWORD
 ATHENA_CORS_ORIGINS
 DEV_MODE
 ATHENA_MIN_STAGE_RUNTIME_SECONDS
+ASTRA_AUTH_MODE
+ASTRA_AUTH_DEMO_EMAIL
+ASTRA_AUTH_DEMO_USERNAME
 ASTRA_AUTH_EMAIL
 ASTRA_AUTH_USERNAME
 ASTRA_AUTH_PASSWORD

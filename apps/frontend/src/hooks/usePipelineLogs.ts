@@ -72,6 +72,8 @@ export function usePipelineLogs(
   const [isRefreshingLogs, setIsRefreshingLogs] = useState(false)
   const [logsError, setLogsError] = useState<string | null>(null)
   const [refreshWarning, setRefreshWarning] = useState<string | null>(null)
+  const [refreshFailureCount, setRefreshFailureCount] = useState(0)
+  const [lastSuccessfulRefreshAt, setLastSuccessfulRefreshAt] = useState<number | null>(null)
   const [lastLogTimestamp, setLastLogTimestamp] = useState<string | null>(null)
   const [terminalLogs] = useState<{ message: string; timestamp: string }[]>([])
 
@@ -101,6 +103,8 @@ export function usePipelineLogs(
           : await getPipelineLogs(targetRunId, 300)
         if (!isCurrentLogRequest(targetRunId, activeRunIdRef.current)) return []
         refreshFailuresRef.current = 0
+        setRefreshFailureCount(0)
+        setLastSuccessfulRefreshAt(Date.now())
         setLogsError(null)
         setRefreshWarning(null)
         return Array.isArray(data?.logs) ? (data.logs as PipelineLog[]) : []
@@ -108,6 +112,7 @@ export function usePipelineLogs(
         if (isCurrentLogRequest(targetRunId, activeRunIdRef.current)) {
           const failure = nextLogRefreshFailure(error, refreshFailuresRef.current)
           refreshFailuresRef.current = failure.failureCount
+          setRefreshFailureCount(failure.failureCount)
           setLogsError(failure.error)
           setRefreshWarning(failure.warning)
         }
@@ -175,6 +180,8 @@ export function usePipelineLogs(
     setLogs([])
     setLogsError(null)
     setRefreshWarning(null)
+    setRefreshFailureCount(0)
+    setLastSuccessfulRefreshAt(null)
     refreshFailuresRef.current = 0
     lastLogTimestampRef.current = null
     setLastLogTimestamp(null)
@@ -223,6 +230,8 @@ export function usePipelineLogs(
     isRefreshingLogs,
     logsError,
     refreshWarning,
+    refreshFailureCount,
+    lastSuccessfulRefreshAt,
     lastLogTimestamp,
     terminalLogs,
     fetchLogs,

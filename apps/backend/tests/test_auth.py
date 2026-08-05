@@ -91,6 +91,43 @@ def test_active_session_can_be_renewed(auth):
     assert service.authenticate_token(renewed.access_token) == current_user
 
 
+def test_demo_session_uses_normal_expiring_token_and_restricted_database_user(monkeypatch, auth):
+    monkeypatch.setenv("ASTRA_AUTH_MODE", "demo")
+    monkeypatch.setenv("ASTRA_AUTH_DEMO_EMAIL", "demo@astra.local")
+    service, repository = auth
+
+    session = service.create_demo_session()
+    user = service.authenticate_token(session.access_token)
+
+    assert session.expires_in == 3600
+    assert user.email == "demo@astra.local"
+    assert user.user_type == "Client"
+    assert user.can_manage_accounts is False
+    assert repository.find_by_uid(user.uid) is not None
+
+
+def test_demo_session_is_hidden_when_required_mode_is_enabled(monkeypatch, auth):
+    monkeypatch.setenv("ASTRA_AUTH_MODE", "required")
+    service, _ = auth
+
+    with pytest.raises(HTTPException) as exc:
+        service.create_demo_session()
+
+    assert exc.value.status_code == 404
+
+
+def test_demo_session_rejects_disabled_demo_account(monkeypatch, auth):
+    monkeypatch.setenv("ASTRA_AUTH_MODE", "demo")
+    service, repository = auth
+    session = service.create_demo_session()
+    repository.set_active(session.user.uid, False)
+
+    with pytest.raises(HTTPException) as exc:
+        service.create_demo_session()
+
+    assert exc.value.status_code == 503
+
+
 def test_disabling_account_immediately_invalidates_existing_token(auth):
     service, repository = auth
     session = service.login("admin@astra.local", "AdminPass!234")

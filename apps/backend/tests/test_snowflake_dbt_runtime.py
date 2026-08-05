@@ -371,6 +371,9 @@ def test_snowflake_dbt_project_name_is_readable_and_project_scoped():
 
 def test_snowflake_dbt_deploys_then_builds_inside_snowflake(monkeypatch):
     workdir = _workdir("snowflake_dbt")
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_CLI_COMMAND", "snow")
+    monkeypatch.setenv("SNOWFLAKE_DBT_PROJECT_DATABASE", "ATHENA_DB")
+    monkeypatch.setenv("SNOWFLAKE_DBT_PROJECT_SCHEMA", "PUBLIC")
     monkeypatch.setattr(dbt_snowflake_runtime, "generated_run_dir", lambda target, run_id, *parts: workdir.joinpath(target, str(run_id), *parts))
     monkeypatch.setattr(dbt_snowflake_runtime, "_write_ai_store_summary", lambda state, payload: None)
     monkeypatch.setattr(dbt_snowflake_runtime.shutil, "which", lambda command: "dbt")

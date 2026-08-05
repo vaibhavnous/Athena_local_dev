@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react'
-import { login as loginRequest, refreshAuthSession } from '../api/athenaApi'
+import { createDemoSession, login as loginRequest, refreshAuthSession } from '../api/athenaApi'
 import {
   clearSession,
   readSession,
@@ -7,6 +7,7 @@ import {
   type AuthSession,
   type AuthUser,
 } from '../auth/session'
+import { isDemoAuthEnabled } from '../auth/demoAuth'
 
 type AuthContextValue = {
   user: AuthUser | null
@@ -20,10 +21,11 @@ const SESSION_REFRESH_BUFFER_MS = 5 * 60 * 1000
 const SESSION_REFRESH_RETRY_MS = 60 * 1000
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const demoMode = isDemoAuthEnabled()
   const initialSession = useMemo(() => readSession(), [])
   const [user, setUser] = useState<AuthUser | null>(() => initialSession?.user ?? null)
   const [expiresAt, setExpiresAt] = useState(() => initialSession?.expiresAt ?? 0)
-  const [isLoading, setIsLoading] = useState(() => Boolean(initialSession?.accessToken))
+  const [isLoading, setIsLoading] = useState(() => demoMode || Boolean(initialSession?.accessToken))
 
   const storeSession = (response: Awaited<ReturnType<typeof refreshAuthSession>>) => {
     const session: AuthSession = {
@@ -37,6 +39,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   useEffect(() => {
+    if (demoMode) {
+      createDemoSession()
+        .then(storeSession)
+        .catch(() => {
+          clearSession()
+          setUser(null)
+          setExpiresAt(0)
+        })
+        .finally(() => setIsLoading(false))
+      return
+    }
+
     const session = readSession()
     if (!session) {
       setIsLoading(false)
@@ -57,15 +71,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .finally(() => setIsLoading(false))
     // Session restoration only runs once; subsequent renewals are scheduled below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [demoMode])
 
   useEffect(() => {
     const handleUnauthorized = () => {
       setUser(null)
       setExpiresAt(0)
     }
+    const handleSessionUpdated = () => {
+      const session = readSession()
+      if (!session) return
+      setUser(session.user)
+      setExpiresAt(session.expiresAt || 0)
+    }
     window.addEventListener('astra:unauthorized', handleUnauthorized)
-    return () => window.removeEventListener('astra:unauthorized', handleUnauthorized)
+    window.addEventListener('astra:session-updated', handleSessionUpdated)
+    return () => {
+      window.removeEventListener('astra:unauthorized', handleUnauthorized)
+      window.removeEventListener('astra:session-updated', handleSessionUpdated)
+    }
   }, [])
 
   useEffect(() => {
@@ -75,7 +99,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         storeSession(await refreshAuthSession())
       } catch (error: any) {
-        if (error?.status !== 401) {
+        if (error?.status === 401) {
+          clearSession()
+          setUser(null)
+          setExpiresAt(0)
+        } else {
           setExpiresAt(Date.now() + SESSION_REFRESH_BUFFER_MS + SESSION_REFRESH_RETRY_MS)
         }
       }
@@ -84,7 +112,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const timer = window.setTimeout(refresh, delay)
     return () => window.clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expiresAt, user])
+  }, [demoMode, expiresAt, user])
 
   const login = async (email: string, password: string) => {
     storeSession(await loginRequest({ email, password }))
@@ -92,6 +120,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = () => {
     clearSession()
+    if (demoMode) {
+      setIsLoading(true)
+      createDemoSession()
+        .then(storeSession)
+        .catch(() => {
+          setUser(null)
+          setExpiresAt(0)
+        })
+        .finally(() => setIsLoading(false))
+      return
+    }
     setUser(null)
     setExpiresAt(0)
   }

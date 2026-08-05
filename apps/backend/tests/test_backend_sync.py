@@ -488,6 +488,10 @@ def test_databricks_bronze_review_reports_execution_stage(monkeypatch):
 def test_silver_merge_review_submission_reports_generation_stage(monkeypatch):
     submitted = {}
     monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "source": "database"},
+    )
+    monkeypatch.setattr(
         "services.pipeline_runtime.submit_background",
         lambda run_id, stage, fn, *args: submitted.update({"run_id": run_id, "stage": stage}),
     )
@@ -501,19 +505,23 @@ def test_silver_merge_review_submission_reports_generation_stage(monkeypatch):
     assert submitted == {"run_id": "run-silver-transition", "stage": "silver"}
 
 
-def test_hitl_batch_submit_returns_503_when_decision_persistence_fails(monkeypatch):
+def test_hitl_batch_submit_returns_conflict_when_decision_persistence_fails(monkeypatch):
     def fail_update_hitl_item(*args, **kwargs):
         raise RuntimeError("pipeline database unavailable")
 
-    monkeypatch.setattr("utilis.db.update_hitl_item", fail_update_hitl_item)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "source": "database"},
+    )
+    monkeypatch.setattr("utilis.db.update_hitl_items_batch", fail_update_hitl_item)
 
     response = client.post(
         "/hitl/run-db/decisions",
         json={"decisions": [{"kpi_id": "run-db:1:kpi-1", "decision": "APPROVED"}]},
     )
 
-    assert response.status_code == 503
-    assert "Failed to persist KPI decision" in response.json()["detail"]
+    assert response.status_code == 409
+    assert response.json()["detail"] == "A KPI is no longer pending; no decisions were saved."
 
 
 def test_update_hitl_item_rejects_missing_item(monkeypatch):

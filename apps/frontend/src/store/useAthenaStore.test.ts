@@ -37,6 +37,89 @@ test('keeps a later phase when a slower status response reports an earlier phase
   expect(useAthenaStore.getState().runs[0].pipeline_steps[0].key).toBe('silver_code_execution')
 })
 
+test('rejects an older authoritative checkpoint response by updated_at', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-versioned',
+    status: 'RUNNING',
+    updated_at: '2026-08-04T10:00:02Z',
+    status_authoritative: true,
+    background_stage: 'profiling',
+    pipeline_steps: [{ key: 'profiling', state: 'RUNNING' }],
+  })
+
+  useAthenaStore.getState().updateRun('run-versioned', {
+    id: 'run-versioned',
+    status: 'HITL_WAIT',
+    updated_at: '2026-08-04T10:00:01Z',
+    status_authoritative: true,
+    next_gate: 2,
+    pipeline_steps: [{ key: 'gate2', state: 'HITL_WAIT' }],
+  })
+
+  expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    status: 'RUNNING',
+    updated_at: '2026-08-04T10:00:02Z',
+    background_stage: 'profiling',
+    pipeline_steps: [{ key: 'profiling', state: 'RUNNING' }],
+  })
+})
+
+test('accepts a newer authoritative checkpoint even when its stage rank is lower', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-newer-reset',
+    status: 'RUNNING',
+    updated_at: '2026-08-04T10:00:01Z',
+    status_authoritative: true,
+    pipeline_steps: [{ key: 'profiling', state: 'RUNNING' }],
+  })
+
+  useAthenaStore.getState().updateRun('run-newer-reset', {
+    id: 'run-newer-reset',
+    status: 'RUNNING',
+    updated_at: '2026-08-04T10:00:02Z',
+    status_authoritative: true,
+    pipeline_steps: [{ key: 'nomination', state: 'RUNNING' }],
+  })
+
+  expect(useAthenaStore.getState().runs[0].pipeline_steps).toEqual([
+    { key: 'nomination', state: 'RUNNING' },
+  ])
+})
+
+test('replaces execution fields atomically from a newer authoritative checkpoint', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-atomic',
+    status: 'RUNNING',
+    updated_at: '2026-08-04T10:00:01Z',
+    status_authoritative: true,
+    background_stage: 'nomination',
+    next_gate: 2,
+    pipeline_steps: [{ key: 'nomination', state: 'RUNNING' }],
+  })
+
+  useAthenaStore.getState().updateRun('run-atomic', {
+    id: 'run-atomic',
+    status: 'RUNNING',
+    updated_at: '2026-08-04T10:00:02Z',
+    status_authoritative: true,
+    pipeline_steps: [
+      { key: 'nomination', state: 'COMPLETED' },
+      { key: 'profiling', state: 'RUNNING' },
+    ],
+  })
+
+  const run = useAthenaStore.getState().runs[0]
+  expect(run.background_stage).toBeUndefined()
+  expect(run.next_gate).toBeUndefined()
+  expect(run.pipeline_steps).toEqual([
+    { key: 'nomination', state: 'COMPLETED' },
+    { key: 'profiling', state: 'RUNNING' },
+  ])
+})
+
 test('accepts SFTP nomination after discovery in the six-phase order', () => {
   resetStore()
   useAthenaStore.getState().addRun({

@@ -23,6 +23,11 @@ def login(request: LoginRequest, service: AuthService = Depends(get_auth_service
     return service.login(request.email, request.password)
 
 
+@router.post("/demo-session", response_model=LoginResponse)
+def demo_session(service: AuthService = Depends(get_auth_service)) -> LoginResponse:
+    return service.create_demo_session()
+
+
 @router.get("/me", response_model=AuthUser)
 def me(user: AuthUser = Depends(get_current_user)) -> AuthUser:
     return user

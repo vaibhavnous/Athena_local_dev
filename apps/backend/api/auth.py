@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,21 @@ from api.repositories.auth_repository import AuthRepository
 
 UserType = Literal["Admin", "Client"]
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def auth_mode() -> Literal["required", "demo"]:
+    configured = os.getenv("ASTRA_AUTH_MODE", "").strip().lower()
+    if not configured:
+        # ponytail: accept the old flag during migration; remove after deployments use ASTRA_AUTH_MODE.
+        legacy_demo = os.getenv("ASTRA_AUTH_DEMO_MODE", "false").strip().lower()
+        return "demo" if legacy_demo in {"1", "true", "yes", "on"} else "required"
+    if configured not in {"required", "demo"}:
+        raise RuntimeError("ASTRA_AUTH_MODE must be either 'required' or 'demo'")
+    return configured
+
+
+def is_demo_auth_enabled() -> bool:
+    return auth_mode() == "demo"
 
 
 class AuthUser(BaseModel):
@@ -103,6 +119,37 @@ class AuthService:
         user = self.repository.find_by_uid(current_user.uid)
         if not user or not user["is_active"]:
             raise HTTPException(status_code=401, detail="Invalid or expired session")
+        return self._issue_session(user)
+
+    def create_demo_session(self) -> LoginResponse:
+        if not is_demo_auth_enabled():
+            raise HTTPException(status_code=404, detail="Demo authentication is disabled")
+
+        self._ensure_ready()
+        email = self._normalize_email(os.getenv("ASTRA_AUTH_DEMO_EMAIL", "demo@astra.local"))
+        if email == self._primary_admin_email:
+            raise HTTPException(status_code=503, detail="Demo account must be separate from the primary admin")
+
+        user = self.repository.find_by_email(email)
+        if not user:
+            try:
+                user = self.repository.create_user(
+                    uid=str(uuid.uuid4()),
+                    username=self._validate_username(
+                        os.getenv("ASTRA_AUTH_DEMO_USERNAME", "Astra Demo User")
+                    ),
+                    email=email,
+                    password_hash=self._hash_password(secrets.token_urlsafe(32)),
+                    user_type="Client",
+                )
+            except Exception:
+                # ponytail: tolerate multiple workers racing to provision the same unique demo account.
+                user = self.repository.find_by_email(email)
+                if not user:
+                    raise
+
+        if not user["is_active"] or user["user_type"] != "Client":
+            raise HTTPException(status_code=503, detail="Demo account is unavailable")
         return self._issue_session(user)
 
     def _issue_session(self, user: dict) -> LoginResponse:

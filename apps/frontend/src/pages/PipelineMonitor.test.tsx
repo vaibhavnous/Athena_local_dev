@@ -43,7 +43,7 @@ jest.mock('../components/pipeline/PipelineLogsPanel', () => () => <div>Pipeline 
 jest.mock('../components/shared/PythonCodeDialog', () => () => null)
 jest.mock('../components/shared/DashboardLayout', () => ({ PageHeader: () => <div>Header</div> }))
 
-import PipelineMonitor, { buildPipelineDisplayPhase, markNextPendingStage, markPreparingReview, pipelineActivityFromLogs, reviewWaitPatchFromLogs } from './PipelineMonitor'
+import PipelineMonitor, { buildPipelineDisplayPhase, isInterruptedRunFailure, markNextPendingStage, markPreparingReview, normalizePipelineTimeline, pipelineActivityFromLogs, reviewWaitPatchFromLogs } from './PipelineMonitor'
 import { getRunStatus } from '../api/athenaApi'
 
 test('hydrates detailed stages for the active run', async () => {
@@ -62,6 +62,16 @@ test('hydrates detailed stages for the active run', async () => {
     expect.objectContaining({ status: 'HITL_WAIT', stages: expect.any(Array) }),
   ))
   view.unmount()
+})
+
+test('recognizes only backend-restart failures as transient interrupted failures', () => {
+  expect(isInterruptedRunFailure({
+    status: 'FAILED',
+    error_type: 'InterruptedRun',
+    error: 'Backend process restarted while this run was active.',
+  })).toBe(true)
+  expect(isInterruptedRunFailure({ status: 'FAILED', error: 'Generated SQL is invalid' })).toBe(false)
+  expect(isInterruptedRunFailure({ status: 'RUNNING', error_type: 'InterruptedRun' })).toBe(false)
 })
 
 test('shows rotating markers for the active phase and stage', () => {
@@ -103,6 +113,59 @@ test('shows a review gate as loading while its content is prepared', () => {
     state: 'RUNNING',
     preparingReview: true,
   })
+})
+
+test('keeps only the preparing review active when an older stage snapshot is still running', () => {
+  const phase = markPreparingReview({
+    id: 'phase-2',
+    status: 'Running',
+    completed: 0,
+    total: 3,
+    steps: [
+      { key: 'nomination', state: 'RUNNING', complete: false },
+      { key: 'gate2', state: 'PENDING', complete: false },
+      { key: 'discovery', state: 'PENDING', complete: false },
+    ],
+  }, 2)
+
+  expect(phase.steps).toEqual([
+    expect.objectContaining({ key: 'nomination', state: 'COMPLETED', complete: true }),
+    expect.objectContaining({ key: 'gate2', state: 'RUNNING', preparingReview: true }),
+    expect.objectContaining({ key: 'discovery', state: 'PENDING', complete: false }),
+  ])
+  expect(phase.steps.filter((step) => step.state === 'RUNNING')).toHaveLength(1)
+  expect(phase.completed).toBe(1)
+})
+
+test('normalizes mixed polling snapshots to one active substage and correct counts', () => {
+  const phases = normalizePipelineTimeline([
+    {
+      id: 'phase-1',
+      status: 'Running',
+      completed: 1,
+      total: 2,
+      steps: [
+        { key: 'kpis', state: 'RUNNING' },
+        { key: 'gate1', state: 'HITL_WAIT', preparingReview: true },
+      ],
+    },
+    {
+      id: 'phase-2',
+      status: 'Pending',
+      completed: 0,
+      total: 1,
+      steps: [{ key: 'nomination', state: 'PENDING' }],
+    },
+  ], { status: 'HITL_WAIT' })
+
+  expect(phases[0]).toMatchObject({ status: 'Review', completed: 1, total: 2 })
+  expect(phases[0].steps).toMatchObject([
+    { key: 'kpis', state: 'COMPLETED', complete: true },
+    { key: 'gate1', state: 'HITL_WAIT', preparingReview: true },
+  ])
+  expect(phases.flatMap((phase) => phase.steps).filter((step) =>
+    ['RUNNING', 'HITL_WAIT', 'FAILED'].includes(step.state)
+  )).toHaveLength(1)
 })
 
 test('shows the next pending stage as starting while an active run awaits backend progress', () => {

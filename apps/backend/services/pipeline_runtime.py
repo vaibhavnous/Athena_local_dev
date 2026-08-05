@@ -829,6 +829,33 @@ def _interrupted_checkpoint_state(state: Dict[str, Any], reason: str) -> Dict[st
     }
 
 
+def _interrupted_recovery_grace_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("ATHENA_INTERRUPTED_RUN_GRACE_SECONDS", "300")))
+    except ValueError:
+        return 300.0
+
+
+def _finalize_interrupted_run_recovery(run_id: str, recovery_token: str, reason: str) -> bool:
+    """Fail only a checkpoint that has not been replaced by a continuing worker."""
+    try:
+        state = load_checkpoint_state(run_id) or {}
+        if state.get("restart_recovery_token") != recovery_token:
+            return False
+        status = str(state.get("status") or "").upper()
+        if status not in ACTIVE_CHECKPOINT_STATUSES and not state.get("background_stage"):
+            return False
+        failed = _interrupted_checkpoint_state(state, reason)
+        failed.pop("restart_recovery_token", None)
+        failed.pop("restart_recovery_pending", None)
+        save_checkpoint_state(run_id, failed)
+        logger.warning("Marked inactive interrupted run as failed run_id=%s", run_id)
+        return True
+    except Exception:
+        logger.exception("Interrupted run recovery recheck failed run_id=%s", run_id)
+        return False
+
+
 def mark_interrupted_background_runs_on_startup() -> int:
     if str(os.getenv("ATHENA_MARK_INTERRUPTED_RUNS_ON_STARTUP", "true")).lower() in {"0", "false", "no", "off"}:
         return 0
@@ -852,6 +879,7 @@ def mark_interrupted_background_runs_on_startup() -> int:
         conn.close()
 
     reason = "Backend process restarted while this run was active."
+    grace_seconds = _interrupted_recovery_grace_seconds()
     recovered = 0
     for run_id, state_json in rows:
         try:
@@ -864,11 +892,31 @@ def mark_interrupted_background_runs_on_startup() -> int:
         if status not in ACTIVE_CHECKPOINT_STATUSES and not state.get("background_stage"):
             continue
 
-        save_checkpoint_state(run_id, _interrupted_checkpoint_state({**state, "run_id": run_id}, reason))
+        recovery_token = str(uuid.uuid4())
+        pending_recovery = {
+            **state,
+            "run_id": run_id,
+            "restart_recovery_pending": True,
+            "restart_recovery_token": recovery_token,
+            "restart_recovery_started_at": time.time(),
+            "resume_message": "Backend restarted. Waiting for the active execution worker to reconnect.",
+        }
+        save_checkpoint_state(run_id, pending_recovery)
+        timer = threading.Timer(
+            grace_seconds,
+            _finalize_interrupted_run_recovery,
+            args=(run_id, recovery_token, reason),
+        )
+        timer.daemon = True
+        timer.start()
         recovered += 1
 
     if recovered:
-        logger.warning("Marked interrupted background runs as failed/retryable count=%s", recovered)
+        logger.warning(
+            "Scheduled interrupted run recovery checks count=%s grace_seconds=%.1f",
+            recovered,
+            grace_seconds,
+        )
     return recovered
 
 

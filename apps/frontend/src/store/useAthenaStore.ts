@@ -115,6 +115,42 @@ function preserveProgressFields(existing: any, merged: any) {
   return merged
 }
 
+const EXECUTION_SNAPSHOT_FIELDS = [
+  'status', 'stages', 'pipeline_steps', 'current_pipeline_step',
+  'background_stage', 'external_execution',
+  'snowflake_bronze_execution_status', 'snowflake_bronze_execution_progress',
+  'snowflake_silver_execution_status', 'snowflake_silver_execution_progress',
+  'snowflake_gold_execution_status', 'snowflake_gold_execution_progress',
+  'stage_confirmation', 'execution_ready', 'awaiting_stage_confirmation',
+  'next_stage_key', 'next_stage_label', 'next_gate', 'next_review_key',
+  'resume_message', 'failed_stage_key', 'failed_background_stage',
+  'error', 'error_message', 'error_type',
+] as const
+
+function snapshotTimestamp(run: any): number | null {
+  const value = run?._execution_snapshot_at || run?.updated_at || run?.checkpoint?.updated_at
+  if (!value) return null
+  const timestamp = Date.parse(String(value))
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function isAuthoritativeExecutionSnapshot(run: any): boolean {
+  return run?.status_authoritative === true && snapshotTimestamp(run) !== null
+}
+
+function preserveExecutionSnapshot(existing: any, merged: any) {
+  for (const key of EXECUTION_SNAPSHOT_FIELDS) {
+    if (existing[key] !== undefined) merged[key] = existing[key]
+    else delete merged[key]
+  }
+  if (existing.updated_at !== undefined) merged.updated_at = existing.updated_at
+  if (existing._execution_snapshot_at !== undefined) merged._execution_snapshot_at = existing._execution_snapshot_at
+  if (existing._execution_snapshot_authoritative !== undefined) {
+    merged._execution_snapshot_authoritative = existing._execution_snapshot_authoritative
+  }
+  return merged
+}
+
 function mergeRunPreservingDetail(existing: any, incoming: any): any {
   if (!existing) {
     if (
@@ -136,6 +172,23 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
   const incomingHasDetail = hasUsefulRunDetail(incoming)
   const existingHasDetail = hasUsefulRunDetail(existing)
   const merged = { ...existing, ...incoming }
+  const incomingSnapshotAt = snapshotTimestamp(incoming)
+  const existingSnapshotAt = snapshotTimestamp(existing)
+  const authoritativeSnapshot = isAuthoritativeExecutionSnapshot(incoming)
+  const staleAuthoritativeSnapshot =
+    authoritativeSnapshot &&
+    existingSnapshotAt !== null &&
+    incomingSnapshotAt !== null &&
+    incomingSnapshotAt < existingSnapshotAt
+
+  // Status and stage fields describe one checkpoint and must move together.
+  // A delayed HTTP response may still complete after a newer poll; keep its
+  // non-execution metadata, but never let it roll the visible timeline back.
+  if (staleAuthoritativeSnapshot) return preserveExecutionSnapshot(existing, merged)
+  if (authoritativeSnapshot && incomingSnapshotAt !== null) {
+    merged._execution_snapshot_at = new Date(incomingSnapshotAt).toISOString()
+    merged._execution_snapshot_authoritative = true
+  }
   const incomingName = String(incoming?.brd_filename || '').trim()
   const incomingIds = new Set([incoming?.id, incoming?.run_id].filter(Boolean).map(String))
   if ((!incomingName || incomingIds.has(incomingName)) && existing?.brd_filename && !incomingIds.has(String(existing.brd_filename))) {
@@ -203,6 +256,7 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
   // Keep the furthest known stage; a slower response must not move the UI back to an earlier phase.
   const sourceHint = incoming?.source || existing?.source
   if (
+    !authoritativeSnapshot &&
     !incomingTerminal &&
     !clearsExecutionGate &&
     runProgressIndex(incoming, sourceHint) < runProgressIndex(existing, sourceHint)
@@ -277,6 +331,13 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
     if (incoming.next_review_key === undefined || incoming.next_review_key === null) merged.next_review_key = null
     if (incoming.background_stage && (incoming.stage_confirmation === undefined || incoming.stage_confirmation === null)) {
       merged.stage_confirmation = null
+    }
+  }
+
+  if (authoritativeSnapshot) {
+    for (const key of EXECUTION_SNAPSHOT_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(incoming, key)) merged[key] = incoming[key]
+      else delete merged[key]
     }
   }
 

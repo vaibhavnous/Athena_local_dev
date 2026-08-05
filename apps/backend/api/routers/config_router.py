@@ -2,13 +2,15 @@ import os
 import uuid
 from typing import Any, Dict, List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from api.auth import AuthUser, get_admin
 
 router = APIRouter()
 
 
 @router.get("/settings")
-def settings() -> Dict[str, Any]:
+def settings(_admin: AuthUser = Depends(get_admin)) -> Dict[str, Any]:
     return {
         "provider": "azure_openai",
         "azure_deployment": os.getenv("AZURE_OPENAI_DEPLOYMENT"),
@@ -19,7 +21,10 @@ def settings() -> Dict[str, Any]:
 
 
 @router.put("/settings")
-def save_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+def save_settings(
+    data: Dict[str, Any],
+    _admin: AuthUser = Depends(get_admin),
+) -> Dict[str, Any]:
     return data
 
 
@@ -59,15 +64,25 @@ def configurations() -> List[Dict[str, Any]]:
 
 
 @router.post("/configurations")
-def create_configuration(data: Dict[str, Any]) -> Dict[str, Any]:
+def create_configuration(
+    data: Dict[str, Any],
+    _admin: AuthUser = Depends(get_admin),
+) -> Dict[str, Any]:
     return {**data, "id": data.get("id") or str(uuid.uuid4())}
 
 
 @router.put("/configurations/{config_id}")
-def update_configuration(config_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+def update_configuration(
+    config_id: str,
+    data: Dict[str, Any],
+    _admin: AuthUser = Depends(get_admin),
+) -> Dict[str, Any]:
     return {**data, "id": config_id}
 
 
 @router.delete("/configurations/{config_id}")
-def delete_configuration(config_id: str) -> Dict[str, Any]:
+def delete_configuration(
+    config_id: str,
+    _admin: AuthUser = Depends(get_admin),
+) -> Dict[str, Any]:
     return {"id": config_id, "deleted": True}

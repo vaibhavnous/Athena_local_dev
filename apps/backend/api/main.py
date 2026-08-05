@@ -135,7 +135,7 @@ app.include_router(runs_router, dependencies=protected)
 app.include_router(reviews_router, dependencies=protected)
 app.include_router(kpi_router, dependencies=protected)
 app.include_router(analytics_router, dependencies=protected)
-app.include_router(config_router, dependencies=[Depends(get_admin)])
+app.include_router(config_router, dependencies=protected)
 app.include_router(logs_router, dependencies=protected)
 app.include_router(projects_router)
 

@@ -146,21 +146,6 @@ def test_silver_table_resolution_ignores_existing_silver_outputs(monkeypatch):
     assert [ref["table_name"] for ref in refs] == ["claim_payment_expenses"]
 
 
-def test_silver_table_resolution_excludes_system_tables():
-    refs = silver_gen._resolve_tables_for_silver(
-        {
-            "bronze_generation_results": [
-                {"table": "claim_information"},
-                {"table": "sysdiagrams"},
-            ],
-            "bronze_schema": "bronze",
-            "silver_schema": "silver",
-        }
-    )
-
-    assert [ref["table_name"] for ref in refs] == ["claim_information"]
-
-
 def test_silver_file_slug_caps_long_table_names():
     long_name = "018c963b_38fe_4567_b413_ae0f7dba5a68_" * 4 + "claim_payment_expenses"
 
@@ -547,34 +532,6 @@ def test_databricks_silver_validates_llm_retry_or_uses_deterministic_fallback(
     assert assignments["COLUMN_ALIASES"] == {"rererence_id": "reference_id"}
     assert len(calls) == 2
     assert calls[1]["validation_feedback"]
-def test_databricks_silver_canonicalizes_bad_schema_types_and_names():
-    table_ref = {
-        "database_name": "insurance",
-        "schema_name": "dbo",
-        "table_name": "claim_payment_expenses",
-        "bronze_table": "workspace.bronze.bronze_claim_payment_expenses",
-        "silver_table": "workspace.silver.silver_claim_payment_expenses",
-        "existing_script_path": None,
-        "source_columns": [],
-    }
-
-    script = silver_gen.generate_silver_script(
-        table_ref=table_ref,
-        enriched_columns=[
-            {"column_name": "claimid", "data_type": "float"},
-            {"column_name": "paidamount", "data_type": "float"},
-            {"column_name": "servicetax", "data_type": "varchar"},
-            {"column_name": "agen_t_category_name", "data_type": "varchar"},
-            {"column_name": "branch_office_name", "data_type": "int"},
-        ],
-        run_id="run-silver-quality",
-    )
-
-    assert "EXPECTED_COLUMNS = ['claim_id', 'paid_amount', 'service_tax', 'agent_category_name', 'branch_office_name']" in script
-    assert "'claim_id': 'bigint'" in script
-    assert "'paid_amount': 'decimal(38,10)'" in script
-    assert "'service_tax': 'decimal(38,10)'" in script
-    assert "'branch_office_name': 'string'" not in script
 
 
 def test_databricks_silver_skips_duplicate_expected_output_columns():

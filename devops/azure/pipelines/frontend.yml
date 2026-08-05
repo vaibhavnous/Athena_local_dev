@@ -27,6 +27,7 @@ stages:
       env:
         CI: true
         REACT_APP_API_BASE_URL: $(REACT_APP_API_BASE_URL)
+        REACT_APP_AUTH_MODE: $(REACT_APP_AUTH_MODE)
 
     - script: |
         cat > $(buildFolder)/web.config << 'EOF'

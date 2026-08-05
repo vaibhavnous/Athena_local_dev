@@ -830,7 +830,7 @@ function HitlQueue({ onClose = null }) {
             join_key_columns: review.join_key_columns || [],
             measure_columns: review.measure_columns || [],
             feed_semantic_summary: review.feed_semantic_summary || [],
-            next_gate: review.next_gate,
+            next_gate: 3,
             resume_message: review.resume_message,
             gate3_approved: review.gate3_approved
           })
@@ -844,7 +844,7 @@ function HitlQueue({ onClose = null }) {
           if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setBronzeReview(review)
           updateRun(selectedRunId, {
-            next_gate: review.next_gate,
+            next_gate: 4,
             resume_message: review.resume_message,
             bronze_review_artifact: review.bronze_review_artifact || {}
           })
@@ -858,8 +858,8 @@ function HitlQueue({ onClose = null }) {
           if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setSilverMergeKeyReview(review)
           updateRun(selectedRunId, {
-            next_gate: review.next_gate,
-            next_review_key: review.next_review_key,
+            next_gate: 0,
+            next_review_key: 'silver_merge_key_review',
             resume_message: review.resume_message,
             silver_merge_key_review_artifact: review.silver_merge_key_review_artifact || {}
           })
@@ -873,7 +873,8 @@ function HitlQueue({ onClose = null }) {
           if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setGoldReview(review)
           updateRun(selectedRunId, {
-            next_review_key: review.next_review_key,
+            next_gate: 0,
+            next_review_key: 'gold_review',
             resume_message: review.resume_message,
             gold_review_artifact: review.gold_review_artifact || {}
           })
@@ -887,7 +888,7 @@ function HitlQueue({ onClose = null }) {
           if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setSilverReview(review)
           updateRun(selectedRunId, {
-            next_gate: review.next_gate,
+            next_gate: 5,
             resume_message: review.resume_message,
             silver_review_artifact: review.silver_review_artifact || {}
           })
@@ -914,7 +915,7 @@ function HitlQueue({ onClose = null }) {
             certified_tables: review.certified_tables || [],
             candidate_feed: review.candidate_feed || null,
             candidate_feeds: review.candidate_feeds || [],
-            next_gate: review.next_gate,
+            next_gate: 2,
             resume_message: review.resume_message
           })
           window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, gate: 2, source: runSource } }))
@@ -1932,7 +1933,12 @@ function HitlQueue({ onClose = null }) {
             </div>
 
             <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-bg-base/20 p-6">
-              {semanticReviewItems.length === 0 ? (
+              {hydrating && semanticReviewItems.length === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center gap-4 py-16 text-center">
+                  <Loader2 size={28} className="animate-spin text-accent-blue" />
+                  <p className="font-medium text-text-primary">Loading semantic review artifacts…</p>
+                </div>
+              ) : semanticReviewItems.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center gap-4 py-16 text-center">
                   <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#131d30]">
                     <Inbox size={28} className="text-[#6f809f]" />
@@ -2856,6 +2862,7 @@ function buildSemanticReviewSource(enrichmentReview, currentRun, runId) {
 
 function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
   if (!enrichmentReview) return []
+  if (enrichmentReview.is_fallback_artifact) return []
   const semanticTables = enrichmentReview.semantic_tables || enrichmentReview.tables || enrichmentReview.table_semantics || []
 
   if (semanticTables.length > 0) {
