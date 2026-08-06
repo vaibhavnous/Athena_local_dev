@@ -412,9 +412,6 @@ function OverviewTab({ run, onRunRefresh, addNotification }) {
                               <span>Matched schema fields: {(table.matched_columns || []).length}</span>
                             )}
                           </div>
-                          {table.nomination_reason && (
-                            <p className="text-xs text-gray-400 mt-1">{table.nomination_reason}</p>
-                          )}
                         </div>
                       </label>
                     )

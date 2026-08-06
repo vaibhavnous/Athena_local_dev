@@ -63,9 +63,11 @@ SYNONYMS: Dict[str, List[str]] = {
 }
 
 GENERIC_KPI_WORDS = {
-    "all", "amount", "and", "average", "avg", "based", "breakdown", "by", "count",
-    "current", "daily", "for", "frequency", "from", "metric", "monthly", "number", "of", "overall",
-    "per", "percentage", "rate", "ratio", "sum", "the", "total", "value", "weekly", "yearly",
+    "all", "amount", "and", "availability", "average", "avg", "based", "breakdown", "by",
+    "consistency", "count", "current", "daily", "data", "for", "frequency", "from",
+    "identifier", "ingestion", "latency", "metric", "monthly", "number", "of", "overall",
+    "per", "percentage", "rate", "ratio", "record", "success", "sum", "the", "time",
+    "total", "traceability", "transaction", "value", "weekly", "yearly",
 }
 
 KEYWORD_EXPANSION_SYSTEM_MSG = (
@@ -99,13 +101,23 @@ def _build_keywords(kpi_names: List[str]) -> List[str]:
     return sorted(keywords or all_keywords)
 
 
-def _matched_kpi_names(kpi_names: List[str], matched_terms: List[str]) -> List[str]:
-    matched = {str(term or "").casefold() for term in matched_terms if str(term or "").strip()}
+def _token_variants(tokens: Set[str]) -> Set[str]:
+    variants = set(tokens)
+    variants.update(token[:-1] for token in tokens if token.endswith("s") and len(token) > 3)
+    return variants
+
+
+def _matched_kpi_names(item: Dict[str, Any], kpi_names: List[str]) -> List[str]:
+    evidence_tokens: Set[str] = set(_tokenize_identifier(str(item.get("table_name") or "")))
+    for column_name in item.get("matched_columns") or []:
+        evidence_tokens.update(_tokenize_identifier(str(column_name or "")))
+    evidence_tokens = _token_variants(evidence_tokens)
+
     return sorted(
         {
             kpi_name
             for kpi_name in kpi_names
-            if matched.intersection(_build_keywords([kpi_name]))
+            if evidence_tokens.intersection(_token_variants(set(_build_keywords([kpi_name]))))
         },
         key=str.casefold,
     )
@@ -847,7 +859,7 @@ def _prepare_review_evidence(item: Dict[str, Any], kpi_names: List[str]) -> Dict
         {str(value) for value in item.get("matched_keywords", []) if str(value).strip()},
         key=str.casefold,
     )
-    matched_kpis = _matched_kpi_names(kpi_names, matched_terms)
+    matched_kpis = _matched_kpi_names(item, kpi_names)
     matched_columns = sorted(
         {str(value) for value in item.get("matched_columns", []) if str(value).strip()},
         key=str.casefold,

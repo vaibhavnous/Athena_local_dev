@@ -123,6 +123,52 @@ def test_review_payload_is_deterministic_and_preserves_concrete_evidence():
     assert validated.nomination_method == table_nomination.REASON_DUAL_MATCH
 
 
+def test_review_payload_matches_kpis_from_table_specific_schema_evidence():
+    raw = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claim_loss_coverage",
+        "confidence_score": 0.732,
+        "coverage_ratio": 0.5,
+        "lexical_score": 0.8,
+        "semantic_score": 0.7,
+        "matched_keywords": ["claims", "consistency", "estimation", "identifier", "policy"],
+        "matched_columns": [
+            "CaseID",
+            "ClaimID",
+            "ClaimLossCoverageName",
+            "ClaimNaturesOfLossID",
+            "ClaimNaturesOfLossName",
+        ],
+        "nomination_reason": table_nomination.REASON_DUAL_MATCH,
+    }
+    kpis = [
+        "Claims Data Ingestion Rate",
+        "Claims Record Traceability Percentage",
+        "Policy Data Ingestion Latency",
+        "Policy Data Traceability Percentage",
+        "Premium Transaction Data Ingestion Success Rate",
+        "Premium Transaction Identifier Consistency Rate",
+        "Regulatory Data Extraction Success Rate",
+        "Reserve Estimation Data Availability Time",
+        "Reserve Estimation Record Identifier Consistency Rate",
+    ]
+
+    evidence = table_nomination._prepare_review_evidence(raw, kpis)
+
+    assert evidence["matched_keywords"] == [
+        "Claims Data Ingestion Rate",
+        "Claims Record Traceability Percentage",
+    ]
+    assert evidence["matched_business_terms"] == [
+        "claims",
+        "consistency",
+        "estimation",
+        "identifier",
+        "policy",
+    ]
+
+
 def test_supporting_table_payload_keeps_legacy_method_and_new_display_reason():
     evidence = table_nomination._prepare_review_evidence(
         {
