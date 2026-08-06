@@ -255,9 +255,78 @@ def _databricks_literal_assignments(code: str) -> Dict[str, Any]:
     return assignments
 
 
+def _databricks_string_assignments(code: str) -> Dict[str, str]:
+    assignments: Dict[str, str] = {}
+    for node in ast.parse(str(code or "")).body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        name = node.targets[0].id
+        if name not in {"RUN_ID", "SOURCE_TABLE", "TARGET_TABLE", "TEMP_VIEW"}:
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, str):
+            assignments[name] = value
+    return assignments
+
+
+def _function_return_expr(tree: ast.Module, function_name: str) -> ast.AST | None:
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name != function_name:
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Return):
+                return child.value
+    return None
+
+
+def _fstring_text_and_names(node: ast.AST | None) -> tuple[str, set[str]]:
+    if isinstance(node, ast.Call) and node.args:
+        node = node.args[0]
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value, set()
+    if not isinstance(node, ast.JoinedStr):
+        return "", set()
+
+    text_parts: List[str] = []
+    names: set[str] = set()
+    for value in node.values:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            text_parts.append(value.value)
+        elif isinstance(value, ast.FormattedValue) and isinstance(value.value, ast.Name):
+            names.add(value.value.id)
+    return "".join(text_parts), names
+
+
+def _require_databricks_rendered_contract(code: str, table_ref: SilverTableRef) -> None:
+    assignments = _databricks_string_assignments(code)
+    if assignments.get("SOURCE_TABLE") != str(table_ref["bronze_table"]) or assignments.get("TARGET_TABLE") != str(
+        table_ref["silver_table"]
+    ):
+        raise ValueError("LLM Silver PySpark rendered contract changed approved source or target table")
+    if not assignments.get("RUN_ID") or not assignments.get("TEMP_VIEW"):
+        raise ValueError("LLM Silver PySpark rendered contract has empty runtime identifiers")
+
+    tree = ast.parse(str(code or ""))
+    try_cast_text, try_cast_names = _fstring_text_and_names(_function_return_expr(tree, "_try_cast_column"))
+    if (
+        "try_cast(`" not in try_cast_text
+        or "` AS " not in try_cast_text
+        or not {"escaped_name", "target_type"}.issubset(try_cast_names)
+    ):
+        raise ValueError("LLM Silver PySpark rendered contract has malformed try_cast helper")
+
+    assignment_text, assignment_names = _fstring_text_and_names(_function_return_expr(tree, "_source_assignment"))
+    if "source.`" not in assignment_text or "`" not in assignment_text or "escaped_name" not in assignment_names:
+        raise ValueError("LLM Silver PySpark rendered contract has malformed source assignment helper")
+
+
 def _require_databricks_silver_safety_scaffold(
     code: str,
     enriched_columns: List[Dict[str, Any]],
+    table_ref: SilverTableRef,
 ) -> None:
     assignments = _databricks_literal_assignments(code)
     expected_columns = assignments.get("EXPECTED_COLUMNS")
@@ -331,7 +400,8 @@ def _require_databricks_silver_safety_scaffold(
         "col(actual_name).alias(expected_name)",
     )
     if any(marker not in code for marker in required_scaffold):
-        raise ValueError("LLM Silver PySpark omitted deterministic case-insensitive column resolution")
+        raise ValueError("LLM Silver PySpark omitted deterministic safety scaffold")
+    _require_databricks_rendered_contract(code, table_ref)
 
 
 def _validate_generated_silver_code(
@@ -394,7 +464,7 @@ def _validate_generated_silver_code(
                 )
     else:
         _validate_python(code)
-        _require_databricks_silver_safety_scaffold(code, enriched_columns)
+        _require_databricks_silver_safety_scaffold(code, enriched_columns, table_ref)
 
 
 def _load_bronze_bundle(target_warehouse: str = "databricks") -> Dict[str, Any]:
@@ -1567,6 +1637,14 @@ def _generate_one_table(
                     "Silver LLM generation and validation-feedback retry failed; using deterministic fallback: %s",
                     retry_exc,
                 )
+
+    if not dbt_codegen:
+        _validate_generated_silver_code(
+            code,
+            table_ref=table_ref,
+            enriched_columns=enriched_columns,
+            target_warehouse=target_warehouse,
+        )
 
     dbt_model_name = (
         dbt_snowflake_runtime.dbt_safe_name(f"silver_{table_name}", prefix="silver")

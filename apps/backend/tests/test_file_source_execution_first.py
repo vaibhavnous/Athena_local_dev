@@ -270,3 +270,37 @@ def test_sftp_gold_uses_exact_silver_table_and_qualified_target(monkeypatch):
     assert result["target_table"] == "workspace.gold.gold_claims"
     assert 'SOURCE_TABLE = r"workspace.silver.vendor1_claims_clean"' in script
     assert 'TARGET_TABLE = r"workspace.gold.gold_claims"' in script
+
+
+def test_sftp_gold_rejects_invalid_llm_output_and_keeps_baseline(monkeypatch):
+    output_dir = Path.cwd() / ".tmp-tests" / f"sftp_gold_llm_{uuid.uuid4().hex}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(gold_code_generation, "GOLD_OUTPUT_DIR", str(output_dir))
+    monkeypatch.setattr(gold_code_generation, "GOLD_LLM_ENABLED", True)
+    monkeypatch.setattr(gold_code_generation, "ai_store_db_writer", lambda **_: None)
+
+    class BrokenLlm:
+        def invoke(self, _messages):
+            return type("Response", (), {"content": "joined_logical_tables =\n"})()
+
+    monkeypatch.setattr(gold_code_generation, "get_llm", lambda **_: BrokenLlm())
+    state = gold_code_generation.sftp_gold_code_generation_node({
+        "run_id": "run-sftp-gold-llm-fallback",
+        "gold_catalog": "workspace",
+        "gold_schema": "gold",
+        "silver_generation_results": [{
+            "entity": "claims",
+            "silver_table": "workspace.silver.vendor1_claims_clean",
+        }],
+    })
+
+    result = state["gold_generation_results"][0]
+    script = Path(result["script_path"]).read_text(encoding="utf-8")
+    gold_code_generation._validate_gold_python(
+        script,
+        source_table="workspace.silver.vendor1_claims_clean",
+        target_table="workspace.gold.gold_claims",
+    )
+    assert result["llm_enhanced"] is False
+    assert result["llm_error"]
+    assert "joined_logical_tables =" not in script

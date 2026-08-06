@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -71,6 +72,37 @@ print(f\"Gold script completed for {{TARGET_TABLE}}\")
 """.strip()
 
 
+def _extract_python(value: str) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"```(?:python)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    return match.group(1).strip() if match else text
+
+
+def _validate_gold_python(
+    code: str,
+    *,
+    source_table: str = "",
+    target_table: str = "",
+    label: str = "SFTP Gold render",
+) -> str:
+    compile(code, "<sftp_gold_generated>", "exec")
+    tree = ast.parse(code)
+    assignments: Dict[str, Any] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            try:
+                assignments[node.targets[0].id] = ast.literal_eval(node.value)
+            except (TypeError, ValueError):
+                continue
+    expected = {"SOURCE_TABLE": source_table, "TARGET_TABLE": target_table}
+    drifted = [name for name, value in expected.items() if value and assignments.get(name) != value]
+    if drifted:
+        raise ValueError(f"{label} changed required table constants: {', '.join(drifted)}")
+    if "{{" in code or "}}" in code:
+        raise ValueError(f"{label} still contains unresolved template placeholders")
+    return code
+
+
 def _llm_prompt(code: str, entity: str, source_table: str, target_table: str) -> str:
     return f"""
 You are a senior Spark data engineer. Improve this Gold KPI script for an SFTP pipeline.
@@ -81,7 +113,8 @@ Target Gold table: {target_table}
 
 Requirements:
 - Preserve the same source and target tables.
-- Generate valid PySpark code.
+- The current script is already executable; return it unchanged unless a KPI-specific edit is required.
+- Preserve indentation, line boundaries, constants, and f-string substitutions outside that edit.
 - Add metadata columns and incremental Delta write behavior if possible.
 - Return only the Python code.
 
@@ -99,7 +132,7 @@ def _enhance_with_llm(code: str, entity: str, source_table: str, target_table: s
     llm = get_llm(provider=provider, model=model, temperature=0.0, request_timeout=GOLD_LLM_TIMEOUT_SECONDS)
     prompt = _llm_prompt(code, entity, source_table, target_table)
     response = llm.invoke([SystemMessage(content="You are a senior Spark data engineer. Return only valid Python code."), HumanMessage(content=prompt)])
-    return str(response.content).strip()
+    return _extract_python(str(response.content))
 
 
 def _write_bundle(bundle: Dict[str, Any], run_id: str) -> str:
@@ -126,19 +159,29 @@ def _generate_one_entity(
     columns: List[str],
 ) -> Dict[str, Any]:
     script_path = _script_output_path(entity, run_id)
-    code = _build_gold_script(source_table=source_table, target_table=target_table, columns=columns)
+    code = _validate_gold_python(
+        _build_gold_script(source_table=source_table, target_table=target_table, columns=columns),
+        source_table=source_table,
+        target_table=target_table,
+    )
     llm_error = None
     llm_enhanced = False
 
     try:
         enhanced = _enhance_with_llm(code, entity, source_table, target_table)
         if enhanced and enhanced != code:
-            code = enhanced
+            code = _validate_gold_python(
+                enhanced,
+                source_table=source_table,
+                target_table=target_table,
+                label="SFTP Gold LLM render",
+            )
             llm_enhanced = True
     except Exception as exc:
         llm_error = str(exc)
         logger.warning("Gold LLM enhancement failed: %s", exc, extra={"run_id": run_id, "node": "sftp_gold_code_generation"})
 
+    _validate_gold_python(code, source_table=source_table, target_table=target_table)
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(code)
 

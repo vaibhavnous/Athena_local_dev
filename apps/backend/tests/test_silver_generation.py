@@ -366,6 +366,78 @@ def test_databricks_silver_uses_serverless_safe_try_cast():
     assert "try_cast(`{escaped_name}` AS {target_type})" in script
 
 
+def test_databricks_silver_rejects_malformed_try_cast_scaffold():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claim_information",
+        "bronze_table": "workspace.bronze.bronze_claim_information",
+        "silver_table": "workspace.silver.silver_claim_information",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+    enriched_columns = [
+        {
+            "table_name": "claim_information",
+            "column_name": "claim_open_date",
+            "data_type": "datetime2",
+        }
+    ]
+    script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=enriched_columns,
+        run_id="run-cast",
+    )
+
+    malformed = script.replace(
+        'return expr(f"try_cast(`{escaped_name}` AS {target_type})")',
+        'return expr(f"try_cast(` AS )")',
+    )
+    with pytest.raises(ValueError, match="malformed try_cast helper"):
+        silver_gen._validate_generated_silver_code(
+            malformed,
+            table_ref=table_ref,
+            enriched_columns=enriched_columns,
+            target_warehouse="databricks",
+        )
+
+
+def test_databricks_silver_rejects_empty_rendered_table_contract():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claim_information",
+        "bronze_table": "workspace.bronze.bronze_claim_information",
+        "silver_table": "workspace.silver.silver_claim_information",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+    enriched_columns = [
+        {
+            "table_name": "claim_information",
+            "column_name": "claim_open_date",
+            "data_type": "datetime2",
+        }
+    ]
+    script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=enriched_columns,
+        run_id="run-cast",
+    )
+
+    malformed = (
+        script.replace('SOURCE_TABLE = "workspace.bronze.bronze_claim_information"', 'SOURCE_TABLE = ""')
+        .replace('TARGET_TABLE = "workspace.silver.silver_claim_information"', 'TARGET_TABLE = ""')
+    )
+    with pytest.raises(ValueError, match="changed approved source or target table"):
+        silver_gen._validate_generated_silver_code(
+            malformed,
+            table_ref=table_ref,
+            enriched_columns=enriched_columns,
+            target_warehouse="databricks",
+        )
+
+
 def test_databricks_silver_canonicalizes_uppercase_metadata_and_duplicate_reference_keys():
     table_ref = {
         "database_name": "insurance",

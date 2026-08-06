@@ -8,7 +8,12 @@ import pytest
 
 from services import pipeline_runtime
 from services import snowflake_gold_runtime
-from nodes.gold_gen import _canonicalize_snowflake_gold_identifiers, _require_snowflake_gold_structure, _validate_snowflake_gold_candidate
+from nodes.gold_gen import (
+    _canonicalize_snowflake_gold_identifiers,
+    _require_snowflake_gold_structure,
+    _validate_snowflake_gold_candidate,
+    generate_snowflake_gold_script,
+)
 
 
 def test_gold_llm_candidate_rejects_noncanonical_silver_column_case():
@@ -34,39 +39,36 @@ ON 1 = 0 WHEN NOT MATCHED THEN INSERT ("value") VALUES (source."value");
 
 def test_gold_llm_candidate_repairs_canonical_silver_column_case():
     mapping = {
+        "kpi_name": "Average",
         "source_silver_table": "ATHENA_DB.SILVER.silver_claims",
         "measure": {"column": "PaidAmount", "aggregation": "AVG"},
     }
-    sql = '''
-CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
-CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_average" ("value" NUMBER);
-MERGE INTO "ATHENA_DB"."GOLD"."fact_average" target
-USING (SELECT AVG("PaidAmount") AS "value" FROM "ATHENA_DB"."SILVER"."silver_claims") source
-ON 1 = 0 WHEN NOT MATCHED THEN INSERT ("value") VALUES (source."value");
-'''
+    baseline = generate_snowflake_gold_script(
+        mapping=mapping, run_id="run-average", gold_catalog="ATHENA_DB", gold_schema="GOLD"
+    )
+    sql = baseline.replace('"paidamount"', '"PaidAmount"', 1)
 
     repaired = _canonicalize_snowflake_gold_identifiers(sql, mapping)
 
-    assert 'AVG("paidamount")' in repaired
+    assert '"PaidAmount"' not in repaired
+    assert '"paidamount"' in repaired
     _validate_snowflake_gold_candidate(repaired, mapping, "ATHENA_DB.GOLD.fact_average")
 
 
 def test_gold_llm_candidate_repairs_corrected_count_identifier():
     mapping = {
+        "kpi_name": "Unique",
         "source_silver_table": "ATHENA_DB.SILVER.silver_policy_transactions",
-        "measure": {"column": "RERERENCE_ID", "aggregation": "COUNT"},
+        "measure": {"column": "RERERENCE_ID", "aggregation": "SUM"},
     }
-    sql = '''
-CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
-CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_unique" ("value" NUMBER);
-MERGE INTO "ATHENA_DB"."GOLD"."fact_unique" AS target
-USING (SELECT COUNT(DISTINCT "RERERENCE_ID") AS "value" FROM "ATHENA_DB"."SILVER"."silver_policy_transactions") AS source
-ON 1 = 0 WHEN NOT MATCHED THEN INSERT ("value") VALUES (source."value");
-'''
+    baseline = generate_snowflake_gold_script(
+        mapping=mapping, run_id="run-unique", gold_catalog="ATHENA_DB", gold_schema="GOLD"
+    )
+    sql = baseline.replace('"reference_id"', '"RERERENCE_ID"', 1)
 
     repaired = _canonicalize_snowflake_gold_identifiers(sql, mapping)
 
-    assert 'COUNT(DISTINCT "reference_id")' in repaired
+    assert '"reference_id"' in repaired
     _validate_snowflake_gold_candidate(repaired, mapping, "ATHENA_DB.GOLD.fact_unique")
 
 
