@@ -1,0 +1,289 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2100" height="3560" viewBox="0 0 2100 3560" role="img" aria-labelledby="title desc">
+  <title id="title">Metadata-driven database-source flow from BRD to script generation</title>
+  <desc id="desc">A production architecture flow chart showing target-resident metadata selection, one-time onboarding, the common BRD and design flow, database discovery, metadata drafting and approval, and target-specific script generation. Execution is outside scope.</desc>
+  <defs>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L12,6 L0,12 z" fill="#475569"/>
+    </marker>
+    <style>
+      .title { font: 700 36px Inter, Segoe UI, Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 18px Inter, Segoe UI, Arial, sans-serif; fill: #475569; }
+      .section { font: 700 19px Inter, Segoe UI, Arial, sans-serif; fill: #334155; letter-spacing: 1px; }
+      .box-title { font: 700 21px Inter, Segoe UI, Arial, sans-serif; fill: #0f172a; }
+      .box-text { font: 400 16px Inter, Segoe UI, Arial, sans-serif; fill: #334155; }
+      .small { font: 400 14px Inter, Segoe UI, Arial, sans-serif; fill: #475569; }
+      .tiny { font: 600 13px Inter, Segoe UI, Arial, sans-serif; fill: #475569; }
+      .white-title { font: 700 19px Inter, Segoe UI, Arial, sans-serif; fill: #ffffff; }
+      .lane { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; }
+      .common { fill: #e8f1ff; stroke: #2563eb; stroke-width: 2.5; }
+      .source { fill: #fff4d6; stroke: #d97706; stroke-width: 2.5; }
+      .metadata { fill: #e8f8ef; stroke: #15803d; stroke-width: 2.5; }
+      .target { fill: #f2eafe; stroke: #7c3aed; stroke-width: 2.5; }
+      .decision { fill: #fff1f2; stroke: #e11d48; stroke-width: 2.5; }
+      .control { fill: #f1f5f9; stroke: #64748b; stroke-width: 2.5; }
+      .arrow { fill: none; stroke: #475569; stroke-width: 3; marker-end: url(#arrow); }
+      .branch { fill: none; stroke: #7c3aed; stroke-width: 3; marker-end: url(#arrow); }
+      .meta-link { fill: none; stroke: #15803d; stroke-width: 2.5; stroke-dasharray: 8 7; marker-end: url(#arrow); }
+      .boundary { fill: none; stroke: #94a3b8; stroke-width: 3; stroke-dasharray: 12 9; }
+    </style>
+  </defs>
+
+  <rect width="2100" height="3560" fill="#f8fafc"/>
+  <text x="1050" y="62" text-anchor="middle" class="title">Metadata-Driven Framework — Database Source</text>
+  <text x="1050" y="96" text-anchor="middle" class="subtitle">Complete design-time flow: BRD → approved metadata → target-specific script artifact (execution excluded)</text>
+
+  <!-- Legend -->
+  <g transform="translate(150,126)">
+    <rect x="0" y="0" width="22" height="22" rx="5" class="common"/><text x="34" y="17" class="small">Common application stage</text>
+    <rect x="310" y="0" width="22" height="22" rx="5" class="source"/><text x="344" y="17" class="small">Database-specific stage</text>
+    <rect x="625" y="0" width="22" height="22" rx="5" class="metadata"/><text x="659" y="17" class="small">Metadata table operation</text>
+    <rect x="965" y="0" width="22" height="22" rx="5" class="target"/><text x="999" y="17" class="small">Target-specific adapter/compiler</text>
+    <rect x="1325" y="0" width="22" height="22" rx="5" class="control"/><text x="1359" y="17" class="small">Runtime boundary / deferred control</text>
+  </g>
+
+  <!-- Initial project and target metadata adapter partition -->
+  <rect x="680" y="190" width="740" height="84" rx="18" class="common" filter="url(#shadow)"/>
+  <text x="1050" y="225" text-anchor="middle" class="box-title">0. Project initialization</text>
+  <text x="1050" y="253" text-anchor="middle" class="box-text">Source type = DATABASE • Select target = Databricks, Snowflake, or Fabric</text>
+
+  <path d="M1050 274 L1050 328" class="arrow"/>
+  <rect x="790" y="330" width="520" height="72" rx="18" class="decision" filter="url(#shadow)"/>
+  <text x="1050" y="359" text-anchor="middle" class="box-title">Target metadata repository selection</text>
+  <text x="1050" y="385" text-anchor="middle" class="small">Physical metadata I/O branches here; logical workflow stays common</text>
+
+  <path d="M1050 402 L1050 435 L350 435 L350 470" class="branch"/>
+  <path d="M1050 402 L1050 470" class="branch"/>
+  <path d="M1050 402 L1050 435 L1750 435 L1750 470" class="branch"/>
+
+  <rect x="120" y="472" width="460" height="88" rx="16" class="target" filter="url(#shadow)"/>
+  <text x="350" y="507" text-anchor="middle" class="box-title">Databricks adapter</text>
+  <text x="350" y="535" text-anchor="middle" class="box-text">Delta/Databricks SQL metadata operations</text>
+
+  <rect x="820" y="472" width="460" height="88" rx="16" class="target" filter="url(#shadow)"/>
+  <text x="1050" y="507" text-anchor="middle" class="box-title">Snowflake adapter</text>
+  <text x="1050" y="535" text-anchor="middle" class="box-text">Snowflake SQL metadata operations</text>
+
+  <rect x="1520" y="472" width="460" height="88" rx="16" class="target" filter="url(#shadow)"/>
+  <text x="1750" y="507" text-anchor="middle" class="box-title">Fabric adapter</text>
+  <text x="1750" y="535" text-anchor="middle" class="box-text">Warehouse/Lakehouse metadata operations</text>
+
+  <path d="M350 560 L350 605 L1050 605 L1050 628" class="arrow"/>
+  <path d="M1050 560 L1050 628" class="arrow"/>
+  <path d="M1750 560 L1750 605 L1050 605 L1050 628" class="arrow"/>
+
+  <rect x="420" y="630" width="1260" height="100" rx="18" class="metadata" filter="url(#shadow)"/>
+  <text x="1050" y="665" text-anchor="middle" class="box-title">1. One-time platform bootstrap — create/verify exactly eight tables</text>
+  <text x="1050" y="695" text-anchor="middle" class="box-text">4 configuration tables + 4 runtime/control tables in the selected target platform</text>
+  <text x="1050" y="716" text-anchor="middle" class="small">Idempotent, versioned platform migration • no dynamic DDL inside ingestion jobs</text>
+
+  <path d="M1050 730 L1050 766" class="arrow"/>
+  <rect x="340" y="768" width="1420" height="150" rx="18" class="metadata" filter="url(#shadow)"/>
+  <text x="1050" y="802" text-anchor="middle" class="box-title">2. One-time source onboarding</text>
+  <rect x="400" y="825" width="610" height="68" rx="12" fill="#ffffff" stroke="#15803d" stroke-width="2"/>
+  <text x="705" y="852" text-anchor="middle" class="box-title">cfg_source_system</text>
+  <text x="705" y="877" text-anchor="middle" class="small">Logical producer, owner, domain, activation</text>
+  <rect x="1090" y="825" width="610" height="68" rx="12" fill="#ffffff" stroke="#15803d" stroke-width="2"/>
+  <text x="1395" y="852" text-anchor="middle" class="box-title">cfg_connection</text>
+  <text x="1395" y="877" text-anchor="middle" class="small">JDBC contract and secret references — never secret values</text>
+
+  <!-- Swimlane headers -->
+  <text x="500" y="980" text-anchor="middle" class="section">APPLICATION / DESIGN FLOW</text>
+  <text x="1270" y="980" text-anchor="middle" class="section">TARGET-RESIDENT METADATA</text>
+  <text x="1815" y="980" text-anchor="middle" class="section">BOUNDARY</text>
+  <rect x="70" y="995" width="860" height="2330" rx="20" class="lane"/>
+  <rect x="965" y="995" width="610" height="2330" rx="20" class="lane"/>
+  <rect x="1610" y="995" width="420" height="2330" rx="20" class="lane"/>
+
+  <!-- Row 3 -->
+  <rect x="135" y="1030" width="730" height="82" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="1063" text-anchor="middle" class="box-title">3. BRD ingestion</text>
+  <text x="500" y="1090" text-anchor="middle" class="box-text">Capture business outcomes, entities, measures, constraints and target expectations</text>
+  <rect x="1020" y="1030" width="500" height="82" rx="15" class="control"/>
+  <text x="1270" y="1062" text-anchor="middle" class="box-title">Application artifact storage</text>
+  <text x="1270" y="1088" text-anchor="middle" class="small">BRD is not forced into the eight ingestion tables</text>
+  <rect x="1665" y="1030" width="310" height="82" rx="15" class="common"/>
+  <text x="1820" y="1064" text-anchor="middle" class="box-title">COMMON</text>
+  <text x="1820" y="1090" text-anchor="middle" class="small">Target-independent logic</text>
+
+  <path d="M500 1112 L500 1140" class="arrow"/>
+  <rect x="135" y="1142" width="730" height="82" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="1175" text-anchor="middle" class="box-title">4. Domain context and requirement extraction</text>
+  <text x="500" y="1202" text-anchor="middle" class="box-text">Resolve business terminology, required datasets, SLAs and governance needs</text>
+
+  <path d="M500 1224 L500 1252" class="arrow"/>
+  <rect x="135" y="1254" width="730" height="82" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="1287" text-anchor="middle" class="box-title">5. KPI extraction and business-grain proposal</text>
+  <text x="500" y="1314" text-anchor="middle" class="box-text">Identify measures, dimensions, facts, candidate grain and source entities</text>
+
+  <path d="M500 1336 L500 1364" class="arrow"/>
+  <rect x="135" y="1366" width="730" height="82" rx="15" class="decision" filter="url(#shadow)"/>
+  <text x="500" y="1399" text-anchor="middle" class="box-title">6. KPI / requirement HITL gate</text>
+  <text x="500" y="1426" text-anchor="middle" class="box-text">Approve the business intent before technical metadata is generated</text>
+
+  <path d="M500 1448 L500 1476" class="arrow"/>
+  <rect x="135" y="1478" width="730" height="82" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="1511" text-anchor="middle" class="box-title">7. Database/table nomination</text>
+  <text x="500" y="1538" text-anchor="middle" class="box-text">Select candidate databases, schemas, tables and queries required by the BRD</text>
+
+  <path d="M500 1560 L500 1588" class="arrow"/>
+  <rect x="135" y="1590" width="730" height="104" rx="15" class="source" filter="url(#shadow)"/>
+  <text x="500" y="1623" text-anchor="middle" class="box-title">8. DATABASE-SPECIFIC discovery</text>
+  <text x="500" y="1650" text-anchor="middle" class="box-text">Schemas • tables/views • columns/types • PK/FK • row counts</text>
+  <text x="500" y="1675" text-anchor="middle" class="box-text">Watermark candidates • partition candidates • CDC capabilities</text>
+  <rect x="1665" y="1590" width="310" height="104" rx="15" class="source"/>
+  <text x="1820" y="1631" text-anchor="middle" class="box-title">SOURCE PARTITION</text>
+  <text x="1820" y="1658" text-anchor="middle" class="small">JDBC discovery adapter</text>
+  <text x="1820" y="1680" text-anchor="middle" class="small">Later: file/API adapters</text>
+
+  <path d="M500 1694 L500 1722" class="arrow"/>
+  <rect x="135" y="1724" width="730" height="82" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="1757" text-anchor="middle" class="box-title">9. Canonical source contract</text>
+  <text x="500" y="1784" text-anchor="middle" class="box-text">Normalize JDBC discovery into one source-neutral dataset and schema model</text>
+  <rect x="1665" y="1724" width="310" height="82" rx="15" class="common"/>
+  <text x="1820" y="1758" text-anchor="middle" class="box-title">REJOIN COMMON</text>
+  <text x="1820" y="1784" text-anchor="middle" class="small">One canonical contract</text>
+
+  <path d="M500 1806 L500 1834" class="arrow"/>
+  <rect x="135" y="1836" width="730" height="94" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="1869" text-anchor="middle" class="box-title">10. Profiling and semantic enrichment</text>
+  <text x="500" y="1896" text-anchor="middle" class="box-text">Nulls, uniqueness, patterns, PII, semantic types, key confidence and relationships</text>
+
+  <path d="M500 1930 L500 1958" class="arrow"/>
+  <rect x="135" y="1960" width="730" height="112" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="1993" text-anchor="middle" class="box-title">11. Create DRAFT executable objects</text>
+  <text x="500" y="2020" text-anchor="middle" class="box-text">One independently retryable object per stage and target</text>
+  <text x="500" y="2047" text-anchor="middle" class="small">No draft is executable until validation and atomic activation</text>
+  <rect x="1020" y="1960" width="500" height="112" rx="15" class="metadata"/>
+  <text x="1270" y="1992" text-anchor="middle" class="box-title">WRITE cfg_ingestion_object</text>
+  <text x="1270" y="2020" text-anchor="middle" class="box-text">lifecycle_status = DRAFT</text>
+  <text x="1270" y="2046" text-anchor="middle" class="small">Source contract, target, write mode, validation, dependencies</text>
+  <path d="M865 2016 L1020 2016" class="meta-link"/>
+
+  <path d="M500 2072 L500 2100" class="arrow"/>
+  <g>
+    <rect x="110" y="2102" width="250" height="150" rx="15" class="common"/>
+    <text x="235" y="2135" text-anchor="middle" class="box-title">SOURCE → BRONZE</text>
+    <text x="235" y="2164" text-anchor="middle" class="small">JDBC table/query</text>
+    <text x="235" y="2187" text-anchor="middle" class="small">Bronze target</text>
+    <text x="235" y="2210" text-anchor="middle" class="small">Full/incremental boundary</text>
+    <text x="235" y="2233" text-anchor="middle" class="small">Lineage + schema policy</text>
+    <rect x="375" y="2102" width="250" height="150" rx="15" class="common"/>
+    <text x="500" y="2135" text-anchor="middle" class="box-title">BRONZE → SILVER</text>
+    <text x="500" y="2164" text-anchor="middle" class="small">Business schema</text>
+    <text x="500" y="2187" text-anchor="middle" class="small">Merge/business keys</text>
+    <text x="500" y="2210" text-anchor="middle" class="small">DQ + dedupe</text>
+    <text x="500" y="2233" text-anchor="middle" class="small">MERGE/SCD strategy</text>
+    <rect x="640" y="2102" width="250" height="150" rx="15" class="common"/>
+    <text x="765" y="2135" text-anchor="middle" class="box-title">SILVER → GOLD</text>
+    <text x="765" y="2164" text-anchor="middle" class="small">One fact/dimension</text>
+    <text x="765" y="2187" text-anchor="middle" class="small">Dependencies + grain</text>
+    <text x="765" y="2210" text-anchor="middle" class="small">Joins + aggregates</text>
+    <text x="765" y="2233" text-anchor="middle" class="small">Build order + DQ</text>
+  </g>
+
+  <path d="M500 2252 L500 2280" class="arrow"/>
+  <rect x="135" y="2282" width="730" height="104" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="2315" text-anchor="middle" class="box-title">12. LLM-assisted declarative mapping proposal</text>
+  <text x="500" y="2342" text-anchor="middle" class="box-text">Mappings, casts, business keys, facts/dimensions, joins, aggregates and DQ rules</text>
+  <text x="500" y="2367" text-anchor="middle" class="small">The LLM proposes metadata; it does not activate or execute it</text>
+  <rect x="1020" y="2282" width="500" height="104" rx="15" class="metadata"/>
+  <text x="1270" y="2315" text-anchor="middle" class="box-title">WRITE cfg_mapping</text>
+  <text x="1270" y="2342" text-anchor="middle" class="box-text">mapping_set_version • stage • target • ordinal</text>
+  <text x="1270" y="2367" text-anchor="middle" class="small">Controlled transformation specifications • DRAFT</text>
+  <path d="M865 2334 L1020 2334" class="meta-link"/>
+
+  <path d="M500 2386 L500 2414" class="arrow"/>
+  <rect x="135" y="2416" width="730" height="108" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="2449" text-anchor="middle" class="box-title">13. Deterministic metadata validation</text>
+  <text x="500" y="2476" text-anchor="middle" class="box-text">Relationships • fields/types • merge keys • grain • dependencies • transformations</text>
+  <text x="500" y="2501" text-anchor="middle" class="small">Reject unsafe SQL, incomplete Gold inputs, mixed versions and invalid target names</text>
+  <rect x="1020" y="2416" width="500" height="108" rx="15" class="metadata"/>
+  <text x="1270" y="2450" text-anchor="middle" class="box-title">READ complete DRAFT set</text>
+  <text x="1270" y="2477" text-anchor="middle" class="box-text">cfg_source_system + cfg_connection</text>
+  <text x="1270" y="2502" text-anchor="middle" class="box-text">cfg_ingestion_object + cfg_mapping</text>
+  <path d="M1020 2470 L865 2470" class="meta-link"/>
+
+  <path d="M500 2524 L500 2552" class="arrow"/>
+  <polygon points="500,2554 790,2620 500,2686 210,2620" class="decision" filter="url(#shadow)"/>
+  <text x="500" y="2609" text-anchor="middle" class="box-title">14. Metadata HITL approval</text>
+  <text x="500" y="2637" text-anchor="middle" class="box-text">Approve complete version?</text>
+  <path d="M210 2620 L90 2620 L90 2334 L135 2334" class="arrow"/>
+  <text x="112" y="2598" class="tiny">REJECT / EDIT</text>
+
+  <path d="M500 2686 L500 2714" class="arrow"/>
+  <rect x="135" y="2716" width="730" height="104" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="2749" text-anchor="middle" class="box-title">15. Atomic configuration activation</text>
+  <text x="500" y="2776" text-anchor="middle" class="box-text">New version ACTIVE • previous version SUPERSEDED • no partial mapping set</text>
+  <text x="500" y="2801" text-anchor="middle" class="small">Calculate configuration, mapping-set and complete snapshot hashes</text>
+  <rect x="1020" y="2716" width="500" height="104" rx="15" class="metadata"/>
+  <text x="1270" y="2748" text-anchor="middle" class="box-title">UPDATE configuration tables</text>
+  <text x="1270" y="2775" text-anchor="middle" class="box-text">Activate one coherent version</text>
+  <text x="1270" y="2800" text-anchor="middle" class="small">Rejected version never replaces current active version</text>
+  <path d="M865 2768 L1020 2768" class="meta-link"/>
+
+  <path d="M500 2820 L500 2848" class="arrow"/>
+  <rect x="135" y="2850" width="730" height="94" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="2883" text-anchor="middle" class="box-title">16. Initialize incremental state if required</text>
+  <text x="500" y="2910" text-anchor="middle" class="box-text">Only INCREMENTAL, CDC or other stateful Source→Bronze objects</text>
+  <rect x="1020" y="2850" width="500" height="94" rx="15" class="metadata"/>
+  <text x="1270" y="2883" text-anchor="middle" class="box-title">INITIALIZE ctl_watermark</text>
+  <text x="1270" y="2910" text-anchor="middle" class="small">Committed initial value • version 0 • checkpoint scope</text>
+  <path d="M865 2897 L1020 2897" class="meta-link"/>
+
+  <path d="M500 2944 L500 2972" class="arrow"/>
+  <rect x="135" y="2974" width="730" height="104" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="3007" text-anchor="middle" class="box-title">17. Build canonical execution plan</text>
+  <text x="500" y="3034" text-anchor="middle" class="box-text">Platform-neutral source, mappings, targets, validation and Gold dependency plan</text>
+  <text x="500" y="3059" text-anchor="middle" class="small">This is the final fully common logical artifact</text>
+  <rect x="1020" y="2974" width="500" height="104" rx="15" class="metadata"/>
+  <text x="1270" y="3007" text-anchor="middle" class="box-title">READ ACTIVE snapshot</text>
+  <text x="1270" y="3034" text-anchor="middle" class="box-text">All four configuration tables</text>
+  <text x="1270" y="3059" text-anchor="middle" class="small">No target-specific syntax in the canonical plan</text>
+  <path d="M1020 3026 L865 3026" class="meta-link"/>
+
+  <!-- Target generation branch -->
+  <path d="M500 3078 L500 3110" class="arrow"/>
+  <rect x="1665" y="3108" width="310" height="118" rx="15" class="target"/>
+  <text x="1820" y="3145" text-anchor="middle" class="box-title">TARGET PARTITION</text>
+  <text x="1820" y="3172" text-anchor="middle" class="small">Compilation differs</text>
+  <text x="1820" y="3195" text-anchor="middle" class="small">Business contract remains</text>
+  <text x="1820" y="3218" text-anchor="middle" class="small">the same</text>
+
+  <rect x="90" y="3112" width="250" height="114" rx="15" class="target" filter="url(#shadow)"/>
+  <text x="215" y="3145" text-anchor="middle" class="box-title">Databricks compiler</text>
+  <text x="215" y="3173" text-anchor="middle" class="small">Spark SQL / PySpark</text>
+  <text x="215" y="3196" text-anchor="middle" class="small">Delta targets</text>
+  <rect x="375" y="3112" width="250" height="114" rx="15" class="target" filter="url(#shadow)"/>
+  <text x="500" y="3145" text-anchor="middle" class="box-title">Snowflake compiler</text>
+  <text x="500" y="3173" text-anchor="middle" class="small">Snowflake SQL</text>
+  <text x="500" y="3196" text-anchor="middle" class="small">Optional dbt models</text>
+  <rect x="660" y="3112" width="250" height="114" rx="15" class="target" filter="url(#shadow)"/>
+  <text x="785" y="3145" text-anchor="middle" class="box-title">Fabric compiler</text>
+  <text x="785" y="3173" text-anchor="middle" class="small">Spark / Warehouse SQL</text>
+  <text x="785" y="3196" text-anchor="middle" class="small">Lakehouse targets</text>
+
+  <path d="M215 3226 L215 3260 L500 3260 L500 3280" class="arrow"/>
+  <path d="M500 3226 L500 3280" class="arrow"/>
+  <path d="M785 3226 L785 3260 L500 3260 L500 3280" class="arrow"/>
+
+  <rect x="135" y="3282" width="730" height="104" rx="15" class="common" filter="url(#shadow)"/>
+  <text x="500" y="3315" text-anchor="middle" class="box-title">18. Script/artifact validation and registration</text>
+  <text x="500" y="3342" text-anchor="middle" class="box-text">Syntax • identifiers • key coverage • dependency completeness • secret scan</text>
+  <text x="500" y="3367" text-anchor="middle" class="small">Persist artifact URI, hash, generator version and metadata snapshot hash</text>
+  <rect x="1020" y="3282" width="500" height="104" rx="15" class="metadata"/>
+  <text x="1270" y="3315" text-anchor="middle" class="box-title">UPDATE cfg_ingestion_object</text>
+  <text x="1270" y="3342" text-anchor="middle" class="box-text">execution_spec_json / artifact reference</text>
+  <text x="1270" y="3367" text-anchor="middle" class="small">Do not store large scripts or credentials in metadata</text>
+  <path d="M865 3334 L1020 3334" class="meta-link"/>
+
+  <!-- Runtime boundary -->
+  <line x1="70" y1="3420" x2="2030" y2="3420" class="boundary"/>
+  <rect x="300" y="3440" width="1500" height="82" rx="16" class="control"/>
+  <text x="1050" y="3472" text-anchor="middle" class="box-title">RUNTIME HANDOFF — intentionally outside this diagram</text>
+  <text x="1050" y="3499" text-anchor="middle" class="box-text">ctl_ingestion_queue, ctl_run and ctl_error_log begin here; ctl_watermark is updated only after successful target commits</text>
+
+  <text x="1050" y="3542" text-anchor="middle" class="small">Common logical workflow • target-resident metadata from the first operation • database-specific discovery in the middle • target-specific compilation at the end</text>
+</svg>
