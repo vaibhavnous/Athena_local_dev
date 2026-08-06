@@ -42,8 +42,11 @@ SCORE_LOOKUP_SWEEP = 0.70
 REASON_DUAL_MATCH = "Dual Match (Keyword + Semantic)"
 REASON_LEXICAL_ONLY = "Exact Schema Keyword Match"
 REASON_SEMANTIC_ONLY = "Semantic Vector Match"
-REASON_FK_RESOLVED = "Supporting table connected by a foreign key to a nominated KPI source"
-REASON_LOOKUP_SWEEP = "Small domain lookup table related to the nominated KPI scope"
+REASON_FK_RESOLVED = "FK Resolution (related to nominated table)"
+REASON_LOOKUP_SWEEP = "Lookup Table Sweep (dim/ref/lkp)"
+
+DISPLAY_REASON_FK_RESOLVED = "Supporting table connected by a foreign key to a nominated KPI source"
+DISPLAY_REASON_LOOKUP_SWEEP = "Small domain lookup table related to the nominated KPI scope"
 
 LOOKUP_PREFIXES = ("dim_", "ref_", "lkp_", "lookup_", "code_", "type_")
 LOOKUP_MAX_ROWS = 10_000
@@ -60,9 +63,11 @@ SYNONYMS: Dict[str, List[str]] = {
 }
 
 GENERIC_KPI_WORDS = {
-    "all", "amount", "and", "average", "avg", "based", "breakdown", "by", "count",
-    "current", "daily", "for", "frequency", "from", "metric", "monthly", "number", "of", "overall",
-    "per", "percentage", "rate", "ratio", "sum", "the", "total", "value", "weekly", "yearly",
+    "all", "amount", "and", "availability", "average", "avg", "based", "breakdown", "by",
+    "consistency", "count", "current", "daily", "data", "for", "frequency", "from",
+    "identifier", "ingestion", "latency", "metric", "monthly", "number", "of", "overall",
+    "per", "percentage", "rate", "ratio", "record", "success", "sum", "the", "time",
+    "total", "traceability", "transaction", "value", "weekly", "yearly",
 }
 
 KEYWORD_EXPANSION_SYSTEM_MSG = (
@@ -85,25 +90,44 @@ def _extract_kpi_names(certified_kpis: List[Any]) -> List[str]:
 
 
 def _build_keywords(kpi_names: List[str]) -> List[str]:
-    keywords: Set[str] = set()
+    all_keywords: Set[str] = set()
     for name in kpi_names:
         for token in re.split(r"[^a-zA-Z0-9_]", name):
             token = token.strip().lower()
-            if len(token) >= 3 and token not in GENERIC_KPI_WORDS:
-                keywords.add(token)
-    return sorted(keywords)
+            if len(token) >= 3:
+                all_keywords.add(token)
+    keywords = all_keywords - GENERIC_KPI_WORDS
+    # ponytail: retain lexical discovery for generic-only KPI names when semantic search is unavailable.
+    return sorted(keywords or all_keywords)
 
 
-def _matched_kpi_names(kpi_names: List[str], matched_terms: List[str]) -> List[str]:
-    matched = {str(term or "").casefold() for term in matched_terms if str(term or "").strip()}
+def _token_variants(tokens: Set[str]) -> Set[str]:
+    variants = set(tokens)
+    variants.update(token[:-1] for token in tokens if token.endswith("s") and len(token) > 3)
+    return variants
+
+
+def _matched_kpi_names(item: Dict[str, Any], kpi_names: List[str]) -> List[str]:
+    evidence_tokens: Set[str] = set(_tokenize_identifier(str(item.get("table_name") or "")))
+    for column_name in item.get("matched_columns") or []:
+        evidence_tokens.update(_tokenize_identifier(str(column_name or "")))
+    evidence_tokens = _token_variants(evidence_tokens)
+
     return sorted(
         {
             kpi_name
             for kpi_name in kpi_names
-            if matched.intersection(_build_keywords([kpi_name]))
+            if evidence_tokens.intersection(_token_variants(set(_build_keywords([kpi_name]))))
         },
         key=str.casefold,
     )
+
+
+def _bounded_score(value: Any) -> float:
+    try:
+        return min(1.0, max(0.0, float(value or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _relevance_band(score: float) -> str:
@@ -159,15 +183,23 @@ def _load_keyword_expansion_cache(cache_fingerprint: str) -> Dict[str, Set[str]]
             or db_config.get("azure_sql", {}).get("schema_name")
             or "dbo"
         )
-        storage_fingerprint = artifact_storage_fingerprint(cache_fingerprint, KEYWORD_EXPANSION_ARTIFACT_TYPE)
+        storage_fingerprint = artifact_storage_fingerprint(
+            cache_fingerprint,
+            KEYWORD_EXPANSION_ARTIFACT_TYPE,
+            run_id=cache_fingerprint,
+        )
+        legacy_storage_fingerprint = artifact_storage_fingerprint(
+            cache_fingerprint,
+            KEYWORD_EXPANSION_ARTIFACT_TYPE,
+        )
         cursor.execute(
             f"""
             SELECT TOP 1 payload
             FROM [{schema}].[ai_store]
-            WHERE fingerprint = ? AND artifact_type = ?
+            WHERE fingerprint IN (?, ?) AND artifact_type = ?
             ORDER BY stored_at DESC
             """,
-            (storage_fingerprint, KEYWORD_EXPANSION_ARTIFACT_TYPE),
+            (storage_fingerprint, legacy_storage_fingerprint, KEYWORD_EXPANSION_ARTIFACT_TYPE),
         )
         row = cursor.fetchone()
         if not row or not row[0]:
@@ -571,7 +603,10 @@ def _semantic_search(combined_kpi_string: str, source_databases: List[str]) -> L
                 "matched_columns": [],
             },
         )
-        entry["semantic_score"] = max(entry["semantic_score"], float(getattr(match, "score", 0.0) or 0.0))
+        entry["semantic_score"] = max(
+            entry["semantic_score"],
+            _bounded_score(getattr(match, "score", 0.0)),
+        )
         if column_name:
             entry["matched_columns"].append(column_name)
 
@@ -667,8 +702,7 @@ def _fuse_results(
         if coverage < 0.3 and sem < 0.4:
             final_score *= 0.7
 
-        # This is an absolute evidence score, not a probability. Do not normalize
-        # the top result to 1.0; that made every review look artificially certain.
+        # Absolute evidence score: never promote the best candidate to 1.0 merely because it ranked first.
         row["confidence_score"] = round(min(0.99, max(0.0, final_score)), 4)
         row["relevance_band"] = _relevance_band(row["confidence_score"])
 
@@ -821,18 +855,26 @@ def _lookup_table_sweep(
 
 def _prepare_review_evidence(item: Dict[str, Any], kpi_names: List[str]) -> Dict[str, Any]:
     review_item = dict(item)
-    matched_terms = sorted({str(value) for value in item.get("matched_keywords", []) if str(value).strip()})
-    matched_kpis = _matched_kpi_names(kpi_names, matched_terms)
-    matched_columns = sorted({str(value) for value in item.get("matched_columns", []) if str(value).strip()})
-    method = str(item.get("nomination_reason") or "")
+    matched_terms = sorted(
+        {str(value) for value in item.get("matched_keywords", []) if str(value).strip()},
+        key=str.casefold,
+    )
+    matched_kpis = _matched_kpi_names(item, kpi_names)
+    matched_columns = sorted(
+        {str(value) for value in item.get("matched_columns", []) if str(value).strip()},
+        key=str.casefold,
+    )
+    method = str(item.get("nomination_method") or item.get("nomination_reason") or "")
 
+    review_item["confidence_score"] = round(_bounded_score(item.get("confidence_score")), 4)
+    review_item["coverage_ratio"] = round(_bounded_score(item.get("coverage_ratio")), 4)
+    review_item["lexical_score"] = round(_bounded_score(item.get("lexical_score")), 4)
+    review_item["semantic_score"] = round(_bounded_score(item.get("semantic_score")), 4)
     review_item["nomination_method"] = method
     review_item["matched_business_terms"] = matched_terms
-    # The existing Table Review labels this field "Matching KPIs", so send KPI
-    # names here rather than internal search tokens such as claim or amount.
     review_item["matched_keywords"] = matched_kpis
     review_item["matched_columns"] = matched_columns
-    review_item["relevance_band"] = _relevance_band(float(item.get("confidence_score") or 0.0))
+    review_item["relevance_band"] = _relevance_band(review_item["confidence_score"])
 
     if method in {REASON_DUAL_MATCH, REASON_LEXICAL_ONLY, REASON_SEMANTIC_ONLY}:
         kpi_text = ", ".join(matched_kpis) if matched_kpis else "the certified KPI set"
@@ -848,6 +890,10 @@ def _prepare_review_evidence(item: Dict[str, Any], kpi_names: List[str]) -> Dict
             if evidence
             else f"Relevant to {kpi_text} based on semantic schema evidence"
         )
+    elif method == REASON_FK_RESOLVED:
+        review_item["nomination_reason"] = DISPLAY_REASON_FK_RESOLVED
+    elif method == REASON_LOOKUP_SWEEP:
+        review_item["nomination_reason"] = DISPLAY_REASON_LOOKUP_SWEEP
 
     return review_item
 
@@ -913,11 +959,16 @@ def build_table_nomination_node() -> Callable[[Stage01State], Stage01State]:
         for row in _lookup_table_sweep(source_databases, {item["table_name"] for item in fused.values()}, domain_tokens):
             fused[f"{row['database_name']}.{row['schema_name']}.{row['table_name']}"] = row
 
-        review_nominations = [
-            _prepare_review_evidence(item, kpi_names)
-            for item in fused.values()
-        ]
-        all_nominations = sorted(review_nominations, key=lambda item: item["confidence_score"], reverse=True)
+        review_nominations = [_prepare_review_evidence(item, kpi_names) for item in fused.values()]
+        all_nominations = sorted(
+            review_nominations,
+            key=lambda item: (
+                -item["confidence_score"],
+                str(item.get("database_name") or "").casefold(),
+                str(item.get("schema_name") or "").casefold(),
+                str(item.get("table_name") or "").casefold(),
+            ),
+        )
         validated = NominationSchema(nominations=[NominationItem(**nom) for nom in all_nominations])
 
         payload = {

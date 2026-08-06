@@ -61,8 +61,8 @@ class NominationItem(BaseModel):
     coverage_ratio: float = Field(default=0.0, ge=0.0, le=1.0, description="Ratio of keywords covered by this table")
     lexical_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Absolute lexical evidence score")
     semantic_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Absolute semantic evidence score")
-    relevance_band: str = Field(default="LOW", description="Human-readable absolute relevance band")
-    nomination_method: str = Field(default="", description="Nomination strategy used before evidence was summarized")
+    relevance_band: str = Field(default="LOW", pattern=r"^(HIGH|MEDIUM|LOW)$", description="Absolute relevance band")
+    nomination_method: str = Field(default="", description="Stable nomination strategy used before evidence was summarized")
 
     @field_validator("confidence_score")
     @classmethod

@@ -19,6 +19,8 @@ class PipelineRunRequest(BaseModel):
     maxKpis: Optional[int] = None
     devMode: Optional[bool] = None
     use_domain_kb: Optional[bool] = False
+    domain_profile: Optional[str] = Field(default=None, max_length=80)
+    knowledge_base_id: Optional[str] = Field(default=None, max_length=80)
     database_name: Optional[str] = None
     database_type: Optional[str] = None
     target_warehouse: Optional[str] = "databricks"
@@ -42,6 +44,16 @@ class PipelineRunRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_dbt_target(self) -> "PipelineRunRequest":
+        if self.use_domain_kb:
+            from utilis.domain_kb import get_domain_kb_config
+
+            kb_config = get_domain_kb_config(
+                knowledge_base_id=self.knowledge_base_id,
+                domain_profile=self.domain_profile,
+            )
+            if self.knowledge_base_id:
+                self.knowledge_base_id = kb_config.knowledge_base_id
+            self.domain_profile = self.domain_profile or kb_config.domain_profile
         if self.execution_engine != "dbt":
             self.dbt_deployment_mode = "generate_only"
             self.force_dbt_deploy = False
@@ -84,6 +96,16 @@ class ProjectRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_dbt_project_target(self) -> "ProjectRequest":
+        if self.use_domain_knowledge_base:
+            from utilis.domain_kb import get_domain_kb_config
+
+            kb_config = get_domain_kb_config(
+                knowledge_base_id=self.knowledge_base_id,
+                domain_profile=self.domain_profile,
+            )
+            if self.knowledge_base_id:
+                self.knowledge_base_id = kb_config.knowledge_base_id
+            self.domain_profile = self.domain_profile or kb_config.domain_profile
         if self.execution_engine != "dbt":
             self.dbt_deployment_mode = "generate_only"
             self.force_dbt_deploy = False
@@ -117,9 +139,21 @@ class Gate2DecisionPayload(BaseModel):
     approved_tables: List[str] = Field(default_factory=list)
 
 
+class Gate3ItemDecision(BaseModel):
+    item_id: str = Field(..., min_length=1, max_length=512)
+    decision: Literal["APPROVED", "REJECTED"]
+    rejection_reason: Optional[str] = Field(default=None, max_length=2000)
+
+
 class Gate3DecisionPayload(BaseModel):
     approve: bool = True
     enriched_metadata: Optional[Dict[str, Any]] = None
+    decisions: List[Gate3ItemDecision] = Field(default_factory=list)
+
+
+class Gate3DraftPayload(BaseModel):
+    edited_content: Dict[str, Any]
+    revision: Optional[str] = Field(default=None, min_length=64, max_length=64)
 
 
 class GenericGateDecisionPayload(BaseModel):

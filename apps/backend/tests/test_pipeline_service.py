@@ -459,6 +459,19 @@ def test_gate2_scope_keeps_lookup_and_fk_dimension_tables():
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "claim_information", "nomination_reason": "Dual Match (Keyword + Semantic)"},
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "dim_policy", "nomination_reason": "Lookup Table Sweep (dim/ref/lkp)"},
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy_type", "nomination_reason": "FK Resolution (related to nominated table)"},
+        {
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table_name": "policy_history",
+            "nomination_method": "FK Resolution (related to nominated table)",
+            "nomination_reason": "Supporting table connected by a foreign key to a nominated KPI source",
+        },
+        {
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table_name": "policy_status",
+            "nomination_reason": "Supporting table connected by a foreign key to a nominated KPI source",
+        },
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "audit_log", "nomination_reason": "Lookup Table Sweep (dim/ref/lkp)"},
     ]
 
@@ -468,7 +481,56 @@ def test_gate2_scope_keeps_lookup_and_fk_dimension_tables():
         "claim_information",
         "dim_policy",
         "policy_type",
+        "policy_history",
+        "policy_status",
     ]
+
+
+def test_gate2_submission_recovers_nominations_from_run_checkpoint(monkeypatch):
+    nominated = [{
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claim_information",
+        "nomination_reason": "Dual Match (Keyword + Semantic)",
+    }]
+    captured = {}
+    monkeypatch.setattr(pipeline_runtime, "fetch_json_artifact", lambda *_: {})
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "load_checkpoint_state",
+        lambda _: {
+            "run_id": "run-retry-gate2",
+            "status": "FAILED",
+            "error": "stale artifact failure",
+            "failed_background_stage": "gate2",
+            "nominated_tables": nominated,
+        },
+    )
+
+    def certify(state):
+        captured["certification_input"] = state
+        return {**state, "status": "GATE2_COMPLETE"}
+
+    def continue_pipeline(run_id, *, start_stage_key, state):
+        captured["continued"] = (run_id, start_stage_key, state)
+        return state
+
+    monkeypatch.setattr("nodes.hitl.hitl_table_review_node", certify)
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda run_id, state: captured.update(saved=(run_id, state)))
+    monkeypatch.setattr(pipeline_runtime, "continue_database_pipeline", continue_pipeline)
+
+    result = pipeline_runtime.submit_gate2_review(
+        "run-retry-gate2",
+        ["insurance.dbo.claim_information"],
+    )
+
+    certification_input = captured["certification_input"]
+    assert certification_input["certified_tables"] == nominated
+    assert certification_input["human_table_decision"] == "COMPLETED"
+    assert "error" not in certification_input
+    assert "failed_background_stage" not in certification_input
+    assert captured["continued"][:2] == ("run-retry-gate2", "discovery")
+    assert result["status"] == "GATE2_COMPLETE"
 
 
 def test_failed_kpi_artifact_does_not_open_empty_gate1():

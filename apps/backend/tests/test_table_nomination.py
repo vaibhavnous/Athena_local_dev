@@ -1,10 +1,4 @@
 from nodes import table_nomination
-from nodes.table_nomination import (
-    REASON_DUAL_MATCH,
-    _build_keywords,
-    _fuse_results,
-    _prepare_review_evidence,
-)
 from schema import NominationItem
 
 
@@ -40,8 +34,10 @@ def test_fusion_merges_case_only_table_name_variants():
     assert nomination["semantic_score"] == 0.9
     assert nomination["nomination_reason"] == table_nomination.REASON_DUAL_MATCH
     assert nomination["matched_columns"] == ["COVER_NAME", "POLICY_NUMBER"]
+
+
 def test_nomination_keywords_exclude_generic_kpi_language():
-    keywords = _build_keywords([
+    keywords = table_nomination._build_keywords([
         "Average Claim Payment Amount",
         "Monthly Policy Count by Customer",
         "Loss Ratio Percentage",
@@ -51,6 +47,14 @@ def test_nomination_keywords_exclude_generic_kpi_language():
     assert not {
         "average", "amount", "monthly", "count", "ratio", "percentage", "by",
     }.intersection(keywords)
+
+
+def test_nomination_keywords_preserve_generic_only_lexical_fallback():
+    assert table_nomination._build_keywords(["Monthly Average Count"]) == [
+        "average",
+        "count",
+        "monthly",
+    ]
 
 
 def test_fusion_uses_absolute_relevance_instead_of_forcing_top_result_to_one():
@@ -82,37 +86,121 @@ def test_fusion_uses_absolute_relevance_instead_of_forcing_top_result_to_one():
         "matched_columns": ["paid_amount"],
     }]
 
-    fused = _fuse_results(lexical, semantic, ["insurance"])
+    fused = table_nomination._fuse_results(lexical, semantic, ["insurance"])
 
     best = fused["insurance.dbo.claim_payment"]
     assert 0.0 < best["confidence_score"] < 1.0
-    assert best["confidence_score"] != 1.0
     assert best["relevance_band"] == "HIGH"
     assert best["lexical_score"] == 0.9
     assert best["semantic_score"] == 0.85
 
 
-def test_review_payload_shows_kpi_names_and_preserves_concrete_evidence():
-    evidence = _prepare_review_evidence(
-        {
-            "database_name": "insurance",
-            "schema_name": "dbo",
-            "table_name": "claim_payment",
-            "confidence_score": 0.82,
-            "coverage_ratio": 0.7,
-            "lexical_score": 0.9,
-            "semantic_score": 0.8,
-            "matched_keywords": ["claim", "payment"],
-            "matched_columns": ["claim_id", "paid_amount"],
-            "nomination_reason": REASON_DUAL_MATCH,
-        },
-        ["Average Claim Payment Amount", "Active Policy Count"],
-    )
+def test_review_payload_is_deterministic_and_preserves_concrete_evidence():
+    raw = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claim_payment",
+        "confidence_score": 0.82,
+        "coverage_ratio": 0.7,
+        "lexical_score": 0.9,
+        "semantic_score": 1.2,
+        "matched_keywords": ["payment", "claim", "claim"],
+        "matched_columns": ["paid_amount", "claim_id", "paid_amount"],
+        "nomination_reason": table_nomination.REASON_DUAL_MATCH,
+    }
+    kpis = ["Average Claim Payment Amount", "Active Policy Count"]
+
+    evidence = table_nomination._prepare_review_evidence(raw, kpis)
     validated = NominationItem(**evidence)
 
+    assert evidence == table_nomination._prepare_review_evidence(raw, kpis)
     assert validated.matched_keywords == ["Average Claim Payment Amount"]
     assert validated.matched_business_terms == ["claim", "payment"]
     assert validated.matched_columns == ["claim_id", "paid_amount"]
+    assert validated.semantic_score == 1.0
     assert "Average Claim Payment Amount" in validated.nomination_reason
     assert "paid_amount" in validated.nomination_reason
-    assert validated.nomination_method == REASON_DUAL_MATCH
+    assert validated.nomination_method == table_nomination.REASON_DUAL_MATCH
+
+
+def test_review_payload_matches_kpis_from_table_specific_schema_evidence():
+    raw = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claim_loss_coverage",
+        "confidence_score": 0.732,
+        "coverage_ratio": 0.5,
+        "lexical_score": 0.8,
+        "semantic_score": 0.7,
+        "matched_keywords": ["claims", "consistency", "estimation", "identifier", "policy"],
+        "matched_columns": [
+            "CaseID",
+            "ClaimID",
+            "ClaimLossCoverageName",
+            "ClaimNaturesOfLossID",
+            "ClaimNaturesOfLossName",
+        ],
+        "nomination_reason": table_nomination.REASON_DUAL_MATCH,
+    }
+    kpis = [
+        "Claims Data Ingestion Rate",
+        "Claims Record Traceability Percentage",
+        "Policy Data Ingestion Latency",
+        "Policy Data Traceability Percentage",
+        "Premium Transaction Data Ingestion Success Rate",
+        "Premium Transaction Identifier Consistency Rate",
+        "Regulatory Data Extraction Success Rate",
+        "Reserve Estimation Data Availability Time",
+        "Reserve Estimation Record Identifier Consistency Rate",
+    ]
+
+    evidence = table_nomination._prepare_review_evidence(raw, kpis)
+
+    assert evidence["matched_keywords"] == [
+        "Claims Data Ingestion Rate",
+        "Claims Record Traceability Percentage",
+    ]
+    assert evidence["matched_business_terms"] == [
+        "claims",
+        "consistency",
+        "estimation",
+        "identifier",
+        "policy",
+    ]
+
+
+def test_supporting_table_payload_keeps_legacy_method_and_new_display_reason():
+    evidence = table_nomination._prepare_review_evidence(
+        {
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table_name": "policy_type",
+            "confidence_score": table_nomination.SCORE_FK_RESOLVED,
+            "nomination_reason": table_nomination.REASON_FK_RESOLVED,
+            "matched_keywords": [],
+        },
+        ["Active Policy Count"],
+    )
+
+    assert evidence["nomination_method"] == table_nomination.REASON_FK_RESOLVED
+    assert evidence["nomination_reason"] == table_nomination.DISPLAY_REASON_FK_RESOLVED
+    assert evidence["relevance_band"] == "HIGH"
+
+
+def test_legacy_nomination_payload_remains_valid():
+    legacy = NominationItem(
+        database_name="insurance",
+        schema_name="dbo",
+        table_name="claims",
+        confidence_score=0.9,
+        coverage_ratio=0.5,
+        matched_keywords=["claim"],
+        nomination_reason=table_nomination.REASON_LEXICAL_ONLY,
+    )
+
+    assert legacy.matched_business_terms == []
+    assert legacy.matched_columns == []
+    assert legacy.lexical_score == 0.0
+    assert legacy.semantic_score == 0.0
+    assert legacy.relevance_band == "LOW"
+    assert legacy.nomination_method == ""

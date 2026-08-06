@@ -39,6 +39,7 @@ def _fetch_latest_payload(fingerprint: str, artifact_types: Tuple[str, ...]) -> 
         for artifact_type in artifact_types:
             params.extend([artifact_storage_fingerprint(fingerprint, artifact_type), artifact_type])
         params.extend([fingerprint, *artifact_types])
+        params.extend([fingerprint, *artifact_types])
 
         cursor.execute(
             f"""
@@ -46,6 +47,7 @@ def _fetch_latest_payload(fingerprint: str, artifact_types: Tuple[str, ...]) -> 
             FROM [{db_schema}].[ai_store]
             WHERE ({pair_conditions})
                OR (fingerprint = ? AND artifact_type IN ({legacy_placeholders}))
+               OR (JSON_VALUE(payload, '$.fingerprint') = ? AND artifact_type IN ({legacy_placeholders}))
             ORDER BY stored_at DESC
             """,
             tuple(params),
@@ -119,12 +121,13 @@ def _fetch_rejected_kpis(fingerprint: str, limit: int = 10) -> List[str]:
             f"""
             SELECT TOP (?) payload
             FROM [{db_schema}].[ai_store]
-            WHERE fingerprint NOT IN (?, ?)
+            WHERE COALESCE(JSON_VALUE(payload, '$.fingerprint'), '') <> ?
+              AND fingerprint NOT IN (?, ?)
               AND artifact_type = 'KPIS'
               AND (faithfulness_status = 'FAILED' OR cost_usd = 0)
             ORDER BY stored_at DESC
             """,
-            (limit, fingerprint, artifact_storage_fingerprint(fingerprint, "KPIS")),
+            (limit, fingerprint, fingerprint, artifact_storage_fingerprint(fingerprint, "KPIS")),
         )
         for row in cursor.fetchall():
             payload = json.loads(row[0])

@@ -91,9 +91,14 @@ def _get_pyodbc():
         ) from exc
 
 
-def artifact_storage_fingerprint(fingerprint: str, artifact_type: str) -> str:
-    """Return the physical ai_store PK for one logical BRD artifact."""
-    raw = f"{fingerprint}:{artifact_type}"
+def artifact_storage_fingerprint(
+    fingerprint: str,
+    artifact_type: str,
+    *,
+    run_id: Optional[str] = None,
+) -> str:
+    """Return the physical ai_store key, optionally isolated to one pipeline run."""
+    raw = f"{run_id}:{fingerprint}:{artifact_type}" if run_id else f"{fingerprint}:{artifact_type}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -538,30 +543,26 @@ def ai_store_db_writer(
         now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
         # Extract fingerprint from payload if not provided explicitly.
-        # Identity is fingerprint + artifact_type so one BRD can safely store
-        # requirements, KPIs, nominations, metadata, profiles, etc. separately.
+        # The logical fingerprint supports lineage/cache lookup. Physical ownership
+        # is run-scoped so concurrent runs of the same input cannot steal artifacts.
         base_fingerprint = fingerprint or payload.get("fingerprint") or run_id
-        storage_fingerprint = artifact_storage_fingerprint(base_fingerprint, artifact_type)
+        storage_fingerprint = artifact_storage_fingerprint(
+            base_fingerprint,
+            artifact_type,
+            run_id=run_id,
+        )
         payload.setdefault("fingerprint", base_fingerprint)
         payload.setdefault("storage_fingerprint", f"{base_fingerprint}:{artifact_type}")
         cost_usd = payload.get("cost_usd")
 
+        serialized_payload = json.dumps(payload)
         cursor.execute(
             f"""
-            SELECT COUNT(1)
-            FROM [{schema}].[ai_store]
-            WHERE fingerprint = ?
-            """,
-            (storage_fingerprint,),
-        )
-        record_exists = cursor.fetchone()[0] > 0
-
-        if record_exists:
-            cursor.execute(
-                f"""
-                UPDATE [{schema}].[ai_store]
-                SET
-                    run_id = ?,
+            MERGE [{schema}].[ai_store] WITH (HOLDLOCK) AS target
+            USING (VALUES (?)) AS source (fingerprint)
+            ON target.fingerprint = source.fingerprint
+            WHEN MATCHED THEN
+                UPDATE SET
                     stage = ?,
                     artifact_type = ?,
                     payload = ?,
@@ -575,49 +576,42 @@ def ai_store_db_writer(
                     output_tokens = ?,
                     cost_usd = ?,
                     stored_at = ?
-                WHERE fingerprint = ?
-                """,
-                run_id,
-                stage,
-                artifact_type,
-                json.dumps(payload),
-                schema_version,
-                prompt_version,
-                faithfulness_status,
-                faithfulness_warn_count,
-                retry_count,
-                token_count,
-                input_tokens,
-                output_tokens,
-                cost_usd,
-                now,
-                storage_fingerprint,
-            )
-        else:
-            cursor.execute(
-                f"""
-                INSERT INTO [{schema}].[ai_store]
-                (run_id, fingerprint, stage, artifact_type, payload, schema_version, prompt_version,
-                 faithfulness_status, faithfulness_warn_count, retry_count, token_count, input_tokens,
-                 output_tokens, cost_usd, stored_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                run_id,
-                storage_fingerprint,
-                stage,
-                artifact_type,
-                json.dumps(payload),
-                schema_version,
-                prompt_version,
-                faithfulness_status,
-                faithfulness_warn_count,
-                retry_count,
-                token_count,
-                input_tokens,
-                output_tokens,
-                cost_usd,
-                now,
-            )
+            WHEN NOT MATCHED THEN
+                INSERT (run_id, fingerprint, stage, artifact_type, payload, schema_version, prompt_version,
+                        faithfulness_status, faithfulness_warn_count, retry_count, token_count, input_tokens,
+                        output_tokens, cost_usd, stored_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            storage_fingerprint,
+            stage,
+            artifact_type,
+            serialized_payload,
+            schema_version,
+            prompt_version,
+            faithfulness_status,
+            faithfulness_warn_count,
+            retry_count,
+            token_count,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            now,
+            run_id,
+            storage_fingerprint,
+            stage,
+            artifact_type,
+            serialized_payload,
+            schema_version,
+            prompt_version,
+            faithfulness_status,
+            faithfulness_warn_count,
+            retry_count,
+            token_count,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            now,
+        )
 
         conn.commit()
 
@@ -690,6 +684,153 @@ def insert_hitl_queue_item(run_id: str, kpi: Dict[str, Any], gate_number: int = 
     except Exception:
         conn.rollback()
         logger.exception("HITL queue item insert failed for run_id=%s", run_id)
+        raise
+    finally:
+        conn.close()
+
+
+def ensure_hitl_queue_items(run_id: str, items: Iterable[Dict[str, Any]], gate_number: int) -> None:
+    """Insert missing, stably identified review items without overwriting reviewer work."""
+    items = list(items)
+    if not items:
+        return
+
+    db_conf = config["azure_sql"]
+    schema = db_conf["pipeline_schema"]
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT item_id
+            FROM [{schema}].[hitl_review_queue] WITH (UPDLOCK, HOLDLOCK)
+            WHERE run_id = ? AND gate_number = ?
+            """,
+            run_id,
+            gate_number,
+        )
+        existing_ids = {str(row.item_id) for row in cursor.fetchall()}
+        for item in items:
+            item_id = str(item.get("item_id") or "").strip()
+            if not item_id or item_id in existing_ids:
+                continue
+            cursor.execute(
+                f"""
+                INSERT INTO [{schema}].[hitl_review_queue]
+                (item_id, run_id, gate_number, gate_status, original_content, queued_at)
+                VALUES (?, ?, ?, 'PENDING', ?, GETUTCDATE())
+                """,
+                item_id,
+                run_id,
+                gate_number,
+                json.dumps(item.get("content") or {}),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("HITL queue initialization failed for run_id=%s gate=%s", run_id, gate_number)
+        raise
+    finally:
+        conn.close()
+
+
+def get_hitl_items(run_id: str, gate_number: int) -> List[Dict[str, Any]]:
+    """Return every queue item for a run/gate, including persisted draft content."""
+    db_conf = config["azure_sql"]
+    schema = db_conf["pipeline_schema"]
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT item_id, gate_status, original_content, edited_content,
+                   rejection_reason, queued_at, decided_at
+            FROM [{schema}].[hitl_review_queue]
+            WHERE run_id = ? AND gate_number = ?
+            ORDER BY queued_at, item_id
+            """,
+            run_id,
+            gate_number,
+        )
+        return [
+            {
+                "item_id": str(row.item_id),
+                "gate_status": str(row.gate_status or "PENDING"),
+                "original_content": json.loads(row.original_content) if row.original_content else {},
+                "edited_content": json.loads(row.edited_content) if row.edited_content else None,
+                "revision": _hitl_content_revision(
+                    json.loads(row.edited_content or row.original_content or "{}")
+                ),
+                "rejection_reason": row.rejection_reason,
+                "queued_at": row.queued_at,
+                "decided_at": row.decided_at,
+            }
+            for row in cursor.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def _hitl_content_revision(content: Dict[str, Any]) -> str:
+    canonical = json.dumps(content or {}, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def save_hitl_item_draft(
+    run_id: str,
+    gate_number: int,
+    item_id: str,
+    edited_content: Dict[str, Any],
+    expected_revision: Optional[str] = None,
+) -> str:
+    """Persist a pending review draft with optional optimistic concurrency control."""
+    db_conf = config["azure_sql"]
+    schema = db_conf["pipeline_schema"]
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT original_content, edited_content, gate_status
+            FROM [{schema}].[hitl_review_queue] WITH (UPDLOCK, ROWLOCK)
+            WHERE run_id = ? AND gate_number = ? AND item_id = ?
+            """,
+            run_id,
+            gate_number,
+            item_id,
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise LookupError(f"HITL item not found: {item_id}")
+        if str(row.gate_status or "").upper() != "PENDING":
+            raise RuntimeError(f"HITL item is no longer editable: {item_id}")
+
+        current = json.loads(row.edited_content or row.original_content or "{}")
+        current_revision = _hitl_content_revision(current)
+        edited_revision = _hitl_content_revision(edited_content)
+        if expected_revision and expected_revision != current_revision and edited_revision != current_revision:
+            raise RuntimeError("This review item was changed by another reviewer. Refresh and try again.")
+        if edited_revision == current_revision:
+            conn.commit()
+            return current_revision
+
+        cursor.execute(
+            f"""
+            UPDATE [{schema}].[hitl_review_queue]
+            SET edited_content = ?
+            WHERE run_id = ? AND gate_number = ? AND item_id = ? AND gate_status = 'PENDING'
+            """,
+            json.dumps(edited_content),
+            run_id,
+            gate_number,
+            item_id,
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"HITL item is no longer editable: {item_id}")
+        conn.commit()
+        return edited_revision
+    except Exception:
+        conn.rollback()
         raise
     finally:
         conn.close()
