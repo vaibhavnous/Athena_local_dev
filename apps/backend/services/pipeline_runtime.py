@@ -19,7 +19,18 @@ from services.dbt_snowflake_runtime import (
     run_snowflake_dbt,
     snowflake_dbt_enabled,
 )
-from utilis.db import ai_store_db_writer, config, get_completed_items, get_connection, get_pending_items, timed_stage, update_hitl_items_batch
+from utilis.db import (
+    ai_store_db_writer,
+    config,
+    ensure_hitl_queue_items,
+    get_completed_items,
+    get_connection,
+    get_hitl_items,
+    get_pending_items,
+    save_hitl_item_draft,
+    timed_stage,
+    update_hitl_items_batch,
+)
 from utilis.generated_code_paths import generated_code_dir
 from utilis.logger import logger
 
@@ -2883,6 +2894,8 @@ def start_pipeline(
     sftp_entity: Optional[str] = None,
     run_id: Optional[str] = None,
     use_domain_kb: bool = False,
+    domain_profile: Optional[str] = None,
+    knowledge_base_id: Optional[str] = None,
     stage_confirmation_enabled: bool = False,
     compliance_enabled: bool = False,
     compliance_domain: str = "Insurance",
@@ -2912,6 +2925,8 @@ def start_pipeline(
         "sftp_entity": str(sftp_entity or "transactions").lower(),
         "source_databases": source_databases or [default_source_db],
         "use_domain_kb": bool(use_domain_kb),
+        "domain_profile": domain_profile,
+        "knowledge_base_id": knowledge_base_id,
         "stage_confirmation_enabled": bool(stage_confirmation_enabled),
         "compliance_enabled": bool(compliance_enabled),
         "compliance_domain": compliance_domain or "Insurance",
@@ -3043,14 +3058,17 @@ def _gate2_execution_scope(tables: List[Dict[str, Any]], approved_keys: List[str
     # Keep them in the execution scope even when the reviewer selected only the
     # fact tables; otherwise they disappear before Bronze/Silver generation.
     dimension_prefixes = ("dim_", "ref_", "lkp_", "lookup_", "code_", "type_")
-    dimension_reasons = {"FK Resolution (related to nominated table)"}
+    dimension_methods = {
+        "FK Resolution (related to nominated table)",
+        "Supporting table connected by a foreign key to a nominated KPI source",
+    }
     fact_keys = {_table_key(item) for item in approved}
     if fact_keys:
         approved_keys_seen = set(fact_keys)
         for item in tables:
             table_name = str(item.get("table_name") or item.get("table") or "").strip().lower()
-            reason = str(item.get("nomination_reason") or "").strip()
-            if (table_name.startswith(dimension_prefixes) or reason in dimension_reasons) and _table_key(item) not in approved_keys_seen:
+            method = str(item.get("nomination_method") or item.get("nomination_reason") or "").strip()
+            if (table_name.startswith(dimension_prefixes) or method in dimension_methods) and _table_key(item) not in approved_keys_seen:
                 approved.append(item)
                 approved_keys_seen.add(_table_key(item))
 
@@ -3062,10 +3080,17 @@ def _gate2_execution_scope(tables: List[Dict[str, Any]], approved_keys: List[str
 def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]:
     from nodes.hitl import hitl_table_review_node
 
-    tables = fetch_json_artifact(run_id, "TABLE_NOMINATIONS").get("nominations", []) or []
+    checkpoint_state = load_checkpoint_state(run_id) or {}
+    tables = (
+        fetch_json_artifact(run_id, "TABLE_NOMINATIONS").get("nominations", [])
+        or checkpoint_state.get("nominated_tables")
+        or []
+    )
     approved = _gate2_execution_scope(tables, approved_keys)
 
-    resumed_input = load_checkpoint_state(run_id) or {"run_id": run_id}
+    resumed_input = dict(checkpoint_state or {"run_id": run_id})
+    resumed_input.pop("error", None)
+    resumed_input.pop("failed_background_stage", None)
     resumed_input["human_table_decision"] = "COMPLETED"
     resumed_input["certified_tables"] = approved
     with timed_stage("gate2_hitl_certification", run_id=run_id, node="api"):
@@ -3077,18 +3102,112 @@ def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]
     return continue_database_pipeline(run_id, start_stage_key="discovery", state=resumed)
 
 
-def submit_gate3_review(run_id: str, approve: bool, enriched_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    from nodes.hitl import build_hitl_enrichment_review_node
+def ensure_gate3_review_queue(
+    run_id: str,
+    enriched_metadata: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Materialize Gate 3 table reviews for new and pre-existing runs."""
+    from nodes.hitl import build_gate3_review_items
+
+    existing_rows = get_hitl_items(run_id, 3)
+    if existing_rows:
+        return existing_rows
+    if fetch_json_artifact(run_id, "GATE3_APPROVED_ENRICHMENT"):
+        return []
+    checkpoint = load_checkpoint_state(run_id) or {}
+    metadata = enriched_metadata or fetch_json_artifact(run_id, "ENRICHED_METADATA") or _checkpoint_enriched_payload(checkpoint)
+    if not metadata:
+        return []
+    ensure_hitl_queue_items(run_id, build_gate3_review_items(run_id, metadata), gate_number=3)
+    return get_hitl_items(run_id, 3)
+
+
+def save_gate3_review_draft(
+    run_id: str,
+    item_id: str,
+    edited_content: Dict[str, Any],
+    expected_revision: Optional[str] = None,
+) -> Dict[str, Any]:
+    from nodes.hitl import validate_gate3_table_edit
+
+    rows = ensure_gate3_review_queue(run_id)
+    row = next((item for item in rows if item["item_id"] == item_id), None)
+    if not row:
+        raise LookupError(f"Gate 3 review item not found: {item_id}")
+    normalized = validate_gate3_table_edit(row.get("original_content") or {}, edited_content)
+    revision = save_hitl_item_draft(run_id, 3, item_id, normalized, expected_revision)
+    return {"item_id": item_id, "edited_content": normalized, "revision": revision, "status": "SAVED"}
+
+
+def record_gate3_review_decisions(run_id: str, decisions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Persist a complete Gate 3 decision set in one transaction."""
+    from nodes.hitl import validate_gate3_table_edit
+
+    rows = ensure_gate3_review_queue(run_id)
+    rows_by_id = {row["item_id"]: row for row in rows}
+    decisions_by_id = {str(item.get("item_id") or ""): item for item in decisions}
+    if not rows or len(decisions_by_id) != len(decisions) or set(decisions_by_id) != set(rows_by_id):
+        raise ValueError("A decision is required for every Gate 3 review item.")
+
+    updates: List[Dict[str, Optional[str]]] = []
+    for item_id, decision in decisions_by_id.items():
+        action = str(decision.get("decision") or "").upper()
+        if action not in {"APPROVED", "REJECTED"}:
+            raise ValueError(f"Unsupported Gate 3 decision for {item_id}: {action}")
+        row = rows_by_id[item_id]
+        edited = row.get("edited_content")
+        if action == "APPROVED":
+            validate_gate3_table_edit(row.get("original_content") or {}, edited or row.get("original_content") or {})
+        reason = str(decision.get("rejection_reason") or "").strip()
+        if action == "REJECTED" and not reason:
+            raise ValueError(f"A rejection reason is required for Gate 3 item {item_id}.")
+        current_status = str(row.get("gate_status") or "PENDING").upper()
+        if current_status != "PENDING":
+            status_matches = (
+                (action == "REJECTED" and current_status == "REJECTED")
+                or (action == "APPROVED" and current_status in {"APPROVED", "EDITED"})
+            )
+            reason_matches = action != "REJECTED" or reason == str(row.get("rejection_reason") or "").strip()
+            if status_matches and reason_matches:
+                continue
+            raise RuntimeError(f"Gate 3 item is already decided differently: {item_id}")
+        updates.append({
+            "item_id": item_id,
+            "status": "REJECTED" if action == "REJECTED" else "EDITED" if edited else "APPROVED",
+            "edited_content": json.dumps(edited) if edited else None,
+            "rejection_reason": reason if action == "REJECTED" else None,
+        })
+
+    if updates:
+        update_hitl_items_batch(updates)
+    return get_hitl_items(run_id, 3)
+
+
+def submit_gate3_review(
+    run_id: str,
+    approve: bool,
+    enriched_metadata: Optional[Dict[str, Any]] = None,
+    use_persisted_review: bool = False,
+) -> Dict[str, Any]:
+    from nodes.hitl import apply_gate3_review_rows, build_hitl_enrichment_review_node
     from services.compliance_client import attach_review_result
 
     checkpoint_state = load_checkpoint_state(run_id) or {}
     metadata = enriched_metadata or fetch_json_artifact(run_id, "ENRICHED_METADATA") or _checkpoint_enriched_payload(checkpoint_state)
     if not metadata:
         raise ValueError("No enriched metadata found for this run.")
+    if use_persisted_review:
+        review_rows = get_hitl_items(run_id, 3)
+        if not review_rows or any(str(row.get("gate_status") or "").upper() == "PENDING" for row in review_rows):
+            raise ValueError("Gate 3 review decisions are incomplete.")
+        approve = not any(str(row.get("gate_status") or "").upper() == "REJECTED" for row in review_rows)
+        if approve:
+            metadata = apply_gate3_review_rows(metadata, review_rows)
 
     enrichment_node = build_hitl_enrichment_review_node()
     state: Dict[str, Any] = {
         "run_id": run_id,
+        "fingerprint": metadata.get("fingerprint") or checkpoint_state.get("fingerprint") or run_id,
         "enriched_metadata": metadata,
         "semantic_tags_reviewed": approve,
         "pii_classifications_reviewed": approve,

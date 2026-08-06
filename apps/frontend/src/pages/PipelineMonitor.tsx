@@ -16,7 +16,6 @@ import {
   getBronzeReview,
   getEnrichmentReviews,
   getGoldReview,
-  getPipelineKpis,
   getRunStatus,
   getRunScripts,
   getSilverMergeKeyReview,
@@ -41,8 +40,7 @@ async function fetchReviewPayload(runId, reviewKey) {
   if (reviewKey === 4) return getBronzeReview(runId)
   if (reviewKey === 3) return getEnrichmentReviews(runId)
   if (reviewKey === 2) return getTableReviews(runId)
-  const review = await fetchKpiReviews(runId)
-  return hasRenderableReviewData(review, 1) ? review : getPipelineKpis(runId)
+  return fetchKpiReviews(runId)
 }
 
 function reviewPath(runId, reviewKey) {
@@ -170,6 +168,10 @@ function PipelineMonitor() {
   const [observedPipelineActivity, setObservedPipelineActivity] = useState(false)
   const actualSteps = useMemo(() => getPipelineSteps(activeRun), [activeRun])
   const actualPhases = useMemo(() => getPhaseGroups(activeRun, actualSteps), [activeRun, actualSteps])
+  const pendingReviewKey = activeReviewKey(activeRun)
+  const pendingReviewStatus = normalizeState(activeRun?.status)
+  const pendingReviewWaiting = ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(pendingReviewStatus)
+  const pendingReviewIsFileSource = ['sftp', 'adls_gen2'].includes(String(activeRun?.source || '').toLowerCase())
 
   useEffect(() => {
     latestActiveRunRef.current = activeRun
@@ -253,24 +255,20 @@ function PipelineMonitor() {
   }, [activeRunStableId, activeRunIsDemoFallback, refreshActiveRunNow])
 
   useEffect(() => {
-    const reviewKey = activeReviewKey(activeRun)
-    const reviewStatus = normalizeState(activeRun?.status)
-    const reviewWaiting = ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(reviewStatus)
     if (!activeRunStableId || activeRunIsDemoFallback) return
-    if (!reviewKey || !reviewWaiting) {
+    if (!pendingReviewKey || !pendingReviewWaiting) {
       setPreparingReviewKey(null)
       // Keep the session marker so a stale HITL snapshot cannot reopen a review
       // that the user has already seen. Reviews remain available from the run card.
       return
     }
 
-    const sessionKey = `${activeRunStableId}:${reviewKey}`
+    const sessionKey = `${activeRunStableId}:${pendingReviewKey}`
     if (reviewAutoOpenSessionRef.current.has(sessionKey)) return
-    setPreparingReviewKey(reviewKey)
+    setPreparingReviewKey(pendingReviewKey)
 
     let cancelled = false
     let timer: number | null = null
-    const isFileSource = ['sftp', 'adls_gen2'].includes(String(activeRun?.source || '').toLowerCase())
 
     const scheduleNext = () => {
       if (!cancelled) timer = window.setTimeout(checkReviewReady, REVIEW_READY_POLL_INTERVAL_MS)
@@ -282,7 +280,7 @@ function PipelineMonitor() {
       setPreparingReviewKey(null)
       reviewAutoOpenSessionRef.current.add(sessionKey)
       setActiveRun(activeRunStableId)
-      navigate(reviewPath(activeRunStableId, reviewKey), {
+      navigate(reviewPath(activeRunStableId, pendingReviewKey), {
         state: { backgroundLocation: location },
       })
     }
@@ -290,13 +288,13 @@ function PipelineMonitor() {
     const checkReviewReady = async () => {
       try {
         const currentRun = latestActiveRunRef.current
-        if (hasRenderableReviewData(currentRun, reviewKey, isFileSource)) {
+        if (hasRenderableReviewData(currentRun, pendingReviewKey, pendingReviewIsFileSource)) {
           openPreparedReview(currentRun)
           return
         }
 
-        const payload = await fetchReviewPayload(activeRunStableId, reviewKey)
-        if (hasRenderableReviewData(payload, reviewKey, isFileSource)) {
+        const payload = await fetchReviewPayload(activeRunStableId, pendingReviewKey)
+        if (hasRenderableReviewData(payload, pendingReviewKey, pendingReviewIsFileSource)) {
           openPreparedReview(payload)
           return
         }
@@ -314,11 +312,13 @@ function PipelineMonitor() {
       if (timer !== null) window.clearTimeout(timer)
     }
   }, [
-    activeRun,
     activeRunIsDemoFallback,
     activeRunStableId,
     location,
     navigate,
+    pendingReviewIsFileSource,
+    pendingReviewKey,
+    pendingReviewWaiting,
     setActiveRun,
     updateRun,
   ])

@@ -40,7 +40,7 @@ def kpi_reviews(
     source = str((checkpoint or load_checkpoint_fields(run_id, "source")).get("source") or "database").lower()
 
     try:
-        rows = fetch_hitl_rows(run_id, status=status)
+        rows = fetch_hitl_rows(run_id, status=status, checkpoint=checkpoint)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

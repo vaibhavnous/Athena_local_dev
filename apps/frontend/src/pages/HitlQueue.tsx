@@ -24,6 +24,7 @@ import {
   submitGoldReview,
   submitDecisions as submitHitlDecisions,
   submitEnrichmentReview,
+  saveEnrichmentReviewDraft,
   submitSilverMergeKeyReview,
   submitSilverReview,
   submitTableReviews
@@ -33,7 +34,7 @@ import { useAuth } from '../context/AuthContext'
 import { ENABLE_DEMO_FALLBACKS, getDemoRuns, isDemoFallbackRun } from '../utils/demoFallbacks'
 import { getGateDisplayName, isGenerationFirstDatabaseRun } from '../utils/pipelinePhases'
 import { expandMergedCodeReviewItems, mergeCodeReviewItems } from '../utils/codeReviewArtifacts'
-import { hasGate2ReviewItems, hasRenderableReviewData } from '../utils/reviewReadiness'
+import { hasGate2ReviewItems, hasRenderableReviewData, semanticReviewValidationError } from '../utils/reviewReadiness'
 
 export { hasGate2ReviewItems, hasRenderableReviewData } from '../utils/reviewReadiness'
 
@@ -1306,6 +1307,11 @@ function HitlQueue({ onClose = null }) {
   }
 
   const handleApproveSemanticItem = (id, draft) => {
+    const validationError = semanticReviewValidationError(draft)
+    if (validationError) {
+      setSemanticValidationError(`${validationError} Edit this table before approving it.`)
+      return
+    }
     setSemanticValidationError('')
     if (draft) handleSemanticDraftChange(id, draft)
     setSemanticDecisions((prev) => ({ ...prev, [id]: 'APPROVED' }))
@@ -1314,6 +1320,28 @@ function HitlQueue({ onClose = null }) {
   const handleSemanticDraftChange = (id, draft) => {
     if (!id) return
     setSemanticDrafts((prev) => ({ ...prev, [id]: draft }))
+  }
+
+  const handleSaveSemanticDraft = async (id, draft, revision) => {
+    if (!id || !selectedRunId) throw new Error('Semantic review item is unavailable.')
+    if (isSftpRun) {
+      handleSemanticDraftChange(id, draft)
+      return null
+    }
+    const response = await saveEnrichmentReviewDraft(selectedRunId, id, draft, revision)
+    const persistedDraft = response?.edited_content || draft
+    handleSemanticDraftChange(id, persistedDraft)
+    setEnrichmentReview((current) => current ? {
+      ...current,
+      semantic_tables: (current.semantic_tables || []).map((table) => table.queue_id === id ? {
+        ...table,
+        ...persistedDraft,
+        queue_id: id,
+        table_name: persistedDraft.qualified_table_name || persistedDraft.table_name || table.table_name,
+        revision: response?.revision || table.revision,
+      } : table),
+    } : current)
+    return response || null
   }
 
   const handleRejectSemanticItem = (id, reason) => {
@@ -1337,6 +1365,16 @@ function HitlQueue({ onClose = null }) {
   }
 
   const handleAutoApproveSemanticItems = () => {
+    const invalidItem = semanticReviewItems.find((item) => {
+      const key = semanticReviewItemKey(item)
+      return !semanticDecisions[key] && !normalizeReviewDecision(item.decision)
+        && semanticReviewValidationError(semanticDrafts[key] || item.item_detail)
+    })
+    if (invalidItem) {
+      const key = semanticReviewItemKey(invalidItem)
+      setSemanticValidationError(`${semanticReviewValidationError(semanticDrafts[key] || invalidItem.item_detail)} Edit this table before approving it.`)
+      return
+    }
     const next = {}
     semanticReviewItems.forEach((item) => {
       const key = semanticReviewItemKey(item)
@@ -1516,17 +1554,36 @@ function HitlQueue({ onClose = null }) {
     }
 
     if (isGate3) {
+      const nextSemanticDecisions = buildApprovedSemanticDecisions()
+      const invalidApprovedItem = semanticReviewItems.find((item) => {
+        const key = semanticReviewItemKey(item)
+        return nextSemanticDecisions[key] === 'APPROVED'
+          && semanticReviewValidationError(semanticDrafts[key] || item.item_detail)
+      })
+      if (invalidApprovedItem) {
+        const key = semanticReviewItemKey(invalidApprovedItem)
+        setSemanticValidationError(`${semanticReviewValidationError(semanticDrafts[key] || invalidApprovedItem.item_detail)} Edit this table before submitting.`)
+        return
+      }
       setSubmitting(true)
       try {
-        const nextSemanticDecisions = buildApprovedSemanticDecisions()
         setSemanticValidationError('')
         setSemanticDecisions(nextSemanticDecisions)
         const hasRejectedSemanticItem = semanticReviewItems.some((item) => {
           const key = semanticReviewItemKey(item)
           return nextSemanticDecisions[key] === 'REJECTED'
         })
-        const editedEnrichmentMetadata = hasRejectedSemanticItem ? undefined : buildEditedEnrichmentMetadata()
-        await submitEnrichmentReview(selectedRunId, !hasRejectedSemanticItem, editedEnrichmentMetadata)
+        const decisions = isSftpRun ? undefined : semanticReviewItems.map((item) => {
+          const key = semanticReviewItemKey(item)
+          const decision = nextSemanticDecisions[key] === 'REJECTED' ? 'REJECTED' : 'APPROVED'
+          return {
+            item_id: key,
+            decision,
+            rejection_reason: decision === 'REJECTED' ? semanticRejectionReasons[key] : undefined,
+          }
+        })
+        const editedEnrichmentMetadata = isSftpRun && !hasRejectedSemanticItem ? buildEditedEnrichmentMetadata() : undefined
+        await submitEnrichmentReview(selectedRunId, !hasRejectedSemanticItem, editedEnrichmentMetadata, decisions)
         updateRun(selectedRunId, hasRejectedSemanticItem ? {
           id: selectedRunId,
           status: 'FAILED',
@@ -1563,13 +1620,13 @@ function HitlQueue({ onClose = null }) {
         }
       } catch (error) {
         await refreshRunAfterSubmitError(`${gate3Name} submit did not complete. Waiting on backend state.`)
+        setSemanticValidationError(error.message || 'Semantic review validation failed. Correct the highlighted table and try again.')
         addNotification({
           type: 'error',
           title: `${gate3Name} Submit Failed`,
           message: error.message || 'Backend submit did not complete. Pipeline state was not advanced locally.',
           duration: 5000
         })
-        returnToMonitor(selectedRunId)
       } finally {
         setSubmitting(false)
       }
@@ -1957,6 +2014,7 @@ function HitlQueue({ onClose = null }) {
                       onReject={handleRejectSemanticItem}
                       onClearDecision={handleClearSemanticDecision}
                       onDraftChange={handleSemanticDraftChange}
+                      onSaveDraft={handleSaveSemanticDraft}
                     />
                   )
                 })
@@ -2433,6 +2491,7 @@ function HitlQueue({ onClose = null }) {
                         onReject={handleRejectSemanticItem}
                         onClearDecision={handleClearSemanticDecision}
                         onDraftChange={handleSemanticDraftChange}
+                        onSaveDraft={handleSaveSemanticDraft}
                       />
                     )
                   })
@@ -2794,6 +2853,7 @@ function normalizeSemanticColumns(columns = []) {
     }
 
     return {
+      ...column,
       column_name: column.column_name || column.name || column.column || `column_${index + 1}`,
       suggested_display_name:
         column.suggested_display_name || column.display_name || column.column_name || column.name || column.column || `Column ${index + 1}`,
@@ -2804,6 +2864,7 @@ function normalizeSemanticColumns(columns = []) {
       is_measure: !!column.is_measure,
       is_dimension: !!column.is_dimension,
       is_pii_candidate: !!(column.is_pii_candidate || column.is_pii),
+      pii_type: column.pii_type || column.pii_category || null,
     }
   })
 }
@@ -2869,6 +2930,7 @@ function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
         table_summary: table.table_summary || table.summary || `${table.table_name || table.name || 'Table'} semantic enrichment summary.`,
       },
       decision: table.decision,
+      revision: table.revision,
       reviewer_id: table.reviewer_id,
       rejection_reason: table.rejection_reason,
       queued_at: table.queued_at,
@@ -2942,6 +3004,8 @@ function toAthenaSemanticItems(enrichmentReview, isSftpRun, runId) {
 }
 
 function semanticColumnTableName(column) {
+  const databaseName = String(column?.database_name || '').trim()
+  const schemaName = String(column?.schema_name || '').trim()
   const value =
     column?.table_name ||
     column?.table ||
@@ -2952,7 +3016,8 @@ function semanticColumnTableName(column) {
     ''
   const text = String(value || '').trim()
   if (!text) return ''
-  return text.split('.').filter(Boolean).pop() || text
+  if (text.includes('.') || (!databaseName && !schemaName)) return text
+  return [databaseName, schemaName, text].filter(Boolean).join('.')
 }
 
 function groupSemanticColumnsByTable(columns) {

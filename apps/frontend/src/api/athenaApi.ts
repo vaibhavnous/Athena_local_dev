@@ -119,6 +119,8 @@ export const startRun = (payload: {
   maxKpis?: number
   devMode?: boolean
   use_domain_kb?: boolean
+  domain_profile?: string
+  knowledge_base_id?: string
   stage_confirmation_enabled?: boolean
   compliance_enabled?: boolean
   compliance_domain?: string
@@ -151,8 +153,26 @@ export const getTableReviews = (runId: string) => api.get(`/table-reviews/${runI
 export const submitTableReviews = (runId: string, approvedTables: string[]) =>
   api.post(`/table-reviews/${runId}`, { approved_tables: approvedTables }, { timeout: WRITE_TIMEOUT })
 export const getEnrichmentReviews = (runId: string) => api.get(`/enrichment-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
-export const submitEnrichmentReview = (runId: string, approve: boolean, enrichedMetadata?: Record<string, any>) =>
-  api.post(`/enrichment-reviews/${runId}`, { approve, enriched_metadata: enrichedMetadata }, { timeout: WRITE_TIMEOUT })
+export const saveEnrichmentReviewDraft = (
+  runId: string,
+  itemId: string,
+  editedContent: Record<string, any>,
+  revision?: string
+) => api.patch(
+  `/enrichment-reviews/${runId}/items/${encodeURIComponent(itemId)}`,
+  { edited_content: editedContent, revision },
+  { timeout: WRITE_TIMEOUT }
+)
+export const submitEnrichmentReview = (
+  runId: string,
+  approve: boolean,
+  enrichedMetadata?: Record<string, any>,
+  decisions?: Array<{ item_id: string; decision: 'APPROVED' | 'REJECTED'; rejection_reason?: string }>
+) => api.post(
+  `/enrichment-reviews/${runId}`,
+  { approve, enriched_metadata: enrichedMetadata, decisions },
+  { timeout: WRITE_TIMEOUT }
+)
 export const getComplianceReview = (runId: string) => api.get(`/compliance-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 export const submitComplianceReview = (
   runId: string,

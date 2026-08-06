@@ -78,7 +78,10 @@ def test_kpi_review_returns_conflict_when_kpi_artifact_failed_without_rows(monke
 
     monkeypatch.setattr(kpi_router, "demo_enabled", lambda: False)
     monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_fields", lambda run_id, *fields: {"source": "database"})
-    monkeypatch.setattr("api.services.kpi_service.fetch_hitl_rows", lambda run_id, status=None: [])
+    monkeypatch.setattr(
+        "api.services.kpi_service.fetch_hitl_rows",
+        lambda run_id, status=None, checkpoint=None: [],
+    )
     monkeypatch.setattr("api.services.kpi_service.artifact_kpis", lambda run_id: [])
     monkeypatch.setattr(
         "services.pipeline_runtime.fetch_run_summary",
@@ -110,6 +113,128 @@ def test_create_kpi_review_adds_pending_gate1_item(monkeypatch):
     assert result["queue_id"] == "run-add-kpi:1:manual-test"
     assert result["status"] == "PENDING_REVIEW"
     assert result["name"] == "Claim Closure Rate"
+
+
+def test_gate3_draft_save_returns_persisted_revision(monkeypatch):
+    from api.models import Gate3DraftPayload
+    from api.routers import reviews_router
+
+    revision = "b" * 64
+    monkeypatch.setattr(reviews_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_gate3_review_draft",
+        lambda run_id, item_id, edited_content, expected_revision: {
+            "item_id": item_id,
+            "edited_content": edited_content,
+            "revision": revision,
+            "status": "SAVED",
+        },
+    )
+
+    result = reviews_router.save_enrichment_review_draft(
+        "run-1",
+        "run-1:3:item-1",
+        Gate3DraftPayload(edited_content={"table_name": "claims", "columns": []}),
+    )
+
+    assert result["status"] == "SAVED"
+    assert result["revision"] == revision
+
+
+def test_gate3_submit_persists_item_decisions_before_background_work(monkeypatch):
+    from api.models import Gate3DecisionPayload, Gate3ItemDecision
+    from api.routers import reviews_router
+
+    recorded = []
+    background_args = []
+    monkeypatch.setattr(reviews_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "source": "database"},
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.record_gate3_review_decisions",
+        lambda run_id, decisions: recorded.extend(decisions),
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda *args: background_args.extend(args),
+    )
+
+    result = reviews_router.submit_enrichment_review(
+        "run-1",
+        Gate3DecisionPayload(
+            approve=True,
+            decisions=[Gate3ItemDecision(item_id="run-1:3:item-1", decision="APPROVED")],
+        ),
+    )
+
+    assert recorded == [{"item_id": "run-1:3:item-1", "decision": "APPROVED", "rejection_reason": None}]
+    assert background_args[-2:] == [None, True]
+    assert result["persisted_decisions"] == 1
+
+
+def test_gate3_invalid_original_is_rejected_before_any_decision_is_persisted(monkeypatch):
+    from services import pipeline_runtime
+
+    updates = []
+    original = {
+        "table_name": "claims",
+        "columns": [{
+            "column_name": "S_AADHAAR_ATTACHED",
+            "suggested_display_name": "Aadhaar Attached",
+            "business_description": "Indicates whether Aadhaar documentation is attached to the claim.",
+            "semantic_type": "FLAG",
+            "is_measure": False,
+            "is_dimension": True,
+            "is_pii_candidate": True,
+            "pii_type": None,
+        }],
+    }
+    monkeypatch.setattr(pipeline_runtime, "ensure_gate3_review_queue", lambda run_id: [{
+        "item_id": f"{run_id}:3:item-1",
+        "gate_status": "PENDING",
+        "original_content": original,
+        "edited_content": None,
+    }])
+    monkeypatch.setattr(pipeline_runtime, "update_hitl_items_batch", lambda items: updates.extend(items))
+
+    with pytest.raises(ValueError, match="S_AADHAAR_ATTACHED: PII type is required"):
+        pipeline_runtime.record_gate3_review_decisions("run-pii", [{
+            "item_id": "run-pii:3:item-1",
+            "decision": "APPROVED",
+        }])
+
+    assert updates == []
+
+
+def test_gate3_submit_keeps_legacy_inline_metadata_contract(monkeypatch):
+    from api.models import Gate3DecisionPayload
+    from api.routers import reviews_router
+
+    background_args = []
+    monkeypatch.setattr(reviews_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "source": "database"},
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.record_gate3_review_decisions",
+        lambda *args: pytest.fail("legacy submission must not use persisted decisions"),
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda *args: background_args.extend(args),
+    )
+    metadata = {"run_id": "run-legacy", "columns": [{"column_name": "claim_id"}]}
+
+    result = reviews_router.submit_enrichment_review(
+        "run-legacy",
+        Gate3DecisionPayload(approve=True, enriched_metadata=metadata),
+    )
+
+    assert background_args[-2:] == [metadata, False]
+    assert result["persisted_decisions"] == 0
 
 
 def test_submit_edited_kpi_persists_full_content(monkeypatch):

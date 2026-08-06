@@ -12,7 +12,13 @@ from api.demo import (
     demo_silver_review,
     demo_table_reviews,
 )
-from api.models import ComplianceReviewPayload, Gate2DecisionPayload, Gate3DecisionPayload, GenericGateDecisionPayload
+from api.models import (
+    ComplianceReviewPayload,
+    Gate2DecisionPayload,
+    Gate3DecisionPayload,
+    Gate3DraftPayload,
+    GenericGateDecisionPayload,
+)
 from utilis.logger import logger
 
 router = APIRouter()
@@ -257,18 +263,38 @@ def enrichment_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) 
     if demo_enabled():
         return demo_enrichment_reviews(run_id)
 
-    from services.pipeline_runtime import load_checkpoint_state
+    from services.pipeline_runtime import ensure_gate3_review_queue, load_checkpoint_state
     from api.services.ui_service import ui_run
 
     try:
         run = _checkpoint_for_user(run_id, user) or load_checkpoint_state(run_id) or {}
         if not run.get("enriched_metadata") and not run.get("enriched_columns"):
             run = ui_run(run_id)
+        review_rows = (
+            []
+            if api_utils.is_file_source(run.get("source"))
+            else ensure_gate3_review_queue(run_id, run.get("enriched_metadata") or None)
+        )
     except HTTPException:
         raise
     except Exception:
         logger.error("Failed to fetch enrichment review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load enrichment review")
+
+    semantic_tables = []
+    for row in review_rows:
+        content = row.get("edited_content") or row.get("original_content") or {}
+        status = str(row.get("gate_status") or "PENDING").upper()
+        semantic_tables.append({
+            **content,
+            "queue_id": row["item_id"],
+            "table_name": content.get("qualified_table_name") or content.get("table_name"),
+            "decision": None if status == "PENDING" else status,
+            "rejection_reason": row.get("rejection_reason"),
+            "queued_at": row.get("queued_at"),
+            "decided_at": row.get("decided_at"),
+            "revision": row.get("revision"),
+        })
 
     return {
         "run_id": run_id,
@@ -282,8 +308,34 @@ def enrichment_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) 
         "join_key_columns": run.get("join_key_columns") or [],
         "measure_columns": run.get("measure_columns") or [],
         "feed_semantic_summary": run.get("feed_semantic_summary") or [],
+        "semantic_tables": semantic_tables,
         "gate3_approved": run.get("gate3_approved") or False,
     }
+
+
+@router.patch("/enrichment-reviews/{run_id}/items/{item_id}")
+def save_enrichment_review_draft(
+    run_id: str,
+    item_id: str,
+    payload: Gate3DraftPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    if demo_enabled():
+        return {"run_id": run_id, "item_id": item_id, "status": "SAVED"}
+
+    from services.pipeline_runtime import save_gate3_review_draft
+
+    _checkpoint_for_user(run_id, user)
+    try:
+        result = save_gate3_review_draft(run_id, item_id, payload.edited_content, payload.revision)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    logger.info("Saved enrichment review draft", extra={"run_id": run_id, "item_id": item_id})
+    return {"run_id": run_id, **result}
 
 
 # -------------------------
@@ -300,6 +352,7 @@ def submit_enrichment_review(
 
     from services.pipeline_runtime import (
         load_checkpoint_state,
+        record_gate3_review_decisions,
         submit_background,
         submit_gate3_review,
     )
@@ -313,9 +366,29 @@ def submit_enrichment_review(
         submit_background(run_id, "gate3", submit_sftp_gate3_review, run_id, payload.approve, payload.enriched_metadata)
         return {"run_id": run_id, "status": "SUBMITTED", "approve": payload.approve}
 
-    submit_background(run_id, "gate3", submit_gate3_review, run_id, payload.approve, payload.enriched_metadata)
+    use_persisted_review = bool(payload.decisions)
+    if use_persisted_review:
+        try:
+            record_gate3_review_decisions(run_id, [decision.model_dump() for decision in payload.decisions])
+        except (LookupError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    return {"run_id": run_id, "status": "SUBMITTED", "approve": payload.approve}
+    submit_background(
+        run_id,
+        "gate3",
+        submit_gate3_review,
+        run_id,
+        payload.approve,
+        None if use_persisted_review else payload.enriched_metadata,
+        use_persisted_review,
+    )
+
+    return {
+        "run_id": run_id,
+        "status": "SUBMITTED",
+        "approve": payload.approve,
+        "persisted_decisions": len(payload.decisions),
+    }
 
 
 # -------------------------

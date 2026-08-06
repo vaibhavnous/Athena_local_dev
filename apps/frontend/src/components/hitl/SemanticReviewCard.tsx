@@ -2,8 +2,10 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, CheckCircle2, ChevronDown, ChevronRight, Clock3, Database, Info, Layers3, Pencil, Save, Sparkles, X } from 'lucide-react'
+import { semanticReviewValidationError } from '../../utils/reviewReadiness'
 
-const SEMANTIC_TYPE_OPTIONS = ['MEASURE', 'DIMENSION', 'ID', 'SURROGATE_KEY', 'DATE', 'AUDIT_TIMESTAMP', 'PII', 'FLAG', 'UNKNOWN']
+const SEMANTIC_TYPE_OPTIONS = ['MEASURE', 'DIMENSION', 'ID', 'SURROGATE_KEY', 'DATE', 'AUDIT_TIMESTAMP', 'PII', 'FLAG', 'HIGH_CARD_TEXT', 'UNKNOWN']
+const DIMENSION_TYPES = new Set(['DIMENSION', 'DATE', 'FLAG'])
 const EMPTY_COLUMNS = []
 const SEMANTIC_TYPE_COLORS = {
   ID: 'border-violet-500/20 bg-violet-500/10 text-violet-400',
@@ -19,17 +21,20 @@ function itemId(item) {
 }
 
 function normalizeColumns(columns = []) {
-  return (columns || []).map((column) => ({
-    ...column,
-    suggested_display_name: column?.suggested_display_name || column?.display_name || column?.column_name || '',
-    semantic_type: String(column?.semantic_type || 'UNKNOWN').toUpperCase(),
-    business_description: column?.business_description || column?.description || '',
-    enrichment_source: column?.enrichment_source || '-',
-    is_measure: Boolean(column?.is_measure),
-    is_dimension: Boolean(column?.is_dimension),
-    is_pii_candidate: Boolean(column?.is_pii_candidate || column?.is_pii),
-    pii_type: column?.pii_type || column?.pii_category || '-',
-  }))
+  return (columns || []).map((column) => {
+    const semanticType = String(column?.semantic_type || 'UNKNOWN').toUpperCase()
+    return {
+      ...column,
+      suggested_display_name: column?.suggested_display_name || column?.display_name || column?.column_name || '',
+      semantic_type: semanticType,
+      business_description: column?.business_description || column?.description || '',
+      enrichment_source: column?.enrichment_source || '-',
+      is_measure: typeof column?.is_measure === 'boolean' ? column.is_measure : semanticType === 'MEASURE',
+      is_dimension: typeof column?.is_dimension === 'boolean' ? column.is_dimension : DIMENSION_TYPES.has(semanticType),
+      is_pii_candidate: Boolean(column?.is_pii_candidate || column?.is_pii || semanticType === 'PII'),
+      pii_type: column?.pii_type || column?.pii_category || '-',
+    }
+  })
 }
 
 function formatDateTime(value) {
@@ -55,6 +60,8 @@ function ColumnCheck({ checked, onChange, label }) {
 
 function SemanticEditModal({ tableName, tableSummary, columns, onClose, onSave }) {
   const [draftColumns, setDraftColumns] = useState(() => normalizeColumns(columns).filter((column) => column.column_name !== '__TABLE_SUMMARY__'))
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
 
   useEffect(() => {
     const handleKeyDown = (event) => {
@@ -80,15 +87,26 @@ function SemanticEditModal({ tableName, tableSummary, columns, onClose, onSave }
       ...column,
       semantic_type: semanticType,
       is_measure: semanticType === 'MEASURE',
-      is_dimension: semanticType === 'DIMENSION',
-      is_pii_candidate: semanticType === 'PII',
-      pii_type: semanticType === 'PII' ? column.pii_type : '-',
+      is_dimension: DIMENSION_TYPES.has(semanticType),
+      is_pii_candidate: semanticType === 'PII' || Boolean(column.is_pii_candidate),
+      pii_type: column.pii_type,
     } : column))
   }
 
-  const canSave = draftColumns.length > 0 && draftColumns.every((column) =>
-    column.column_name && column.suggested_display_name.trim() && column.business_description.trim()
-  )
+  const validationError = semanticReviewValidationError({ table_name: tableName, columns: draftColumns })
+  const canSave = !validationError
+
+  const saveChanges = async () => {
+    setSaving(true)
+    setSaveError('')
+    try {
+      await onSave({ table_name: tableName, table_summary: tableSummary, columns: draftColumns })
+    } catch (error) {
+      setSaveError(error?.response?.data?.detail || error?.message || 'Unable to save semantic changes.')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-3 backdrop-blur-[2px] sm:p-5" role="dialog" aria-modal="true" aria-label={`Edit ${tableName} semantic enrichment`}>
@@ -135,7 +153,18 @@ function SemanticEditModal({ tableName, tableSummary, columns, onClose, onSave }
                     <td className="px-3 py-3"><ColumnCheck label={`${column.column_name} measure`} checked={column.is_measure} onChange={(value) => updateColumn(index, 'is_measure', value)} /></td>
                     <td className="px-3 py-3"><ColumnCheck label={`${column.column_name} dimension`} checked={column.is_dimension} onChange={(value) => updateColumn(index, 'is_dimension', value)} /></td>
                     <td className="px-3 py-3"><ColumnCheck label={`${column.column_name} PII`} checked={column.is_pii_candidate} onChange={(value) => updateColumn(index, 'is_pii_candidate', value)} /></td>
-                    <td className="px-3 py-2"><input value={column.pii_type === '-' ? '' : column.pii_type} onChange={(event) => updateColumn(index, 'pii_type', event.target.value || '-')} disabled={!column.is_pii_candidate} placeholder="-" className="h-9 w-full rounded-lg border border-[#26334a] bg-[#081120] px-2.5 text-xs text-white outline-none placeholder:text-[#738096] focus:border-[#4388ff] disabled:cursor-not-allowed disabled:opacity-55" /></td>
+                    <td className="px-3 py-2">
+                      <input
+                        aria-label={`${column.column_name} PII type`}
+                        aria-invalid={column.is_pii_candidate && (!column.pii_type || column.pii_type === '-')}
+                        value={column.pii_type === '-' ? '' : column.pii_type}
+                        onChange={(event) => updateColumn(index, 'pii_type', event.target.value || '-')}
+                        disabled={!column.is_pii_candidate}
+                        placeholder="Required for PII"
+                        className={`h-9 w-full rounded-lg border bg-[#081120] px-2.5 text-xs text-white outline-none placeholder:text-[#738096] focus:border-[#4388ff] disabled:cursor-not-allowed disabled:opacity-55 ${column.is_pii_candidate && (!column.pii_type || column.pii_type === '-') ? 'border-accent-red' : 'border-[#26334a]'}`}
+                      />
+                      {column.is_pii_candidate && (!column.pii_type || column.pii_type === '-') && <p className="mt-1 text-[11px] text-accent-red">PII type is required.</p>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -144,15 +173,16 @@ function SemanticEditModal({ tableName, tableSummary, columns, onClose, onSave }
         </div>
 
         <div className="grid shrink-0 grid-cols-2 gap-3 border-t border-bg-border px-6 py-4">
+          {(saveError || validationError) && <div role="alert" className="col-span-2 rounded-lg border border-accent-red/30 bg-accent-red/10 px-3 py-2 text-xs text-accent-red">{saveError || validationError}</div>}
           <button type="button" onClick={onClose} className="btn-secondary">Cancel</button>
           <button
             type="button"
-            onClick={() => onSave({ table_name: tableName, table_summary: tableSummary, columns: draftColumns })}
-            disabled={!canSave}
+            onClick={saveChanges}
+            disabled={!canSave || saving}
             className="btn-primary inline-flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-45"
           >
             <Save size={16} />
-            Save Changes
+            {saving ? 'Saving...' : 'Save Changes'}
           </button>
         </div>
       </div>
@@ -161,7 +191,7 @@ function SemanticEditModal({ tableName, tableSummary, columns, onClose, onSave }
   )
 }
 
-function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, onReject, onClearDecision, onDraftChange }) {
+function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, onReject, onClearDecision, onDraftChange, onSaveDraft = null }) {
   const id = itemId(item)
   const tableName = item?.item_detail?.table_name || item?.item_id || 'Semantic Review'
   const sourceColumns = item?.item_detail?.columns || EMPTY_COLUMNS
@@ -173,30 +203,39 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
   const [editorOpen, setEditorOpen] = useState(false)
   const [showRejectInput, setShowRejectInput] = useState(false)
   const [reason, setReason] = useState(rejectionReason || '')
+  const [revision, setRevision] = useState(item?.revision)
+  const [reviewError, setReviewError] = useState('')
   const decision = localDecision || item?.decision
+  const acceptedDecision = decision === 'APPROVED' || decision === 'EDITED'
   const displayColumns = columns.filter((column) => column.column_name !== '__TABLE_SUMMARY__')
   const summaryColumn = columns.find((column) => column.column_name === '__TABLE_SUMMARY__')
   const displayedSummary = summaryColumn?.business_description || summary
   const llmColumns = displayColumns.filter((column) => String(column.enrichment_source || '').toLowerCase().includes('llm')).length
+  const currentValidationError = semanticReviewValidationError({ table_name: tableName, columns: displayColumns })
 
   useEffect(() => {
     setColumns(initialColumns)
     setSummary(initialSummary)
     setReason(rejectionReason || '')
+    setRevision(item?.revision)
+    setReviewError('')
     onDraftChange?.(id, { table_name: tableName, table_summary: initialSummary, columns: initialColumns })
     // The item id identifies the review draft session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, initialColumns, initialSummary])
+  }, [id, item?.revision])
 
-  const saveDraft = (draft) => {
+  const saveDraft = async (draft) => {
+    const saved = onSaveDraft ? await onSaveDraft(id, draft, revision) : null
+    if (saved?.revision) setRevision(saved.revision)
     setColumns(draft.columns)
     setSummary(draft.table_summary)
+    setReviewError('')
     onDraftChange?.(id, draft)
     setEditorOpen(false)
   }
 
   return (
-    <article className={`relative rounded-xl border p-5 transition-colors ${decision === 'APPROVED' ? 'border-[#1f6658] bg-[#103033]' : decision === 'REJECTED' ? 'border-[#803348] bg-[#301c29]' : 'border-bg-border bg-bg-card'}`}>
+    <article className={`relative rounded-xl border p-5 transition-colors ${acceptedDecision ? 'border-[#1f6658] bg-[#103033]' : decision === 'REJECTED' ? 'border-[#803348] bg-[#301c29]' : 'border-bg-border bg-bg-card'}`}>
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-2.5">
@@ -216,7 +255,7 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
           <button type="button" onClick={() => setEditorOpen(true)} className="btn-secondary inline-flex items-center gap-2 text-sm">
             <Pencil size={12} className="text-accent-blue" /> Edit
           </button>
-          {decision && <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${decision === 'APPROVED' ? 'text-accent-green' : 'text-accent-red'}`}><CheckCircle2 size={13} />{decision === 'APPROVED' ? 'Approved' : 'Rejected'}</span>}
+          {decision && <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${acceptedDecision ? 'text-accent-green' : 'text-accent-red'}`}><CheckCircle2 size={13} />{decision === 'EDITED' ? 'Edited' : decision === 'APPROVED' ? 'Approved' : 'Rejected'}</span>}
         </div>
       </div>
 
@@ -249,8 +288,22 @@ function SemanticReviewCard({ item, localDecision, rejectionReason, onApprove, o
         </div>
       )}
 
+      {(reviewError || (!decision && currentValidationError)) && (
+        <div role="alert" className="mt-3 flex items-center gap-2 rounded-lg border border-accent-red/30 bg-accent-red/10 px-3 py-2 text-xs text-accent-red">
+          <Info size={13} className="shrink-0" />
+          <span>{reviewError || currentValidationError} Edit this table before approving it.</span>
+        </div>
+      )}
+
       {!decision && !showRejectInput && <div className="mt-3 grid gap-2 sm:grid-cols-2">
-        <button type="button" onClick={() => onApprove(id, { table_name: tableName, table_summary: summary, columns })} className={`inline-flex h-12 items-center justify-center gap-2 rounded-xl border text-sm font-bold transition-colors ${decision === 'APPROVED' ? 'border-[#13a47d] bg-[#103f36] text-[#26d5a3]' : 'border-[#12634f] bg-[#0d302d] text-[#22c99a] hover:bg-[#104039]'}`}>
+        <button type="button" onClick={() => {
+          if (currentValidationError) {
+            setReviewError(currentValidationError)
+            setEditorOpen(true)
+            return
+          }
+          onApprove(id, { table_name: tableName, table_summary: summary, columns })
+        }} className={`inline-flex h-12 items-center justify-center gap-2 rounded-xl border text-sm font-bold transition-colors ${decision === 'APPROVED' ? 'border-[#13a47d] bg-[#103f36] text-[#26d5a3]' : 'border-[#12634f] bg-[#0d302d] text-[#22c99a] hover:bg-[#104039]'}`}>
           <Check size={17} /> Approve
         </button>
         <button type="button" onClick={() => { setReason(''); setShowRejectInput(true) }} className="inline-flex h-12 items-center justify-center gap-2 rounded-xl border border-[#6d2d42] bg-[#281722] text-sm font-bold text-[#ff4d68] transition-colors hover:bg-[#351a28]">
