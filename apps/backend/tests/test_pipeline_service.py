@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+import json
+from pathlib import Path
+import uuid
 
 import pytest
 from fastapi import HTTPException
@@ -533,6 +536,653 @@ def test_gate2_submission_recovers_nominations_from_run_checkpoint(monkeypatch):
     assert result["status"] == "GATE2_COMPLETE"
 
 
+def test_gate2_materializes_one_inactive_object_per_approved_table(monkeypatch):
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    calls = []
+
+    class Repository:
+        def upsert_database_ingestion_object_draft(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "ingestion_object_id": 100 + len(calls),
+                "config_version": 1,
+                "config_hash": "sha256:object",
+            }
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(
+            repository=Repository(),
+            connection={"config_version": 3, "config_hash": "sha256:connection"},
+        ),
+    )
+    approved = [
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"},
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy"},
+    ]
+
+    materialized = pipeline_runtime._materialize_gate2_ingestion_objects(
+        {"source_system_id": 7, "source_connection_id": 11},
+        approved,
+    )
+
+    assert [item["ingestion_object_id"] for item in materialized] == [101, 102]
+    assert all(item["ingestion_object_config_version"] == 1 for item in materialized)
+    assert [call["table"]["table_name"] for call in calls] == ["claims", "policy"]
+    assert all(call["expected_connection_version"] == 3 for call in calls)
+
+
+def test_metadata_gate2_does_not_materialize_unapproved_support_tables(monkeypatch):
+    tables = [
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"},
+        {
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table_name": "dim_policy",
+            "nomination_reason": "Supporting table connected by a foreign key to a nominated KPI source",
+        },
+    ]
+    captured = {}
+    state = {
+        "run_id": "run-metadata-gate2",
+        "source_system_id": 7,
+        "source_connection_id": 11,
+        "nominated_tables": tables,
+    }
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: state)
+    monkeypatch.setattr(pipeline_runtime, "fetch_json_artifact", lambda *_args: {})
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_materialize_gate2_ingestion_objects",
+        lambda _state, approved: captured.setdefault("approved", approved),
+    )
+    monkeypatch.setattr(
+        "nodes.hitl.hitl_table_review_node",
+        lambda review_state: {**review_state, "status": "GATE2_COMPLETE"},
+    )
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "continue_database_pipeline",
+        lambda _run_id, **kwargs: kwargs["state"],
+    )
+
+    pipeline_runtime.submit_gate2_review("run-metadata-gate2", ["insurance.dbo.claims"])
+
+    assert [table["table_name"] for table in captured["approved"]] == ["claims"]
+
+
+def test_bronze_metadata_is_selected_and_ordered_by_exact_mapping_bundle(monkeypatch):
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    mappings = [
+        {
+            "source_field_path": "amount",
+            "target_column_name": "amount",
+            "target_data_type": "decimal(12,2)",
+            "ordinal_position": 2,
+        },
+        {
+            "source_field_path": "claim_id",
+            "target_column_name": "claim_id",
+            "target_data_type": "int",
+            "ordinal_position": 1,
+        },
+    ]
+
+    class Repository:
+        def get_ingestion_object(self, _object_id, _version):
+            return {
+                "config_hash": "sha256:object",
+                "target_bronze_table": "main.bronze.bronze_claims",
+            }
+
+        def get_mapping_bundle(self, **_kwargs):
+            return {
+                "ingestion_object_id": 101,
+                "mapping_version": 9,
+                "mapping_hash": "sha256:mapping",
+                "mappings": mappings,
+            }
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(
+            repository=Repository(),
+            connection={
+                "host_name": "source.database.windows.net",
+                "port": 1433,
+                "database_name": "insurance",
+                "secrets_json": "{}",
+                "config_json": "{}",
+                "config_version": 1,
+                "config_hash": "sha256:connection",
+            },
+        ),
+    )
+    state = {
+        "source_system_id": 7,
+        "source_connection_id": 11,
+        "certified_tables": [
+            {
+                "ingestion_object_id": 101,
+                "ingestion_object_config_version": 1,
+                "ingestion_object_config_hash": "sha256:object",
+                "source_to_bronze_mapping_version": 9,
+                "source_to_bronze_mapping_hash": "sha256:mapping",
+            }
+        ],
+        "discovered_metadata": {
+            "tables": [
+                {
+                    "ingestion_object_id": 101,
+                    "table_name": "claims",
+                    "columns": [
+                        {"column_name": "amount", "data_type": "decimal"},
+                        {"column_name": "unused", "data_type": "varchar"},
+                        {"column_name": "claim_id", "data_type": "int"},
+                    ],
+                }
+            ]
+        },
+    }
+
+    mapped = pipeline_runtime._mapping_driven_bronze_state(state)
+
+    assert [column["column_name"] for column in mapped["discovered_metadata"]["tables"][0]["columns"]] == [
+        "claim_id",
+        "amount",
+    ]
+
+
+def test_merge_key_approval_materializes_exact_bronze_to_silver_draft(monkeypatch):
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    captured = {}
+    monkeypatch.setenv("SILVER_CATALOG", "main")
+    monkeypatch.setenv("SILVER_SCHEMA", "silver")
+    source_object = {
+        "ingestion_object_id": 101,
+        "source_system_id": 7,
+        "config_version": 2,
+        "config_hash": "sha256:bronze-object",
+        "target_bronze_table": "main.bronze.bronze_claims",
+        "active_flag": True,
+        "is_current": True,
+    }
+    source_mapping = {
+        "mapping_version": 9,
+        "mapping_hash": "sha256:bronze-mapping",
+        "mappings": [
+            {
+                "source_field_path": "ClaimID",
+                "target_column_name": "claimid",
+                "target_data_type": "int",
+                "is_nullable": False,
+                "ordinal_position": 1,
+            },
+            {
+                "source_field_path": "Description",
+                "target_column_name": "description",
+                "target_data_type": "string",
+                "is_nullable": True,
+                "ordinal_position": 2,
+            },
+        ],
+    }
+
+    class Repository:
+        def get_active_ingestion_object(self, object_id):
+            assert object_id == 101
+            return source_object
+
+        def get_mapping_bundle(self, **kwargs):
+            assert kwargs["mapping_version"] == 9
+            assert kwargs["expected_hash"] == "sha256:bronze-mapping"
+            assert kwargs["require_active"] is True
+            return source_mapping
+
+        def upsert_bronze_to_silver_draft(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "ingestion_object": {
+                    "ingestion_object_id": 202,
+                    "config_version": 3,
+                    "config_hash": "sha256:silver-object",
+                },
+                "mapping_bundle": {
+                    "mapping_version": 11,
+                    "mapping_hash": "sha256:silver-mapping",
+                },
+            }
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    result = pipeline_runtime._materialize_bronze_to_silver_metadata(
+        {
+            "target_warehouse": "databricks",
+            "source_system_id": 7,
+            "bronze_generation_results": [{
+                "ingestion_object_id": 101,
+                "mapping_version": 9,
+                "mapping_hash": "sha256:bronze-mapping",
+                "database_name": "ClaimsDB",
+                "schema_name": "dbo",
+                "table": "Claims",
+            }],
+        },
+        {"feeds": [{
+            "ingestion_object_id": 101,
+            "database_name": "ClaimsDB",
+            "schema_name": "dbo",
+            "table": "Claims",
+            "merge_keys": ["ClaimID"],
+        }]},
+    )
+
+    silver = result["bronze_generation_results"][0]
+    assert captured["target_silver_table"] == "main.silver.silver_Claims"
+    assert captured["merge_keys"] == ["claimid"]
+    assert captured["columns"][0]["source_field_path"] == "claimid"
+    assert captured["columns"][1]["transformation_rule"] == "TRIM_CAST"
+    assert silver["silver_ingestion_object_id"] == 202
+    assert silver["bronze_to_silver_mapping_hash"] == "sha256:silver-mapping"
+
+
+def test_metadata_merge_key_review_rejects_ambiguous_leaf_table(monkeypatch):
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=object()),
+    )
+    state = {
+        "target_warehouse": "databricks",
+        "bronze_generation_results": [
+            {"ingestion_object_id": 101, "database_name": "db", "schema_name": "a", "table": "Claims"},
+            {"ingestion_object_id": 102, "database_name": "db", "schema_name": "b", "table": "Claims"},
+        ],
+    }
+
+    with pytest.raises(ValueError, match="unambiguously"):
+        pipeline_runtime._materialize_bronze_to_silver_metadata(
+            state,
+            {"feeds": [{"table": "Claims", "merge_keys": ["ClaimID"]}]},
+        )
+
+
+def test_gate5_metadata_filter_uses_transformation_id_not_leaf_name() -> None:
+    results = [
+        {"silver_ingestion_object_id": 201, "table": "claims", "target_table": "main.a.silver_claims"},
+        {"silver_ingestion_object_id": 202, "table": "claims", "target_table": "main.b.silver_claims"},
+    ]
+
+    selected = pipeline_runtime._filter_silver_results_by_gate5_review(
+        results,
+        {"items": [{"silver_ingestion_object_id": 202, "table": "claims", "review_status": "APPROVED"}]},
+    )
+
+    assert [item["silver_ingestion_object_id"] for item in selected] == [202]
+
+
+def test_gate5_silver_artifact_is_hashed_and_activated_from_exact_draft(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    artifact_root = Path.cwd() / ".tmp-tests" / f"gate5-silver-{uuid.uuid4().hex}"
+    artifact = artifact_root / "silver" / "claims.py"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("print('approved silver')\n", encoding="utf-8")
+    monkeypatch.setenv("ATHENA_GENERATED_CODE_DIR", str(artifact_root))
+    captured = {}
+
+    class Repository:
+        def register_and_activate_bronze_to_silver_artifact(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "ingestion_object": {"config_version": 4, "config_hash": "sha256:active"},
+                "execution_spec": {**kwargs["execution_spec"], "processing_stage": "BRONZE_TO_SILVER"},
+            }
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    state = {
+        "run_id": "design-run",
+        "target_warehouse": "databricks",
+        "silver_review_artifact": {"items": [{
+            "silver_ingestion_object_id": 202,
+            "generated_silver_script": "print('approved silver')\n",
+        }]},
+        "silver_generation_results": [{
+            "silver_ingestion_object_id": 202,
+            "silver_ingestion_object_config_version": 3,
+            "silver_ingestion_object_config_hash": "sha256:draft",
+            "bronze_to_silver_mapping_version": 11,
+            "bronze_to_silver_mapping_hash": "sha256:mapping",
+            "script_path": str(artifact),
+            "target_table": "main.silver.silver_claims",
+            "code_generation_format": "native",
+        }],
+        "silver_transformation_objects": [{"ingestion_object_id": 202}],
+    }
+
+    attached = pipeline_runtime._attach_silver_execution_specs(state)
+    activated = pipeline_runtime._activate_reviewed_silver_metadata(attached)
+
+    assert captured["draft_config_version"] == 3
+    assert captured["mapping_version"] == 11
+    assert captured["execution_spec"]["mapping_version"] == 11
+    assert activated["silver_generation_results"][0]["metadata_activation_status"] == "ACTIVE"
+    assert activated["silver_transformation_objects"][0]["active_config_version"] == 4
+
+
+def test_gate5_metadata_rejects_edited_executable_code(monkeypatch) -> None:
+    artifact_root = Path.cwd() / ".tmp-tests" / f"gate5-edited-{uuid.uuid4().hex}"
+    artifact = artifact_root / "silver" / "claims.py"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("print('generated')\n", encoding="utf-8")
+    monkeypatch.setenv("ATHENA_GENERATED_CODE_DIR", str(artifact_root))
+
+    with pytest.raises(ValueError, match="cannot replace executable code"):
+        pipeline_runtime._attach_silver_execution_specs({
+            "run_id": "design-run",
+            "target_warehouse": "databricks",
+            "silver_review_artifact": {"items": [{
+                "silver_ingestion_object_id": 202,
+                "generated_silver_script": "print('edited')\n",
+            }]},
+            "silver_generation_results": [{
+                "silver_ingestion_object_id": 202,
+                "bronze_to_silver_mapping_version": 11,
+                "script_path": str(artifact),
+            }],
+        })
+
+
+def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    captured = []
+    monkeypatch.setenv("GOLD_CATALOG", "main")
+    monkeypatch.setenv("GOLD_SCHEMA", "gold")
+    active = {
+        "ingestion_object_id": 202,
+        "source_system_id": 7,
+        "config_version": 4,
+        "config_hash": "sha256:silver-object",
+        "processing_stage": "BRONZE_TO_SILVER",
+        "target_table": "main.silver.silver_claims",
+        "target_silver_table": "main.silver.silver_claims",
+    }
+    bundle = {
+        "mapping_version": 11,
+        "mapping_hash": "sha256:silver-mapping",
+        "mappings": [
+            {"target_column_name": "claimid", "target_data_type": "BIGINT", "is_primary_key": True, "is_nullable": False},
+            {"target_column_name": "claimstatus", "target_data_type": "STRING", "is_primary_key": False, "is_nullable": True},
+            {"target_column_name": "claimamount", "target_data_type": "DECIMAL(18,2)", "is_primary_key": False, "is_nullable": True},
+        ],
+    }
+
+    class Repository:
+        def get_mapping_bundle(self, **_kwargs):
+            return bundle
+
+        def get_active_ingestion_object(self, object_id):
+            return active if object_id == 202 else None
+
+        def upsert_silver_to_gold_draft(self, **kwargs):
+            captured.append(kwargs)
+            object_id = 300 + len(captured)
+            return {
+                "ingestion_object": {
+                    "ingestion_object_id": object_id,
+                    "config_version": 3,
+                    "config_hash": f"sha256:gold-object-{object_id}",
+                },
+                "mapping_bundle": {
+                    "mapping_version": object_id,
+                    "mapping_hash": f"sha256:gold-mapping-{object_id}",
+                },
+            }
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    result = pipeline_runtime._materialize_silver_to_gold_metadata({
+        "target_warehouse": "databricks",
+        "silver_generation_results": [{
+            "table": "claims",
+            "target_table": "main.silver.silver_claims",
+            "silver_ingestion_object_id": 202,
+            "bronze_to_silver_mapping_version": 11,
+            "bronze_to_silver_mapping_hash": "sha256:silver-mapping",
+            "metadata_activation_status": "ACTIVE",
+        }],
+        "gold_generation_contract": {
+            "dimension_mappings": [{
+                "logical_table": "claims",
+                "source_silver_table": "main.silver.silver_claims",
+                "columns": ["claimstatus"],
+            }],
+            "kpi_mappings": [{
+                "kpi_name": "Total Claims",
+                "source_silver_table": "main.silver.silver_claims",
+                "measure": {"table": "claims", "column": "claimamount", "aggregation": "SUM"},
+                "grouping_dimensions": [{"table": "claims", "column": "claimstatus", "semantic_type": "DIMENSION"}],
+                "time": {"grain": "month", "column": None},
+                "filters": [],
+                "join_paths": [],
+                "readiness": "READY",
+            }],
+        },
+    })
+
+    assert [item["artifact_kind"] for item in result["gold_metadata_drafts"]] == ["DIMENSION", "FACT"]
+    assert [item["target_gold_table"] for item in captured] == ["main.gold.dim_claims", "main.gold.fact_total_claims"]
+    assert captured[0]["merge_keys"] == ["claimid"]
+    assert captured[1]["merge_keys"] == ["claimstatus"]
+    assert result["gold_metadata_rejections"] == []
+
+
+def test_gate5_rejects_unimplemented_snowflake_multi_input_gold_before_metadata_write(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    captured = []
+    active = {
+        object_id: {
+            "ingestion_object_id": object_id,
+            "source_system_id": 7,
+            "config_version": 4,
+            "config_hash": f"sha256:object-{object_id}",
+            "processing_stage": "BRONZE_TO_SILVER",
+            "target_table": target,
+            "target_silver_table": target,
+        }
+        for object_id, target in ((202, "ATHENA_DB.SILVER.silver_claims"), (203, "ATHENA_DB.SILVER.silver_policy"))
+    }
+    bundles = {
+        object_id: {
+            "mapping_version": object_id,
+            "mapping_hash": f"sha256:mapping-{object_id}",
+            "mappings": [
+                {"target_column_name": "policyid", "target_data_type": "BIGINT", "is_primary_key": True, "is_nullable": False},
+                {"target_column_name": "amount", "target_data_type": "DECIMAL(18,2)", "is_primary_key": False, "is_nullable": True},
+            ],
+        }
+        for object_id in active
+    }
+
+    class Repository:
+        def get_mapping_bundle(self, **kwargs):
+            return bundles[int(kwargs["ingestion_object_id"])]
+
+        def get_active_ingestion_object(self, object_id):
+            return active.get(object_id)
+
+        def upsert_silver_to_gold_draft(self, **kwargs):
+            captured.append(kwargs)
+            raise AssertionError("Unsupported Gold work must not create metadata rows")
+
+    monkeypatch.setattr(metadata_selection, "validated_metadata_selection", lambda _state: SimpleNamespace(repository=Repository()))
+    state = {
+        "target_warehouse": "snowflake",
+        "silver_generation_results": [
+            {
+                "table": logical,
+                "target_table": active[object_id]["target_table"],
+                "silver_ingestion_object_id": object_id,
+                "bronze_to_silver_mapping_version": object_id,
+                "bronze_to_silver_mapping_hash": f"sha256:mapping-{object_id}",
+                "metadata_activation_status": "ACTIVE",
+            }
+            for object_id, logical in ((202, "claims"), (203, "policy"))
+        ],
+        "gold_generation_contract": {
+            "dimension_mappings": [],
+            "kpi_mappings": [{
+                "kpi_name": "Claims by Policy",
+                "measure": {"table": "claims", "column": "amount", "aggregation": "SUM"},
+                "grouping_dimensions": [{"table": "policy", "column": "policyid", "semantic_type": "DIMENSION"}],
+                "time": {"column": None},
+                "filters": [],
+                "join_paths": [{
+                    "left_table": "claims", "left_column": "policyid",
+                    "right_table": "policy", "right_column": "policyid", "certified": True,
+                }],
+                "readiness": "READY",
+            }],
+        },
+    }
+
+    with pytest.raises(ValueError, match="UNSUPPORTED_MULTI_INPUT_SNOWFLAKE"):
+        pipeline_runtime._materialize_silver_to_gold_metadata(state)
+    assert captured == []
+
+
+def test_gold_review_hashes_and_activates_exact_transformation_artifact(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    artifact_root = Path.cwd() / ".tmp-tests" / f"gold-activation-{uuid.uuid4().hex}"
+    artifact = artifact_root / "gold" / "fact_claims.py"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("print('approved gold')\n", encoding="utf-8")
+    monkeypatch.setenv("ATHENA_GENERATED_CODE_DIR", str(artifact_root))
+    captured = {}
+
+    class Repository:
+        def register_and_activate_silver_to_gold_artifact(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "ingestion_object": {"config_version": 4, "config_hash": "sha256:active-gold"},
+                "execution_spec": {**kwargs["execution_spec"], "processing_stage": "SILVER_TO_GOLD"},
+            }
+
+    monkeypatch.setattr(metadata_selection, "validated_metadata_selection", lambda _state: SimpleNamespace(repository=Repository()))
+    state = {
+        "run_id": "design-run",
+        "target_warehouse": "databricks",
+        "gold_review_artifact": {"items": [{
+            "gold_ingestion_object_id": 302,
+            "script_body": "print('approved gold')\n",
+        }]},
+        "gold_generation_results": [{
+            "gold_ingestion_object_id": 302,
+            "gold_ingestion_object_config_version": 3,
+            "gold_ingestion_object_config_hash": "sha256:draft-gold",
+            "silver_to_gold_mapping_version": 32,
+            "silver_to_gold_mapping_hash": "sha256:gold-mapping",
+            "script_path": str(artifact),
+            "target_table": "gold.fact_claims",
+        }],
+        "gold_transformation_objects": [{"ingestion_object_id": 302}],
+    }
+
+    activated = pipeline_runtime._activate_reviewed_gold_metadata(
+        pipeline_runtime._attach_gold_execution_specs(state)
+    )
+
+    assert captured["draft_config_version"] == 3
+    assert captured["mapping_version"] == 32
+    assert captured["execution_spec"]["mapping_version"] == 32
+    assert activated["gold_generation_results"][0]["metadata_activation_status"] == "ACTIVE"
+    assert activated["gold_transformation_objects"][0]["active_config_version"] == 4
+
+
+def test_metadata_gold_review_filters_by_exact_object_id() -> None:
+    results = [
+        {"gold_ingestion_object_id": 301, "target_table": "gold.dim_claims"},
+        {"gold_ingestion_object_id": 302, "target_table": "gold.fact_claims"},
+    ]
+
+    selected = pipeline_runtime._filter_gold_results_by_review(
+        results,
+        {"items": [{"gold_ingestion_object_id": 302, "review_status": "APPROVED"}]},
+    )
+
+    assert [item["gold_ingestion_object_id"] for item in selected] == [302]
+
+
+def test_metadata_native_execution_confirmation_enqueues_only_bronze_roots(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    captured = []
+
+    class Repository:
+        context = SimpleNamespace(platform="databricks", environment="qa")
+
+        def enqueue_work(self, **kwargs):
+            captured.append(kwargs)
+            return {
+                "queue_id": 900 + len(captured),
+                "queue_status": "PENDING",
+                "logical_work_id": kwargs["logical_work_id"],
+            }
+
+    monkeypatch.setattr(metadata_selection, "validated_metadata_selection", lambda _state: SimpleNamespace(repository=Repository()))
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+    state = {
+        "run_id": "design-run",
+        "target_warehouse": "databricks",
+        "bronze_generation_results": [{
+            "ingestion_object_id": 101, "target_table": "main.bronze.claims", "metadata_activation_status": "ACTIVE",
+        }],
+        "silver_generation_results": [{
+            "silver_ingestion_object_id": 201, "target_table": "main.silver.claims", "metadata_activation_status": "ACTIVE",
+        }],
+        "gold_generation_results": [{
+            "gold_ingestion_object_id": 301, "target_table": "main.gold.fact_claims", "metadata_activation_status": "ACTIVE",
+        }],
+    }
+
+    queued = pipeline_runtime.execute_database_native_layers("design-run", state=state)
+
+    assert queued["status"] == "RUNTIME_QUEUED"
+    assert [item["ingestion_object_id"] for item in queued["metadata_runtime_queue"]] == [101]
+    assert [item["priority"] for item in captured] == [300]
+    assert len({item["logical_work_id"] for item in captured}) == 1
+
+
 def test_failed_kpi_artifact_does_not_open_empty_gate1():
     context = pipeline_runtime.build_pipeline_steps(
         source="database",
@@ -765,6 +1415,55 @@ def test_load_checkpoint_fields_uses_json_value_projection(monkeypatch):
     assert "JSON_VALUE(full_state_json, '$.source')" in recorded["query"]
     assert "JSON_VALUE(full_state_json, '$.status')" in recorded["query"]
     assert recorded["params"] == ("run-fast",)
+    assert recorded["closed"] is True
+
+
+def test_checkpoint_persistence_redacts_nested_credentials_and_url_userinfo(monkeypatch):
+    recorded = {}
+
+    class StubCursor:
+        def execute(self, query, parameters):
+            recorded["parameters"] = parameters
+
+    class StubConnection:
+        def cursor(self):
+            return StubCursor()
+
+        def commit(self):
+            recorded["committed"] = True
+
+        def close(self):
+            recorded["closed"] = True
+
+    monkeypatch.setattr(pipeline_runtime, "get_connection", lambda: StubConnection())
+
+    pipeline_runtime.save_checkpoint_state(
+        "run-secret",
+        {
+            "status": "FAILED",
+            "error": "https://source-user:source-password@example.test/path?token=token-value",
+            "nested": {"client_secret": "client-value"},
+            "source_runtime_connection": {
+                "secrets": {
+                    "username": {"scope": "source-scope", "key": "claims-user"},
+                    "password": {"scope": "source-scope", "key": "claims-password"},
+                }
+            },
+        },
+    )
+
+    persisted = json.loads(recorded["parameters"][1])
+    rendered = json.dumps(persisted)
+    assert "source-user" not in rendered
+    assert "source-password" not in rendered
+    assert "token-value" not in rendered
+    assert "client-value" not in rendered
+    assert rendered.count("[REDACTED]") >= 3
+    assert persisted["source_runtime_connection"]["secrets"]["password"] == {
+        "scope": "source-scope",
+        "key": "claims-password",
+    }
+    assert recorded["committed"] is True
     assert recorded["closed"] is True
 
 

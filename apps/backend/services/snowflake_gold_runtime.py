@@ -9,8 +9,16 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from services.external_execution_progress import save_external_execution_progress
+from services.metadata_contracts import validate_snowflake_logical_work_filters
 from services.snowflake_contract_validation import validate_catalog_columns
-from services.snowflake_bronze_runtime import _snowflake_connect
+from services.snowflake_bronze_runtime import (
+    _snowflake_connect,
+    configure_snowflake_runtime_session,
+    is_snowflake_transient_error,
+    reconcile_snowflake_resumed_attempt,
+    SnowflakeAmbiguousExecutionError,
+    snowflake_target_commit_result,
+)
 from utilis.logger import logger
 
 
@@ -38,6 +46,15 @@ def _log_context(run_id: Any, *, table: str | None = None, step_name: str = "sno
 
 
 def _read_sql(script: Dict[str, Any]) -> str:
+    execution_spec = script.get("execution_spec")
+    if execution_spec:
+        from utilis.generated_code_paths import verified_execution_artifact
+
+        verified_path = verified_execution_artifact(execution_spec, platform="snowflake")
+        script_path = Path(str(script.get("script_path") or "")).resolve()
+        if script_path != verified_path:
+            raise RuntimeError("Snowflake Gold script_path does not match the registered execution artifact.")
+        return verified_path.read_text(encoding="utf-8")
     body = str(script.get("script_body") or script.get("generated_gold_script") or "").strip()
     if body and not _is_serialized_review_metadata(body, script):
         return body
@@ -94,10 +111,17 @@ def _qualified_name(value: str) -> str:
 
 
 def _sql_without_comments(sql: str) -> str:
-    return re.sub(r"--[^\n]*|/\*.*?\*/", "", str(sql or ""), flags=re.DOTALL)
+    from nodes.bronze_gen import _sql_without_comments as strip_comments
+
+    return strip_comments(sql)
 
 
-def _require_approved_snowflake_structure(sql: str, source_table: str, target_table: str) -> None:
+def _require_approved_snowflake_structure(
+    sql: str,
+    source_table: str,
+    target_table: str,
+    approved_source_tables: List[str] | None = None,
+) -> None:
     clean_sql = _sql_without_comments(sql)
     if source_table and not re.search(
         rf"(?:^|\s)FROM\s+{re.escape(_qualified_name(source_table))}(?=\s|\)|,|$)",
@@ -111,8 +135,23 @@ def _require_approved_snowflake_structure(sql: str, source_table: str, target_ta
         re.IGNORECASE,
     ):
         raise ValueError(f"Snowflake gold SQL must merge into the approved target table as target: {target_table}")
-    if re.search(r"\bJOIN\b", clean_sql, re.IGNORECASE):
+    approved_sources = {
+        _qualified_name(item).casefold() for item in (approved_source_tables or []) if str(item).strip()
+    }
+    actual_sources = {
+        match.group(1).casefold()
+        for match in re.finditer(
+            r'\b(?:FROM|JOIN)\s+((?:"(?:""|[^"])+"\.){2}"(?:""|[^"])+")',
+            clean_sql,
+            re.IGNORECASE,
+        )
+    }
+    if approved_sources and actual_sources != approved_sources:
+        raise ValueError("Snowflake gold SQL must use exactly its approved input objects")
+    if not approved_sources and re.search(r"\bJOIN\b", clean_sql, re.IGNORECASE):
         raise ValueError("Snowflake gold SQL must not add joins outside the approved source table")
+    if approved_sources:
+        validate_snowflake_logical_work_filters(clean_sql, approved_sources)
     forbidden = re.search(r"\b(DROP|TRUNCATE|DELETE|COPY|CALL|GRANT|REVOKE|USE|EXECUTE\s+IMMEDIATE)\b", clean_sql, re.IGNORECASE)
     if forbidden:
         raise ValueError(f"Snowflake gold SQL contains forbidden statement: {forbidden.group(1).upper()}")
@@ -150,13 +189,16 @@ def _validate_canonical_source_references(sql: str, required_columns: List[str],
 
 def validate_snowflake_gold_script(script: Dict[str, Any], catalog_connection: Any = None) -> str:
     sql = _read_sql(script)
-    sql = _normalize_snowflake_gold_sql(sql)
+    if not script.get("metadata_runtime"):
+        sql = _normalize_snowflake_gold_sql(sql)
     normalized = sql.upper()
-    missing = [
-        keyword
-        for keyword in ("CREATE SCHEMA", "CREATE TABLE", "MERGE INTO", "WHEN MATCHED", "WHEN NOT MATCHED")
-        if keyword not in normalized
-    ]
+    snapshot_replace = str(script.get("write_mode") or "").upper() == "SNAPSHOT_REPLACE"
+    required = (
+        ("CREATE SCHEMA", "CREATE OR REPLACE TABLE", "SELECT")
+        if snapshot_replace
+        else ("CREATE SCHEMA", "CREATE TABLE", "MERGE INTO", "WHEN MATCHED", "WHEN NOT MATCHED")
+    )
+    missing = [keyword for keyword in required if keyword not in normalized]
     if missing:
         raise ValueError(f"Snowflake gold SQL is missing required statements: {', '.join(missing)}")
     for token in ("PYSPARK", "SPARK.", "DELTA", "DATABRICKS"):
@@ -169,7 +211,13 @@ def validate_snowflake_gold_script(script: Dict[str, Any], catalog_connection: A
         raise ValueError(f"Snowflake gold SQL does not read from expected source table: {source_table}")
     if target_table and _qualified_name(target_table) not in sql:
         raise ValueError(f"Snowflake gold SQL does not write to expected target table: {target_table}")
-    _require_approved_snowflake_structure(sql, source_table, target_table)
+    if not snapshot_replace:
+        _require_approved_snowflake_structure(
+            sql,
+            source_table,
+            target_table,
+            script.get("approved_source_tables") if script.get("metadata_runtime") else None,
+        )
     required_columns = [
         _silver_output_column_name(column)
         for column in script.get("validation_columns") or []
@@ -196,6 +244,11 @@ def validate_snowflake_gold_script(script: Dict[str, Any], catalog_connection: A
 
 
 def validate_snowflake_dimension_script(script: Dict[str, Any], catalog_connection: Any = None) -> str:
+    if script.get("metadata_runtime") and (
+        str(script.get("dimension_script_body") or "").strip()
+        or str(script.get("dimension_script_path") or "").strip()
+    ):
+        raise ValueError("Metadata runtime cannot execute an unregistered secondary Gold artifact.")
     sql = str(script.get("dimension_script_body") or "").strip()
     if not sql:
         path = Path(str(script.get("dimension_script_path") or ""))
@@ -260,6 +313,134 @@ def validate_snowflake_dimension_script(script: Dict[str, Any], catalog_connecti
     return sql
 
 
+def _gold_join_multiplier(script: Dict[str, Any], cursor: Any) -> float:
+    mappings = [row for row in (script.get("mapping_contract") or []) if isinstance(row, dict)]
+    aggregate = next(
+        (row for row in mappings if str(row.get("transformation_rule") or "").upper().startswith("AGG_")),
+        None,
+    )
+    sources = [str(item) for item in (script.get("approved_source_tables") or []) if str(item).strip()]
+    if not aggregate or not sources:
+        raise RuntimeError("Gold join-multiplier validation requires the approved aggregate mapping and inputs.")
+    root = str(aggregate.get("source_object_name") or "")
+    if root not in sources:
+        raise RuntimeError("Gold join-multiplier root is outside the approved inputs.")
+    try:
+        joins = json.loads(str(mappings[0].get("join_rules_json") or "[]"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Gold join-multiplier validation has invalid join rules.") from exc
+    aliases = {source: f"s{index}" for index, source in enumerate(sources)}
+    visited = {root}
+    pending = [dict(rule) for rule in joins if isinstance(rule, dict)]
+    join_sql = []
+    while pending:
+        progressed = False
+        for rule in list(pending):
+            left = str(rule.get("left_source_table") or "")
+            right = str(rule.get("right_source_table") or "")
+            join_type = str(rule.get("join_type") or "INNER").upper()
+            if left in visited and right not in visited:
+                new_source, existing_source = right, left
+                new_column, existing_column = str(rule.get("right_column") or ""), str(rule.get("left_column") or "")
+            elif join_type == "INNER" and right in visited and left not in visited:
+                new_source, existing_source = left, right
+                new_column, existing_column = str(rule.get("left_column") or ""), str(rule.get("right_column") or "")
+            else:
+                continue
+            join_sql.append(
+                f"{join_type} JOIN {_qualified_name(new_source)} AS {aliases[new_source]} ON "
+                f"{aliases[existing_source]}.{_quote_identifier(existing_column)} = "
+                f"{aliases[new_source]}.{_quote_identifier(new_column)} AND "
+                f'{aliases[new_source]}."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID'
+            )
+            visited.add(new_source)
+            pending.remove(rule)
+            progressed = True
+        if not progressed:
+            raise RuntimeError("Gold join-multiplier validation cannot order the approved join graph.")
+    if visited != set(sources):
+        raise RuntimeError("Gold join-multiplier validation does not cover every approved input.")
+    from_sql = f"FROM {_qualified_name(root)} AS {aliases[root]} " + " ".join(join_sql)
+    logical_filter = f'WHERE {aliases[root]}."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID'
+    cursor.execute(f"SELECT COUNT(*) {from_sql} {logical_filter}")
+    joined_count = int(cursor.fetchone()[0])
+    cursor.execute(
+        f"SELECT COUNT(*) FROM {_qualified_name(root)} "
+        'WHERE "_logical_work_id" = $ATHENA_LOGICAL_WORK_ID'
+    )
+    root_count = int(cursor.fetchone()[0])
+    return (joined_count / root_count) if root_count else (0.0 if joined_count == 0 else float("inf"))
+
+
+def _blocking_validation_results(script: Dict[str, Any], snowflake_conn: Any) -> List[Dict[str, Any]]:
+    rules = (script.get("validation_policy") or {}).get("rules") or []
+    if not rules:
+        return []
+    target = str(script.get("target_table") or "").strip()
+    expected_columns = {
+        str(row.get("target_column_name") or "")
+        for row in (script.get("mapping_contract") or [])
+        if str(row.get("target_column_name") or "")
+    }
+    cursor = snowflake_conn.cursor()
+    try:
+        cursor.execute(f"SELECT * FROM {_qualified_name(target)} LIMIT 0")
+        target_columns = {str(item[0]) for item in (cursor.description or [])}
+        results = []
+        for rule in rules:
+            rule_type = str(rule.get("rule_type") or rule.get("rule") or "").upper()
+            threshold = rule.get("threshold_value", 0)
+            if rule_type == "TARGET_SCHEMA_MATCH":
+                observed = len(expected_columns - target_columns)
+            elif rule_type == "INPUTS_PRESENT":
+                missing = 0
+                for source in script.get("approved_source_tables") or []:
+                    try:
+                        cursor.execute(f"SELECT 1 FROM {_qualified_name(str(source))} LIMIT 0")
+                    except Exception:
+                        missing += 1
+                observed = missing
+            elif rule_type == "MAX_JOIN_MULTIPLIER":
+                observed = _gold_join_multiplier(script, cursor)
+            elif rule_type in {"KEYS_NOT_NULL", "KEYS_UNIQUE"}:
+                columns = [str(item) for item in (rule.get("columns") or script.get("merge_keys") or [])]
+                if not columns or any(column not in target_columns for column in columns):
+                    raise RuntimeError("Snowflake Gold key validation references unavailable target columns.")
+                quoted_columns = ", ".join(_quote_identifier(column) for column in columns)
+                scope = (
+                    ' WHERE "_logical_work_id" = $ATHENA_LOGICAL_WORK_ID'
+                    if "_logical_work_id" in target_columns
+                    else ""
+                )
+                if rule_type == "KEYS_NOT_NULL":
+                    predicate = " OR ".join(f"{_quote_identifier(column)} IS NULL" for column in columns)
+                    conjunction = " AND " if scope else " WHERE "
+                    cursor.execute(
+                        f"SELECT COUNT(*) FROM {_qualified_name(target)}{scope}{conjunction}({predicate})"
+                    )
+                else:
+                    cursor.execute(
+                        f"SELECT COUNT(*) FROM (SELECT {quoted_columns} FROM {_qualified_name(target)}{scope} "
+                        f"GROUP BY {quoted_columns} HAVING COUNT(*) > 1) AS duplicate_keys"
+                    )
+                observed = int(cursor.fetchone()[0])
+            else:
+                raise RuntimeError(f"Unsupported Snowflake Gold validation rule: {rule_type}")
+            status = "PASSED" if float(observed) <= float(threshold) else "FAILED"
+            result = {
+                "rule_type": rule_type,
+                "observed_value": observed,
+                "threshold_value": threshold,
+                "status": status,
+            }
+            results.append(result)
+            if status != "PASSED":
+                raise RuntimeError(f"Snowflake Gold blocking validation failed: {result}")
+        return results
+    finally:
+        cursor.close()
+
+
 def _normalize_snowflake_gold_sql(sql: str) -> str:
     # Existing reviewed artifacts may contain TRY_TO_TIMESTAMP_NTZ("date_col").
     # Snowflake rejects TRY_CAST from DATE to TIMESTAMP_NTZ, so parse via VARCHAR.
@@ -310,9 +491,21 @@ def execute_snowflake_gold_sql(script: Dict[str, Any], snowflake_conn: Any) -> D
         dimension_statement_count = len(list(dimension_cursors or []))
 
     sql = validate_snowflake_gold_script(script, catalog_connection=snowflake_conn)
-    cursors = snowflake_conn.execute_string(sql, return_cursors=True)
-    statement_count = len(list(cursors or []))
-    return {
+    try:
+        cursors = snowflake_conn.execute_string(sql, return_cursors=True)
+    except Exception as exc:
+        if is_snowflake_transient_error(exc):
+            raise SnowflakeAmbiguousExecutionError(
+                "Snowflake execution outcome is ambiguous; the same queue attempt must be resumed."
+            ) from exc
+        raise
+    executed = list(cursors or [])
+    statement_count = len(executed)
+    query_id = next(
+        (str(getattr(cursor, "sfqid", "") or "") for cursor in reversed(executed) if getattr(cursor, "sfqid", None)),
+        "",
+    )
+    result = {
         "kpi_name": script.get("kpi_name"),
         "source_table": script.get("source_table"),
         "target_table": script.get("target_table"),
@@ -321,7 +514,16 @@ def execute_snowflake_gold_sql(script: Dict[str, Any], snowflake_conn: Any) -> D
         "dimension_statement_count": dimension_statement_count,
         "statement_count": statement_count,
         "status": "COMPLETED",
+        "snowflake_query_id": query_id,
     }
+    receipt = snowflake_target_commit_result(
+        script,
+        query_id,
+        validation_results=_blocking_validation_results(script, snowflake_conn),
+    )
+    if receipt:
+        result["execution_result"] = receipt
+    return result
 
 
 def run_snowflake_gold_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -342,6 +544,8 @@ def run_snowflake_gold_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
 
     snowflake_conn = _snowflake_connect()
     try:
+        configure_snowflake_runtime_session(snowflake_conn, state)
+        reconcile_snowflake_resumed_attempt(snowflake_conn, state)
         for script in scripts:
             validate_snowflake_gold_script(script, catalog_connection=snowflake_conn)
             validate_snowflake_dimension_script(script, catalog_connection=snowflake_conn)

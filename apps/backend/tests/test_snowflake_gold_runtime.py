@@ -152,6 +152,60 @@ DROP TABLE "ATHENA_DB"."GOLD"."fact_average";
         )
 
 
+def test_metadata_gold_requires_logical_work_predicate_for_each_input_alias():
+    sql = '''
+MERGE INTO "ATHENA_DB"."GOLD"."fact_orders" AS target
+USING (
+    SELECT $ATHENA_LOGICAL_WORK_ID AS fake_one, $ATHENA_LOGICAL_WORK_ID AS fake_two
+    FROM "ATHENA_DB"."SILVER"."silver_orders" AS orders
+    JOIN "ATHENA_DB"."SILVER"."silver_customers" AS customers
+      ON orders."customer_id" = customers."customer_id"
+) AS source ON 1 = 0
+WHEN NOT MATCHED THEN INSERT DEFAULT VALUES;
+'''
+
+    with pytest.raises(ValueError, match="does not isolate every input"):
+        snowflake_gold_runtime._require_approved_snowflake_structure(
+            sql,
+            "ATHENA_DB.SILVER.silver_orders",
+            "ATHENA_DB.GOLD.fact_orders",
+            [
+                "ATHENA_DB.SILVER.silver_orders",
+                "ATHENA_DB.SILVER.silver_customers",
+            ],
+        )
+
+
+def test_metadata_gold_executes_validated_artifact_without_runtime_rewrite(monkeypatch):
+    sql = '''CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
+CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_orders" ("order_count" NUMBER);
+MERGE INTO "ATHENA_DB"."GOLD"."fact_orders" AS target
+USING (
+    SELECT COUNT(*) AS "order_count"
+    FROM "ATHENA_DB"."SILVER"."silver_orders" AS orders
+    WHERE orders."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID
+) AS source ON target."order_count" = source."order_count"
+WHEN MATCHED THEN UPDATE SET target."order_count" = source."order_count"
+WHEN NOT MATCHED THEN INSERT ("order_count") VALUES (source."order_count");'''
+    monkeypatch.setattr(snowflake_gold_runtime, "_read_sql", lambda _script: sql)
+    monkeypatch.setattr(
+        snowflake_gold_runtime,
+        "_normalize_snowflake_gold_sql",
+        lambda _sql: (_ for _ in ()).throw(AssertionError("registered artifact must not be rewritten")),
+    )
+
+    validated = snowflake_gold_runtime.validate_snowflake_gold_script(
+        {
+            "metadata_runtime": True,
+            "source_table": "ATHENA_DB.SILVER.silver_orders",
+            "approved_source_tables": ["ATHENA_DB.SILVER.silver_orders"],
+            "target_table": "ATHENA_DB.GOLD.fact_orders",
+        }
+    )
+
+    assert validated == sql
+
+
 def _gold_sql() -> str:
     return """CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
 CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_total_claims" (

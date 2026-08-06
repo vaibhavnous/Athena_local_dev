@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from nodes.req_extraction import get_llm
 from services import dbt_snowflake_runtime
+from services.metadata_contracts import bronze_target_data_type, normalize_bronze_column_name
 from state import Stage01State
 from utilis.db import build_source_jdbc_url
 from utilis.generated_code_paths import generated_code_dir
@@ -63,7 +64,7 @@ class BronzeTableRef(TypedDict):
 
 
 def _normalize_bronze_column_name(column_name: str) -> str:
-    return str(column_name or "").strip().lower()
+    return normalize_bronze_column_name(column_name)
 
 
 def _spark_cast_type(column: Dict[str, Any]) -> str | None:
@@ -420,13 +421,54 @@ def _detect_dangerous_sql(code: str) -> None:
             raise ValueError(f"Dangerous SQL keyword detected: {kw}")
 
 
+def _sql_without_comments(sql: str) -> str:
+    """Remove SQL comments without treating comment markers inside literals as comments."""
+    text = str(sql or "")
+    output: list[str] = []
+    index = 0
+    quote = ""
+    while index < len(text):
+        char = text[index]
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if quote:
+            output.append(char)
+            if char == quote:
+                if following == quote:
+                    output.append(following)
+                    index += 2
+                    continue
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            output.append(char)
+            index += 1
+            continue
+        if char == "-" and following == "-":
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and following == "*":
+            end = text.find("*/", index + 2)
+            if end < 0:
+                raise ValueError("Snowflake SQL contains an unterminated block comment.")
+            index = end + 2
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
 def validate_snowflake_bronze_sql(
     sql: str,
     *,
     source_table: str | None = None,
     target_table: str | None = None,
+    metadata_driven: bool = False,
 ) -> None:
-    sql = str(sql or "")
+    sql = _sql_without_comments(sql)
     upper = sql.upper()
     required = (
         "CREATE SCHEMA IF NOT EXISTS",
@@ -445,12 +487,43 @@ def validate_snowflake_bronze_sql(
         raise ValueError(f"Snowflake bronze SQL does not read from expected source table: {source_table}")
     if target_table and target_table not in sql:
         raise ValueError(f"Snowflake bronze SQL does not write to expected target table: {target_table}")
+    if metadata_driven:
+        metadata_required = (
+            "BEGIN TRANSACTION",
+            "COMMIT;",
+            '"_LOGICAL_WORK_ID"',
+            "$ATHENA_LOGICAL_WORK_ID",
+            "$ATHENA_RUNTIME_RUN_ID",
+        )
+        missing_metadata = [token for token in metadata_required if token not in upper]
+        if missing_metadata:
+            raise ValueError(
+                "Metadata Snowflake Bronze SQL is missing its transaction/idempotency contract: "
+                + ", ".join(missing_metadata)
+            )
+        if not re.search(
+            rf'DELETE\s+FROM\s+{re.escape(str(target_table or ""))}\s+'
+            r'WHERE\s+"_logical_work_id"\s*=\s*\$ATHENA_LOGICAL_WORK_ID\s*;',
+            sql,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            raise ValueError("Metadata Snowflake Bronze SQL does not replace the queued logical work.")
+        statement_positions = [
+            upper.find("BEGIN TRANSACTION"),
+            upper.find("DELETE FROM"),
+            upper.find("INSERT INTO"),
+            upper.rfind("COMMIT;"),
+        ]
+        if any(position < 0 for position in statement_positions) or statement_positions != sorted(statement_positions):
+            raise ValueError("Metadata Snowflake Bronze transaction statements are not in the required order.")
     # Bronze generation is idempotent per run. Its only permitted destructive
     # operation is deleting that same run's rows from its expected target table.
     # ponytail: this is intentionally narrow; widening it requires statement parsing.
     allowed_cleanup = re.escape(str(target_table or ""))
     cleanup_pattern = (
-        rf"DELETE\s+FROM\s+{allowed_cleanup}\s+WHERE\s+\"run_id\"\s*=\s*'[^']*'\s*;"
+        rf"DELETE\s+FROM\s+{allowed_cleanup}\s+WHERE\s+(?:"
+        rf"\"run_id\"\s*=\s*'[^']*'|"
+        rf"\"_logical_work_id\"\s*=\s*\$ATHENA_LOGICAL_WORK_ID)\s*;"
         if target_table else None
     )
     safety_sql = re.sub(cleanup_pattern, "", sql, flags=re.IGNORECASE) if cleanup_pattern else sql
@@ -468,8 +541,14 @@ def _validate_snowflake_sql(
     *,
     source_table: str | None = None,
     target_table: str | None = None,
+    metadata_driven: bool = False,
 ) -> None:
-    validate_snowflake_bronze_sql(sql, source_table=source_table, target_table=target_table)
+    validate_snowflake_bronze_sql(
+        sql,
+        source_table=source_table,
+        target_table=target_table,
+        metadata_driven=metadata_driven,
+    )
 
 
 def _strip_code_fences(raw: str) -> str:
@@ -941,35 +1020,7 @@ def _snowflake_string_literal(value: str) -> str:
 
 
 def _snowflake_type_from_metadata(column: Dict[str, Any]) -> str:
-    data_type = str(column.get("data_type") or "").strip().lower()
-    precision = column.get("numeric_precision")
-    scale = column.get("numeric_scale")
-    max_length = column.get("character_maximum_length") or column.get("max_length")
-
-    if data_type in {"int", "integer", "smallint", "tinyint", "bigint"}:
-        return "NUMBER(38,0)"
-    if data_type in {"bit", "boolean"}:
-        return "BOOLEAN"
-    if data_type in {"float", "real", "double"}:
-        return "FLOAT"
-    if data_type in {"decimal", "numeric", "number", "money", "smallmoney"}:
-        if precision and scale is not None:
-            return f"NUMBER({min(int(precision), 38)},{int(scale)})"
-        return "NUMBER(38,10)"
-    if data_type == "date":
-        return "DATE"
-    if data_type in {"datetime", "datetime2", "smalldatetime", "datetimeoffset", "time", "timestamp"}:
-        return "TIMESTAMP_NTZ"
-    if data_type in {"binary", "varbinary"}:
-        return "BINARY"
-    if data_type in {"varchar", "nvarchar", "char", "nchar", "text", "ntext", "string"}:
-        try:
-            length = int(max_length)
-            if 0 < length <= 16777216:
-                return f"VARCHAR({length})"
-        except Exception:
-            pass
-    return "VARCHAR"
+    return bronze_target_data_type("snowflake", column)
 
 
 def _snowflake_type_from_spark_cast(cast_type: str) -> str:
@@ -1003,7 +1054,7 @@ def _snowflake_columns(
         original_name = str(column.get("column_name") or "").strip()
         if not original_name:
             continue
-        normalized_name = _normalize_bronze_column_name(original_name)
+        normalized_name = str(column.get("bronze_target_name") or _normalize_bronze_column_name(original_name))
         if normalized_name in seen:
             seen[normalized_name] += 1
             normalized_name = f"{normalized_name}_{seen[normalized_name]}"
@@ -1013,7 +1064,7 @@ def _snowflake_columns(
             {
                 "source": original_name,
                 "target": normalized_name,
-                "type": _snowflake_type_from_metadata(column),
+                "type": str(column.get("bronze_target_type") or _snowflake_type_from_metadata(column)),
             }
         )
 
@@ -1044,11 +1095,28 @@ def generate_snowflake_bronze_script(
     bronze_schema: str = "bronze",
     cast_rules: Dict[str, str] | None = None,
     table_metadata: Dict[str, Any] | None = None,
+    metadata_driven: bool = False,
+    landing_database: str | None = None,
+    landing_schema: str | None = None,
+    landing_table: str | None = None,
 ) -> str:
-    source_table = _snowflake_qualified_name(database, schema, table)
+    source_table = _snowflake_qualified_name(
+        landing_database or database,
+        landing_schema or schema,
+        landing_table or table,
+    )
     target_table = _snowflake_qualified_name(bronze_catalog, bronze_schema, f"bronze_{table}")
     target_schema = _snowflake_qualified_name(bronze_catalog, bronze_schema)
     columns = _snowflake_columns(table_metadata=table_metadata, cast_rules=cast_rules)
+    run_id_expression = "$ATHENA_RUNTIME_RUN_ID" if metadata_driven else _snowflake_string_literal(run_id)
+    logical_column_definition = ',\n    "_logical_work_id" VARCHAR' if metadata_driven else ""
+    logical_insert_column = ',\n    "_logical_work_id"' if metadata_driven else ""
+    logical_select_value = ',\n    $ATHENA_LOGICAL_WORK_ID AS "_logical_work_id"' if metadata_driven else ""
+    delete_predicate = (
+        '"_logical_work_id" = $ATHENA_LOGICAL_WORK_ID'
+        if metadata_driven
+        else f'"run_id" = {_snowflake_string_literal(run_id)}'
+    )
 
     if columns:
         table_columns = ",\n    ".join(
@@ -1064,39 +1132,39 @@ def generate_snowflake_bronze_script(
     "run_id" VARCHAR,
     "ingestion_timestamp" TIMESTAMP_NTZ,
     "source_system" VARCHAR,
-    "source_table" VARCHAR
+    "source_table" VARCHAR{logical_column_definition}
 );"""
         insert_sql = f"""INSERT INTO {target_table} (
     {insert_columns},
     "run_id",
     "ingestion_timestamp",
     "source_system",
-    "source_table"
+    "source_table"{logical_insert_column}
 )
 SELECT
     {select_columns},
-    {_snowflake_string_literal(run_id)} AS "run_id",
+    {run_id_expression} AS "run_id",
     CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
     {_snowflake_string_literal(database)} AS "source_system",
-    {_snowflake_string_literal(table)} AS "source_table"
+    {_snowflake_string_literal(table)} AS "source_table"{logical_select_value}
 FROM {source_table} AS src;"""
     else:
         create_table = f"""CREATE TABLE IF NOT EXISTS {target_table} AS
 SELECT
     src.*,
-    {_snowflake_string_literal(run_id)} AS "run_id",
+    {run_id_expression} AS "run_id",
     CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
     {_snowflake_string_literal(database)} AS "source_system",
-    {_snowflake_string_literal(table)} AS "source_table"
+    {_snowflake_string_literal(table)} AS "source_table"{logical_select_value}
 FROM {source_table} AS src
 WHERE 1 = 0;"""
         insert_sql = f"""INSERT INTO {target_table}
 SELECT
     src.*,
-    {_snowflake_string_literal(run_id)} AS "run_id",
+    {run_id_expression} AS "run_id",
     CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
     {_snowflake_string_literal(database)} AS "source_system",
-    {_snowflake_string_literal(table)} AS "source_table"
+    {_snowflake_string_literal(table)} AS "source_table"{logical_select_value}
 FROM {source_table} AS src;"""
 
     return f"""-- AUTO-GENERATED BRONZE INGESTION SCRIPT
@@ -1109,9 +1177,13 @@ CREATE SCHEMA IF NOT EXISTS {target_schema};
 
 {create_table}
 
-DELETE FROM {target_table} WHERE "run_id" = {_snowflake_string_literal(run_id)};
+BEGIN TRANSACTION;
+
+DELETE FROM {target_table} WHERE {delete_predicate};
 
 {insert_sql}
+
+COMMIT;
 """
 
 
@@ -1394,15 +1466,57 @@ def generate_bronze_script(
     source_type: str | None = None,
     source_jdbc_url: str | None = None,
     cast_rules: Dict[str, str] | None = None,
+    mapped_columns: List[Dict[str, str]] | None = None,
+    runtime_connection: Dict[str, Any] | None = None,
+    runtime_jdbc_required: bool = False,
 ) -> str:
     landing_path = str(landing_path or "").strip()
     file_format = _normalize_file_format(file_format or "")
     source_type = str(source_type or "adls_gen2").strip().lower() or "adls_gen2"
 
-    if not landing_path and not source_jdbc_url:
+    if not landing_path and not source_jdbc_url and not runtime_jdbc_required:
         raise ValueError(f"Missing source JDBC URL for {database}.{schema}.{table}.")
 
     cast_rules = cast_rules or {}
+    mapped_columns = mapped_columns or []
+    runtime_connection = runtime_connection or {}
+    if runtime_jdbc_required and not mapped_columns:
+        raise ValueError("Metadata-driven JDBC Bronze generation requires an approved mapping projection.")
+    schema_conflict_handler = (
+        '        raise ValueError(f"Schema conflicts detected for {TARGET_TABLE}: {conflict_text}")'
+        if runtime_jdbc_required or mapped_columns
+        else '''        print(f"Recreating {TARGET_TABLE} due to schema conflicts: {conflict_text}")
+        spark.sql(f"DROP TABLE IF EXISTS {TARGET_TABLE}")'''
+    )
+    runtime_identity_setup = (
+        '''RUNTIME_CONTEXT = globals().get("ATHENA_RUNTIME_CONTEXT")
+if not isinstance(RUNTIME_CONTEXT, dict):
+    raise RuntimeError("Metadata Bronze execution requires ATHENA_RUNTIME_CONTEXT")
+if RUNTIME_CONTEXT.get("contract_version") != "1.0" or RUNTIME_CONTEXT.get("load_type") != "FULL":
+    raise RuntimeError("Unsupported metadata runtime-context contract")
+RUN_ID = str(RUNTIME_CONTEXT.get("runtime_run_id") or "")
+LOGICAL_WORK_ID = str(RUNTIME_CONTEXT.get("logical_work_id") or "")
+if not RUN_ID or not LOGICAL_WORK_ID:
+    raise RuntimeError("Metadata runtime context is missing run or logical-work identity")'''
+        if runtime_jdbc_required
+        else f"RUN_ID = {run_id!r}\nLOGICAL_WORK_ID = None"
+    )
+    logical_lineage = (
+        '.withColumn("_logical_work_id", lit(LOGICAL_WORK_ID))'
+        if runtime_jdbc_required
+        else ""
+    )
+    idempotent_replace = (
+        '''logical_work_literal = LOGICAL_WORK_ID.replace("'", "''")'''
+        if runtime_jdbc_required
+        else ""
+    )
+    write_mode = (
+        '''.mode("overwrite")
+    .option("replaceWhere", f"`_logical_work_id` = '{logical_work_literal}'")'''
+        if runtime_jdbc_required
+        else '.mode("append")'
+    )
     assessment_id = str(assessment_id or "").strip()
     policies = {
         _normalize_bronze_column_name(column_name): str(control).strip()
@@ -1463,8 +1577,8 @@ FILE_FORMAT = {file_format!r}
 TARGET_TABLE = "{bronze_catalog}.{bronze_schema}.bronze_{table}"
 TEMP_VIEW = "bronze_src_{table}"
 CAST_RULES = {repr(cast_rules)}
+MAPPED_COLUMNS = {repr(mapped_columns)}
 DATE_COLUMN_HINTS = ("date", "_dt", "timestamp", "created_at", "updated_at", "modified_at")
-RECREATE_TARGET_ON_SCHEMA_CONFLICT = True
 
 def _try_cast_column(column_name, target_type):
     escaped_name = column_name.replace("`", "``")
@@ -1487,29 +1601,43 @@ else:
 if not df.schema or not df.schema.fields:
     raise ValueError("Source read returned an empty schema for {table}.")
 
-normalized_columns = []
-seen_columns = {{}}
-for original_name in df.columns:
-    normalized_name = original_name.lower()
-    if normalized_name in seen_columns:
-        seen_columns[normalized_name] += 1
-        normalized_name = f"{{normalized_name}}_{{seen_columns[normalized_name]}}"
-    else:
-        seen_columns[normalized_name] = 0
-    normalized_columns.append(col(original_name).alias(normalized_name))
+if MAPPED_COLUMNS:
+    source_by_name = {{}}
+    for source_name in df.columns:
+        source_key = source_name.casefold()
+        if source_key in source_by_name:
+            raise ValueError(f"Duplicate case-insensitive source column: {{source_name}}")
+        source_by_name[source_key] = source_name
+    missing = [item["source"] for item in MAPPED_COLUMNS if item["source"].casefold() not in source_by_name]
+    if missing:
+        raise ValueError(f"Mapped source columns are missing: {{', '.join(missing)}}")
+    df = df.select(*[
+        _try_cast_column(source_by_name[item["source"].casefold()], item["type"]).alias(item["target"])
+        for item in MAPPED_COLUMNS
+    ])
+else:
+    normalized_columns = []
+    seen_columns = {{}}
+    for original_name in df.columns:
+        normalized_name = original_name.lower()
+        if normalized_name in seen_columns:
+            seen_columns[normalized_name] += 1
+            normalized_name = f"{{normalized_name}}_{{seen_columns[normalized_name]}}"
+        else:
+            seen_columns[normalized_name] = 0
+        normalized_columns.append(col(original_name).alias(normalized_name))
+    df = df.select(*normalized_columns)
 
-df = df.select(*normalized_columns)
+    for column_name, target_type in CAST_RULES.items():
+        if column_name in df.columns:
+            df = df.withColumn(column_name, _try_cast_column(column_name, target_type))
 
-for column_name, target_type in CAST_RULES.items():
-    if column_name in df.columns:
-        df = df.withColumn(column_name, _try_cast_column(column_name, target_type))
-
-for column_name in df.columns:
-    lower_name = column_name.lower()
-    if column_name in CAST_RULES:
-        continue
-    if any(hint in lower_name for hint in DATE_COLUMN_HINTS):
-        df = df.withColumn(column_name, _try_cast_column(column_name, "timestamp"))
+    for column_name in df.columns:
+        lower_name = column_name.lower()
+        if column_name in CAST_RULES:
+            continue
+        if any(hint in lower_name for hint in DATE_COLUMN_HINTS):
+            df = df.withColumn(column_name, _try_cast_column(column_name, "timestamp"))
 
 df = (
     df
@@ -1542,11 +1670,7 @@ if spark.catalog.tableExists(TARGET_TABLE):
             f"{{name}}: target={{target_type}}, incoming={{incoming_type}}"
             for name, target_type, incoming_type in schema_conflicts
         )
-        if RECREATE_TARGET_ON_SCHEMA_CONFLICT:
-            print(f"Recreating {{TARGET_TABLE}} due to schema conflicts: {{conflict_text}}")
-            spark.sql(f"DROP TABLE IF EXISTS {{TARGET_TABLE}}")
-        else:
-            raise ValueError(f"Schema conflicts detected for {{TARGET_TABLE}}: {{conflict_text}}")
+{schema_conflict_handler}
 
 create_table_sql = (
     f"CREATE TABLE IF NOT EXISTS {{TARGET_TABLE}} "
@@ -1593,10 +1717,32 @@ try:
 except Exception:
     print("Could not create schema '{bronze_catalog}.{bronze_schema}'")
 
-RUN_ID = {run_id!r}
+{runtime_identity_setup}
 DEFAULT_SOURCE_JDBC_URL = {source_jdbc_url!r}
+RUNTIME_CONNECTION = {repr(runtime_connection)}
 SOURCE_JDBC_URL_ENV = "ATHENA_SOURCE_JDBC_URL"
-SOURCE_JDBC_URL = os.getenv(SOURCE_JDBC_URL_ENV) or os.getenv("SOURCE_JDBC_URL") or DEFAULT_SOURCE_JDBC_URL
+SOURCE_USERNAME = None
+SOURCE_PASSWORD = None
+if RUNTIME_CONNECTION:
+    try:
+        dbutils
+    except NameError:
+        from pyspark.dbutils import DBUtils
+        dbutils = DBUtils(spark)
+    username_ref = RUNTIME_CONNECTION["secrets"]["username"]
+    password_ref = RUNTIME_CONNECTION["secrets"]["password"]
+    SOURCE_USERNAME = dbutils.secrets.get(scope=username_ref["scope"], key=username_ref["key"])
+    SOURCE_PASSWORD = dbutils.secrets.get(scope=password_ref["scope"], key=password_ref["key"])
+    url_template = RUNTIME_CONNECTION["config"].get("jdbc_url_template") or (
+        "jdbc:sqlserver://{{host_name}}:{{port}};databaseName={{database_name}};encrypt=true"
+    )
+    SOURCE_JDBC_URL = url_template.format(
+        host_name=RUNTIME_CONNECTION["host_name"],
+        port=RUNTIME_CONNECTION["port"],
+        database_name=RUNTIME_CONNECTION["database_name"],
+    )
+else:
+    SOURCE_JDBC_URL = os.getenv(SOURCE_JDBC_URL_ENV) or os.getenv("SOURCE_JDBC_URL") or DEFAULT_SOURCE_JDBC_URL
 if not SOURCE_JDBC_URL:
     raise RuntimeError(f"Missing source JDBC URL. Set {{SOURCE_JDBC_URL_ENV}} or SOURCE_JDBC_URL at runtime.")
 {security_setup}
@@ -1604,47 +1750,63 @@ if not SOURCE_JDBC_URL:
 TARGET_TABLE = "{bronze_catalog}.{bronze_schema}.bronze_{table}"
 TEMP_VIEW = "bronze_src_{table}"
 CAST_RULES = {repr(cast_rules)}
+MAPPED_COLUMNS = {repr(mapped_columns)}
 DATE_COLUMN_HINTS = ("date", "_dt", "timestamp", "created_at", "updated_at", "modified_at")
-RECREATE_TARGET_ON_SCHEMA_CONFLICT = True
 
 def _try_cast_column(column_name, target_type):
     escaped_name = column_name.replace("`", "``")
     return expr(f"try_cast(`{{escaped_name}}` AS {{target_type}})")
 
-df = (
+reader = (
     spark.read.format("jdbc")
     .option("url", SOURCE_JDBC_URL)
     .option("dbtable", "{schema}.{table}")
-    .option("driver", "com.microsoft.sqlserver.jdbc.SQLServerDriver")
-    .load()
+    .option("driver", RUNTIME_CONNECTION.get("config", {{}}).get("jdbc_driver", "com.microsoft.sqlserver.jdbc.SQLServerDriver"))
 )
+if SOURCE_USERNAME is not None:
+    reader = reader.option("user", SOURCE_USERNAME).option("password", SOURCE_PASSWORD)
+df = reader.load()
 
 if not df.schema or not df.schema.fields:
     raise ValueError("Source read returned an empty schema for {database}.{schema}.{table}.")
 
-normalized_columns = []
-seen_columns = {{}}
-for original_name in df.columns:
-    normalized_name = original_name.lower()
-    if normalized_name in seen_columns:
-        seen_columns[normalized_name] += 1
-        normalized_name = f"{{normalized_name}}_{{seen_columns[normalized_name]}}"
-    else:
-        seen_columns[normalized_name] = 0
-    normalized_columns.append(col(original_name).alias(normalized_name))
+if MAPPED_COLUMNS:
+    source_by_name = {{}}
+    for source_name in df.columns:
+        source_key = source_name.casefold()
+        if source_key in source_by_name:
+            raise ValueError(f"Duplicate case-insensitive source column: {{source_name}}")
+        source_by_name[source_key] = source_name
+    missing = [item["source"] for item in MAPPED_COLUMNS if item["source"].casefold() not in source_by_name]
+    if missing:
+        raise ValueError(f"Mapped source columns are missing: {{', '.join(missing)}}")
+    df = df.select(*[
+        _try_cast_column(source_by_name[item["source"].casefold()], item["type"]).alias(item["target"])
+        for item in MAPPED_COLUMNS
+    ])
+else:
+    normalized_columns = []
+    seen_columns = {{}}
+    for original_name in df.columns:
+        normalized_name = original_name.lower()
+        if normalized_name in seen_columns:
+            seen_columns[normalized_name] += 1
+            normalized_name = f"{{normalized_name}}_{{seen_columns[normalized_name]}}"
+        else:
+            seen_columns[normalized_name] = 0
+        normalized_columns.append(col(original_name).alias(normalized_name))
+    df = df.select(*normalized_columns)
 
-df = df.select(*normalized_columns)
+    for column_name, target_type in CAST_RULES.items():
+        if column_name in df.columns:
+            df = df.withColumn(column_name, _try_cast_column(column_name, target_type))
 
-for column_name, target_type in CAST_RULES.items():
-    if column_name in df.columns:
-        df = df.withColumn(column_name, _try_cast_column(column_name, target_type))
-
-for column_name in df.columns:
-    lower_name = column_name.lower()
-    if column_name in CAST_RULES:
-        continue
-    if any(hint in lower_name for hint in DATE_COLUMN_HINTS):
-        df = df.withColumn(column_name, _try_cast_column(column_name, "timestamp"))
+    for column_name in df.columns:
+        lower_name = column_name.lower()
+        if column_name in CAST_RULES:
+            continue
+        if any(hint in lower_name for hint in DATE_COLUMN_HINTS):
+            df = df.withColumn(column_name, _try_cast_column(column_name, "timestamp"))
 
 df = (
     df
@@ -1652,6 +1814,7 @@ df = (
     .withColumn("ingestion_timestamp", current_timestamp())
     .withColumn("source_system", lit("{database}"))
     .withColumn("source_table", lit("{table}"))
+    {logical_lineage}
 )
 {security_apply}
 
@@ -1677,11 +1840,7 @@ if spark.catalog.tableExists(TARGET_TABLE):
             f"{{name}}: target={{target_type}}, incoming={{incoming_type}}"
             for name, target_type, incoming_type in schema_conflicts
         )
-        if RECREATE_TARGET_ON_SCHEMA_CONFLICT:
-            print(f"Recreating {{TARGET_TABLE}} due to schema conflicts: {{conflict_text}}")
-            spark.sql(f"DROP TABLE IF EXISTS {{TARGET_TABLE}}")
-        else:
-            raise ValueError(f"Schema conflicts detected for {{TARGET_TABLE}}: {{conflict_text}}")
+{schema_conflict_handler}
 
 create_table_sql = (
     f"CREATE TABLE IF NOT EXISTS {{TARGET_TABLE}} "
@@ -1690,10 +1849,12 @@ create_table_sql = (
 )
 spark.sql(create_table_sql)
 
+{idempotent_replace}
+
 (
     df.write
     .format("delta")
-    .mode("append")
+    {write_mode}
     .option("mergeSchema", "true")
     .saveAsTable(TARGET_TABLE)
 )
@@ -1712,16 +1873,24 @@ def _generate_one_table(
     file_source_config: Dict[str, str] | None = None,
     run_id: str,
     source_jdbc_url: str | None = None,
+    runtime_connection: Dict[str, Any] | None = None,
     bronze_catalog: str = "main",
     bronze_schema: str = "bronze",
     cast_rules: Dict[str, str] | None = None,
     table_metadata: Dict[str, Any] | None = None,
     target_warehouse: str = "databricks",
     execution_engine: str = "native",
+    metadata_driven: bool = False,
 ) -> Dict[str, object]:
     database_name = table_ref["database_name"]
     schema_name = table_ref["schema_name"]
     table_name = table_ref["table_name"]
+    if metadata_driven:
+        from services.metadata_contracts import validate_identifier
+
+        database_name = validate_identifier(database_name, label="source database")
+        schema_name = validate_identifier(schema_name, label="source schema")
+        table_name = validate_identifier(table_name, label="source table")
     target_warehouse = str(target_warehouse or "databricks").lower()
     execution_engine = str(execution_engine or "native").lower()
     dbt_codegen = target_warehouse == "snowflake" and execution_engine == "dbt"
@@ -1730,11 +1899,16 @@ def _generate_one_table(
     dbt_alias: str | None = None
     dbt_source_name: str | None = None
     dbt_source_table_name: str | None = None
+    snowflake_landing_database: str | None = None
+    snowflake_landing_schema: str | None = None
+    snowflake_landing_table: str | None = None
 
-    if dbt_codegen:
+    if dbt_codegen or (metadata_driven and target_warehouse == "snowflake"):
         snowflake_landing_database = bronze_catalog
         snowflake_landing_schema = str(os.getenv("SNOWFLAKE_RAW_SCHEMA") or bronze_schema).strip() or bronze_schema
         snowflake_landing_table = f"raw_{table_name}"
+
+    if dbt_codegen:
         dbt_model_name = dbt_snowflake_runtime.dbt_safe_name(f"bronze_{table_name}", prefix="bronze")
         dbt_alias = f"bronze_{table_name}"
         dbt_source_name = dbt_snowflake_runtime.dbt_source_name(
@@ -1754,6 +1928,7 @@ def _generate_one_table(
             landing_table=snowflake_landing_table,
             cast_rules=cast_rules or {},
             table_metadata=table_metadata or {},
+            metadata_driven=metadata_driven,
         )
         validate_snowflake_bronze_dbt_model(
             code,
@@ -1773,6 +1948,10 @@ def _generate_one_table(
             bronze_schema=bronze_schema,
             cast_rules=cast_rules or {},
             table_metadata=table_metadata or {},
+            metadata_driven=metadata_driven,
+            landing_database=snowflake_landing_database,
+            landing_schema=snowflake_landing_schema,
+            landing_table=snowflake_landing_table,
         )
         enhancement_metadata = {
             "source_table": table_ref,
@@ -1781,20 +1960,36 @@ def _generate_one_table(
             "table_metadata": table_metadata or {},
             "target_warehouse": "snowflake",
         }
-        source_table = _snowflake_qualified_name(database_name, schema_name, table_name)
+        source_table = _snowflake_qualified_name(
+            snowflake_landing_database or database_name,
+            snowflake_landing_schema or schema_name,
+            snowflake_landing_table or table_name,
+        )
         target_table = _snowflake_qualified_name(bronze_catalog, bronze_schema, f"bronze_{table_name}")
-        code, llm_enhanced, llm_error = _maybe_enhance_snowflake_with_llm(
+        if metadata_driven:
+            llm_enhanced, llm_error = False, None
+        else:
+            code, llm_enhanced, llm_error = _maybe_enhance_snowflake_with_llm(
+                code,
+                enhancement_metadata,
+                source_table=source_table,
+                target_table=target_table,
+            )
+        _validate_snowflake_sql(
             code,
-            enhancement_metadata,
             source_table=source_table,
             target_table=target_table,
+            metadata_driven=metadata_driven,
         )
-        _validate_snowflake_sql(code, source_table=source_table, target_table=target_table)
         extension = "sql"
     else:
         resolved_source_jdbc_url = ""
         if not file_source_config.get("landing_path"):
-            resolved_source_jdbc_url = source_jdbc_url or build_source_jdbc_url(database_name)
+            resolved_source_jdbc_url = (
+                None
+                if metadata_driven
+                else source_jdbc_url or build_source_jdbc_url(database_name)
+            )
 
         code = generate_bronze_script(
             assessment_id=assessment_id,
@@ -1810,6 +2005,17 @@ def _generate_one_table(
             source_type=str(file_source_config.get("source_type") or ""),
             source_jdbc_url=resolved_source_jdbc_url,
             cast_rules=cast_rules or {},
+            mapped_columns=[
+                {
+                    "source": str(column.get("column_name") or ""),
+                    "target": str(column.get("bronze_target_name") or ""),
+                    "type": str(column.get("bronze_target_type") or ""),
+                }
+                for column in (table_metadata or {}).get("columns") or []
+                if column.get("bronze_target_name") and column.get("bronze_target_type")
+            ] if metadata_driven else [],
+            runtime_connection=runtime_connection if metadata_driven else {},
+            runtime_jdbc_required=metadata_driven,
         )
 
         enhancement_metadata = {
@@ -1819,7 +2025,10 @@ def _generate_one_table(
             "table_metadata": table_metadata or {},
             "file_source_config": file_source_config,
         }
-        code, llm_enhanced, llm_error = _maybe_enhance_with_llm(code, enhancement_metadata)
+        if metadata_driven:
+            llm_enhanced, llm_error = False, None
+        else:
+            code, llm_enhanced, llm_error = _maybe_enhance_with_llm(code, enhancement_metadata)
 
         _validate_python(code)
         _detect_dangerous_sql(code)
@@ -1880,9 +2089,9 @@ def _generate_one_table(
         "dbt_alias": dbt_alias,
         "dbt_source_name": dbt_source_name,
         "dbt_source_table_name": dbt_source_table_name,
-        "snowflake_landing_database": snowflake_landing_database if dbt_codegen else None,
-        "snowflake_landing_schema": snowflake_landing_schema if dbt_codegen else None,
-        "snowflake_landing_table": snowflake_landing_table if dbt_codegen else None,
+        "snowflake_landing_database": snowflake_landing_database,
+        "snowflake_landing_schema": snowflake_landing_schema,
+        "snowflake_landing_table": snowflake_landing_table,
     }
 # ------------------------------------------------------------------------------
 # LANGGRAPH NODE
@@ -1903,7 +2112,7 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
     target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
     execution_engine = dbt_snowflake_runtime.resolve_execution_engine(state)
     dbt_codegen = dbt_snowflake_runtime.snowflake_dbt_enabled(state)
-    if target_warehouse == "snowflake":
+    if target_warehouse == "snowflake" and state.get("source_system_id") is None:
         bronze_catalog = _snowflake_bronze_catalog()
         bronze_schema = _snowflake_bronze_schema()
     assessment_id = _security_assessment_id(state)
@@ -1959,6 +2168,7 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
     )
 
     source_jdbc_url = state.get("source_jdbc_url")
+    runtime_connection = state.get("source_runtime_connection") or {}
     should_copy_security_module = False
     with ThreadPoolExecutor(max_workers=BRONZE_MAX_WORKERS) as executor:
         futures = [
@@ -1980,12 +2190,14 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
                 ),
                 run_id=run_id,
                 source_jdbc_url=source_jdbc_url,
+                runtime_connection=runtime_connection,
                 bronze_catalog=bronze_catalog,
                 bronze_schema=bronze_schema,
                 cast_rules=_cast_rules_for_table(state, table_ref["table_name"]),
                 table_metadata=_metadata_for_table(state, table_ref["table_name"]),
                 target_warehouse=target_warehouse,
                 execution_engine=execution_engine,
+                metadata_driven=state.get("source_system_id") is not None,
             )
             for table_ref in table_refs
         ]

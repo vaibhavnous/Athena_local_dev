@@ -42,6 +42,111 @@ class SilverTableRef(TypedDict):
     bronze_model_name: str | None
 
 
+def _metadata_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
+    """Reload the exact approved draft; checkpoint data only selects its immutable version."""
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Metadata-driven Silver generation requires a valid target selection.")
+    refs: List[SilverTableRef] = []
+    seen_objects: set[int] = set()
+    for bronze in state.get("bronze_generation_results") or []:
+        if not isinstance(bronze, dict):
+            continue
+        object_id = int(bronze.get("silver_ingestion_object_id") or 0)
+        config_version = int(bronze.get("silver_ingestion_object_config_version") or 0)
+        config_hash = str(bronze.get("silver_ingestion_object_config_hash") or "")
+        mapping_version = int(bronze.get("bronze_to_silver_mapping_version") or 0)
+        mapping_hash = str(bronze.get("bronze_to_silver_mapping_hash") or "")
+        if not all((object_id, config_version, config_hash, mapping_version, mapping_hash)):
+            raise ValueError("Silver generation is missing its exact transformation-object or mapping pins.")
+        if object_id in seen_objects:
+            raise ValueError("Silver generation contains a duplicate transformation object.")
+        seen_objects.add(object_id)
+        transformation = selection.repository.get_ingestion_object(object_id, config_version)
+        if (
+            not transformation
+            or str(transformation.get("config_hash") or "") != config_hash
+            or str(transformation.get("object_kind") or "").upper() != "TRANSFORMATION"
+            or str(transformation.get("processing_stage") or "").upper() != "BRONZE_TO_SILVER"
+            or bool(transformation.get("active_flag"))
+            or bool(transformation.get("is_current"))
+        ):
+            raise RuntimeError("The pinned Bronze-to-Silver transformation draft is invalid.")
+        target_table = str(transformation.get("target_table") or "")
+        bundle = selection.repository.get_mapping_bundle(
+            ingestion_object_id=object_id,
+            processing_stage="BRONZE_TO_SILVER",
+            mapping_version=mapping_version,
+            expected_hash=mapping_hash,
+            expected_target=target_table,
+            require_active=False,
+        )
+        rows = bundle["mappings"]
+        input_pin = json.loads(str(rows[0].get("input_objects_json") or "[]"))
+        if len(input_pin) != 1:
+            raise RuntimeError("Bronze-to-Silver requires exactly one pinned Bronze input.")
+        upstream_pin = input_pin[0]
+        upstream_id = int(upstream_pin.get("ingestion_object_id") or 0)
+        upstream = selection.repository.get_active_ingestion_object(upstream_id)
+        if (
+            not upstream
+            or int(upstream.get("config_version") or 0) != int(upstream_pin.get("config_version") or 0)
+            or str(upstream.get("config_hash") or "") != str(upstream_pin.get("config_hash") or "")
+        ):
+            raise RuntimeError("The active Bronze dependency changed after Silver approval.")
+        selection.repository.get_mapping_bundle(
+            ingestion_object_id=upstream_id,
+            processing_stage="SOURCE_TO_BRONZE",
+            mapping_version=int(upstream_pin.get("mapping_version") or 0),
+            expected_hash=str(upstream_pin.get("mapping_hash") or ""),
+            expected_target=str(upstream.get("target_bronze_table") or ""),
+            require_active=True,
+        )
+        merge_keys = [str(row.get("target_column_name") or "") for row in rows if bool(row.get("is_primary_key"))]
+        if not merge_keys or merge_keys != json.loads(str(transformation.get("merge_keys_json") or "[]")):
+            raise RuntimeError("The reviewed Silver merge keys do not match the mapping bundle.")
+        target_parts = target_table.split(".")
+        source_table = str(rows[0].get("source_object_name") or "")
+        source_parts = source_table.split(".")
+        table_name = target_parts[-1]
+        if table_name.casefold().startswith("silver_"):
+            table_name = table_name[7:]
+        mapping_columns = [
+            {
+                "table_name": table_name,
+                "source_column_name": str(row.get("source_field_path") or ""),
+                "column_name": str(row.get("target_column_name") or ""),
+                "data_type": str(row.get("target_data_type") or ""),
+                "type": str(row.get("target_data_type") or ""),
+                "is_join_key": bool(row.get("is_primary_key")),
+                "transformation_rule": str(row.get("transformation_rule") or ""),
+            }
+            for row in rows
+        ]
+        refs.append({
+            "database_name": source_parts[-3] if len(source_parts) == 3 else "",
+            "schema_name": source_parts[-2] if len(source_parts) >= 2 else "",
+            "table_name": table_name,
+            "bronze_table": source_table,
+            "silver_table": target_table,
+            "existing_script_path": None,
+            "source_columns": mapping_columns,
+            "bronze_model_name": bronze.get("dbt_model_name"),
+            "mapping_columns": mapping_columns,
+            "metadata_driven": True,
+            "silver_ingestion_object_id": object_id,
+            "silver_ingestion_object_config_version": config_version,
+            "silver_ingestion_object_config_hash": config_hash,
+            "bronze_to_silver_mapping_version": mapping_version,
+            "bronze_to_silver_mapping_hash": mapping_hash,
+        })
+    if not refs:
+        raise ValueError("Metadata-driven Silver generation found no approved transformation drafts.")
+    return refs
+
+
 def _silver_output_dir() -> str:
     return str(generated_code_dir("silver"))
 
@@ -574,6 +679,8 @@ def _safe_python_list(values: List[str]) -> str:
 
 def _datatype_cast(data_type: str) -> str | None:
     normalized = data_type.lower().strip()
+    if re.fullmatch(r"decimal\(\d+,\s*\d+\)", normalized):
+        return normalized
     if normalized in {"int", "integer", "smallint", "tinyint"}:
         return "int"
     if normalized in {"bigint"}:
@@ -649,6 +756,7 @@ def generate_silver_script(
     run_id: str,
     silver_catalog: str = "main",
     silver_schema: str = "silver",
+    strict_mapping: bool = False,
 ) -> str:
     enriched_columns = _canonicalize_databricks_columns(enriched_columns)
     table_name = table_ref["table_name"]
@@ -682,6 +790,28 @@ def generate_silver_script(
         if _source_column_name(column)
         and _source_column_name(column) != _normalized_column_name(column)
     }
+    strict_merge_condition = " AND ".join(
+        f"target.`{name.replace('`', '``')}` = source.`{name.replace('`', '``')}`"
+        for name in key_columns
+    )
+    runtime_identity = (
+        '''RUNTIME_CONTEXT = globals().get("ATHENA_RUNTIME_CONTEXT")
+if not isinstance(RUNTIME_CONTEXT, dict):
+    raise RuntimeError("Metadata Silver execution requires ATHENA_RUNTIME_CONTEXT")
+RUN_ID = str(RUNTIME_CONTEXT.get("runtime_run_id") or "")
+LOGICAL_WORK_ID = str(RUNTIME_CONTEXT.get("logical_work_id") or "")
+if not RUN_ID or not LOGICAL_WORK_ID:
+    raise RuntimeError("Metadata runtime context is missing run or logical-work identity")'''
+        if strict_mapping
+        else f'RUN_ID = "{run_id}"\nLOGICAL_WORK_ID = None'
+    )
+    logical_work_filter = (
+        '''if "_logical_work_id" not in df.columns:
+    raise ValueError(f"Metadata Bronze source lacks _logical_work_id: {SOURCE_TABLE}")
+df = df.filter(col("_logical_work_id") == lit(LOGICAL_WORK_ID))'''
+        if strict_mapping
+        else ""
+    )
 
     return f'''
 """
@@ -699,7 +829,7 @@ DO NOT EDIT MANUALLY
 
 from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, expr, lit, row_number, sha2, trim, when
+from pyspark.sql.functions import col, current_timestamp, expr, lit, row_number, sha2, struct, to_json, trim, when
 from pyspark.sql.window import Window
 
 spark = SparkSession.builder.getOrCreate()
@@ -709,7 +839,7 @@ try:
 except Exception:
     print("Could not create schema '{silver_schema}' in the current catalog")
 
-RUN_ID = "{run_id}"
+{runtime_identity}
 SOURCE_TABLE = "{bronze_table}"
 TARGET_TABLE = "{silver_table}"
 TEMP_VIEW = "silver_src_{table_name}"
@@ -720,6 +850,8 @@ PII_COLUMNS = {_safe_python_list(pii_columns)}
 KEY_COLUMNS = {_safe_python_list(key_columns)}
 CAST_RULES = {repr(cast_rules)}
 COLUMN_ALIASES = {repr(column_aliases)}
+STRICT_MAPPING = {strict_mapping!r}
+STRICT_MERGE_CONDITION = {strict_merge_condition!r}
 
 def _try_cast_column(column_name, target_type):
     escaped_name = column_name.replace("`", "``")
@@ -729,6 +861,7 @@ if not spark.catalog.tableExists(SOURCE_TABLE):
     raise ValueError(f"Missing bronze source table: {{SOURCE_TABLE}}")
 
 df = spark.table(SOURCE_TABLE)
+{logical_work_filter}
 
 if df.limit(1).count() == 0:
     raise ValueError(f"Bronze source table has no rows: {{SOURCE_TABLE}}")
@@ -740,7 +873,7 @@ for old_name, new_name in COLUMN_ALIASES.items():
 
 available_columns = set(df.columns)
 metadata_columns = [
-    name for name in ["run_id", "ingestion_timestamp", "source_system", "source_table"]
+    name for name in ["run_id", "ingestion_timestamp", "source_system", "source_table", "_logical_work_id"]
     if name in available_columns
 ]
 
@@ -759,7 +892,7 @@ if EXPECTED_COLUMNS:
     for expected_name in EXPECTED_COLUMNS:
         if expected_name in selected_output_columns:
             continue
-        actual_name = available_by_compact.get(compact_name(expected_name))
+        actual_name = expected_name if STRICT_MAPPING and expected_name in available_columns else available_by_compact.get(compact_name(expected_name))
         if actual_name:
             select_expressions.append(col(actual_name).alias(expected_name))
             selected_output_columns.add(expected_name)
@@ -784,7 +917,9 @@ if not select_expressions:
 metadata_expressions = [col(name) for name in metadata_columns if name not in selected_output_columns]
 df = df.select(*select_expressions, *metadata_expressions)
 
-if missing_columns:
+if missing_columns and STRICT_MAPPING:
+    raise ValueError(f"Missing approved mapped columns in {{SOURCE_TABLE}}: {{missing_columns}}")
+elif missing_columns:
     print(f"WARNING: Missing expected columns in {{SOURCE_TABLE}}: {{missing_columns}}")
 
 for column_name in STRING_COLUMNS:
@@ -803,23 +938,25 @@ for column_name in PII_COLUMNS:
         df = df.withColumn(column_name, col(column_name).cast("string"))
 
 dedup_keys = [column_name for column_name in KEY_COLUMNS if column_name in df.columns]
+if STRICT_MAPPING and len(dedup_keys) != len(KEY_COLUMNS):
+    raise ValueError(f"Approved Silver merge keys are missing from {{SOURCE_TABLE}}: {{KEY_COLUMNS}}")
+if STRICT_MAPPING and not dedup_keys:
+    raise ValueError(f"Metadata-driven MERGE requires reviewed keys for {{TARGET_TABLE}}")
+if STRICT_MAPPING and any(df.filter(col(name).isNull()).limit(1).count() for name in dedup_keys):
+    raise ValueError(f"Approved Silver merge keys contain nulls for {{TARGET_TABLE}}")
+if STRICT_MAPPING and df.groupBy(*dedup_keys).count().filter(col("count") > 1).limit(1).count():
+    raise ValueError(f"Approved Silver merge keys are not unique for {{TARGET_TABLE}}")
 business_columns = [
     name for name in df.columns
     if name not in metadata_columns
 ]
-hash_columns = dedup_keys or business_columns
+hash_columns = dedup_keys if STRICT_MAPPING else (dedup_keys or business_columns)
 if not hash_columns:
     raise ValueError(f"No columns available to build Silver upsert key for {{TARGET_TABLE}}")
 
 df = df.withColumn(
     "silver_upsert_key",
-    sha2(
-        concat_ws(
-            "||",
-            *[coalesce(col(name).cast("string"), lit("__NULL__")) for name in hash_columns]
-        ),
-        256,
-    ),
+    sha2(to_json(struct(*[col(name).alias(name) for name in hash_columns])), 256),
 )
 
 dedup_order_columns = [
@@ -862,7 +999,13 @@ create_table_sql = (
 spark.sql(create_table_sql)
 
 target_columns = set(spark.table(TARGET_TABLE).columns)
-if "silver_upsert_key" not in target_columns:
+source_columns = set(df.columns)
+if STRICT_MAPPING and target_columns != source_columns:
+    raise ValueError(
+        f"Target schema differs from approved Silver mapping for {{TARGET_TABLE}}: "
+        f"missing={{sorted(source_columns - target_columns)}}, extra={{sorted(target_columns - source_columns)}}"
+    )
+if not STRICT_MAPPING and "silver_upsert_key" not in target_columns:
     spark.sql(f"ALTER TABLE {{TARGET_TABLE}} ADD COLUMNS (silver_upsert_key STRING)")
 
 target_column_names = spark.table(TARGET_TABLE).columns
@@ -895,11 +1038,16 @@ if not insert_assignments:
     raise ValueError(f"No common columns available to merge into {{TARGET_TABLE}}")
 
 delta_target = DeltaTable.forName(spark, TARGET_TABLE)
+merge_condition = (
+    STRICT_MERGE_CONDITION
+    if STRICT_MAPPING
+    else "target.silver_upsert_key = source.silver_upsert_key"
+)
 merge_builder = (
     delta_target.alias("target")
     .merge(
         df.alias("source"),
-        "target.silver_upsert_key = source.silver_upsert_key",
+        merge_condition,
     )
 )
 if update_assignments:
@@ -985,10 +1133,8 @@ def _snowflake_variant_cast_expr(source_ref: str, target_type: str) -> str:
 def _snowflake_hash_expr(columns: List[str]) -> str:
     if not columns:
         return "SHA2('__NO_BUSINESS_COLUMNS__', 256)"
-    parts = ",\n            ".join(
-        f"COALESCE(TO_VARCHAR({_snowflake_quote_identifier(column)}), '__NULL__')" for column in columns
-    )
-    return f"SHA2(CONCAT_WS('||',\n            {parts}\n        ), 256)"
+    parts = ", ".join(_snowflake_quote_identifier(column) for column in columns)
+    return f"SHA2(TO_JSON(ARRAY_CONSTRUCT({parts})), 256)"
 
 
 def generate_snowflake_silver_script(
@@ -998,6 +1144,7 @@ def generate_snowflake_silver_script(
     run_id: str,
     silver_catalog: str = "ATHENA_DB",
     silver_schema: str = "SILVER",
+    strict_mapping: bool = False,
 ) -> str:
     table_name = table_ref["table_name"]
     source_table = _snowflake_qualified_name(*str(table_ref["bronze_table"]).split("."))
@@ -1024,6 +1171,13 @@ def generate_snowflake_silver_script(
     )
     business_selects = ",\n        ".join(_snowflake_column_expr(column) for column in business_columns)
     business_insert_columns = ",\n    ".join(_snowflake_quote_identifier(column) for column in business_column_names)
+    logical_work_definition = ',\n    "_logical_work_id" VARCHAR' if strict_mapping else ""
+    logical_work_select = ',\n        src."_logical_work_id" AS "_logical_work_id"' if strict_mapping else ""
+    logical_work_filter = (
+        '\n    WHERE src."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID'
+        if strict_mapping else ""
+    )
+    silver_run_expression = "$ATHENA_RUNTIME_RUN_ID" if strict_mapping else _snowflake_string_literal(run_id)
     all_insert_columns = ",\n    ".join(
         [
             business_insert_columns,
@@ -1034,6 +1188,7 @@ def generate_snowflake_silver_script(
             '"silver_upsert_key"',
             '"silver_run_id"',
             '"silver_processed_timestamp"',
+            *(['"_logical_work_id"'] if strict_mapping else []),
         ]
     )
     update_assignments = ",\n        ".join(
@@ -1049,11 +1204,60 @@ def generate_snowflake_silver_script(
             'target."source_table" = source."source_table"',
             'target."silver_run_id" = source."silver_run_id"',
             'target."silver_processed_timestamp" = source."silver_processed_timestamp"',
+            *([
+                'target."_logical_work_id" = source."_logical_work_id"'
+            ] if strict_mapping else []),
         ]
     )
     insert_values = ",\n    ".join(f"source.{column}" for column in all_insert_columns.split(",\n    "))
     hash_expr = _snowflake_hash_expr(hash_columns)
+    if strict_mapping and not key_columns:
+        raise ValueError(f"Metadata-driven MERGE requires reviewed keys for {table_ref['silver_table']}.")
+    merge_predicate = (
+        " AND ".join(
+            f"target.{_snowflake_quote_identifier(column)} = source.{_snowflake_quote_identifier(column)}"
+            for column in key_columns
+        )
+        if strict_mapping
+        else 'target."silver_upsert_key" = source."silver_upsert_key"'
+    )
     order_expr = 'COALESCE("ingestion_timestamp", "silver_processed_timestamp") DESC NULLS LAST'
+    null_key_check = ""
+    if strict_mapping:
+        null_predicate = " OR ".join(f"{_snowflake_quote_identifier(column)} IS NULL" for column in key_columns)
+        grouped_keys = ", ".join(_snowflake_quote_identifier(column) for column in key_columns)
+        null_key_check = f"""
+WITH normalized AS (
+    SELECT
+        {business_selects}
+    FROM {source_table} AS src
+    {logical_work_filter}
+)
+SELECT IFF(
+    COUNT_IF({null_predicate}) = 0,
+    1,
+    TO_NUMBER('APPROVED_SILVER_MERGE_KEYS_CONTAIN_NULLS')
+)
+FROM normalized;
+
+WITH normalized AS (
+    SELECT
+        {business_selects}
+    FROM {source_table} AS src
+    {logical_work_filter}
+), duplicate_keys AS (
+    SELECT {grouped_keys}
+    FROM normalized
+    GROUP BY {grouped_keys}
+    HAVING COUNT(*) > 1
+)
+SELECT IFF(
+    COUNT(*) = 0,
+    1,
+    TO_NUMBER('APPROVED_SILVER_MERGE_KEYS_ARE_NOT_UNIQUE')
+)
+FROM duplicate_keys;
+"""
 
     return f"""-- AUTO-GENERATED SILVER TRANSFORMATION SCRIPT
 -- Source table: {table_ref["bronze_table"]}
@@ -1072,8 +1276,9 @@ CREATE TABLE IF NOT EXISTS {target_table} (
     "source_table" VARCHAR,
     "silver_upsert_key" VARCHAR,
     "silver_run_id" VARCHAR,
-    "silver_processed_timestamp" TIMESTAMP_NTZ
+    "silver_processed_timestamp" TIMESTAMP_NTZ{logical_work_definition}
 );
+{null_key_check}
 
 MERGE INTO {target_table} AS target
 USING (
@@ -1084,9 +1289,10 @@ USING (
         src."ingestion_timestamp" AS "ingestion_timestamp",
         src."source_system" AS "source_system",
         src."source_table" AS "source_table",
-        {_snowflake_string_literal(run_id)} AS "silver_run_id",
-        CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "silver_processed_timestamp"
+        {silver_run_expression} AS "silver_run_id",
+        CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "silver_processed_timestamp"{logical_work_select}
         FROM {source_table} AS src
+        {logical_work_filter}
     ),
     keyed AS (
         SELECT
@@ -1101,7 +1307,7 @@ USING (
         ORDER BY {order_expr}
     ) = 1
 ) AS source
-ON target."silver_upsert_key" = source."silver_upsert_key"
+ON {merge_predicate}
 WHEN MATCHED THEN UPDATE SET
         {update_assignments}
 WHEN NOT MATCHED THEN INSERT (
@@ -1151,6 +1357,7 @@ def generate_snowflake_silver_dbt_model(
     run_id: str,
     silver_catalog: str,
     silver_schema: str,
+    strict_mapping: bool = False,
 ) -> str:
     table_name = table_ref["table_name"]
     physical_alias = f"silver_{table_name}"
@@ -1169,7 +1376,9 @@ def generate_snowflake_silver_dbt_model(
 
     business_column_names = [_normalized_column_name(column) for column in business_columns]
     key_columns = [column for column in _key_columns(business_columns) if column in business_column_names]
-    hash_columns = key_columns or business_column_names
+    if strict_mapping and not key_columns:
+        raise ValueError(f"Metadata-driven MERGE requires reviewed keys for {table_ref['silver_table']}.")
+    hash_columns = key_columns if strict_mapping else (key_columns or business_column_names)
     business_selects = (
         ",\n        ".join(_snowflake_column_expr(column) for column in business_columns)
         if business_columns
@@ -1188,7 +1397,7 @@ def generate_snowflake_silver_dbt_model(
     alias={json.dumps(physical_alias)},
     unique_key='"silver_upsert_key"',
     incremental_strategy='merge',
-    on_schema_change='sync_all_columns'
+    on_schema_change={'\'fail\'' if strict_mapping else '\'sync_all_columns\''}
 ) }}}}
 
 -- AUTO-GENERATED SILVER DBT MODEL
@@ -1422,7 +1631,12 @@ def _generate_one_table(
     target_warehouse = str(target_warehouse or "databricks").lower()
     execution_engine = str(execution_engine or "native").lower()
     dbt_codegen = target_warehouse == "snowflake" and execution_engine == "dbt"
-    enriched_columns = _columns_for_table(enriched_metadata, table_name)
+    metadata_driven = bool(table_ref.get("metadata_driven"))
+    enriched_columns = (
+        list(table_ref.get("mapping_columns") or [])
+        if metadata_driven
+        else _columns_for_table(enriched_metadata, table_name)
+    )
     if not enriched_columns and target_warehouse == "snowflake":
         enriched_columns = table_ref.get("source_columns") or []
     if target_warehouse == "databricks" and execution_engine == "native":
@@ -1436,6 +1650,7 @@ def _generate_one_table(
             run_id=run_id,
             silver_catalog=silver_catalog,
             silver_schema=silver_schema,
+            strict_mapping=metadata_driven,
         )
         validate_snowflake_silver_dbt_model(code, table_ref=table_ref)
         script_language = "sql"
@@ -1448,6 +1663,7 @@ def _generate_one_table(
             run_id=run_id,
             silver_catalog=silver_catalog,
             silver_schema=silver_schema,
+            strict_mapping=metadata_driven,
         )
         script_language = "sql"
         extension = "sql"
@@ -1459,6 +1675,7 @@ def _generate_one_table(
             run_id=run_id,
             silver_catalog=silver_catalog,
             silver_schema=silver_schema,
+            strict_mapping=metadata_driven,
         )
         _validate_python(code)
         script_language = "python"
@@ -1466,7 +1683,7 @@ def _generate_one_table(
         merge_strategy = "Delta MERGE on silver_upsert_key built from reviewed merge keys"
 
     llm_configured = _llm_enabled_for_silver()
-    llm_enabled = llm_configured and not dbt_codegen
+    llm_enabled = llm_configured and not dbt_codegen and not metadata_driven
     generation_mode = "DETERMINISTIC_DBT" if dbt_codegen else "DETERMINISTIC"
     if llm_enabled:
         try:
@@ -1574,6 +1791,17 @@ def _generate_one_table(
         "bronze_model_name": table_ref.get("bronze_model_name") if dbt_codegen else None,
         "status": "APPROVED",
         "script_path": script_path,
+        **{
+            key: table_ref[key]
+            for key in (
+                "silver_ingestion_object_id",
+                "silver_ingestion_object_config_version",
+                "silver_ingestion_object_config_hash",
+                "bronze_to_silver_mapping_version",
+                "bronze_to_silver_mapping_hash",
+            )
+            if key in table_ref
+        },
     }
 
 
@@ -2419,7 +2647,11 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
         dbt_project_path = str(dbt_snowflake_runtime.write_snowflake_dbt_scaffold(state))
         _refresh_snowflake_dbt_models(run_id)
 
-    table_refs = _resolve_tables_for_silver(state)
+    metadata_driven = bool(state.get("silver_transformation_objects")) or any(
+        isinstance(item, dict) and item.get("silver_ingestion_object_id") is not None
+        for item in state.get("bronze_generation_results") or []
+    )
+    table_refs = _metadata_tables_for_silver(state) if metadata_driven else _resolve_tables_for_silver(state)
 
     if dbt_codegen:
         _assert_unique_dbt_model_names(

@@ -32,7 +32,7 @@ from utilis.db import (
     update_hitl_items_batch,
 )
 from utilis.generated_code_paths import generated_code_dir
-from utilis.logger import logger
+from utilis.logger import logger, redact_sensitive
 
 
 BACKGROUND_WORKER_COUNT = max(1, int(os.getenv("ATHENA_BACKGROUND_WORKERS", "2")))
@@ -417,9 +417,7 @@ def _database_stage_runner(stage_key: str):
 
         return hitl_review_node
     if stage_key == "nomination":
-        from nodes.table_nomination import table_nomination_node
-
-        return table_nomination_node
+        return _run_database_nomination_stage
     if stage_key == "gate2":
         from nodes.hitl import hitl_table_review_node
 
@@ -449,10 +447,31 @@ def _database_stage_runner(stage_key: str):
     raise ValueError(f"Unsupported database stage: {stage_key}")
 
 
+def _run_database_nomination_stage(state: Dict[str, Any]) -> Dict[str, Any]:
+    from nodes.table_nomination import table_nomination_node
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if selection:
+        configured_database = str(selection.connection.get("database_name") or "").strip()
+        requested = [str(value).strip() for value in state.get("source_databases") or [] if str(value).strip()]
+        if requested and {value.casefold() for value in requested} != {configured_database.casefold()}:
+            raise ValueError("Requested source_databases do not match the selected active connection.")
+        state = {
+            **state,
+            "source_databases": [configured_database],
+            "source_connection_config_version": selection.connection.get("config_version"),
+            "source_connection_config_hash": selection.connection.get("config_hash"),
+        }
+    return table_nomination_node(state)
+
+
 def _run_database_bronze_stage(state: Dict[str, Any]) -> Dict[str, Any]:
     from nodes.bronze_gen import bronze_code_generation_node
 
-    result = bronze_code_generation_node(state)
+    result = bronze_code_generation_node(_mapping_driven_bronze_state(state))
+    if state.get("source_system_id") is not None:
+        result = _attach_bronze_execution_specs(result)
     if str(result.get("bronze_generation_status") or "").upper() == "COMPLETED":
         return {
             **result,
@@ -461,6 +480,421 @@ def _run_database_bronze_stage(state: Dict[str, Any]) -> Dict[str, Any]:
             "resume_message": "Bronze Review is pending. Review generated Bronze scripts before Silver generation.",
         }
     return result
+
+
+def _attach_bronze_execution_specs(state: Dict[str, Any]) -> Dict[str, Any]:
+    from pathlib import Path
+
+    from services.metadata_contracts import file_sha256, validate_execution_spec
+    from utilis.generated_code_paths import generated_artifact_uri
+
+    certified_by_source = {
+        f"{table.get('database_name')}.{table.get('schema_name')}.{table.get('table_name')}".casefold(): table
+        for table in state.get("certified_tables") or []
+    }
+    platform = str(state.get("target_warehouse") or "").strip().lower()
+    enriched_results = []
+    for result in state.get("bronze_generation_results") or []:
+        source_key = str(result.get("source_table") or "").casefold()
+        certified = certified_by_source.get(source_key)
+        if not certified:
+            raise ValueError(f"Generated Bronze artifact has no certified ingestion object: {source_key}")
+        path = Path(str(result.get("script_path") or ""))
+        engine = (
+            "SNOWFLAKE_DBT"
+            if platform == "snowflake" and str(result.get("code_generation_format") or "").lower() == "dbt"
+            else "SNOWFLAKE_SQL"
+            if platform == "snowflake"
+            else "DATABRICKS_JOB"
+        )
+        spec = validate_execution_spec(
+            {
+                "contract_version": "1.0",
+                "execution_mode": "GENERATED_ARTIFACT",
+                "target_platform": platform.upper(),
+                "engine": engine,
+                "artifact_uri": generated_artifact_uri(path),
+                "entry_point": str(result.get("dbt_model_name") or "script"),
+                "artifact_hash": file_sha256(path),
+                "generator_version": "astra-codegen-1.0.0",
+                "mapping_version": int(certified["source_to_bronze_mapping_version"]),
+                "deployment_id": str(state.get("run_id") or ""),
+                "connection_id": int(state["source_connection_id"]),
+                "connection_config_version": int(state["source_connection_config_version"]),
+                "connection_config_hash": str(state["source_connection_config_hash"]),
+                "runtime_context_contract_version": "1.0",
+                "idempotency_identity": "logical_work_id",
+                "source_resource": {
+                    "database": result.get("database_name"),
+                    "schema": result.get("schema_name"),
+                    "table": result.get("table"),
+                },
+                "landing_resource": (
+                    {
+                        "database": result.get("snowflake_landing_database"),
+                        "schema": result.get("snowflake_landing_schema"),
+                        "table": result.get("snowflake_landing_table"),
+                    }
+                    if platform == "snowflake"
+                    else None
+                ),
+            },
+            platform=platform,
+        )
+        enriched_results.append(
+            {
+                **result,
+                "ingestion_object_id": int(certified["ingestion_object_id"]),
+                "ingestion_object_config_version": int(certified["ingestion_object_config_version"]),
+                "ingestion_object_config_hash": str(certified["ingestion_object_config_hash"]),
+                "mapping_version": int(certified["source_to_bronze_mapping_version"]),
+                "mapping_hash": str(certified["source_to_bronze_mapping_hash"]),
+                "execution_spec": spec,
+            }
+        )
+    return {**state, "bronze_generation_results": enriched_results}
+
+
+def _activate_reviewed_bronze_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+    from services.metadata_selection import validated_metadata_selection
+
+    if state.get("source_system_id") is None:
+        return state
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Bronze activation requires a valid target metadata selection.")
+    activated_results = []
+    active_versions: Dict[int, tuple[int, str]] = {}
+    for result in state.get("bronze_generation_results") or []:
+        if str((result.get("execution_spec") or {}).get("engine") or "").upper() == "SNOWFLAKE_DBT":
+            activated_results.append({**result, "metadata_activation_status": "PENDING_FINAL_DBT_PACKAGE"})
+            continue
+        activated = selection.repository.register_and_activate_source_to_bronze_artifact(
+            draft_config_version=int(result["ingestion_object_config_version"]),
+            ingestion_object_id=int(result["ingestion_object_id"]),
+            mapping_version=int(result["mapping_version"]),
+            mapping_hash=str(result["mapping_hash"]),
+            execution_spec=result["execution_spec"],
+        )
+        active_object = activated["ingestion_object"]
+        active_versions[int(result["ingestion_object_id"])] = (
+            int(active_object["config_version"]),
+            str(active_object["config_hash"]),
+        )
+        activated_results.append(
+            {
+                **result,
+                "active_ingestion_object_config_version": int(active_object["config_version"]),
+                "active_ingestion_object_config_hash": str(active_object["config_hash"]),
+                "execution_spec": activated["execution_spec"],
+                "metadata_activation_status": "ACTIVE",
+            }
+        )
+    certified_tables = []
+    for table in state.get("certified_tables") or []:
+        active = active_versions.get(int(table.get("ingestion_object_id") or 0))
+        certified_tables.append(
+            {
+                **table,
+                **(
+                    {
+                        "active_ingestion_object_config_version": active[0],
+                        "active_ingestion_object_config_hash": active[1],
+                    }
+                    if active
+                    else {}
+                ),
+            }
+        )
+    return {**state, "bronze_generation_results": activated_results, "certified_tables": certified_tables}
+
+
+def _attach_silver_execution_specs(state: Dict[str, Any]) -> Dict[str, Any]:
+    from services.metadata_contracts import canonical_json_hash, file_sha256, validate_execution_spec
+    from utilis.generated_code_paths import generated_artifact_uri
+
+    platform = str(state.get("target_warehouse") or "").strip().lower()
+    objects_by_id = {
+        int(item.get("ingestion_object_id") or 0): item
+        for item in state.get("silver_transformation_objects") or []
+        if isinstance(item, dict)
+    }
+    review_by_object = {
+        int(item.get("silver_ingestion_object_id") or 0): item
+        for item in (state.get("silver_review_artifact") or {}).get("items") or []
+        if isinstance(item, dict) and item.get("silver_ingestion_object_id") is not None
+    }
+    results = []
+    for result in state.get("silver_generation_results") or []:
+        object_id = int(result.get("silver_ingestion_object_id") or 0)
+        transformation = objects_by_id.get(object_id) or {}
+        validation_policy = json.loads(str(transformation.get("validation_policy_json") or "{}"))
+        path = Path(str(result.get("script_path") or ""))
+        reviewed = review_by_object.get(object_id) or {}
+        reviewed_body = str(reviewed.get("generated_silver_script") or reviewed.get("script_body") or "")
+        if reviewed_body and reviewed_body != path.read_text(encoding="utf-8"):
+            raise ValueError(
+                "Metadata-driven Silver review cannot replace executable code; update the approved mapping and regenerate."
+            )
+        engine = (
+            "SNOWFLAKE_DBT"
+            if platform == "snowflake" and str(result.get("code_generation_format") or "").lower() == "dbt"
+            else "SNOWFLAKE_SQL"
+            if platform == "snowflake"
+            else "DATABRICKS_JOB"
+        )
+        spec = validate_execution_spec(
+            {
+                "contract_version": "1.0",
+                "execution_mode": "GENERATED_ARTIFACT",
+                "target_platform": platform.upper(),
+                "engine": engine,
+                "artifact_uri": generated_artifact_uri(path),
+                "entry_point": str(result.get("dbt_model_name") or "script"),
+                "artifact_hash": file_sha256(path),
+                "generator_version": "astra-codegen-1.0.0",
+                "mapping_version": int(result["bronze_to_silver_mapping_version"]),
+                "deployment_id": str(state.get("run_id") or ""),
+                "embedded_blocking_validation": True,
+                "validation_policy_hash": canonical_json_hash(validation_policy),
+            },
+            platform=platform,
+        )
+        results.append({**result, "execution_spec": spec})
+    return {**state, "silver_generation_results": results}
+
+
+def _activate_reviewed_silver_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Silver activation requires a valid target metadata selection.")
+    active_versions: Dict[int, tuple[int, str]] = {}
+    results = []
+    for result in state.get("silver_generation_results") or []:
+        if str((result.get("execution_spec") or {}).get("engine") or "").upper() == "SNOWFLAKE_DBT":
+            results.append({**result, "metadata_activation_status": "PENDING_FINAL_DBT_PACKAGE"})
+            continue
+        activated = selection.repository.register_and_activate_bronze_to_silver_artifact(
+            draft_config_version=int(result["silver_ingestion_object_config_version"]),
+            ingestion_object_id=int(result["silver_ingestion_object_id"]),
+            mapping_version=int(result["bronze_to_silver_mapping_version"]),
+            mapping_hash=str(result["bronze_to_silver_mapping_hash"]),
+            execution_spec=result["execution_spec"],
+        )
+        active_object = activated["ingestion_object"]
+        object_id = int(result["silver_ingestion_object_id"])
+        active_versions[object_id] = (
+            int(active_object["config_version"]),
+            str(active_object["config_hash"]),
+        )
+        results.append({
+            **result,
+            "active_silver_ingestion_object_config_version": int(active_object["config_version"]),
+            "active_silver_ingestion_object_config_hash": str(active_object["config_hash"]),
+            "execution_spec": activated["execution_spec"],
+            "metadata_activation_status": "ACTIVE",
+        })
+    objects = [
+        {
+            **item,
+            **(
+                {
+                    "active_config_version": active_versions[int(item["ingestion_object_id"])][0],
+                    "active_config_hash": active_versions[int(item["ingestion_object_id"])][1],
+                }
+                if int(item.get("ingestion_object_id") or 0) in active_versions
+                else {}
+            ),
+        }
+        for item in state.get("silver_transformation_objects") or []
+        if isinstance(item, dict)
+    ]
+    return {**state, "silver_generation_results": results, "silver_transformation_objects": objects}
+
+
+def _attach_gold_execution_specs(state: Dict[str, Any]) -> Dict[str, Any]:
+    from services.metadata_contracts import canonical_json_hash, file_sha256, validate_execution_spec
+    from utilis.generated_code_paths import generated_artifact_uri
+
+    platform = str(state.get("target_warehouse") or "").strip().lower()
+    review_by_object = {
+        int(item.get("gold_ingestion_object_id") or 0): item
+        for item in (state.get("gold_review_artifact") or {}).get("items") or []
+        if isinstance(item, dict) and item.get("gold_ingestion_object_id") is not None
+    }
+    results = []
+    objects_by_id = {
+        int(item.get("ingestion_object_id") or 0): item
+        for item in state.get("gold_transformation_objects") or []
+        if isinstance(item, dict)
+    }
+    for result in state.get("gold_generation_results") or []:
+        object_id = int(result.get("gold_ingestion_object_id") or 0)
+        transformation = objects_by_id.get(object_id) or {}
+        validation_policy = json.loads(str(transformation.get("validation_policy_json") or "{}"))
+        path = Path(str(result.get("script_path") or ""))
+        reviewed = review_by_object.get(object_id) or {}
+        reviewed_body = str(reviewed.get("generated_gold_script") or reviewed.get("script_body") or "")
+        if reviewed_body and reviewed_body != path.read_text(encoding="utf-8"):
+            raise ValueError(
+                "Metadata-driven Gold review cannot replace executable code; update the approved mapping and regenerate."
+            )
+        engine = "SNOWFLAKE_SQL" if platform == "snowflake" else "DATABRICKS_JOB"
+        spec = validate_execution_spec(
+            {
+                "contract_version": "1.0",
+                "execution_mode": "GENERATED_ARTIFACT",
+                "target_platform": platform.upper(),
+                "engine": engine,
+                "artifact_uri": generated_artifact_uri(path),
+                "entry_point": "script",
+                "artifact_hash": file_sha256(path),
+                "generator_version": "astra-codegen-1.0.0",
+                "mapping_version": int(result["silver_to_gold_mapping_version"]),
+                "deployment_id": str(state.get("run_id") or ""),
+                "embedded_blocking_validation": True,
+                "validation_policy_hash": canonical_json_hash(validation_policy),
+            },
+            platform=platform,
+        )
+        results.append({**result, "execution_spec": spec})
+    return {**state, "gold_generation_results": results}
+
+
+def _activate_reviewed_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Gold activation requires a valid target metadata selection.")
+    active_versions: Dict[int, tuple[int, str]] = {}
+    results = []
+    for result in state.get("gold_generation_results") or []:
+        activated = selection.repository.register_and_activate_silver_to_gold_artifact(
+            draft_config_version=int(result["gold_ingestion_object_config_version"]),
+            ingestion_object_id=int(result["gold_ingestion_object_id"]),
+            mapping_version=int(result["silver_to_gold_mapping_version"]),
+            mapping_hash=str(result["silver_to_gold_mapping_hash"]),
+            execution_spec=result["execution_spec"],
+        )
+        active_object = activated["ingestion_object"]
+        object_id = int(result["gold_ingestion_object_id"])
+        active_versions[object_id] = (int(active_object["config_version"]), str(active_object["config_hash"]))
+        results.append({
+            **result,
+            "active_gold_ingestion_object_config_version": int(active_object["config_version"]),
+            "active_gold_ingestion_object_config_hash": str(active_object["config_hash"]),
+            "execution_spec": activated["execution_spec"],
+            "metadata_activation_status": "ACTIVE",
+        })
+    objects = [
+        {
+            **item,
+            **(
+                {
+                    "active_config_version": active_versions[int(item["ingestion_object_id"])][0],
+                    "active_config_hash": active_versions[int(item["ingestion_object_id"])][1],
+                }
+                if int(item.get("ingestion_object_id") or 0) in active_versions
+                else {}
+            ),
+        }
+        for item in state.get("gold_transformation_objects") or []
+        if isinstance(item, dict)
+    ]
+    return {**state, "gold_generation_results": results, "gold_transformation_objects": objects}
+
+
+def _mapping_driven_bronze_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    if state.get("source_system_id") is None:
+        return state
+    from services.metadata_contracts import validate_identifier
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Metadata-enabled Bronze generation requires a valid target metadata selection.")
+    certified_tables = state.get("certified_tables") or []
+    discovered = dict(state.get("discovered_metadata") or {})
+    discovered_by_object = {
+        int(table["ingestion_object_id"]): table
+        for table in discovered.get("tables") or []
+        if table.get("ingestion_object_id") is not None
+    }
+    mapped_discovery = []
+    loaded_bundles = []
+    pinned_target_namespace: Optional[tuple[str, str]] = None
+    for certified in certified_tables:
+        object_id = int(certified.get("ingestion_object_id") or 0)
+        config_version = int(certified.get("ingestion_object_config_version") or 0)
+        ingestion_object = selection.repository.get_ingestion_object(object_id, config_version)
+        if not ingestion_object:
+            raise ValueError(f"Missing ingestion-object draft for object {object_id}/{config_version}.")
+        if str(ingestion_object.get("config_hash") or "") != str(
+            certified.get("ingestion_object_config_hash") or ""
+        ):
+            raise ValueError(f"Ingestion-object configuration hash mismatch for object {object_id}.")
+        target_table = str(ingestion_object.get("target_bronze_table") or "").strip()
+        bundle = selection.repository.get_mapping_bundle(
+            ingestion_object_id=object_id,
+            processing_stage="SOURCE_TO_BRONZE",
+            mapping_version=int(certified.get("source_to_bronze_mapping_version") or 0),
+            expected_hash=str(certified.get("source_to_bronze_mapping_hash") or ""),
+            expected_target=target_table,
+            require_active=False,
+        )
+        loaded_bundles.append(bundle)
+        source_table = discovered_by_object.get(object_id)
+        if not source_table:
+            raise ValueError(f"Missing approved Source-to-Bronze mapping context for object {object_id}.")
+        target_parts = [validate_identifier(part, label="Bronze target identifier") for part in target_table.split(".")]
+        if len(target_parts) != 3 or target_parts[2].casefold() != f"bronze_{source_table.get('table_name') or ''}".casefold():
+            raise ValueError(f"Unsupported pinned Bronze target for object {object_id}: {target_table!r}")
+        target_namespace = (target_parts[0], target_parts[1])
+        if pinned_target_namespace and tuple(part.casefold() for part in pinned_target_namespace) != tuple(
+            part.casefold() for part in target_namespace
+        ):
+            raise ValueError("One Bronze generation batch cannot span multiple target catalog/schema pairs.")
+        pinned_target_namespace = target_namespace
+        original_columns = {
+            str(column.get("column_name") or "").casefold(): column
+            for column in source_table.get("columns") or []
+        }
+        mapped_columns = []
+        for mapping in sorted(bundle.get("mappings") or [], key=lambda item: int(item.get("ordinal_position") or 0)):
+            source_name = str(mapping.get("source_field_path") or "")
+            original = original_columns.get(source_name.casefold())
+            if not original:
+                raise ValueError(f"Mapped source column was not discovered: {source_name}")
+            mapped_columns.append(
+                {
+                    **original,
+                    "ordinal_position": mapping.get("ordinal_position"),
+                    "bronze_target_name": mapping.get("target_column_name"),
+                    "bronze_target_type": mapping.get("target_data_type"),
+                }
+            )
+        mapped_discovery.append({**source_table, "target_bronze_table": target_table, "columns": mapped_columns})
+    if not pinned_target_namespace:
+        raise ValueError("Metadata-enabled Bronze generation requires at least one pinned target.")
+    return {
+        **state,
+        "bronze_catalog": pinned_target_namespace[0],
+        "bronze_schema": pinned_target_namespace[1],
+        "source_to_bronze_mapping_bundles": loaded_bundles,
+        "source_runtime_connection": {
+            "host_name": selection.connection.get("host_name"),
+            "port": selection.connection.get("port"),
+            "database_name": selection.connection.get("database_name"),
+            "secrets": json.loads(str(selection.connection.get("secrets_json") or "{}")),
+            "config": json.loads(str(selection.connection.get("config_json") or "{}")),
+            "config_version": selection.connection.get("config_version"),
+            "config_hash": selection.connection.get("config_hash"),
+        },
+        "discovered_metadata": {**discovered, "tables": mapped_discovery},
+    }
 
 
 def _run_database_silver_stage(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -728,7 +1162,7 @@ def load_checkpoint_state(run_id: str) -> Optional[Dict[str, Any]]:
 
 
 def save_checkpoint_state(run_id: str, state: Dict[str, Any]) -> None:
-    persisted_state = dict(state)
+    persisted_state = redact_sensitive(dict(state))
     now = datetime.now(timezone.utc).isoformat()
     persisted_state["updated_at"] = now
     normalized_status = str(persisted_state.get("status") or "").upper()
@@ -2901,6 +3335,9 @@ def start_pipeline(
     compliance_domain: str = "Insurance",
     compliance_countries: Optional[List[str]] = None,
     target_warehouse: str = "databricks",
+    target_environment: Optional[str] = None,
+    source_system_id: Optional[int] = None,
+    source_connection_id: Optional[int] = None,
     execution_engine: str = "native",
     dbt_deployment_mode: str = "generate_only",
     dbt_project_object_name: Optional[str] = None,
@@ -2932,6 +3369,9 @@ def start_pipeline(
         "compliance_domain": compliance_domain or "Insurance",
         "compliance_countries": compliance_countries or ["US"],
         "target_warehouse": str(target_warehouse or "databricks").lower(),
+        "target_environment": target_environment,
+        "source_system_id": source_system_id,
+        "source_connection_id": source_connection_id,
         "execution_engine": str(execution_engine or "native").lower(),
         "dbt_deployment_mode": str(dbt_deployment_mode or "generate_only").lower(),
         "dbt_project_object_name": dbt_project_object_name,
@@ -3077,6 +3517,93 @@ def _gate2_execution_scope(tables: List[Dict[str, Any]], approved_keys: List[str
     return approved
 
 
+def _materialize_gate2_ingestion_objects(
+    state: Dict[str, Any],
+    approved: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if not selection:
+        return approved
+    materialized = []
+    from services.metadata_contracts import validate_identifier
+
+    platform = str(state.get("target_warehouse") or "").lower()
+    if platform == "snowflake":
+        bronze_catalog = os.getenv("SNOWFLAKE_BRONZE_CATALOG", "ATHENA_DB")
+        bronze_schema = os.getenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
+    else:
+        bronze_catalog = os.getenv("BRONZE_CATALOG", "main")
+        bronze_schema = os.getenv("BRONZE_SCHEMA", "bronze")
+    bronze_catalog = validate_identifier(bronze_catalog, label="Bronze catalog")
+    bronze_schema = validate_identifier(bronze_schema, label="Bronze schema")
+    for table in approved:
+        bronze_table = validate_identifier(f"bronze_{table.get('table_name') or ''}", label="Bronze table")
+        target_bronze_table = f"{bronze_catalog}.{bronze_schema}.{bronze_table}"
+        ingestion_object = selection.repository.upsert_database_ingestion_object_draft(
+            source_system_id=int(state["source_system_id"]),
+            connection_id=int(state["source_connection_id"]),
+            table=table,
+            expected_connection_version=int(selection.connection["config_version"]),
+            expected_connection_hash=str(selection.connection["config_hash"]),
+            target_bronze_table=target_bronze_table,
+        )
+        materialized.append(
+            {
+                **table,
+                "ingestion_object_id": int(ingestion_object["ingestion_object_id"]),
+                "ingestion_object_config_version": int(ingestion_object["config_version"]),
+                "ingestion_object_config_hash": str(ingestion_object["config_hash"]),
+                "target_bronze_table": target_bronze_table,
+            }
+        )
+    return materialized
+
+
+def _materialize_source_to_bronze_mappings(
+    state: Dict[str, Any],
+    approved_metadata: Dict[str, Any],
+    certified_tables: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if not selection:
+        return certified_tables, []
+    columns_by_object: Dict[int, List[Dict[str, Any]]] = {}
+    for column in approved_metadata.get("columns") or []:
+        if isinstance(column, dict) and column.get("ingestion_object_id") is not None:
+            columns_by_object.setdefault(int(column["ingestion_object_id"]), []).append(column)
+
+    mapped_tables: List[Dict[str, Any]] = []
+    bundles: List[Dict[str, Any]] = []
+    for table in certified_tables:
+        ingestion_object_id = table.get("ingestion_object_id")
+        config_version = table.get("ingestion_object_config_version")
+        if ingestion_object_id is None or config_version is None:
+            raise ValueError("Metadata-enabled Bronze mapping requires ingestion-object lineage for every table.")
+        ingestion_object = selection.repository.get_ingestion_object(
+            int(ingestion_object_id),
+            int(config_version),
+        )
+        if not ingestion_object:
+            raise ValueError(f"Ingestion-object draft not found: {ingestion_object_id}/{config_version}")
+        bundle = selection.repository.upsert_source_to_bronze_mapping_draft(
+            ingestion_object=ingestion_object,
+            columns=columns_by_object.get(int(ingestion_object_id), []),
+        )
+        bundles.append(bundle)
+        mapped_tables.append(
+            {
+                **table,
+                "source_to_bronze_mapping_version": bundle["mapping_version"],
+                "source_to_bronze_mapping_hash": bundle["mapping_hash"],
+            }
+        )
+    return mapped_tables, bundles
+
+
 def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]:
     from nodes.hitl import hitl_table_review_node
 
@@ -3086,13 +3613,32 @@ def submit_gate2_review(run_id: str, approved_keys: List[str]) -> Dict[str, Any]
         or checkpoint_state.get("nominated_tables")
         or []
     )
-    approved = _gate2_execution_scope(tables, approved_keys)
+    if checkpoint_state.get("source_system_id") is not None:
+        approved_key_set = set(approved_keys)
+        approved = [item for item in tables if _table_key(item) in approved_key_set]
+        if not approved:
+            raise ValueError("At least one table must be explicitly approved for Table Review.")
+    else:
+        approved = _gate2_execution_scope(tables, approved_keys)
+    approved = _materialize_gate2_ingestion_objects(checkpoint_state, approved)
 
     resumed_input = dict(checkpoint_state or {"run_id": run_id})
     resumed_input.pop("error", None)
     resumed_input.pop("failed_background_stage", None)
     resumed_input["human_table_decision"] = "COMPLETED"
     resumed_input["certified_tables"] = approved
+    resumed_input["ingestion_objects"] = [
+        {
+            "ingestion_object_id": table["ingestion_object_id"],
+            "config_version": table["ingestion_object_config_version"],
+            "config_hash": table.get("ingestion_object_config_hash"),
+            "database_name": table.get("database_name"),
+            "schema_name": table.get("schema_name"),
+            "table_name": table.get("table_name"),
+        }
+        for table in approved
+        if table.get("ingestion_object_id") is not None
+    ]
     with timed_stage("gate2_hitl_certification", run_id=run_id, node="api"):
         resumed = hitl_table_review_node(resumed_input)
     if resumed.get("status") == "FAILED":
@@ -3196,6 +3742,10 @@ def submit_gate3_review(
     metadata = enriched_metadata or fetch_json_artifact(run_id, "ENRICHED_METADATA") or _checkpoint_enriched_payload(checkpoint_state)
     if not metadata:
         raise ValueError("No enriched metadata found for this run.")
+    if checkpoint_state.get("source_system_id") is not None:
+        if enriched_metadata is not None and not use_persisted_review:
+            raise ValueError("Metadata-enabled enrichment approval must use persisted Gate 3 review decisions.")
+        use_persisted_review = True
     if use_persisted_review:
         review_rows = get_hitl_items(run_id, 3)
         if not review_rows or any(str(row.get("gate_status") or "").upper() == "PENDING" for row in review_rows):
@@ -3227,6 +3777,11 @@ def submit_gate3_review(
     )
     if not certified_tables:
         raise ValueError("Bronze generation skipped: no Table Review certified tables found.")
+    certified_tables, mapping_bundles = _materialize_source_to_bronze_mappings(
+        checkpoint_state,
+        metadata,
+        certified_tables,
+    )
 
     bronze_state: Dict[str, Any] = {
         **checkpoint_state,
@@ -3235,6 +3790,7 @@ def submit_gate3_review(
         "enriched_metadata": metadata,
         "fingerprint": metadata.get("fingerprint") or checkpoint_state.get("fingerprint") or run_id,
         "certified_tables": certified_tables,
+        "source_to_bronze_mapping_bundles": mapping_bundles,
         "discovered_metadata": fetch_json_artifact(run_id, "DISCOVERED_METADATA") or checkpoint_state.get("discovered_metadata") or {},
         "bronze_catalog": os.getenv("BRONZE_CATALOG", "main"),
         "bronze_schema": os.getenv("BRONZE_SCHEMA", "bronze"),
@@ -3474,6 +4030,27 @@ def _filter_silver_results_by_gate5_review(
     if not approved_items and not rejected_items:
         return silver_results
 
+    if any(result.get("silver_ingestion_object_id") is not None for result in silver_results):
+        results_by_id = {
+            int(result["silver_ingestion_object_id"]): result
+            for result in silver_results
+            if result.get("silver_ingestion_object_id") is not None
+        }
+        reviewed_ids = []
+        for item in approved_items or rejected_items:
+            object_id = int(item.get("silver_ingestion_object_id") or 0)
+            if object_id not in results_by_id:
+                raise ValueError("Gate 5 metadata review must identify the exact Silver transformation object.")
+            reviewed_ids.append(object_id)
+        if len(reviewed_ids) != len(set(reviewed_ids)):
+            raise ValueError("Gate 5 contains duplicate Silver transformation-object decisions.")
+        selected_ids = set(reviewed_ids)
+        return (
+            [result for object_id, result in results_by_id.items() if object_id in selected_ids]
+            if approved_items
+            else [result for object_id, result in results_by_id.items() if object_id not in selected_ids]
+        )
+
     def matches(result: Dict[str, Any], review_item: Dict[str, Any]) -> bool:
         return bool(_silver_review_keys(result) & _silver_review_keys(review_item))
 
@@ -3485,6 +4062,32 @@ def _filter_silver_results_by_gate5_review(
         elif not any(matches(result, item) for item in rejected_items):
             filtered.append(result)
     return filtered
+
+
+def _filter_gold_results_by_review(
+    gold_results: List[Dict[str, Any]], review_artifact: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    if not any(result.get("gold_ingestion_object_id") is not None for result in gold_results):
+        from services.databricks_runtime import _filtered_scripts
+
+        return _filtered_scripts(gold_results, review_artifact, "gold")
+    items = [item for item in (review_artifact or {}).get("items") or [] if isinstance(item, dict)]
+    if not items:
+        return gold_results
+    approved = [item for item in items if str(item.get("review_status") or "").upper() == "APPROVED"]
+    rejected = [item for item in items if str(item.get("review_status") or "").upper() == "REJECTED"]
+    if not approved and not rejected:
+        return gold_results
+    results_by_id = {int(item["gold_ingestion_object_id"]): item for item in gold_results}
+    reviewed_ids = [int(item.get("gold_ingestion_object_id") or 0) for item in (approved or rejected)]
+    if len(reviewed_ids) != len(set(reviewed_ids)) or any(object_id not in results_by_id for object_id in reviewed_ids):
+        raise ValueError("Gold review must identify each exact transformation object once.")
+    selected = set(reviewed_ids)
+    return (
+        [item for object_id, item in results_by_id.items() if object_id in selected]
+        if approved
+        else [item for object_id, item in results_by_id.items() if object_id not in selected]
+    )
 
 
 def _filter_gold_contract_by_silver_results(contract: Dict[str, Any], silver_results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -3513,6 +4116,374 @@ def _filter_gold_contract_by_silver_results(contract: Dict[str, Any], silver_res
     if dropped:
         warnings.append(f"Gold scope filtered out {dropped} KPI mapping(s) because their Silver source was not approved for execution.")
     return {**contract, "kpi_mappings": mappings, "warnings": warnings}
+
+
+def _materialize_silver_to_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist only computable Gold facts/dimensions after Silver approval."""
+    from services.metadata_contracts import normalize_bronze_column_name, validate_identifier
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Silver-to-Gold metadata requires a valid target selection.")
+    if str(state.get("execution_engine") or "").lower() == "dbt":
+        raise RuntimeError(
+            "Metadata-driven Gold requires the reviewed dbt package to be registered before Silver inputs can be activated."
+        )
+
+    platform = str(state.get("target_warehouse") or "").lower()
+    if platform == "snowflake":
+        gold_catalog = validate_identifier(
+            os.getenv("SNOWFLAKE_GOLD_CATALOG") or os.getenv("SNOWFLAKE_SILVER_CATALOG") or "ATHENA_DB",
+            label="Gold catalog",
+        )
+        gold_schema = validate_identifier(os.getenv("SNOWFLAKE_GOLD_SCHEMA", "GOLD"), label="Gold schema")
+        target_prefix = f"{gold_catalog}.{gold_schema}"
+    else:
+        gold_catalog = validate_identifier(
+            os.getenv("GOLD_CATALOG") or os.getenv("SILVER_CATALOG") or os.getenv("BRONZE_CATALOG") or "main",
+            label="Gold catalog",
+        )
+        gold_schema = validate_identifier(os.getenv("GOLD_SCHEMA", "gold"), label="Gold schema")
+        target_prefix = f"{gold_catalog}.{gold_schema}"
+
+    silver_by_logical: Dict[str, Dict[str, Any]] = {}
+    for result in state.get("silver_generation_results") or []:
+        if not isinstance(result, dict) or result.get("metadata_activation_status") != "ACTIVE":
+            continue
+        logical = str(result.get("table") or result.get("table_name") or "").split(".")[-1].casefold()
+        logical = logical.removeprefix("silver_")
+        if not logical or logical in silver_by_logical:
+            raise ValueError("Approved Silver results contain an ambiguous logical table identity.")
+        object_id = int(result["silver_ingestion_object_id"])
+        target = str(result.get("target_table") or result.get("target_silver_table") or "")
+        bundle = selection.repository.get_mapping_bundle(
+            ingestion_object_id=object_id,
+            processing_stage="BRONZE_TO_SILVER",
+            mapping_version=int(result["bronze_to_silver_mapping_version"]),
+            expected_hash=str(result["bronze_to_silver_mapping_hash"]),
+            expected_target=target,
+            require_active=True,
+        )
+        active = selection.repository.get_active_ingestion_object(object_id)
+        if not active:
+            raise ValueError(f"Active Silver transformation object not found: {object_id}")
+        columns = {
+            str(row.get("target_column_name") or "").casefold(): row
+            for row in bundle["mappings"]
+        }
+        silver_by_logical[logical] = {
+            "result": result,
+            "object": active,
+            "bundle": bundle,
+            "columns": columns,
+            "input": {
+                "ingestion_object_id": object_id,
+                "config_version": int(active["config_version"]),
+                "config_hash": str(active["config_hash"]),
+                "mapping_version": int(bundle["mapping_version"]),
+                "mapping_hash": str(bundle["mapping_hash"]),
+            },
+            "target": target,
+        }
+
+    contract = dict(state.get("gold_generation_contract") or {})
+    rejections: List[Dict[str, Any]] = []
+    drafts: List[Dict[str, Any]] = []
+    objects: List[Dict[str, Any]] = []
+    bundles: List[Dict[str, Any]] = []
+    used_targets: set[str] = set()
+
+    def reject(kind: str, name: str, code: str, detail: str) -> None:
+        rejections.append({"object_kind": kind, "name": name, "code": code, "detail": detail})
+
+    def source(logical: Any) -> Optional[Dict[str, Any]]:
+        name = str(logical or "").split(".")[-1].casefold().removeprefix("silver_")
+        return silver_by_logical.get(name)
+
+    def source_column(item: Dict[str, Any], column_name: Any) -> Optional[Dict[str, Any]]:
+        return item["columns"].get(normalize_bronze_column_name(column_name).casefold())
+
+    def compatible_join_types(left: Any, right: Any) -> bool:
+        def family(value: Any) -> str:
+            base = re.split(r"[<(]", str(value or "").upper(), 1)[0].strip()
+            if any(token in base for token in ("INT", "DECIMAL", "NUMERIC", "NUMBER", "FLOAT", "DOUBLE", "REAL")):
+                return "NUMERIC"
+            if any(token in base for token in ("CHAR", "STRING", "TEXT", "VARCHAR")):
+                return "STRING"
+            if any(token in base for token in ("DATE", "TIME")):
+                return "TEMPORAL"
+            return base
+
+        return bool(family(left)) and family(left) == family(right)
+
+    for raw in contract.get("dimension_mappings") or []:
+        if not isinstance(raw, dict):
+            continue
+        logical = str(raw.get("logical_table") or "").strip()
+        name = f"dim_{normalize_bronze_column_name(logical)}"
+        item = source(logical)
+        if not item:
+            reject("DIMENSION", name, "MISSING_SILVER_INPUT", f"No approved Silver object exists for {logical}.")
+            continue
+        key_rows = [row for row in item["bundle"]["mappings"] if bool(row.get("is_primary_key"))]
+        if not key_rows:
+            reject("DIMENSION", name, "MISSING_BUSINESS_KEY", f"No reviewed business key exists for {logical}.")
+            continue
+        requested = list(dict.fromkeys([*(raw.get("columns") or []), *[row["target_column_name"] for row in key_rows]]))
+        mapped = []
+        for ordinal, column_name in enumerate(requested, 1):
+            row = source_column(item, column_name)
+            if not row:
+                reject("DIMENSION", name, "MISSING_SOURCE_FIELD", f"{logical}.{column_name} is not in the active Silver mapping.")
+                mapped = []
+                break
+            target_column = normalize_bronze_column_name(row["target_column_name"])
+            mapped.append({
+                "source_object_name": item["target"],
+                "source_field_path": str(row["target_column_name"]),
+                "source_data_type": str(row["target_data_type"]),
+                "target_column_name": target_column,
+                "target_data_type": str(row["target_data_type"]),
+                "is_nullable": bool(row.get("is_nullable", True)),
+                "is_primary_key": bool(row.get("is_primary_key")),
+                "ordinal_position": ordinal,
+                "transformation_rule": "IDENTITY",
+            })
+        if not mapped:
+            continue
+        target = f"{target_prefix}.{name}"
+        keys = [normalize_bronze_column_name(row["target_column_name"]) for row in key_rows]
+        definition = {"artifact_kind": "DIMENSION", "logical_table": logical, "columns": requested}
+        created = selection.repository.upsert_silver_to_gold_draft(
+            source_system_id=int(item["object"]["source_system_id"]),
+            target_gold_table=target,
+            inputs=[item["input"]],
+            columns=mapped,
+            merge_keys=keys,
+            join_rules=[],
+            definition=definition,
+            build_order=10,
+            validation_policy={"fail_on_null_key": True, "fail_on_duplicate_key": True, "fail_on_schema_mismatch": True},
+        )
+        used_targets.add(target.casefold())
+        drafts.append({
+            "artifact_kind": "DIMENSION",
+            "name": name,
+            "gold_ingestion_object_id": int(created["ingestion_object"]["ingestion_object_id"]),
+            "gold_ingestion_object_config_version": int(created["ingestion_object"]["config_version"]),
+            "gold_ingestion_object_config_hash": str(created["ingestion_object"]["config_hash"]),
+            "silver_to_gold_mapping_version": int(created["mapping_bundle"]["mapping_version"]),
+            "silver_to_gold_mapping_hash": str(created["mapping_bundle"]["mapping_hash"]),
+            "target_table": target,
+        })
+        objects.append(created["ingestion_object"])
+        bundles.append(created["mapping_bundle"])
+
+    for raw in contract.get("kpi_mappings") or []:
+        if not isinstance(raw, dict):
+            continue
+        kpi_name = str(raw.get("kpi_name") or "KPI").strip()
+        name = f"fact_{normalize_bronze_column_name(kpi_name)}"
+        if str(raw.get("readiness") or "").upper() == "BLOCKED":
+            reject("FACT", name, "INCOMPLETE_KPI_CONTRACT", "The approved KPI contract is marked BLOCKED.")
+            continue
+        filters = list(raw.get("filters") or [])
+        if filters:
+            reject("FACT", name, "UNSUPPORTED_FILTER", "Gold filters require a validated structured expression contract.")
+            continue
+        measure = dict(raw.get("measure") or {})
+        measure_input = source(measure.get("table") or raw.get("source_silver_table"))
+        if not measure_input:
+            reject("FACT", name, "MISSING_SILVER_INPUT", "The KPI measure source is not an approved Silver object.")
+            continue
+        logical_inputs = {str(measure.get("table") or "").casefold()}
+        logical_inputs.update(str(dim.get("table") or "").casefold() for dim in raw.get("grouping_dimensions") or [] if isinstance(dim, dict))
+        time_column = (raw.get("time") or {}).get("column")
+        if isinstance(time_column, dict):
+            logical_inputs.add(str(time_column.get("table") or "").casefold())
+        joins = [join for join in raw.get("join_paths") or [] if isinstance(join, dict) and join.get("certified") is True]
+        logical_inputs.update(str(join.get(side) or "").casefold() for join in joins for side in ("left_table", "right_table"))
+        logical_inputs.discard("")
+        resolved_inputs = [source(logical) for logical in sorted(logical_inputs)]
+        if any(item is None for item in resolved_inputs):
+            reject("FACT", name, "MISSING_SILVER_INPUT", "One or more KPI inputs are not approved active Silver objects.")
+            continue
+        inputs_by_id = {
+            int(item["input"]["ingestion_object_id"]): item
+            for item in [measure_input, *[value for value in resolved_inputs if value is not None]]
+        }
+        inputs = list(inputs_by_id.values())
+        if len(inputs) > 1 and platform == "snowflake":
+            reject("FACT", name, "UNSUPPORTED_MULTI_INPUT_SNOWFLAKE", "The current Snowflake Gold generator has no validated multi-input JOIN implementation.")
+            continue
+        if len(inputs) > 1 and len(joins) < len(inputs) - 1:
+            reject("FACT", name, "DISCONNECTED_JOIN_GRAPH", "Certified joins do not connect every required Silver input.")
+            continue
+        join_rules = []
+        join_valid = True
+        join_edges: set[tuple[str, str]] = set()
+        for join in joins:
+            left = source(join.get("left_table"))
+            right = source(join.get("right_table"))
+            left_row = source_column(left, join.get("left_column")) if left else None
+            right_row = source_column(right, join.get("right_column")) if right else None
+            if not left or not right or not left_row or not right_row:
+                reject("FACT", name, "UNCERTIFIED_JOIN", "A certified join does not match the active Silver column contracts.")
+                join_valid = False
+                break
+            join_type = str(join.get("join_type") or "INNER").upper()
+            edge = tuple(sorted((left["target"].casefold(), right["target"].casefold())))
+            if (
+                join_type not in {"INNER", "LEFT"}
+                or edge[0] == edge[1]
+                or edge in join_edges
+                or not compatible_join_types(left_row.get("target_data_type"), right_row.get("target_data_type"))
+            ):
+                reject("FACT", name, "INVALID_JOIN_GRAPH", "A certified join has an unsupported type, duplicate edge, or incompatible key datatype.")
+                join_valid = False
+                break
+            join_edges.add(edge)
+            join_rules.append({
+                "left_source_table": left["target"],
+                "left_column": str(left_row["target_column_name"]),
+                "right_source_table": right["target"],
+                "right_column": str(right_row["target_column_name"]),
+                "join_type": join_type,
+                "cardinality": join.get("cardinality"),
+                "certified": True,
+            })
+        if not join_valid:
+            continue
+        required_nodes = {item["target"].casefold() for item in inputs}
+        graph = {node: set() for node in required_nodes}
+        for left, right in join_edges:
+            graph[left].add(right)
+            graph[right].add(left)
+        visited: set[str] = set()
+        pending = [measure_input["target"].casefold()]
+        while pending:
+            node = pending.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            pending.extend(graph.get(node, set()) - visited)
+        if visited != required_nodes or len(join_edges) != max(0, len(required_nodes) - 1):
+            reject("FACT", name, "DISCONNECTED_JOIN_GRAPH", "Certified joins must form one unambiguous graph rooted at the measure input.")
+            continue
+        mapped: List[Dict[str, Any]] = []
+        keys: List[str] = []
+        seen_targets: set[str] = set()
+
+        def add_output(input_item: Dict[str, Any], field: Any, target_field: Any, rule: str, target_type: Optional[str] = None) -> bool:
+            row = source_column(input_item, field)
+            target_name = normalize_bronze_column_name(target_field)
+            if not row or target_name.casefold() in seen_targets:
+                return False
+            seen_targets.add(target_name.casefold())
+            mapped.append({
+                "source_object_name": input_item["target"],
+                "source_field_path": str(row["target_column_name"]),
+                "source_data_type": str(row["target_data_type"]),
+                "target_column_name": target_name,
+                "target_data_type": target_type or str(row["target_data_type"]),
+                "is_nullable": bool(row.get("is_nullable", True)),
+                "is_primary_key": False,
+                "ordinal_position": len(mapped) + 1,
+                "transformation_rule": rule,
+            })
+            return True
+
+        invalid_field = False
+        for dimension in raw.get("grouping_dimensions") or []:
+            if not isinstance(dimension, dict):
+                continue
+            input_item = source(dimension.get("table") or measure.get("table"))
+            target_name = normalize_bronze_column_name(dimension.get("column"))
+            if not input_item or not add_output(input_item, dimension.get("column"), target_name, "IDENTITY"):
+                reject("FACT", name, "MISSING_SOURCE_FIELD", f"Gold dimension field {dimension.get('column')} is invalid or duplicated.")
+                invalid_field = True
+                break
+            keys.append(target_name)
+        if invalid_field:
+            continue
+        if isinstance(time_column, dict):
+            time_input = source(time_column.get("table") or measure.get("table"))
+            grain = str((raw.get("time") or {}).get("grain") or "month").upper()
+            if grain not in {"DAY", "WEEK", "MONTH", "QUARTER", "YEAR"}:
+                reject("FACT", name, "INVALID_GRAIN", f"Unsupported Gold time grain: {grain}.")
+                continue
+            if not time_input or not add_output(time_input, time_column.get("column"), "period_start", f"DATE_TRUNC_{grain}", "TIMESTAMP"):
+                reject("FACT", name, "INVALID_GRAIN", "The Gold time grain column is not present in active Silver metadata.")
+                continue
+            keys.append("period_start")
+        aggregation = str(measure.get("aggregation") or "SUM").upper()
+        if aggregation not in {"SUM", "AVG", "MIN", "MAX", "COUNT"}:
+            reject("FACT", name, "INVALID_AGGREGATION", f"Unsupported Gold aggregation: {aggregation}.")
+            continue
+        measure_row = source_column(measure_input, measure.get("column"))
+        if aggregation != "COUNT" and not measure_row:
+            reject("FACT", name, "MISSING_SOURCE_FIELD", "The KPI measure column is not present in active Silver metadata.")
+            continue
+        if aggregation == "COUNT" and not measure_row:
+            measure_row = next(iter(measure_input["columns"].values()), None)
+        value_name = f"{normalize_bronze_column_name(kpi_name)}_value"
+        if not measure_row or not add_output(
+            measure_input,
+            measure_row["target_column_name"],
+            value_name,
+            f"AGG_{aggregation}",
+            "BIGINT" if aggregation == "COUNT" else "DECIMAL(38,10)",
+        ):
+            reject("FACT", name, "INVALID_AGGREGATION", "The KPI aggregation could not be represented by the approved mapping.")
+            continue
+        target = f"{target_prefix}.{name}"
+        if target.casefold() in used_targets:
+            reject("FACT", name, "DUPLICATE_GOLD_TARGET", f"More than one Gold object resolves to {target}.")
+            continue
+        created = selection.repository.upsert_silver_to_gold_draft(
+            source_system_id=int(measure_input["object"]["source_system_id"]),
+            target_gold_table=target,
+            inputs=[item["input"] for item in inputs],
+            columns=mapped,
+            merge_keys=keys,
+            join_rules=join_rules,
+            definition={"artifact_kind": "FACT", "mapping": raw},
+            build_order=20,
+            write_mode="MERGE" if keys else "SNAPSHOT_REPLACE",
+            validation_policy={
+                "fail_on_missing_input": True,
+                "fail_on_join_multiplier": True,
+                "fail_on_schema_mismatch": True,
+                "max_join_multiplier": float(os.getenv("ATHENA_GOLD_MAX_JOIN_MULTIPLIER", "1.05")),
+            },
+        )
+        used_targets.add(target.casefold())
+        drafts.append({
+            "artifact_kind": "FACT",
+            "name": name,
+            "gold_ingestion_object_id": int(created["ingestion_object"]["ingestion_object_id"]),
+            "gold_ingestion_object_config_version": int(created["ingestion_object"]["config_version"]),
+            "gold_ingestion_object_config_hash": str(created["ingestion_object"]["config_hash"]),
+            "silver_to_gold_mapping_version": int(created["mapping_bundle"]["mapping_version"]),
+            "silver_to_gold_mapping_hash": str(created["mapping_bundle"]["mapping_hash"]),
+            "target_table": target,
+        })
+        objects.append(created["ingestion_object"])
+        bundles.append(created["mapping_bundle"])
+
+    if not drafts:
+        details = "; ".join(f"{item['code']}: {item['name']}" for item in rejections) or "no Gold objects were proposed"
+        raise ValueError(f"No computable Gold metadata objects remain after validation ({details}).")
+    return {
+        **state,
+        "gold_metadata_drafts": drafts,
+        "gold_transformation_objects": objects,
+        "silver_to_gold_mapping_bundles": bundles,
+        "gold_metadata_rejections": rejections,
+        "gold_catalog": gold_catalog,
+        "gold_schema": f"{gold_catalog}.{gold_schema}" if platform == "databricks" else gold_schema,
+    }
 
 
 def submit_gate4_review(
@@ -3569,6 +4540,8 @@ def submit_gate4_review(
             bronze_results,
             final_state["bronze_review_artifact"],
         )
+        if final_state.get("source_system_id") is not None:
+            final_state = _activate_reviewed_bronze_metadata(_attach_bronze_execution_specs(final_state))
         if target_warehouse == "snowflake" and snowflake_dbt_enabled(final_state):
             if (
                 str(final_state.get("dbt_deployment_mode") or "generate_only").lower() == "generate_and_deploy"
@@ -3745,6 +4718,8 @@ def submit_silver_merge_key_review(run_id: str, action: str = "APPROVED", review
             [item for item in final_state.get("bronze_generation_results") or [] if isinstance(item, dict)],
             artifact,
         )
+        if final_state.get("source_system_id") is not None:
+            final_state = _materialize_bronze_to_silver_metadata(final_state, artifact)
         final_state["status"] = "RUNNING"
         final_state["next_gate"] = None
         final_state["resume_message"] = "Silver Merge Key Review approved. Silver generation is starting."
@@ -3789,6 +4764,136 @@ def submit_silver_merge_key_review(run_id: str, action: str = "APPROVED", review
             return gate5_state
         return continue_database_pipeline(run_id, start_stage_key="silver", state=final_state)
     return final_state
+
+
+def _materialize_bronze_to_silver_metadata(
+    state: Dict[str, Any], review_artifact: Dict[str, Any]
+) -> Dict[str, Any]:
+    from services.metadata_contracts import normalize_bronze_column_name, validate_identifier
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Bronze-to-Silver metadata requires a valid target selection.")
+    platform = str(state.get("target_warehouse") or "").lower()
+    if platform == "snowflake":
+        silver_catalog = validate_identifier(os.getenv("SNOWFLAKE_SILVER_CATALOG", "ATHENA_DB"), label="Silver catalog")
+        silver_schema = validate_identifier(os.getenv("SNOWFLAKE_SILVER_SCHEMA", "SILVER"), label="Silver schema")
+    else:
+        silver_catalog = validate_identifier(
+            os.getenv("SILVER_CATALOG", os.getenv("BRONZE_CATALOG", "main")), label="Silver catalog"
+        )
+        silver_schema = validate_identifier(os.getenv("SILVER_SCHEMA", "silver"), label="Silver schema")
+    reviewed_feeds = [feed for feed in review_artifact.get("feeds") or [] if isinstance(feed, dict)]
+    bronze_results = [item for item in state.get("bronze_generation_results") or [] if isinstance(item, dict)]
+
+    def result_identity(item: Dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(item.get("database_name") or "").strip().casefold(),
+            str(item.get("schema_name") or "").strip().casefold(),
+            str(item.get("table") or item.get("table_name") or "").split(".")[-1].strip().casefold(),
+        )
+
+    def reviewed_feed_for(item: Dict[str, Any]) -> Dict[str, Any]:
+        object_id = int(item.get("ingestion_object_id") or 0)
+        by_object = [feed for feed in reviewed_feeds if int(feed.get("ingestion_object_id") or 0) == object_id]
+        if len(by_object) == 1:
+            return by_object[0]
+        identity = result_identity(item)
+        exact = [
+            feed for feed in reviewed_feeds
+            if (
+                str(feed.get("database_name") or "").strip().casefold(),
+                str(feed.get("schema_name") or "").strip().casefold(),
+                str(feed.get("table") or feed.get("table_name") or feed.get("entity") or "")
+                .split(".")[-1].strip().casefold(),
+            ) == identity
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        same_leaf_results = [candidate for candidate in bronze_results if result_identity(candidate)[2] == identity[2]]
+        leaf = [
+            feed for feed in reviewed_feeds
+            if not feed.get("database_name") and not feed.get("schema_name")
+            and str(feed.get("table") or feed.get("table_name") or feed.get("entity") or "")
+            .split(".")[-1].strip().casefold() == identity[2]
+        ]
+        if len(same_leaf_results) == 1 and len(leaf) == 1:
+            return leaf[0]
+        raise ValueError(
+            f"Silver merge-key review does not identify ingestion object {object_id} unambiguously."
+        )
+
+    results = []
+    bundles = []
+    objects = []
+    for bronze in bronze_results:
+        object_id = int(bronze.get("ingestion_object_id") or 0)
+        feed = reviewed_feed_for(bronze)
+        source_object = selection.repository.get_active_ingestion_object(object_id)
+        if not source_object:
+            raise ValueError(f"Active Bronze ingestion object not found: {object_id}")
+        source_mapping = selection.repository.get_mapping_bundle(
+            ingestion_object_id=object_id,
+            processing_stage="SOURCE_TO_BRONZE",
+            mapping_version=int(bronze["mapping_version"]),
+            expected_hash=str(bronze["mapping_hash"]),
+            expected_target=str(source_object["target_bronze_table"]),
+            require_active=True,
+        )
+        table_name = str(bronze.get("table") or "")
+        merge_keys = [
+            normalize_bronze_column_name(key)
+            for key in feed.get("merge_keys") or feed.get("primary_keys") or []
+            if str(key or "").strip()
+        ]
+        if not merge_keys:
+            raise ValueError(f"Silver merge keys were not approved for {table_name}.")
+        columns = []
+        for mapping in source_mapping["mappings"]:
+            bronze_name = str(mapping.get("target_column_name") or "")
+            target_type = str(mapping.get("target_data_type") or "")
+            columns.append({
+                "source_field_path": bronze_name,
+                "source_data_type": target_type,
+                "target_column_name": normalize_bronze_column_name(bronze_name),
+                "target_data_type": target_type,
+                "is_nullable": mapping.get("is_nullable", True),
+                "ordinal_position": mapping.get("ordinal_position"),
+                "transformation_rule": "TRIM_CAST"
+                if re.match(r"^(?:VAR)?CHAR|^STRING|^TEXT", target_type, re.IGNORECASE)
+                else "CAST",
+            })
+        target_table = f"{silver_catalog}.{silver_schema}.silver_{validate_identifier(table_name, label='Silver table')}"
+        created = selection.repository.upsert_bronze_to_silver_draft(
+            source_system_id=int(source_object["source_system_id"]),
+            source_object=source_object,
+            source_mapping=source_mapping,
+            target_silver_table=target_table,
+            merge_keys=merge_keys,
+            columns=columns,
+        )
+        transformation = created["ingestion_object"]
+        bundle = created["mapping_bundle"]
+        objects.append(transformation)
+        bundles.append(bundle)
+        results.append({
+            **bronze,
+            "silver_ingestion_object_id": int(transformation["ingestion_object_id"]),
+            "silver_ingestion_object_config_version": int(transformation["config_version"]),
+            "silver_ingestion_object_config_hash": str(transformation["config_hash"]),
+            "bronze_to_silver_mapping_version": int(bundle["mapping_version"]),
+            "bronze_to_silver_mapping_hash": str(bundle["mapping_hash"]),
+            "target_silver_table": target_table,
+        })
+    return {
+        **state,
+        "bronze_generation_results": results,
+        "silver_transformation_objects": objects,
+        "bronze_to_silver_mapping_bundles": bundles,
+        "silver_catalog": silver_catalog,
+        "silver_schema": silver_schema,
+    }
 
 
 def submit_bronze_generation(run_id: str) -> Dict[str, Any]:
@@ -3901,10 +5006,15 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
             final_state["silver_review_artifact"],
         )
         final_state["silver_generation_results"] = selected_silver_results
+        if any(result.get("silver_ingestion_object_id") is not None for result in selected_silver_results):
+            final_state = _activate_reviewed_silver_metadata(_attach_silver_execution_specs(final_state))
+            selected_silver_results = final_state["silver_generation_results"]
         final_state["gold_generation_contract"] = _filter_gold_contract_by_silver_results(
             final_state.get("gold_generation_contract") or {},
             selected_silver_results,
         )
+        if any(result.get("silver_ingestion_object_id") is not None for result in selected_silver_results):
+            final_state = _materialize_silver_to_gold_metadata(final_state)
         if target_warehouse == "snowflake" and snowflake_dbt_enabled(final_state):
             final_state.update(
                 {
@@ -3985,6 +5095,8 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
             "run_id": run_id,
             "decision": decision,
             "review_artifact": final_state["silver_review_artifact"],
+            "gold_metadata_drafts": final_state.get("gold_metadata_drafts") or [],
+            "gold_metadata_rejections": final_state.get("gold_metadata_rejections") or [],
         },
         schema_version="GATE5_v1",
         prompt_version="UI_REVIEWER_v1",
@@ -4050,6 +5162,64 @@ NATIVE_EXECUTION_STAGES = (
 )
 
 
+def _enqueue_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
+    from services.metadata_contracts import canonical_json_hash
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Metadata runtime queueing requires a valid target selection.")
+    requested_by = str(state.get("requested_by") or state.get("user_email") or "design-pipeline")
+    queued = []
+    batch_logical_work_id = canonical_json_hash({
+        "design_run_id": str(state.get("run_id") or ""),
+        "target_platform": selection.repository.context.platform,
+        "target_environment": selection.repository.context.environment,
+        "work_scope": state.get("runtime_work_scope") or {},
+    })
+    # Runtime queues only roots; successful workers release metadata-pinned dependants.
+    layers = (("SOURCE_TO_BRONZE", "bronze_generation_results", "ingestion_object_id", 300),)
+    for stage, result_key, object_key, priority in layers:
+        for result in state.get(result_key) or []:
+            if not isinstance(result, dict) or result.get("metadata_activation_status") != "ACTIVE":
+                continue
+            object_id = int(result.get(object_key) or 0)
+            work_scope = {
+                "design_run_id": str(state.get("run_id") or ""),
+                "processing_stage": stage,
+                "target_table": result.get("target_table"),
+            }
+            item = selection.repository.enqueue_work(
+                ingestion_object_id=object_id,
+                trigger_type="MANUAL",
+                work_scope=work_scope,
+                requested_by=requested_by,
+                priority=priority,
+                logical_work_id=batch_logical_work_id,
+            )
+            queued.append({
+                "queue_id": int(item["queue_id"]),
+                "ingestion_object_id": object_id,
+                "processing_stage": stage,
+                "queue_status": str(item.get("queue_status") or ""),
+                "logical_work_id": str(item.get("logical_work_id") or ""),
+            })
+    if not queued:
+        raise RuntimeError("No active metadata artifacts were available for runtime queueing.")
+    queued_state = {
+        **state,
+        "status": "RUNTIME_QUEUED",
+        "execution_ready": False,
+        "awaiting_stage_confirmation": False,
+        "stage_confirmation": None,
+        "background_stage": None,
+        "metadata_runtime_queue": queued,
+        "resume_message": f"Queued {len(queued)} metadata runtime work item(s) on the selected target.",
+    }
+    save_checkpoint_state_timed(str(state.get("run_id") or ""), queued_state, context="metadata_runtime:queued")
+    return queued_state
+
+
 def _native_execution_completed(state: Dict[str, Any], target_warehouse: str, layer: str) -> bool:
     status = state.get(f"{target_warehouse}_{layer}_execution_status")
     if target_warehouse == "databricks":
@@ -4109,6 +5279,11 @@ def execute_database_native_layers(
 ) -> Dict[str, Any]:
     working_state = dict(state or load_checkpoint_state(run_id) or {"run_id": run_id})
     working_state["run_id"] = run_id
+    if any(
+        isinstance(item, dict) and item.get("gold_ingestion_object_id") is not None
+        for item in working_state.get("gold_generation_results") or []
+    ):
+        return _enqueue_metadata_native_runtime(working_state)
     validation_errors = _database_native_execution_validation_errors(working_state)
     if validation_errors:
         raise RuntimeError(
@@ -4582,13 +5757,12 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
     }
 
     if decision == "APPROVED":
-        from services.databricks_runtime import _filtered_scripts
-
-        final_state["gold_generation_results"] = _filtered_scripts(
+        final_state["gold_generation_results"] = _filter_gold_results_by_review(
             [item for item in final_state.get("gold_generation_results") or [] if isinstance(item, dict)],
             final_state["gold_review_artifact"],
-            "gold",
         )
+        if any(item.get("gold_ingestion_object_id") is not None for item in final_state["gold_generation_results"]):
+            final_state = _activate_reviewed_gold_metadata(_attach_gold_execution_specs(final_state))
 
     if decision == "REJECTED":
         final_state.update({"status": "FAILED", "error": "Gold Review rejected generated Gold scripts"})

@@ -13,6 +13,279 @@ from services import dbt_snowflake_runtime
 from services import pipeline_runtime
 
 
+def test_metadata_gold_generation_emits_one_artifact_per_fact_and_dimension(monkeypatch):
+    monkeypatch.setenv("GOLD_SCHEMA", "gold")
+    monkeypatch.setattr(gold_gen, "ai_store_db_writer", lambda **_: None)
+    workdir = Path.cwd() / ".tmp-tests" / f"gold_metadata_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    inputs = [{"object_name": "main.silver.silver_claims"}]
+    dimension_plan = {
+        "reference": {
+            "artifact_kind": "DIMENSION", "name": "dim_claims", "target_table": "gold.dim_claims",
+            "gold_ingestion_object_id": 301, "gold_ingestion_object_config_version": 3,
+            "gold_ingestion_object_config_hash": "sha256:dim", "silver_to_gold_mapping_version": 31,
+            "silver_to_gold_mapping_hash": "sha256:dim-map",
+        },
+        "object": {"target_table": "gold.dim_claims"},
+        "inputs": inputs,
+        "definition": {"artifact_kind": "DIMENSION", "logical_table": "claims"},
+        "bundle": {"mappings": [
+            {"source_object_name": "main.silver.silver_claims", "source_field_path": "claimid", "source_data_type": "BIGINT", "target_column_name": "claimid", "target_data_type": "BIGINT", "is_primary_key": True},
+            {"source_object_name": "main.silver.silver_claims", "source_field_path": "claimstatus", "source_data_type": "STRING", "target_column_name": "claimstatus", "target_data_type": "STRING", "is_primary_key": False},
+        ]},
+    }
+    fact_mapping = {
+        "kpi_name": "Total Claims",
+        "source_silver_table": "main.silver.silver_claims",
+        "measure": {"table": "claims", "column": "claimamount", "aggregation": "SUM"},
+        "formula": {"status": "PROPOSED"},
+        "grouping_dimensions": [{"table": "claims", "column": "claimstatus", "semantic_type": "DIMENSION"}],
+        "time": {"grain": "month", "column": None},
+        "filters": [], "join_paths": [], "readiness": "READY",
+    }
+    fact_plan = {
+        "reference": {
+            "artifact_kind": "FACT", "name": "fact_total_claims", "target_table": "gold.fact_total_claims",
+            "gold_ingestion_object_id": 302, "gold_ingestion_object_config_version": 3,
+            "gold_ingestion_object_config_hash": "sha256:fact", "silver_to_gold_mapping_version": 32,
+            "silver_to_gold_mapping_hash": "sha256:fact-map",
+        },
+        "object": {
+            "target_table": "gold.fact_total_claims",
+            "write_mode": "MERGE",
+            "merge_keys_json": '["claimstatus"]',
+        },
+        "inputs": inputs,
+        "definition": {"artifact_kind": "FACT", "mapping": fact_mapping},
+        "bundle": {"mappings": [
+            {
+                "build_order": 20,
+                "join_rules_json": "[]",
+                "source_object_name": "main.silver.silver_claims",
+                "source_field_path": "claimstatus",
+                "target_column_name": "claimstatus",
+                "target_data_type": "STRING",
+                "transformation_rule": "IDENTITY",
+            },
+            {
+                "build_order": 20,
+                "join_rules_json": "[]",
+                "source_object_name": "main.silver.silver_claims",
+                "source_field_path": "claimamount",
+                "target_column_name": "total_claims_value",
+                "target_data_type": "DECIMAL(38,10)",
+                "transformation_rule": "AGG_SUM",
+            },
+        ]},
+    }
+    monkeypatch.setattr(gold_gen, "_metadata_gold_plans", lambda _state: [dimension_plan, fact_plan])
+    result = gold_gen.gold_code_generation_node({
+        "run_id": "metadata-gold",
+        "target_warehouse": "databricks",
+        "gold_metadata_drafts": [dimension_plan["reference"], fact_plan["reference"]],
+        "gold_generation_contract": {
+            "status": "READY",
+            "silver_tables": [{"table": "claims", "target_table": "main.silver.silver_claims"}],
+            "kpi_mappings": [fact_mapping],
+        },
+    })
+
+    assert result["gold_generation_status"] == "COMPLETED"
+    assert [item["artifact_kind"] for item in result["gold_generation_results"]] == ["DIMENSION", "FACT"]
+    assert {item["gold_ingestion_object_id"] for item in result["gold_generation_results"]} == {301, 302}
+    assert len({item["script_path"] for item in result["gold_generation_results"]}) == 2
+    assert all(item["source_table_guard"].get("dropped_source_tables") == [] for item in result["gold_generation_results"])
+    generated_code = [Path(item["script_path"]).read_text(encoding="utf-8") for item in result["gold_generation_results"]]
+    assert all('globals().get("ATHENA_RUNTIME_CONTEXT")' in code for code in generated_code)
+    assert any("__ATHENA_LOGICAL_WORK_ID__" in code for code in generated_code)
+
+
+def test_snowflake_metadata_fact_uses_exact_mapping_types_keys_and_write_mode() -> None:
+    source = "ATHENA_DB.SILVER.silver_claims"
+    plan = {
+        "object": {
+            "target_table": "ATHENA_DB.GOLD.fact_claims",
+            "write_mode": "MERGE",
+            "merge_keys_json": '["claimstatus"]',
+        },
+        "inputs": [{"object_name": source}],
+        "bundle": {"mappings": [
+            {
+                "source_object_name": source,
+                "source_field_path": "claimstatus",
+                "target_column_name": "claimstatus",
+                "target_data_type": "VARCHAR(80)",
+                "transformation_rule": "GROUP_KEY",
+                "join_rules_json": "[]",
+            },
+            {
+                "source_object_name": source,
+                "source_field_path": "claimamount",
+                "target_column_name": "claim_total",
+                "target_data_type": "DECIMAL(38,10)",
+                "transformation_rule": "AGG_SUM",
+                "join_rules_json": "[]",
+            },
+        ]},
+    }
+
+    sql = gold_gen._metadata_fact_code(plan, target_warehouse="snowflake")
+
+    assert '"claimstatus" VARCHAR(80) NOT NULL' in sql
+    assert '"claim_total" DECIMAL(38,10)' in sql
+    assert 'SUM(s0."claimamount")' in sql
+    assert 'target."claimstatus" = source."claimstatus"' in sql
+    assert 's0."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID' in sql
+    assert " FLOAT" not in sql
+
+
+def test_databricks_metadata_fact_reports_observed_join_multiplier() -> None:
+    source = "main.silver.orders"
+    plan = {
+        "object": {
+            "target_table": "main.gold.fact_orders",
+            "write_mode": "MERGE",
+            "merge_keys_json": '["status"]',
+            "validation_policy_json": json.dumps({
+                "schema_version": "1.0",
+                "rules": [{"rule_type": "MAX_JOIN_MULTIPLIER", "threshold_value": 1.05}],
+            }),
+        },
+        "inputs": [{"object_name": source}],
+        "bundle": {"mappings": [
+            {
+                "source_object_name": source,
+                "source_field_path": "status",
+                "target_column_name": "status",
+                "target_data_type": "STRING",
+                "transformation_rule": "GROUP_KEY",
+                "join_rules_json": "[]",
+            },
+            {
+                "source_object_name": source,
+                "source_field_path": "amount",
+                "target_column_name": "amount",
+                "target_data_type": "DECIMAL(38,10)",
+                "transformation_rule": "AGG_SUM",
+                "join_rules_json": "[]",
+            },
+        ]},
+    }
+
+    code = gold_gen._metadata_fact_code(plan, target_warehouse="databricks")
+
+    assert "JOINED_COUNT_QUERY" in code
+    assert "ROOT_COUNT_QUERY" in code
+    assert '"rule_type": "MAX_JOIN_MULTIPLIER"' in code
+    assert "observed_join_multiplier" in code
+
+
+def test_snowflake_gold_returns_observed_join_multiplier_validation() -> None:
+    from services import snowflake_gold_runtime
+
+    orders = "ATHENA_DB.SILVER.silver_orders"
+    customers = "ATHENA_DB.SILVER.silver_customers"
+    join_rules = json.dumps([{
+        "left_source_table": orders,
+        "right_source_table": customers,
+        "left_column": "customer_id",
+        "right_column": "customer_id",
+        "join_type": "INNER",
+    }])
+
+    class Cursor:
+        description = [("status",), ("amount",)]
+
+        def execute(self, sql):
+            self.sql = sql
+
+        def fetchone(self):
+            if " JOIN " in self.sql:
+                return (110,)
+            return (100,)
+
+        def close(self):
+            pass
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    results = snowflake_gold_runtime._blocking_validation_results(
+        {
+            "target_table": "ATHENA_DB.GOLD.fact_orders",
+            "approved_source_tables": [orders, customers],
+            "mapping_contract": [
+                {
+                    "source_object_name": orders,
+                    "source_field_path": "amount",
+                    "target_column_name": "amount",
+                    "transformation_rule": "AGG_SUM",
+                    "join_rules_json": join_rules,
+                },
+                {
+                    "source_object_name": customers,
+                    "source_field_path": "status",
+                    "target_column_name": "status",
+                    "transformation_rule": "GROUP_KEY",
+                    "join_rules_json": join_rules,
+                },
+            ],
+            "validation_policy": {
+                "rules": [{"rule_type": "MAX_JOIN_MULTIPLIER", "threshold_value": 1.2}]
+            },
+        },
+        Connection(),
+    )
+
+    assert results == [{
+        "rule_type": "MAX_JOIN_MULTIPLIER",
+        "observed_value": 1.1,
+        "threshold_value": 1.2,
+        "status": "PASSED",
+    }]
+
+
+def test_snowflake_gold_returns_observed_key_validation() -> None:
+    from services import snowflake_gold_runtime
+
+    class Cursor:
+        description = [("claim_key",), ("_logical_work_id",)]
+
+        def execute(self, sql):
+            self.sql = sql
+
+        def fetchone(self):
+            return (0,)
+
+        def close(self):
+            pass
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    results = snowflake_gold_runtime._blocking_validation_results(
+        {
+            "target_table": "ATHENA_DB.GOLD.dim_claim",
+            "merge_keys": ["claim_key"],
+            "mapping_contract": [{"target_column_name": "claim_key"}],
+            "validation_policy": {
+                "rules": [
+                    {"rule_type": "KEYS_NOT_NULL", "columns": ["claim_key"], "threshold_value": 0},
+                    {"rule_type": "KEYS_UNIQUE", "columns": ["claim_key"], "threshold_value": 0},
+                ]
+            },
+        },
+        Connection(),
+    )
+
+    assert [result["rule_type"] for result in results] == ["KEYS_NOT_NULL", "KEYS_UNIQUE"]
+    assert all(result["observed_value"] == 0 and result["status"] == "PASSED" for result in results)
+
+
 def test_snowflake_gold_generation_writes_sql_from_contract(monkeypatch):
     monkeypatch.setenv("SNOWFLAKE_GOLD_CATALOG", "ATHENA_DB")
     monkeypatch.setenv("SNOWFLAKE_GOLD_SCHEMA", "GOLD")
@@ -893,6 +1166,24 @@ def test_databricks_batch_notebook_fails_the_job_when_any_script_fails():
     assert "_SCRIPTS_OK >= _SCRIPTS_FAILED" in notebook
     assert "spark.catalog.tableExists(_target)" in notebook
     assert notebook.index('raise RuntimeError(json.dumps(_SUMMARY') < notebook.index("dbutils.notebook.exit")
+
+
+def test_metadata_gold_batch_disables_legacy_partial_success(monkeypatch):
+    monkeypatch.setenv("ATHENA_DATABRICKS_GOLD_ALLOW_PARTIAL_SUCCESS", "true")
+
+    notebook = databricks_runtime._build_batch_driver_notebook(
+        "gold",
+        [{
+            "gold_ingestion_object_id": 301,
+            "status": "APPROVED",
+            "script_body": "raise RuntimeError('boom')",
+            "target_table": "gold.fact_one",
+        }],
+        workspace_dir="/Workspace/athena/run",
+    )
+
+    assert "_ALLOW_PARTIAL_SUCCESS = False" in notebook
+    assert "_CONTINUE_ON_ERROR = False" in notebook
 
 
 def test_databricks_gold_batch_fifty_percent_success_completes_with_warnings(monkeypatch):

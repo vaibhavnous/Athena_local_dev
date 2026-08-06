@@ -7,11 +7,19 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib import error, request
 
 from services.external_execution_progress import save_external_execution_progress
 from utilis.logger import logger
+
+
+class DatabricksTransientError(RuntimeError):
+    retryable = True
+
+
+class DatabricksAmbiguousSubmissionError(DatabricksTransientError):
+    preserve_attempt = True
 
 
 def _env_flag(*names: str) -> bool:
@@ -134,7 +142,14 @@ def _request_json(method: str, path: str, payload: Optional[Dict[str, Any]] = No
             return json.loads(body) if body else {}
     except error.HTTPError as exc:
         message = exc.read().decode("utf-8", "ignore").strip()
-        raise RuntimeError(f"Databricks API request failed ({method} {path}): {message or exc.reason}") from exc
+        exception_type = DatabricksTransientError if exc.code == 429 or exc.code >= 500 else RuntimeError
+        raise exception_type(
+            f"Databricks API request failed ({method} {path}): {message or exc.reason}"
+        ) from exc
+    except (error.URLError, TimeoutError) as exc:
+        raise DatabricksTransientError(
+            f"Databricks API request failed ({method} {path}): {exc}"
+        ) from exc
     except Exception as exc:
         raise RuntimeError(f"Databricks API request failed ({method} {path}): {exc}") from exc
 
@@ -211,7 +226,9 @@ def _cluster_spec() -> Dict[str, Any]:
     )
 
 
-def _submit_run(notebook_path: str, *, run_name: str) -> Dict[str, Any]:
+def _submit_run(
+    notebook_path: str, *, run_name: str, idempotency_token: str = ""
+) -> Dict[str, Any]:
     task: Dict[str, Any] = {
         "task_key": "athena",
         "notebook_task": {"notebook_path": notebook_path},
@@ -222,7 +239,19 @@ def _submit_run(notebook_path: str, *, run_name: str) -> Dict[str, Any]:
         "tasks": [task],
         "timeout_seconds": _databricks_run_timeout_seconds(),
     }
-    return _request_json("POST", "/api/2.0/jobs/runs/submit", payload)
+    if idempotency_token:
+        payload["idempotency_token"] = str(idempotency_token)[-64:]
+    attempts = 3 if idempotency_token else 1
+    for attempt in range(attempts):
+        try:
+            return _request_json("POST", "/api/2.0/jobs/runs/submit", payload)
+        except DatabricksTransientError as exc:
+            if attempt + 1 == attempts:
+                raise DatabricksAmbiguousSubmissionError(
+                    "Databricks submission outcome is ambiguous; the same queue attempt must be resumed."
+                ) from exc
+            time.sleep(0.25 * (attempt + 1))
+    raise AssertionError("unreachable")
 
 
 def _get_run(run_id: int) -> Dict[str, Any]:
@@ -281,6 +310,15 @@ def _task_run_id(run_state: Dict[str, Any]) -> Optional[int]:
 
 
 def _read_script_text(script: Dict[str, Any]) -> str:
+    execution_spec = script.get("execution_spec")
+    if execution_spec:
+        from utilis.generated_code_paths import verified_execution_artifact
+
+        verified_path = verified_execution_artifact(execution_spec, platform="databricks")
+        script_path = Path(str(script.get("script_path") or "")).resolve()
+        if script_path != verified_path:
+            raise RuntimeError("Databricks script_path does not match the registered execution artifact.")
+        return verified_path.read_text(encoding="utf-8")
     script_body = str(script.get("script_body") or "").strip()
     if script_body:
         script_path_value = str(script.get("script_path") or "").strip()
@@ -593,18 +631,32 @@ def _upload_support_files(workspace_dir: str, scripts: List[Dict[str, Any]]) -> 
             uploaded.add(target_path)
 
 
-def _build_batch_driver_notebook(layer: str, scripts: List[Dict[str, Any]], *, workspace_dir: str) -> str:
+def _build_batch_driver_notebook(
+    layer: str,
+    scripts: List[Dict[str, Any]],
+    *,
+    workspace_dir: str,
+    runtime_context: Optional[Dict[str, Any]] = None,
+) -> str:
     script_items = [
         {
             "script_name": _script_name(script),
             "script_path": str(script.get("script_path") or "").strip(),
             "target_table": _script_target_table(script),
             "script_text": _read_script_text(script),
+            "validation_policy": script.get("validation_policy") or {},
+            "mapping_contract": script.get("mapping_contract") or [],
+            "merge_keys": script.get("merge_keys") or [],
+            "approved_source_tables": script.get("approved_source_tables") or [],
         }
         for script in scripts
     ]
     encoded = base64.b64encode(json.dumps(script_items).encode("utf-8")).decode("ascii")
-    allow_partial_success = _gold_partial_success_enabled(layer)
+    context_encoded = base64.b64encode(
+        json.dumps(dict(runtime_context or {}), sort_keys=True).encode("utf-8")
+    ).decode("ascii")
+    metadata_driven = any(script.get("gold_ingestion_object_id") is not None for script in scripts)
+    allow_partial_success = _gold_partial_success_enabled(layer) and not metadata_driven
     continue_on_error = allow_partial_success or _env_flag(
         f"ATHENA_DATABRICKS_{str(layer or '').upper()}_CONTINUE_ON_ERROR",
         "ATHENA_DATABRICKS_CONTINUE_ON_ERROR",
@@ -617,11 +669,20 @@ import sys
 import time
 import traceback
 
+from delta.tables import DeltaTable
+
 _SCRIPT_ITEMS = json.loads(base64.b64decode("{encoded}").decode("utf-8"))
+_RUNTIME_CONTEXT = json.loads(base64.b64decode("{context_encoded}").decode("utf-8"))
 _CONTINUE_ON_ERROR = {str(continue_on_error)}
 _ALLOW_PARTIAL_SUCCESS = {str(allow_partial_success)}
 _RESULTS = []
 _WORKSPACE_DIR = "{workspace_dir}"
+_COMMIT_METADATA = json.dumps({{
+    "logical_work_id": _RUNTIME_CONTEXT.get("logical_work_id"),
+    "runtime_run_id": _RUNTIME_CONTEXT.get("runtime_run_id"),
+}}, sort_keys=True, separators=(",", ":")) if _RUNTIME_CONTEXT else ""
+if _COMMIT_METADATA:
+    spark.conf.set("spark.databricks.delta.commitInfo.userMetadata", _COMMIT_METADATA)
 if _WORKSPACE_DIR not in sys.path:
     sys.path.append(_WORKSPACE_DIR)
 
@@ -632,6 +693,7 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
         _script_globals = dict(globals())
         _script_globals["__name__"] = f"__athena_{{_name}}"
         _script_globals["__file__"] = _item.get("script_path") or f"<athena:{{_name}}>"
+        _script_globals["ATHENA_RUNTIME_CONTEXT"] = dict(_RUNTIME_CONTEXT)
         exec(compile(_item.get("script_text") or "", f"<athena:{{_name}}>", "exec"), _script_globals)
         _target = str(_item.get("target_table") or "").strip()
         _verification_status = "UNVERIFIED"
@@ -645,6 +707,99 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
                 if not _target_exists:
                     raise RuntimeError(f"Expected Databricks target table was not created: {{_target}}")
                 _verification_status = "VERIFIED"
+        _validation_results = []
+        _policy_rules = (_item.get("validation_policy") or {{}}).get("rules") or []
+        if _policy_rules:
+            if not _target or _target.casefold() == "gold_dimensions":
+                raise RuntimeError("Blocking validation requires one concrete target table")
+            _target_df = spark.table(_target)
+            _target_columns = set(_target_df.columns)
+            _expected_columns = {{
+                str(_row.get("target_column_name") or "")
+                for _row in (_item.get("mapping_contract") or [])
+                if str(_row.get("target_column_name") or "")
+            }}
+            _scoped_target = _target_df
+            if "_logical_work_id" in _target_columns:
+                _logical_literal = str(_RUNTIME_CONTEXT.get("logical_work_id") or "").replace("'", "''")
+                _scoped_target = _target_df.filter(f"`_logical_work_id` = '{{_logical_literal}}'")
+            _script_rule_results = {{
+                str(_row.get("rule_type") or _row.get("rule") or "").upper(): _row
+                for _row in (_script_globals.get("ATHENA_VALIDATION_RESULTS") or [])
+                if isinstance(_row, dict)
+            }}
+            for _rule in _policy_rules:
+                if not isinstance(_rule, dict):
+                    raise RuntimeError("Blocking validation policy contains an invalid rule")
+                _rule_type = str(_rule.get("rule_type") or _rule.get("rule") or "").upper()
+                _threshold = _rule.get("threshold_value", 0)
+                if _rule_type in {{"MAPPED_COLUMNS_PRESENT", "TARGET_SCHEMA_MATCH"}}:
+                    _observed = len(_expected_columns - _target_columns)
+                elif _rule_type == "MERGE_KEYS_NOT_NULL":
+                    _columns = [str(_name) for _name in (_rule.get("columns") or _item.get("merge_keys") or [])]
+                    if not _columns or any(_name not in _target_columns for _name in _columns):
+                        raise RuntimeError("Merge-key validation references unavailable target columns")
+                    _predicate = " OR ".join(f"`{{_name.replace('`', '``')}}` IS NULL" for _name in _columns)
+                    _observed = _scoped_target.filter(_predicate).count()
+                elif _rule_type == "KEYS_NOT_NULL":
+                    _columns = [str(_name) for _name in (_rule.get("columns") or _item.get("merge_keys") or [])]
+                    if not _columns or any(_name not in _target_columns for _name in _columns):
+                        raise RuntimeError("Gold key validation references unavailable target columns")
+                    _predicate = " OR ".join(f"`{{_name.replace('`', '``')}}` IS NULL" for _name in _columns)
+                    _observed = _scoped_target.filter(_predicate).count()
+                elif _rule_type == "KEYS_UNIQUE":
+                    _columns = [str(_name) for _name in (_rule.get("columns") or _item.get("merge_keys") or [])]
+                    if not _columns or any(_name not in _target_columns for _name in _columns):
+                        raise RuntimeError("Gold key validation references unavailable target columns")
+                    _observed = _scoped_target.groupBy(*_columns).count().filter("count > 1").count()
+                elif _rule_type == "INPUTS_PRESENT":
+                    _observed = sum(
+                        1 for _source in (_item.get("approved_source_tables") or [])
+                        if not spark.catalog.tableExists(str(_source))
+                    )
+                elif _rule_type == "MAX_JOIN_MULTIPLIER":
+                    _reported = _script_rule_results.get(_rule_type)
+                    if not _reported or _reported.get("observed_value") is None:
+                        raise RuntimeError("Gold artifact did not report its observed join multiplier")
+                    _observed = float(_reported["observed_value"])
+                else:
+                    raise RuntimeError(f"Unsupported blocking validation rule: {{_rule_type}}")
+                _status = "PASSED" if float(_observed) <= float(_threshold) else "FAILED"
+                _result = {{
+                    "rule_type": _rule_type,
+                    "observed_value": _observed,
+                    "threshold_value": _threshold,
+                    "status": _status,
+                }}
+                _validation_results.append(_result)
+                if _status != "PASSED":
+                    raise RuntimeError(f"Blocking validation failed: {{_result}}")
+        _execution_result = None
+        if _RUNTIME_CONTEXT and _target and _target.casefold() != "gold_dimensions":
+            _history = DeltaTable.forName(spark, _target).history(1).select(
+                "version", "operationMetrics", "userMetadata"
+            ).first()
+            if not _history or str(_history["userMetadata"] or "") != _COMMIT_METADATA:
+                raise RuntimeError(f"Latest Delta commit for {{_target}} is not owned by this logical work")
+            _metrics = dict(_history["operationMetrics"] or {{}})
+            _rows_written = _metrics.get("numOutputRows")
+            if _rows_written is None:
+                _rows_written = sum(
+                    int(_metrics.get(_key) or 0)
+                    for _key in ("numTargetRowsInserted", "numTargetRowsUpdated")
+                )
+            _execution_result = {{
+                "contract_version": "1.0",
+                "status": "COMPLETED",
+                "logical_work_id": _RUNTIME_CONTEXT.get("logical_work_id"),
+                "runtime_run_id": _RUNTIME_CONTEXT.get("runtime_run_id"),
+                "target_table": _target,
+                "target_commit_id": f"delta:{{_target}}:v{{_history['version']}}",
+                "rows_written": int(_rows_written or 0),
+                "validation_status": "PASSED",
+                "validation_policy_hash": _RUNTIME_CONTEXT.get("validation_policy_hash"),
+                "validation_results": _validation_results,
+            }}
         _result = {{
             "script_name": _name,
             "script_path": _item.get("script_path"),
@@ -655,6 +810,8 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
         }}
         if _verification_warning:
             _result["verification_warning"] = _verification_warning
+        if _execution_result:
+            _result["execution_result"] = _execution_result
         _RESULTS.append(_result)
     except Exception as _exc:
         _RESULTS.append({{
@@ -671,6 +828,11 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
 
 _SCRIPTS_OK = builtins.sum(1 for _r in _RESULTS if _r.get("status") == "SUCCESS")
 _SCRIPTS_FAILED = builtins.sum(1 for _r in _RESULTS if _r.get("status") == "FAILED")
+if _COMMIT_METADATA:
+    try:
+        spark.conf.unset("spark.databricks.delta.commitInfo.userMetadata")
+    except Exception:
+        pass
 _PARTIAL_SUCCESS = _ALLOW_PARTIAL_SUCCESS and _SCRIPTS_FAILED > 0 and _SCRIPTS_OK >= _SCRIPTS_FAILED
 _SUMMARY = {{
     "status": "COMPLETED_WITH_WARNINGS" if _PARTIAL_SUCCESS else "FAILED" if _SCRIPTS_FAILED else "SUCCESS",
@@ -713,6 +875,12 @@ def _parse_batch_summary_from_error(value: Any) -> Dict[str, Any]:
         if isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
             return parsed
     return {}
+
+
+def _safe_progress_value(value: Any) -> Any:
+    from services.metadata_repository import MetadataRepository
+
+    return MetadataRepository._redact_sensitive(value)
 
 
 def _annotate_batch_results(
@@ -780,12 +948,19 @@ def _execute_databricks_stage_batch(
     *,
     layer: str,
     scripts: List[Dict[str, Any]],
+    on_submitted: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     run_id = str(state.get("run_id") or "")
     notebook_path = _batch_driver_path(layer, run_id)
     workspace_dir = _workspace_dir(notebook_path)
     _upload_support_files(workspace_dir, scripts)
-    _workspace_import_notebook(notebook_path, _build_batch_driver_notebook(layer, scripts, workspace_dir=workspace_dir))
+    runtime_context = dict(state.get("metadata_runtime_context") or {})
+    _workspace_import_notebook(
+        notebook_path,
+        _build_batch_driver_notebook(
+            layer, scripts, workspace_dir=workspace_dir, runtime_context=runtime_context
+        ),
+    )
 
     state = save_external_execution_progress(
         state,
@@ -800,7 +975,25 @@ def _execute_databricks_stage_batch(
     )
 
     started_at = time.monotonic()
-    run_payload = _submit_run(notebook_path, run_name=f"Athena {layer} batch {run_id}")
+    run_payload = _submit_run(
+        notebook_path,
+        run_name=f"Athena {layer} batch {run_id}",
+        idempotency_token=(
+            f"athena-metadata-{runtime_context['queue_id']}-{runtime_context.get('attempt_number', 0)}"
+            if runtime_context else ""
+        ),
+    )
+    if on_submitted:
+        submitted_run_id = str(run_payload.get("run_id") or "")
+        try:
+            on_submitted(submitted_run_id)
+        except Exception as exc:
+            if runtime_context:
+                raise DatabricksAmbiguousSubmissionError(
+                    f"Databricks run {submitted_run_id} was accepted but its control receipt could not be persisted; "
+                    "resume the same queue attempt."
+                ) from exc
+            raise
     run_state = _wait_for_run(int(run_payload.get("run_id")))
     elapsed_seconds = round(time.monotonic() - started_at, 2)
     if str(run_state.get("result_state") or "").upper() not in {"SUCCESS", "COMPLETED"}:
@@ -811,15 +1004,16 @@ def _execute_databricks_stage_batch(
             notebook_path=notebook_path,
             run_state=run_state,
         )
+        partial_results = _safe_progress_value(partial_results)
         failed_results = [item for item in partial_results if str(item.get("status") or "").upper() == "FAILED"]
         first_failed = failed_results[0] if failed_results else {}
         completed_count = sum(1 for item in partial_results if str(item.get("status") or "").upper() == "SUCCESS")
-        failure = (
+        failure = str(_safe_progress_value(
             f"Databricks {layer} batch execution failed for {first_failed.get('script_name')}: "
             f"{first_failed.get('error') or 'unknown error'}"
             if first_failed
             else f"Databricks {layer} batch execution failed: {detail}"
-        )
+        ))
         save_external_execution_progress(
             {
                 **state,
@@ -867,7 +1061,13 @@ def _execute_databricks_stage_batch(
     )
     failed = [item for item in executed_scripts if str(item.get("status") or "").upper() == "FAILED"]
     succeeded_count = sum(1 for item in executed_scripts if str(item.get("status") or "").upper() == "SUCCESS")
-    partial_success = _gold_partial_success_enabled(layer) and bool(failed) and succeeded_count >= len(failed)
+    metadata_driven = any(script.get("gold_ingestion_object_id") is not None for script in scripts)
+    partial_success = (
+        _gold_partial_success_enabled(layer)
+        and not metadata_driven
+        and bool(failed)
+        and succeeded_count >= len(failed)
+    )
     if failed and not partial_success:
         first = failed[0]
         raise RuntimeError(
@@ -910,6 +1110,7 @@ def _execute_databricks_stage(
     layer: str,
     review_artifact: Optional[Dict[str, Any]] = None,
     approved_only: bool = False,
+    on_submitted: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     run_id = str(state.get("run_id") or "")
     target_warehouse = str(state.get("target_warehouse") or "databricks").lower()
@@ -967,8 +1168,11 @@ def _execute_databricks_stage(
             f"matched_count={identity_matched_count})."
         )
 
-    if _databricks_execution_mode(layer) == "batch":
-        return _execute_databricks_stage_batch(state, layer=layer, scripts=scripts)
+    metadata_runtime = bool(state.get("metadata_runtime_context"))
+    if metadata_runtime or _databricks_execution_mode(layer) == "batch":
+        return _execute_databricks_stage_batch(
+            state, layer=layer, scripts=scripts, on_submitted=on_submitted
+        )
 
     state = save_external_execution_progress(
         state,
@@ -1015,10 +1219,14 @@ def _execute_databricks_stage(
         )
         started_at = time.monotonic()
         run_payload = _submit_run(notebook_path, run_name=f"Athena {layer} {run_id}")
+        if on_submitted:
+            on_submitted(str(run_payload.get("run_id") or ""))
         run_state = _wait_for_run(int(run_payload.get("run_id")))
         elapsed_seconds = round(time.monotonic() - started_at, 2)
         if str(run_state.get("result_state") or "").upper() not in {"SUCCESS", "COMPLETED"}:
-            failure = f"Databricks {layer} execution failed for {script_name}: {_run_failure_detail(run_state)}"
+            failure = str(_safe_progress_value(
+                f"Databricks {layer} execution failed for {script_name}: {_run_failure_detail(run_state)}"
+            ))
             save_external_execution_progress(
                 {
                     **state,
@@ -1097,8 +1305,12 @@ def run_databricks_bronze_scripts(
     *,
     review_artifact: Dict[str, Any] | None = None,
     approved_only: bool = False,
+    on_submitted: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    return _execute_databricks_stage(state, layer="bronze", review_artifact=review_artifact, approved_only=approved_only)
+    return _execute_databricks_stage(
+        state, layer="bronze", review_artifact=review_artifact,
+        approved_only=approved_only, on_submitted=on_submitted,
+    )
 
 
 def run_databricks_silver_scripts(
@@ -1106,8 +1318,12 @@ def run_databricks_silver_scripts(
     *,
     review_artifact: Dict[str, Any] | None = None,
     approved_only: bool = False,
+    on_submitted: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    return _execute_databricks_stage(state, layer="silver", review_artifact=review_artifact, approved_only=approved_only)
+    return _execute_databricks_stage(
+        state, layer="silver", review_artifact=review_artifact,
+        approved_only=approved_only, on_submitted=on_submitted,
+    )
 
 
 def run_databricks_gold_scripts(
@@ -1115,5 +1331,9 @@ def run_databricks_gold_scripts(
     *,
     review_artifact: Dict[str, Any] | None = None,
     approved_only: bool = False,
+    on_submitted: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    return _execute_databricks_stage(state, layer="gold", review_artifact=review_artifact, approved_only=approved_only)
+    return _execute_databricks_stage(
+        state, layer="gold", review_artifact=review_artifact,
+        approved_only=approved_only, on_submitted=on_submitted,
+    )

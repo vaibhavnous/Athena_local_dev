@@ -2201,8 +2201,35 @@ def _generate_one_mapping(
     dimension_contract: List[Dict[str, Any]] | None = None,
     include_dimension: bool = True,
     dbt_compatible: bool = False,
+    strict_metadata: bool = False,
 ) -> Dict[str, Any]:
-    mapping, source_table_guard = _sanitize_gold_mapping(mapping)
+    if strict_metadata:
+        source_tables = sorted({
+            str(value)
+            for value in [
+                mapping.get("source_silver_table"),
+                *[item.get("source_silver_table") for item in mapping.get("grouping_dimensions") or [] if isinstance(item, dict)],
+                *[item.get("left_source_table") for item in mapping.get("join_paths") or [] if isinstance(item, dict)],
+                *[item.get("right_source_table") for item in mapping.get("join_paths") or [] if isinstance(item, dict)],
+            ]
+            if str(value or "").strip()
+        })
+        source_table_guard = {
+            "strict_metadata": True,
+            "ranked_source_tables": source_tables,
+            "kept_source_tables": source_tables,
+            "dropped_source_tables": [],
+            "kept_dimension_tables": sorted({
+                str(item.get("table")) for item in mapping.get("grouping_dimensions") or []
+                if isinstance(item, dict) and item.get("table")
+            }),
+            "dropped_dimension_tables": [],
+            "dropped_malformed_join_paths": 0,
+            "dropped_join_paths": 0,
+            "warnings": [],
+        }
+    else:
+        mapping, source_table_guard = _sanitize_gold_mapping(mapping)
     dimension_contract = dimension_contract or []
     kpi_name = str(mapping.get("kpi_name") or "KPI")
     kpi_id = _safe_identifier(kpi_name, "kpi")
@@ -2217,7 +2244,7 @@ def _generate_one_mapping(
         knowledge_base_id=knowledge_base_id if use_domain_kb else None,
         domain_profile=domain_profile,
     )
-    use_domain_kb = bool(use_domain_kb) and kb_cfg.enabled
+    use_domain_kb = bool(use_domain_kb) and kb_cfg.enabled and not strict_metadata
     if use_domain_kb:
         kb_query_parts = [
             kpi_name,
@@ -2246,7 +2273,8 @@ def _generate_one_mapping(
     }
     if use_domain_kb:
         mapping, kb_guidance = _apply_gold_kb_rules(mapping, kb_result.get("rows") or [])
-        mapping, source_table_guard = _sanitize_gold_mapping(mapping)
+        if not strict_metadata:
+            mapping, source_table_guard = _sanitize_gold_mapping(mapping)
 
     if not _usable_mapping(mapping):
         return {
@@ -2273,7 +2301,7 @@ def _generate_one_mapping(
             },
         }
 
-    llm_requested = _llm_enabled_for_gold()
+    llm_requested = _llm_enabled_for_gold() and not strict_metadata
     generation_mode = "LLM" if llm_requested else "DETERMINISTIC"
     fallback_reason = None
     if is_dbt_snowflake:
@@ -2610,11 +2638,419 @@ def _persist_gold_generation(*, state: Stage01State, bundle: Dict[str, Any]) -> 
     )
 
 
+def _metadata_gold_plans(state: Stage01State) -> List[Dict[str, Any]]:
+    from services.metadata_selection import validated_metadata_selection
+
+    references = [item for item in state.get("gold_metadata_drafts") or [] if isinstance(item, dict)]
+    if not references:
+        return []
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Metadata-driven Gold generation requires a valid target selection.")
+    plans: List[Dict[str, Any]] = []
+    for reference in references:
+        object_id = int(reference["gold_ingestion_object_id"])
+        config_version = int(reference["gold_ingestion_object_config_version"])
+        target = str(reference["target_table"])
+        obj = selection.repository.get_ingestion_object(object_id, config_version)
+        if (
+            not obj
+            or bool(obj.get("active_flag"))
+            or bool(obj.get("is_current"))
+            or str(obj.get("config_hash") or "") != str(reference["gold_ingestion_object_config_hash"])
+        ):
+            raise ValueError("Gold generation requires the exact inactive transformation-object draft.")
+        bundle = selection.repository.get_mapping_bundle(
+            ingestion_object_id=object_id,
+            processing_stage="SILVER_TO_GOLD",
+            mapping_version=int(reference["silver_to_gold_mapping_version"]),
+            expected_hash=str(reference["silver_to_gold_mapping_hash"]),
+            expected_target=target,
+            require_active=False,
+        )
+        first = bundle["mappings"][0]
+        definition = json.loads(str(first.get("aggregation_rules_json") or "{}"))
+        inputs = json.loads(str(first.get("input_objects_json") or "[]"))
+        for pin in inputs:
+            active = selection.repository.get_active_ingestion_object(int(pin["ingestion_object_id"]))
+            if (
+                not active
+                or int(active.get("config_version") or 0) != int(pin["config_version"])
+                or str(active.get("config_hash") or "") != str(pin["config_hash"])
+            ):
+                raise ValueError("A pinned Silver input changed after the Gold draft was approved.")
+            selection.repository.get_mapping_bundle(
+                ingestion_object_id=int(pin["ingestion_object_id"]),
+                processing_stage="BRONZE_TO_SILVER",
+                mapping_version=int(pin["mapping_version"]),
+                expected_hash=str(pin["mapping_hash"]),
+                expected_target=str(pin["object_name"]),
+                require_active=True,
+            )
+        plans.append({"reference": reference, "object": obj, "bundle": bundle, "definition": definition, "inputs": inputs})
+    return sorted(plans, key=lambda item: (int(item["bundle"]["mappings"][0].get("build_order") or 0), str(item["object"].get("target_table") or "")))
+
+
+def _metadata_dimension_code(plan: Dict[str, Any], *, target_warehouse: str) -> str:
+    rows = plan["bundle"]["mappings"]
+    source_table = str(rows[0]["source_object_name"])
+    target_table = str(plan["object"]["target_table"])
+    keys = [str(row["target_column_name"]) for row in rows if bool(row.get("is_primary_key"))]
+    if not keys:
+        raise ValueError(f"Gold dimension {target_table} has no business key.")
+    if target_warehouse == "snowflake":
+        source_q = _snowflake_qualified_name(*source_table.split("."))
+        target_q = _snowflake_qualified_name(*target_table.split("."))
+        columns = [str(row["target_column_name"]) for row in rows]
+        definitions = ",\n    ".join(
+            f"{_snowflake_quote_identifier(str(row['target_column_name']))} {str(row['target_data_type'])}"
+            + (" NOT NULL" if str(row["target_column_name"]) in keys else "")
+            for row in rows
+        )
+        projections = ",\n        ".join(
+            f"src.{_snowflake_quote_identifier(str(row['source_field_path']))}::{str(row['target_data_type'])} "
+            f"AS {_snowflake_quote_identifier(str(row['target_column_name']))}"
+            for row in rows
+        )
+        on_clause = " AND ".join(
+            f"target.{_snowflake_quote_identifier(key)} = source.{_snowflake_quote_identifier(key)}" for key in keys
+        )
+        updates = [column for column in columns if column not in keys]
+        update_clause = ",\n        ".join(
+            f"target.{_snowflake_quote_identifier(column)} = source.{_snowflake_quote_identifier(column)}" for column in updates
+        ) or f"target.{_snowflake_quote_identifier(keys[0])} = source.{_snowflake_quote_identifier(keys[0])}"
+        quoted_columns = ", ".join(_snowflake_quote_identifier(column) for column in columns)
+        source_columns = ", ".join(f"source.{_snowflake_quote_identifier(column)}" for column in columns)
+        return f"""CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(*target_table.split('.')[:-1])};
+CREATE TABLE IF NOT EXISTS {target_q} (
+    {definitions}
+);
+MERGE INTO {target_q} AS target
+USING (
+    SELECT
+        {projections}
+    FROM {source_q} AS src
+    WHERE src."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID
+) AS source
+ON {on_clause}
+WHEN MATCHED THEN UPDATE SET
+        {update_clause}
+WHEN NOT MATCHED THEN INSERT ({quoted_columns})
+VALUES ({source_columns});
+"""
+
+    source_columns = [str(row["source_field_path"]) for row in rows]
+    target_columns = [str(row["target_column_name"]) for row in rows]
+    target_types = [str(row["target_data_type"]) for row in rows]
+    return f'''"""AUTO-GENERATED METADATA-DRIVEN GOLD DIMENSION"""
+from delta.tables import DeltaTable
+from pyspark.sql.functions import col, lit
+
+SOURCE_TABLE = {source_table!r}
+TARGET_TABLE = {target_table!r}
+SOURCE_COLUMNS = {source_columns!r}
+TARGET_COLUMNS = {target_columns!r}
+TARGET_TYPES = {target_types!r}
+KEYS = {keys!r}
+
+RUNTIME_CONTEXT = globals().get("ATHENA_RUNTIME_CONTEXT")
+if not isinstance(RUNTIME_CONTEXT, dict) or not RUNTIME_CONTEXT.get("logical_work_id"):
+    raise RuntimeError("Metadata Gold execution requires logical-work runtime context")
+LOGICAL_WORK_ID = str(RUNTIME_CONTEXT["logical_work_id"])
+source = spark.table(SOURCE_TABLE)
+if "_logical_work_id" not in source.columns:
+    raise ValueError(f"Gold dimension source lacks _logical_work_id: {{SOURCE_TABLE}}")
+source = source.filter(col("_logical_work_id") == lit(LOGICAL_WORK_ID))
+missing = [name for name in SOURCE_COLUMNS if name not in source.columns]
+if missing:
+    raise ValueError(f"Gold dimension source is missing mapped columns: {{missing}}")
+mapped = source.select(*[
+    col(source_name).cast(target_type).alias(target_name)
+    for source_name, target_name, target_type in zip(SOURCE_COLUMNS, TARGET_COLUMNS, TARGET_TYPES)
+])
+if mapped.filter(" OR ".join(f"`{{key}}` IS NULL" for key in KEYS)).limit(1).count():
+    raise ValueError("Gold dimension business keys contain NULL values")
+if mapped.groupBy(*KEYS).count().filter("count > 1").limit(1).count():
+    raise ValueError("Gold dimension business keys are not unique")
+if spark.catalog.tableExists(TARGET_TABLE):
+    if set(spark.table(TARGET_TABLE).columns) != set(TARGET_COLUMNS):
+        raise ValueError("Gold dimension target schema differs from the approved mapping")
+    condition = " AND ".join(f"target.`{{key}}` <=> source.`{{key}}`" for key in KEYS)
+    DeltaTable.forName(spark, TARGET_TABLE).alias("target").merge(
+        mapped.alias("source"), condition
+    ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+else:
+    mapped.write.format("delta").mode("errorifexists").saveAsTable(TARGET_TABLE)
+'''
+
+
+def _metadata_fact_code(plan: Dict[str, Any], *, target_warehouse: str) -> str:
+    """Generate a fact only from the exact persisted mapping/write contract."""
+    rows = plan["bundle"]["mappings"]
+    target_table = str(plan["object"]["target_table"])
+    write_mode = str(plan["object"].get("write_mode") or "").upper()
+    keys = json.loads(str(plan["object"].get("merge_keys_json") or "[]"))
+    validation_policy = json.loads(str(plan["object"].get("validation_policy_json") or "{}"))
+    join_multiplier_rule = next(
+        (
+            rule for rule in validation_policy.get("rules") or []
+            if isinstance(rule, dict) and str(rule.get("rule_type") or "").upper() == "MAX_JOIN_MULTIPLIER"
+        ),
+        None,
+    )
+    joins = json.loads(str(rows[0].get("join_rules_json") or "[]"))
+    sources = list(dict.fromkeys(str(pin["object_name"]) for pin in plan["inputs"]))
+    aggregate_rows = [row for row in rows if str(row.get("transformation_rule") or "").startswith("AGG_")]
+    if len(aggregate_rows) != 1 or write_mode not in {"MERGE", "SNAPSHOT_REPLACE"}:
+        raise ValueError("Gold fact requires exactly one controlled aggregate and a supported write mode.")
+    root = str(aggregate_rows[0]["source_object_name"])
+    if root not in sources:
+        raise ValueError("Gold fact aggregate source is not one of its pinned inputs.")
+
+    aliases = {source: f"s{index}" for index, source in enumerate(sources)}
+    quote = _snowflake_quote_identifier if target_warehouse == "snowflake" else lambda value: f"`{str(value).replace('`', '``')}`"
+    if target_warehouse == "snowflake":
+        qualify = lambda value: _snowflake_qualified_name(*str(value).split("."))
+    else:
+        qualify = lambda value: ".".join(quote(part) for part in str(value).split("."))
+    visited = {root}
+    logical_scope_value = (
+        "$ATHENA_LOGICAL_WORK_ID"
+        if target_warehouse == "snowflake"
+        else "'__ATHENA_LOGICAL_WORK_ID__'"
+    )
+    pending = [dict(rule) for rule in joins]
+    join_sql: List[str] = []
+    while pending:
+        progress = False
+        for rule in list(pending):
+            left = str(rule["left_source_table"])
+            right = str(rule["right_source_table"])
+            join_type = str(rule.get("join_type") or "INNER").upper()
+            if left in visited and right not in visited:
+                new_source, existing_source = right, left
+                new_column, existing_column = str(rule["right_column"]), str(rule["left_column"])
+            elif join_type == "INNER" and right in visited and left not in visited:
+                new_source, existing_source = left, right
+                new_column, existing_column = str(rule["left_column"]), str(rule["right_column"])
+            else:
+                continue
+            join_sql.append(
+                f"{join_type} JOIN {qualify(new_source)} AS {aliases[new_source]} ON "
+                f"{aliases[existing_source]}.{quote(existing_column)} = {aliases[new_source]}.{quote(new_column)} "
+                f"AND {aliases[new_source]}.{quote('_logical_work_id')} = {logical_scope_value}"
+            )
+            visited.add(new_source)
+            pending.remove(rule)
+            progress = True
+        if not progress:
+            raise ValueError("Gold fact joins cannot be ordered safely from the aggregate source.")
+    if visited != set(sources):
+        raise ValueError("Gold fact join graph does not cover every pinned input.")
+
+    projections: List[str] = []
+    groups: List[str] = []
+    for row in rows:
+        source = str(row["source_object_name"])
+        field = f"{aliases[source]}.{quote(str(row['source_field_path']))}"
+        rule = str(row.get("transformation_rule") or "IDENTITY").upper()
+        if rule.startswith("AGG_"):
+            expression = f"{rule.removeprefix('AGG_')}({field})"
+        elif rule.startswith("DATE_TRUNC_"):
+            grain = rule.removeprefix("DATE_TRUNC_")
+            expression = f"DATE_TRUNC('{grain}', {field})"
+            groups.append(expression)
+        elif rule in {"IDENTITY", "GROUP_KEY"}:
+            expression = field
+            groups.append(expression)
+        else:
+            raise ValueError(f"Unsupported persisted Gold transformation: {rule}")
+        projections.append(
+            f"CAST({expression} AS {str(row['target_data_type'])}) AS {quote(str(row['target_column_name']))}"
+        )
+    from_clause = f"FROM {qualify(root)} AS {aliases[root]}"
+    if join_sql:
+        from_clause += "\n    " + "\n    ".join(join_sql)
+    from_clause += f"\n    WHERE {aliases[root]}.{quote('_logical_work_id')} = {logical_scope_value}"
+    query = "SELECT\n        " + ",\n        ".join(projections) + f"\n    {from_clause}"
+    if groups:
+        query += "\n    GROUP BY " + ", ".join(groups)
+    joined_count_query = f"SELECT COUNT(*) AS joined_count {from_clause}"
+    root_count_query = (
+        f"SELECT COUNT(*) AS root_count FROM {qualify(root)} AS {aliases[root]} "
+        f"WHERE {aliases[root]}.{quote('_logical_work_id')} = {logical_scope_value}"
+    )
+
+    if target_warehouse == "snowflake":
+        target_q = qualify(target_table)
+        schema_q = qualify(".".join(target_table.split(".")[:-1]))
+        if write_mode == "SNAPSHOT_REPLACE":
+            return f"CREATE SCHEMA IF NOT EXISTS {schema_q};\nCREATE OR REPLACE TABLE {target_q} AS\n{query};\n"
+        definitions = ",\n    ".join(
+            f"{quote(str(row['target_column_name']))} {str(row['target_data_type'])}"
+            + (" NOT NULL" if str(row["target_column_name"]) in keys else "")
+            for row in rows
+        )
+        columns = [str(row["target_column_name"]) for row in rows]
+        on_clause = " AND ".join(f"target.{quote(key)} = source.{quote(key)}" for key in keys)
+        updates = [column for column in columns if column not in keys]
+        update_clause = ",\n    ".join(
+            f"target.{quote(column)} = source.{quote(column)}" for column in updates
+        ) or f"target.{quote(keys[0])} = source.{quote(keys[0])}"
+        quoted_columns = ", ".join(quote(column) for column in columns)
+        source_columns = ", ".join(f"source.{quote(column)}" for column in columns)
+        return f"""CREATE SCHEMA IF NOT EXISTS {schema_q};
+CREATE TABLE IF NOT EXISTS {target_q} (
+    {definitions}
+);
+MERGE INTO {target_q} AS target
+USING (
+    {query}
+) AS source
+ON {on_clause}
+WHEN MATCHED THEN UPDATE SET
+    {update_clause}
+WHEN NOT MATCHED THEN INSERT ({quoted_columns})
+VALUES ({source_columns});
+"""
+
+    return f'''"""AUTO-GENERATED METADATA-DRIVEN GOLD FACT"""
+from delta.tables import DeltaTable
+
+TARGET_TABLE = {target_table!r}
+TARGET_COLUMNS = {[str(row["target_column_name"]) for row in rows]!r}
+KEYS = {keys!r}
+WRITE_MODE = {write_mode!r}
+QUERY = {query!r}
+JOINED_COUNT_QUERY = {joined_count_query!r}
+ROOT_COUNT_QUERY = {root_count_query!r}
+MAX_JOIN_MULTIPLIER = {float(join_multiplier_rule.get("threshold_value")) if join_multiplier_rule else None!r}
+
+RUNTIME_CONTEXT = globals().get("ATHENA_RUNTIME_CONTEXT")
+if not isinstance(RUNTIME_CONTEXT, dict) or not RUNTIME_CONTEXT.get("logical_work_id"):
+    raise RuntimeError("Metadata Gold execution requires logical-work runtime context")
+LOGICAL_WORK_ID = str(RUNTIME_CONTEXT["logical_work_id"])
+QUERY = QUERY.replace("__ATHENA_LOGICAL_WORK_ID__", LOGICAL_WORK_ID.replace("'", "''"))
+JOINED_COUNT_QUERY = JOINED_COUNT_QUERY.replace("__ATHENA_LOGICAL_WORK_ID__", LOGICAL_WORK_ID.replace("'", "''"))
+ROOT_COUNT_QUERY = ROOT_COUNT_QUERY.replace("__ATHENA_LOGICAL_WORK_ID__", LOGICAL_WORK_ID.replace("'", "''"))
+ATHENA_VALIDATION_RESULTS = []
+if MAX_JOIN_MULTIPLIER is not None:
+    joined_count = int(spark.sql(JOINED_COUNT_QUERY).first()[0])
+    root_count = int(spark.sql(ROOT_COUNT_QUERY).first()[0])
+    observed_join_multiplier = joined_count / root_count if root_count else (0.0 if joined_count == 0 else float("inf"))
+    ATHENA_VALIDATION_RESULTS.append({{
+        "rule_type": "MAX_JOIN_MULTIPLIER",
+        "observed_value": observed_join_multiplier,
+        "threshold_value": MAX_JOIN_MULTIPLIER,
+        "status": "PASSED" if observed_join_multiplier <= MAX_JOIN_MULTIPLIER else "FAILED",
+    }})
+    if observed_join_multiplier > MAX_JOIN_MULTIPLIER:
+        raise ValueError(f"Gold join multiplier {{observed_join_multiplier}} exceeds {{MAX_JOIN_MULTIPLIER}}")
+mapped = spark.sql(QUERY)
+if mapped.columns != TARGET_COLUMNS:
+    raise ValueError("Gold fact output schema differs from the approved mapping")
+if KEYS and mapped.filter(" OR ".join(f"`{{key}}` IS NULL" for key in KEYS)).limit(1).count():
+    raise ValueError("Gold fact business grain contains NULL values")
+if KEYS and mapped.groupBy(*KEYS).count().filter("count > 1").limit(1).count():
+    raise ValueError("Gold fact business grain is not unique")
+if WRITE_MODE == "SNAPSHOT_REPLACE":
+    mapped.write.format("delta").mode("overwrite").option("overwriteSchema", "false").saveAsTable(TARGET_TABLE)
+elif spark.catalog.tableExists(TARGET_TABLE):
+    if spark.table(TARGET_TABLE).columns != TARGET_COLUMNS:
+        raise ValueError("Gold fact target schema differs from the approved mapping")
+    condition = " AND ".join(f"target.`{{key}}` <=> source.`{{key}}`" for key in KEYS)
+    DeltaTable.forName(spark, TARGET_TABLE).alias("target").merge(
+        mapped.alias("source"), condition
+    ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+else:
+    mapped.write.format("delta").mode("errorifexists").saveAsTable(TARGET_TABLE)
+'''
+
+
+def _generate_metadata_gold(state: Stage01State, plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    target_warehouse = _target_warehouse(state)
+    run_id = str(state.get("run_id") or "GOLD_RUN")
+    gold_schema = str(state.get("gold_schema") or (_snowflake_gold_schema() if target_warehouse == "snowflake" else "gold"))
+    gold_catalog = str(state.get("gold_catalog") or (_snowflake_gold_catalog() if target_warehouse == "snowflake" else ""))
+    results: List[Dict[str, Any]] = []
+    for plan in plans:
+        reference = plan["reference"]
+        definition = plan["definition"]
+        kind = str(definition.get("artifact_kind") or reference.get("artifact_kind") or "").upper()
+        if kind == "FACT":
+            code = _metadata_fact_code(plan, target_warehouse=target_warehouse)
+            if target_warehouse != "snowflake":
+                _validate_python(code)
+            output_dir = _gold_output_dir_for(target_warehouse)
+            os.makedirs(output_dir, exist_ok=True)
+            extension = "sql" if target_warehouse == "snowflake" else "py"
+            path = os.path.join(output_dir, f"gold_{_run_slug(run_id)}_{reference['name']}.{extension}")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(code)
+            result = {
+                "run_id": run_id,
+                "kpi_name": reference["name"],
+                "status": "APPROVED",
+                "source_table": str(plan["bundle"]["mappings"][0]["source_object_name"]),
+                "target_table": str(reference["target_table"]),
+                "script_path": path,
+                "script_body": code,
+                "script_language": "sql" if target_warehouse == "snowflake" else "python",
+                "target_warehouse": target_warehouse,
+                "code_generation_format": "native",
+                "generation_mode": "METADATA_DETERMINISTIC",
+                "validation_columns": [str(row["source_field_path"]) for row in plan["bundle"]["mappings"]],
+                "source_table_guard": {"strict_metadata": True, "dropped_source_tables": [], "dropped_dimension_tables": []},
+            }
+        elif kind == "DIMENSION":
+            code = _metadata_dimension_code(plan, target_warehouse=target_warehouse)
+            if target_warehouse != "snowflake":
+                _validate_python(code)
+            output_dir = _gold_output_dir_for(target_warehouse)
+            os.makedirs(output_dir, exist_ok=True)
+            extension = "sql" if target_warehouse == "snowflake" else "py"
+            path = os.path.join(output_dir, f"gold_{_run_slug(run_id)}_{reference['name']}.{extension}")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(code)
+            result = {
+                "run_id": run_id,
+                "kpi_name": reference["name"],
+                "artifact_kind": "DIMENSION",
+                "status": "APPROVED",
+                "source_table": str(plan["bundle"]["mappings"][0]["source_object_name"]),
+                "target_table": str(reference["target_table"]),
+                "script_path": path,
+                "script_body": code,
+                "script_language": "sql" if target_warehouse == "snowflake" else "python",
+                "target_warehouse": target_warehouse,
+                "code_generation_format": "native",
+                "generation_mode": "METADATA_DETERMINISTIC",
+                "validation_columns": [str(row["source_field_path"]) for row in plan["bundle"]["mappings"]],
+                "source_table_guard": {"strict_metadata": True, "dropped_source_tables": [], "dropped_dimension_tables": []},
+            }
+        else:
+            raise ValueError("Gold metadata artifact_kind must be FACT or DIMENSION.")
+        results.append({
+            **result,
+            "artifact_kind": kind,
+            "gold_ingestion_object_id": int(reference["gold_ingestion_object_id"]),
+            "gold_ingestion_object_config_version": int(reference["gold_ingestion_object_config_version"]),
+            "gold_ingestion_object_config_hash": str(reference["gold_ingestion_object_config_hash"]),
+            "silver_to_gold_mapping_version": int(reference["silver_to_gold_mapping_version"]),
+            "silver_to_gold_mapping_hash": str(reference["silver_to_gold_mapping_hash"]),
+        })
+    return results
+
+
 def gold_code_generation_node(state: Stage01State) -> Stage01State:
     new_state = state.copy()
     contract = _load_contract(state)
     target_warehouse = _target_warehouse(state)
     dbt_codegen = _snowflake_dbt_codegen_enabled(state)
+    metadata_plans = _metadata_gold_plans(state)
+    metadata_driven = bool(metadata_plans)
+    if metadata_driven and dbt_codegen:
+        raise RuntimeError("Metadata-driven Gold dbt generation requires final package registration and is not yet executable.")
     mappings = _normalize_contract_mappings(
         contract,
         canonicalize_columns=target_warehouse == "databricks",
@@ -2625,7 +3061,7 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         new_state["gold_generation_error"] = "No gold generation contract found."
         return new_state
 
-    if not mappings:
+    if not mappings and not metadata_driven:
         new_state["gold_generation_status"] = "SKIPPED"
         new_state["gold_generation_error"] = "Gold contract has no KPI mappings."
         return new_state
@@ -2638,28 +3074,32 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         gold_catalog = str(state.get("gold_catalog") or "")
         gold_schema = str(state.get("gold_schema") or os.getenv("GOLD_SCHEMA", "gold"))
     generated_at = datetime.utcnow().isoformat()
-    shared_dimension_mapping = _shared_dimension_mapping(mappings)
+    shared_dimension_mapping = _shared_dimension_mapping(mappings) if not metadata_driven else {}
     databricks_dimension_contract = (
         _dimension_specs(shared_dimension_mapping) if target_warehouse == "databricks" else []
     )
 
-    results = [
-        _generate_one_mapping(
-            mapping,
-            run_id=run_id,
-            gold_schema=gold_schema,
-            gold_catalog=gold_catalog,
-            target_warehouse=target_warehouse,
-            use_domain_kb=bool(state.get("use_domain_kb")),
-            knowledge_base_id=state.get("knowledge_base_id"),
-            domain_profile=state.get("domain_profile"),
-            dimension_contract=databricks_dimension_contract,
-            include_dimension=False,
-            dbt_compatible=dbt_codegen,
-        )
-        for mapping in mappings
-        if isinstance(mapping, dict)
-    ]
+    results = (
+        _generate_metadata_gold(state, metadata_plans)
+        if metadata_driven
+        else [
+            _generate_one_mapping(
+                mapping,
+                run_id=run_id,
+                gold_schema=gold_schema,
+                gold_catalog=gold_catalog,
+                target_warehouse=target_warehouse,
+                use_domain_kb=bool(state.get("use_domain_kb")),
+                knowledge_base_id=state.get("knowledge_base_id"),
+                domain_profile=state.get("domain_profile"),
+                dimension_contract=databricks_dimension_contract,
+                include_dimension=False,
+                dbt_compatible=dbt_codegen,
+            )
+            for mapping in mappings
+            if isinstance(mapping, dict)
+        ]
+    )
 
     # ponytail: one shared mart artifact avoids generating/executing the same
     # source-table grain DIM/FCT tables once per KPI.
@@ -2672,7 +3112,9 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
         enriched_metadata = enriched_metadata.get("enrichment_artifact") or {}
     source_table_grain_specs = _source_table_grain_specs(contract, mappings, enriched_metadata)
     shared_dimension_code = ""
-    if not dbt_codegen and target_warehouse == "snowflake" and source_table_grain_specs:
+    if metadata_driven:
+        source_table_grain_specs = []
+    elif not dbt_codegen and target_warehouse == "snowflake" and source_table_grain_specs:
         shared_dimension_code = generate_snowflake_source_table_mart_script(
             specs=source_table_grain_specs,
             run_id=run_id,

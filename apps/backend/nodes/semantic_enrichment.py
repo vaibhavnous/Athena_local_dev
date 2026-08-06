@@ -951,6 +951,8 @@ def semantic_enrichment_node(state: Stage01State) -> Stage01State:
                 "schema_name": table.get("schema_name"),
                 "table_name": table.get("table_name"),
                 "column_name": col.get("column_name"),
+                "ingestion_object_id": table.get("ingestion_object_id"),
+                "ingestion_object_config_version": table.get("ingestion_object_config_version"),
             }
             identity_key = _column_key(identity)
             profile = profile_map.get(identity_key, {})

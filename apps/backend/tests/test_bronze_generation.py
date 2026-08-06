@@ -37,6 +37,149 @@ def test_snowflake_bronze_script_uses_sql_patterns():
     assert 'INSERT INTO "ATHENA_DB"."BRONZE"."bronze_Claims"' in script
 
 
+def test_metadata_snowflake_bronze_replaces_one_logical_work_atomically():
+    script = bronze_gen.generate_snowflake_bronze_script(
+        table="Claims",
+        schema="dbo",
+        database="insurance",
+        bronze_catalog="ATHENA_DB",
+        bronze_schema="BRONZE",
+        table_metadata={"columns": [{"column_name": "ClaimID", "data_type": "int"}]},
+        metadata_driven=True,
+    )
+
+    assert '"_logical_work_id" VARCHAR' in script
+    assert '$ATHENA_RUNTIME_RUN_ID AS "run_id"' in script
+    assert '$ATHENA_LOGICAL_WORK_ID AS "_logical_work_id"' in script
+    assert 'DELETE FROM "ATHENA_DB"."BRONZE"."bronze_Claims" WHERE "_logical_work_id" = $ATHENA_LOGICAL_WORK_ID;' in script
+    assert "BEGIN TRANSACTION;" in script
+    assert script.rstrip().endswith("COMMIT;")
+
+    bronze_gen.validate_snowflake_bronze_sql(
+        script,
+        source_table='"insurance"."dbo"."Claims"',
+        target_table='"ATHENA_DB"."BRONZE"."bronze_Claims"',
+        metadata_driven=True,
+    )
+
+
+def test_metadata_snowflake_validator_rejects_legacy_run_scoped_artifact():
+    legacy = bronze_gen.generate_snowflake_bronze_script(
+        table="Claims",
+        schema="dbo",
+        database="insurance",
+        bronze_catalog="ATHENA_DB",
+        bronze_schema="BRONZE",
+        table_metadata={"columns": [{"column_name": "ClaimID", "data_type": "int"}]},
+    )
+
+    with pytest.raises(ValueError, match="transaction/idempotency contract"):
+        bronze_gen.validate_snowflake_bronze_sql(
+            legacy,
+            source_table='"insurance"."dbo"."Claims"',
+            target_table='"ATHENA_DB"."BRONZE"."bronze_Claims"',
+            metadata_driven=True,
+        )
+
+
+def test_metadata_snowflake_validator_does_not_accept_contract_tokens_in_comments():
+    legacy = bronze_gen.generate_snowflake_bronze_script(
+        table="Claims",
+        schema="dbo",
+        database="insurance",
+        bronze_catalog="ATHENA_DB",
+        bronze_schema="BRONZE",
+        table_metadata={"columns": [{"column_name": "ClaimID", "data_type": "int"}]},
+    )
+    bypass = legacy + """
+-- BEGIN TRANSACTION; COMMIT; "_logical_work_id" $ATHENA_LOGICAL_WORK_ID $ATHENA_RUNTIME_RUN_ID
+/* DELETE FROM "ATHENA_DB"."BRONZE"."bronze_Claims"
+   WHERE "_logical_work_id" = $ATHENA_LOGICAL_WORK_ID; */
+"""
+
+    with pytest.raises(ValueError, match="transaction/idempotency contract"):
+        bronze_gen.validate_snowflake_bronze_sql(
+            bypass,
+            source_table='"insurance"."dbo"."Claims"',
+            target_table='"ATHENA_DB"."BRONZE"."bronze_Claims"',
+            metadata_driven=True,
+        )
+
+
+def test_metadata_snowflake_generation_preserves_runtime_contract_and_skips_llm(monkeypatch):
+    monkeypatch.setenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "true")
+    monkeypatch.setattr(
+        bronze_gen,
+        "_enhance_snowflake_with_llm",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("LLM must not run")),
+    )
+
+    result = bronze_gen._generate_one_table(
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"},
+        run_id="run-metadata-snowflake",
+        bronze_catalog="ATHENA_DB",
+        bronze_schema="BRONZE",
+        target_warehouse="snowflake",
+        table_metadata={"columns": [{"column_name": "ClaimID", "data_type": "int"}]},
+        metadata_driven=True,
+    )
+    script = Path(result["script_path"]).read_text(encoding="utf-8")
+
+    assert result["llm_enhanced"] is False
+    assert result["snowflake_landing_database"] == "ATHENA_DB"
+    assert result["snowflake_landing_schema"]
+    assert result["snowflake_landing_table"] == "raw_claims"
+    assert (
+        f'FROM "ATHENA_DB"."{result["snowflake_landing_schema"]}"."raw_claims" AS src;'
+        in script
+    )
+    assert '"_logical_work_id" VARCHAR' in script
+    assert '$ATHENA_RUNTIME_RUN_ID AS "run_id"' in script
+    assert '$ATHENA_LOGICAL_WORK_ID AS "_logical_work_id"' in script
+
+
+def test_snowflake_bronze_execution_spec_pins_source_and_landing_resources():
+    from services import pipeline_runtime
+
+    result = bronze_gen._generate_one_table(
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"},
+        run_id="run-pinned-snowflake",
+        bronze_catalog="ATHENA_DB",
+        bronze_schema="BRONZE",
+        target_warehouse="snowflake",
+        table_metadata={"columns": [{"column_name": "ClaimID", "data_type": "int"}]},
+        metadata_driven=True,
+    )
+    attached = pipeline_runtime._attach_bronze_execution_specs({
+        "run_id": "run-pinned-snowflake",
+        "target_warehouse": "snowflake",
+        "source_connection_id": 11,
+        "source_connection_config_version": 2,
+        "source_connection_config_hash": "connection-hash",
+        "bronze_generation_results": [result],
+        "certified_tables": [{
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "table_name": "claims",
+            "ingestion_object_id": 101,
+            "ingestion_object_config_version": 2,
+            "ingestion_object_config_hash": "object-hash",
+            "source_to_bronze_mapping_version": 3,
+            "source_to_bronze_mapping_hash": "mapping-hash",
+        }],
+    })
+    spec = attached["bronze_generation_results"][0]["execution_spec"]
+
+    assert spec["source_resource"] == {
+        "database": "insurance", "schema": "dbo", "table": "claims"
+    }
+    assert spec["landing_resource"] == {
+        "database": result["snowflake_landing_database"],
+        "schema": result["snowflake_landing_schema"],
+        "table": "raw_claims",
+    }
+
+
 def test_databricks_bronze_script_uses_catalog_qualified_target():
     script = bronze_gen.generate_bronze_script(
         table="Claims",
@@ -174,6 +317,137 @@ def test_databricks_batch_driver_keeps_separate_script_targets(monkeypatch):
     assert "exec(compile" in notebook
 
 
+def test_databricks_batch_driver_injects_metadata_runtime_context():
+    from services import databricks_runtime
+
+    runtime_context = {
+        "contract_version": "1.0",
+        "logical_work_id": "logical-1",
+        "queue_id": 91,
+        "runtime_run_id": "runtime-1",
+    }
+    notebook = databricks_runtime._build_batch_driver_notebook(
+        "bronze",
+        [{"target_table": "main.bronze.claims", "script_body": "print('claims')"}],
+        workspace_dir="/Workspace/athena/runtime-1",
+        runtime_context=runtime_context,
+    )
+    encoded = re.search(
+        r'_RUNTIME_CONTEXT = json.loads\(base64\.b64decode\("([^"]+)"\)', notebook
+    ).group(1)
+
+    assert json.loads(base64.b64decode(encoded).decode("utf-8")) == runtime_context
+    assert '_script_globals["ATHENA_RUNTIME_CONTEXT"] = dict(_RUNTIME_CONTEXT)' in notebook
+    assert 'spark.databricks.delta.commitInfo.userMetadata' in notebook
+    assert '"target_commit_id": f"delta:{_target}:v{_history[\'version\']}"' in notebook
+    assert '_result["execution_result"] = _execution_result' in notebook
+
+
+def test_databricks_submit_uses_stable_platform_idempotency_token(monkeypatch):
+    from services import databricks_runtime
+
+    captured = {}
+    monkeypatch.setattr(databricks_runtime, "_cluster_spec", lambda: {"existing_cluster_id": "cluster-1"})
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_request_json",
+        lambda method, path, payload: captured.update(
+            {"method": method, "path": path, "payload": payload}
+        ) or {"run_id": 42},
+    )
+
+    result = databricks_runtime._submit_run(
+        "/Workspace/athena/runtime-1",
+        run_name="metadata runtime",
+        idempotency_token="athena-metadata-91",
+    )
+
+    assert result["run_id"] == 42
+    assert captured["payload"]["idempotency_token"] == "athena-metadata-91"
+
+
+def test_databricks_submit_retries_ambiguous_response_with_same_token(monkeypatch):
+    from services import databricks_runtime
+
+    attempts = []
+
+    def request_json(_method, _path, payload):
+        attempts.append(dict(payload))
+        if len(attempts) < 3:
+            raise databricks_runtime.DatabricksTransientError("response lost")
+        return {"run_id": 42}
+
+    monkeypatch.setattr(databricks_runtime, "_request_json", request_json)
+    monkeypatch.setattr(databricks_runtime.time, "sleep", lambda _seconds: None)
+
+    assert databricks_runtime._submit_run(
+        "/Shared/job", run_name="metadata", idempotency_token="athena-metadata-91-2"
+    ) == {"run_id": 42}
+    assert [item["idempotency_token"] for item in attempts] == [
+        "athena-metadata-91-2", "athena-metadata-91-2", "athena-metadata-91-2"
+    ]
+
+
+def test_metadata_databricks_batch_uses_queue_attempt_token_and_returns_receipt(monkeypatch):
+    from services import databricks_runtime
+
+    submitted = {}
+    receipts = []
+    monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_args: None)
+    monkeypatch.setattr(databricks_runtime, "_workspace_import_notebook", lambda *_args: {})
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_submit_run",
+        lambda _path, **kwargs: submitted.update(kwargs) or {"run_id": 42},
+    )
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_wait_for_run",
+        lambda _run_id: {
+            "run_id": 42,
+            "result_state": "SUCCESS",
+            "life_cycle_state": "TERMINATED",
+        },
+    )
+    monkeypatch.setattr(databricks_runtime, "_task_run_id", lambda _state: 42)
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_get_run_output",
+        lambda _run_id: {"notebook_output": {"result": json.dumps({
+            "status": "COMPLETED",
+            "results": [{
+                "script_name": "bronze_claims",
+                "target_table": "main.bronze.claims",
+                "status": "SUCCESS",
+                "verification_status": "VERIFIED",
+            }],
+        })}},
+    )
+    monkeypatch.setattr(
+        databricks_runtime,
+        "save_external_execution_progress",
+        lambda state, **_kwargs: state,
+    )
+
+    result = databricks_runtime._execute_databricks_stage_batch(
+        {
+            "run_id": "runtime-1",
+            "metadata_runtime_context": {
+                "queue_id": 91,
+                "attempt_number": 2,
+                "logical_work_id": "logical-1",
+            },
+        },
+        layer="bronze",
+        scripts=[{"target_table": "main.bronze.claims", "script_body": "print('claims')"}],
+        on_submitted=receipts.append,
+    )
+
+    assert submitted["idempotency_token"] == "athena-metadata-91-2"
+    assert receipts == ["42"]
+    assert result["databricks_bronze_execution_results"][0]["databricks_run_id"] == 42
+
+
 def test_databricks_task_run_id_expands_parent_submit_run(monkeypatch):
     from services import databricks_runtime
 
@@ -184,6 +458,36 @@ def test_databricks_task_run_id_expands_parent_submit_run(monkeypatch):
     )
 
     assert databricks_runtime._task_run_id({"run_id": 123}) == 456
+
+
+def test_metadata_databricks_submission_receipt_failure_preserves_attempt(monkeypatch):
+    from services import databricks_runtime
+
+    waited = []
+    monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_args: None)
+    monkeypatch.setattr(databricks_runtime, "_workspace_import_notebook", lambda *_args: {})
+    monkeypatch.setattr(databricks_runtime, "_submit_run", lambda *_args, **_kwargs: {"run_id": 42})
+    monkeypatch.setattr(databricks_runtime, "_wait_for_run", lambda run_id: waited.append(run_id))
+    monkeypatch.setattr(databricks_runtime, "save_external_execution_progress", lambda state, **_: state)
+
+    with pytest.raises(databricks_runtime.DatabricksAmbiguousSubmissionError) as raised:
+        databricks_runtime._execute_databricks_stage_batch(
+            {
+                "run_id": "runtime-1",
+                "metadata_runtime_context": {
+                    "queue_id": 91,
+                    "attempt_number": 2,
+                    "logical_work_id": "logical-1",
+                },
+            },
+            layer="bronze",
+            scripts=[{"target_table": "main.bronze.claims", "script_body": "print('claims')"}],
+            on_submitted=lambda _run_id: (_ for _ in ()).throw(ConnectionError("control unavailable")),
+        )
+
+    assert raised.value.preserve_attempt is True
+    assert "Databricks run 42" in str(raised.value)
+    assert waited == []
 
 
 def test_file_bronze_generation_uses_tolerant_databricks_casts():
@@ -492,6 +796,108 @@ def test_snowflake_bronze_generation_can_use_llm_enhancement(monkeypatch):
     assert calls
     assert result["llm_enhanced"] is True
     assert result["llm_enhancement_error"] is None
+
+
+def test_metadata_bronze_artifact_never_embeds_environment_jdbc_credentials(monkeypatch):
+    monkeypatch.setattr(
+        bronze_gen,
+        "build_source_jdbc_url",
+        lambda _database: "jdbc:sqlserver://source;user=secret-user;password=secret-password",
+    )
+
+    result = bronze_gen._generate_one_table(
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"},
+        run_id="run-metadata-secret-free",
+        bronze_catalog="main",
+        bronze_schema="bronze",
+        target_warehouse="databricks",
+        table_metadata={
+            "columns": [
+                {
+                    "column_name": "ClaimID",
+                    "bronze_target_name": "claimid",
+                    "bronze_target_type": "bigint",
+                }
+            ]
+        },
+        metadata_driven=True,
+    )
+    code = Path(result["script_path"]).read_text(encoding="utf-8")
+
+    assert "secret-user" not in code
+    assert "secret-password" not in code
+    assert "DEFAULT_SOURCE_JDBC_URL = None" in code
+    assert 'SOURCE_JDBC_URL_ENV = "ATHENA_SOURCE_JDBC_URL"' in code
+    assert "MAPPED_COLUMNS = [{'source': 'ClaimID', 'target': 'claimid', 'type': 'bigint'}]" in code
+    assert "DROP TABLE" not in code
+
+
+def test_metadata_databricks_bronze_projects_only_the_approved_mapping(monkeypatch):
+    result = bronze_gen._generate_one_table(
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"},
+        run_id="run-metadata-projection",
+        bronze_catalog="main",
+        bronze_schema="bronze",
+        target_warehouse="databricks",
+        table_metadata={
+            "columns": [
+                {
+                    "column_name": "ClaimID",
+                    "bronze_target_name": "claimid",
+                    "bronze_target_type": "bigint",
+                },
+                {
+                    "column_name": "ClaimAmount",
+                    "bronze_target_name": "claimamount",
+                    "bronze_target_type": "decimal(12,2)",
+                },
+            ]
+        },
+        metadata_driven=True,
+    )
+
+    code = Path(result["script_path"]).read_text(encoding="utf-8")
+    assert "'source': 'ClaimID'" in code
+    assert "'source': 'ClaimAmount'" in code
+    assert "source_by_name[item[\"source\"].casefold()]" in code
+    assert "Mapped source columns are missing" in code
+    assert 'RUNTIME_CONTEXT = globals().get("ATHENA_RUNTIME_CONTEXT")' in code
+    assert '.withColumn("_logical_work_id", lit(LOGICAL_WORK_ID))' in code
+    assert '.mode("overwrite")' in code
+    assert '.option("replaceWhere", f"`_logical_work_id` = \'{logical_work_literal}\'")' in code
+    assert "DROP TABLE" not in code
+
+
+def test_metadata_databricks_bronze_resolves_source_credentials_from_secret_scope():
+    result = bronze_gen._generate_one_table(
+        {"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"},
+        run_id="run-secret-scope",
+        bronze_catalog="main",
+        bronze_schema="bronze",
+        target_warehouse="databricks",
+        table_metadata={
+            "columns": [
+                {"column_name": "ClaimID", "bronze_target_name": "claimid", "bronze_target_type": "bigint"}
+            ]
+        },
+        runtime_connection={
+            "host_name": "source.database.windows.net",
+            "port": 1433,
+            "database_name": "insurance",
+            "secrets": {
+                "username": {"scope": "astra-qa-source-secrets", "key": "claims-db-username"},
+                "password": {"scope": "astra-qa-source-secrets", "key": "claims-db-password"},
+            },
+            "config": {},
+        },
+        metadata_driven=True,
+    )
+
+    code = Path(result["script_path"]).read_text(encoding="utf-8")
+    assert 'dbutils.secrets.get(scope=username_ref["scope"], key=username_ref["key"])' in code
+    assert "astra-qa-source-secrets" in code
+    assert "claims-db-password" in code
+    assert "secret-password" not in code
 
 
 def test_snowflake_llm_enhancement_falls_back_when_target_drifted(monkeypatch):

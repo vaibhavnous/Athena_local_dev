@@ -93,6 +93,8 @@ class ColumnProfileResult(BaseModel):
     database_name: str
     schema_name: str
     table_name: str
+    ingestion_object_id: Optional[int] = None
+    ingestion_object_config_version: Optional[int] = None
     column_name: str
     data_type: Optional[str]
     profile_tier: ProfileTier
@@ -120,6 +122,8 @@ class TableProfileResult(BaseModel):
     database_name: str
     schema_name: str
     table_name: str
+    ingestion_object_id: Optional[int] = None
+    ingestion_object_config_version: Optional[int] = None
     columns_profiled: int
     columns_failed: int
     status: Literal["SUCCESS", "PARTIAL", "FAILED", "SKIPPED"]
@@ -131,6 +135,8 @@ class ProfilingTable(BaseModel):
     database_name: str
     schema_name: str
     table_name: str
+    ingestion_object_id: Optional[int] = None
+    ingestion_object_config_version: Optional[int] = None
     columns: List[Dict[str, Any]]
 
 
@@ -364,6 +370,8 @@ def profile_column(
         database_name=table_ref.database_name,
         schema_name=table_ref.schema_name,
         table_name=table_ref.table_name,
+        ingestion_object_id=table_ref.ingestion_object_id,
+        ingestion_object_config_version=table_ref.ingestion_object_config_version,
         column_name=name,
         data_type=data_type,
         profile_tier=tier,
@@ -429,6 +437,8 @@ def _resolve_tables_for_profiling(state: Stage01State) -> List[ProfilingTable]:
                 database_name=database,
                 schema_name=schema,
                 table_name=table,
+                ingestion_object_id=item.get("ingestion_object_id"),
+                ingestion_object_config_version=item.get("ingestion_object_config_version"),
                 columns=[col for col in columns if isinstance(col, dict)],
             )
         )
@@ -446,6 +456,8 @@ def profile_table(table_ref: ProfilingTable, run_id: str) -> tuple[TableProfileR
                 database_name=table_ref.database_name,
                 schema_name=table_ref.schema_name,
                 table_name=table_ref.table_name,
+                ingestion_object_id=table_ref.ingestion_object_id,
+                ingestion_object_config_version=table_ref.ingestion_object_config_version,
                 columns_profiled=0,
                 columns_failed=0,
                 status="SKIPPED",
@@ -488,6 +500,8 @@ def profile_table(table_ref: ProfilingTable, run_id: str) -> tuple[TableProfileR
             database_name=table_ref.database_name,
             schema_name=table_ref.schema_name,
             table_name=table_ref.table_name,
+            ingestion_object_id=table_ref.ingestion_object_id,
+            ingestion_object_config_version=table_ref.ingestion_object_config_version,
             columns_profiled=success,
             columns_failed=failed,
             status=status,

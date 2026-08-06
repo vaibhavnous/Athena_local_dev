@@ -184,6 +184,71 @@ def test_snowflake_silver_runtime_prefers_reviewed_script_body(monkeypatch):
     assert "-- reviewed edit" in fake_conn.sql[0]
 
 
+def test_snowflake_silver_runtime_prefers_verified_registered_artifact(monkeypatch):
+    from services.metadata_contracts import file_sha256
+    from utilis.generated_code_paths import generated_artifact_uri
+
+    artifact_root = Path.cwd() / ".tmp-tests" / f"snowflake-silver-artifact-{uuid.uuid4().hex}"
+    artifact = artifact_root / "silver" / "claims.sql"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(_silver_sql("claims"), encoding="utf-8")
+    monkeypatch.setenv("ATHENA_GENERATED_CODE_DIR", str(artifact_root))
+
+    assert snowflake_silver_runtime._read_sql({
+        "script_path": str(artifact),
+        "script_body": "DROP TABLE should_not_execute",
+        "execution_spec": {
+            "contract_version": "1.0",
+            "execution_mode": "GENERATED_ARTIFACT",
+            "target_platform": "SNOWFLAKE",
+            "engine": "SNOWFLAKE_SQL",
+            "artifact_uri": generated_artifact_uri(artifact),
+            "entry_point": "script",
+            "artifact_hash": file_sha256(artifact),
+            "generator_version": "test",
+            "mapping_version": 1,
+        },
+    }) == _silver_sql("claims")
+
+
+def test_snowflake_silver_returns_observed_rule_level_validation() -> None:
+    class Cursor:
+        description = [("claim_id",), ("_logical_work_id",)]
+
+        def execute(self, sql):
+            self.sql = sql
+
+        def fetchone(self):
+            return (0,)
+
+        def close(self):
+            pass
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    results = snowflake_silver_runtime._blocking_validation_results(
+        {
+            "target_table": "ATHENA_DB.SILVER.silver_claims",
+            "mapping_contract": [{"target_column_name": "claim_id"}],
+            "merge_keys": ["claim_id"],
+            "validation_policy": {
+                "rules": [
+                    {"rule_type": "MAPPED_COLUMNS_PRESENT", "threshold_value": 0},
+                    {"rule_type": "MERGE_KEYS_NOT_NULL", "columns": ["claim_id"], "threshold_value": 0},
+                ]
+            },
+        },
+        Connection(),
+    )
+
+    assert results == [
+        {"rule_type": "MAPPED_COLUMNS_PRESENT", "observed_value": 0, "threshold_value": 0, "status": "PASSED"},
+        {"rule_type": "MERGE_KEYS_NOT_NULL", "observed_value": 0, "threshold_value": 0, "status": "PASSED"},
+    ]
+
+
 def test_snowflake_silver_review_uses_selected_subset_and_keep_all_pending_legacy():
     scripts = [
         {

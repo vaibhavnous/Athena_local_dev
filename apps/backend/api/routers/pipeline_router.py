@@ -196,6 +196,9 @@ def _seed_run_checkpoint(
             "provider": existing.get("provider") or payload.provider,
             "deployment": existing.get("deployment") or payload.deployment,
             "target_warehouse": existing.get("target_warehouse") or payload.target_warehouse or "databricks",
+            "target_environment": existing.get("target_environment") or payload.target_environment,
+            "source_system_id": existing.get("source_system_id") or payload.source_system_id,
+            "source_connection_id": existing.get("source_connection_id") or payload.source_connection_id,
             "database_flow_version": existing.get("database_flow_version") or (
                 DATABASE_GENERATION_FIRST_FLOW_VERSION
                 if source == "database"

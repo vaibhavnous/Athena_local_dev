@@ -115,6 +115,17 @@ def _map_silver_item(item: Dict[str, Any]) -> Dict[str, Any]:
         "merge_strategy": "MERGE upsert" if primary_keys else "overwrite",
         "llm_enhanced": item.get("llm_enhanced", False),
         "generated_silver_script": item.get("generated_silver_script") or item.get("script_body") or "",
+        **{
+            key: item[key]
+            for key in (
+                "silver_ingestion_object_id",
+                "silver_ingestion_object_config_version",
+                "silver_ingestion_object_config_hash",
+                "bronze_to_silver_mapping_version",
+                "bronze_to_silver_mapping_hash",
+            )
+            if item.get(key) is not None
+        },
     }
 
 
