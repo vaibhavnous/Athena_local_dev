@@ -39,8 +39,13 @@ def _checkpoint_for_user(run_id: str, user: Any) -> Dict[str, Any]:
     return assert_run_access(run_id, user) if has_request_user(user) else {}
 
 
-def _review_artifact_for_user(review_artifact: Dict[str, Any] | None, user: AuthUser) -> Dict[str, Any] | None:
-    if not review_artifact or user.user_type == "Admin":
+def _review_artifact_for_user(
+    review_artifact: Dict[str, Any] | None,
+    user: AuthUser,
+    *,
+    strip_executable: bool = False,
+) -> Dict[str, Any] | None:
+    if not review_artifact or (user.user_type == "Admin" and not strip_executable):
         return review_artifact
 
     def sanitized(value: Any) -> Any:
@@ -510,10 +515,14 @@ def submit_silver_merge_key_reviews(
 ) -> Dict[str, Any]:
     from services.pipeline_runtime import submit_background, submit_silver_merge_key_review
 
-    _checkpoint_for_user(run_id, user)
+    checkpoint = _checkpoint_for_user(run_id, user)
     logger.info("Submitting Silver merge-key review", extra={"run_id": run_id, "action": payload.action})
     stage = "silver" if str(payload.action).upper() == "APPROVED" else "silver_merge_key_review"
-    review_artifact = _review_artifact_for_user(payload.review_artifact, user)
+    review_artifact = _review_artifact_for_user(
+        payload.review_artifact,
+        user,
+        strip_executable=checkpoint.get("source_system_id") is not None,
+    )
     submit_background(run_id, stage, submit_silver_merge_key_review, run_id, payload.action, review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
@@ -592,7 +601,11 @@ def submit_silver_reviews(
             else "gold" if str(payload.action).upper() == "APPROVED"
             else "gate5"
         )
-        review_artifact = _review_artifact_for_user(payload.review_artifact, user)
+        review_artifact = _review_artifact_for_user(
+            payload.review_artifact,
+            user,
+            strip_executable=checkpoint.get("source_system_id") is not None,
+        )
         submit_background(run_id, stage, submit_gate5_review, run_id, payload.action, review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
@@ -640,7 +653,11 @@ def submit_gold_reviews(
 
     checkpoint = _checkpoint_for_user(run_id, user) or load_checkpoint_state(run_id) or {}
     logger.info("Submitting Gold review", extra={"run_id": run_id, "action": payload.action})
-    review_artifact = _review_artifact_for_user(payload.review_artifact, user)
+    review_artifact = _review_artifact_for_user(
+        payload.review_artifact,
+        user,
+        strip_executable=checkpoint.get("source_system_id") is not None,
+    )
     stage = (
         "gold_review"
         if generation_first_database_flow(checkpoint)

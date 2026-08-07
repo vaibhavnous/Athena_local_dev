@@ -13,6 +13,19 @@ from api.services import pipeline_service
 from services import pipeline_runtime
 
 
+def test_pipeline_request_preserves_bigint_metadata_ids_from_json_strings():
+    payload = PipelineRunRequest(
+        brd_text="claims requirements",
+        target_warehouse="databricks",
+        target_environment="qa",
+        source_system_id="7499026347042686646",
+        source_connection_id="3358264270364792816",
+    )
+
+    assert payload.source_system_id == 7499026347042686646
+    assert payload.source_connection_id == 3358264270364792816
+
+
 def test_validate_pipeline_result_rejects_non_dict():
     with pytest.raises(ValueError, match="invalid response object"):
         pipeline_service._validate_pipeline_result("bad")
@@ -75,7 +88,11 @@ def _generation_first_state(target: str = "databricks"):
 
 
 def test_generation_first_gold_review_pauses_at_start_execution(monkeypatch):
-    state = _generation_first_state()
+    state = {
+        **_generation_first_state(),
+        "failed_background_stage": "gold_review",
+        "error": "stale failure",
+    }
     saved = []
     monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: state)
     monkeypatch.setattr(
@@ -95,6 +112,8 @@ def test_generation_first_gold_review_pauses_at_start_execution(monkeypatch):
     assert result["next_stage_key"] == "bronze_code_execution"
     assert result["execution_ready"] is True
     assert result["stage_confirmation"]["next_stage_label"] == "Bronze Target Execution"
+    assert result["failed_background_stage"] is None
+    assert result["error"] is None
     assert not result.get("databricks_bronze_execution_status")
     assert saved[-1]["gold_generation_results"][0]["script_body"] == "gold"
     assert saved[-1]["gold_generation_results"][0]["review_status"] == "APPROVED"
@@ -557,6 +576,7 @@ def test_gate2_materializes_one_inactive_object_per_approved_table(monkeypatch):
         lambda _state: SimpleNamespace(
             repository=Repository(),
             connection={"config_version": 3, "config_hash": "sha256:connection"},
+            uses_environment_source=True,
         ),
     )
     approved = [
@@ -573,6 +593,7 @@ def test_gate2_materializes_one_inactive_object_per_approved_table(monkeypatch):
     assert all(item["ingestion_object_config_version"] == 1 for item in materialized)
     assert [call["table"]["table_name"] for call in calls] == ["claims", "policy"]
     assert all(call["expected_connection_version"] == 3 for call in calls)
+    assert all(call["allow_inactive_connection"] is True for call in calls)
 
 
 def test_metadata_gate2_does_not_materialize_unapproved_support_tables(monkeypatch):
@@ -823,17 +844,26 @@ def test_metadata_merge_key_review_rejects_ambiguous_leaf_table(monkeypatch):
 
 
 def test_gate5_metadata_filter_uses_transformation_id_not_leaf_name() -> None:
+    selected_object_id = 4_134_741_637_349_269_810
     results = [
         {"silver_ingestion_object_id": 201, "table": "claims", "target_table": "main.a.silver_claims"},
-        {"silver_ingestion_object_id": 202, "table": "claims", "target_table": "main.b.silver_claims"},
+        {"silver_ingestion_object_id": selected_object_id, "table": "claims", "target_table": "main.b.silver_claims"},
     ]
 
     selected = pipeline_runtime._filter_silver_results_by_gate5_review(
         results,
-        {"items": [{"silver_ingestion_object_id": 202, "table": "claims", "review_status": "APPROVED"}]},
+        {
+            "items": [
+                {
+                    "silver_ingestion_object_id": str(selected_object_id),
+                    "table": "claims",
+                    "review_status": "APPROVED",
+                }
+            ]
+        },
     )
 
-    assert [item["silver_ingestion_object_id"] for item in selected] == [202]
+    assert [item["silver_ingestion_object_id"] for item in selected] == [selected_object_id]
 
 
 def test_gate5_silver_artifact_is_hashed_and_activated_from_exact_draft(monkeypatch) -> None:
@@ -913,7 +943,17 @@ def test_gate5_metadata_rejects_edited_executable_code(monkeypatch) -> None:
         })
 
 
-def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("filters", "aggregation", "expected_kinds", "rejection_code"),
+    [
+        (["Consistent identifiers across systems"], "SUM", ["DIMENSION", "FACT"], None),
+        ([{"column": "claimstatus", "operator": "=", "value": "OPEN"}], "SUM", ["DIMENSION"], "UNSUPPORTED_FILTER"),
+        (["Consistent identifiers across systems"], "RATIO", ["DIMENSION"], "INVALID_AGGREGATION"),
+    ],
+)
+def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(
+    monkeypatch, filters, aggregation, expected_kinds, rejection_code
+) -> None:
     from types import SimpleNamespace
     from services import metadata_selection
 
@@ -985,21 +1025,27 @@ def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(monkeypat
             "kpi_mappings": [{
                 "kpi_name": "Total Claims",
                 "source_silver_table": "main.silver.silver_claims",
-                "measure": {"table": "claims", "column": "claimamount", "aggregation": "SUM"},
+                "measure": {"table": "claims", "column": "claimamount", "aggregation": aggregation},
                 "grouping_dimensions": [{"table": "claims", "column": "claimstatus", "semantic_type": "DIMENSION"}],
                 "time": {"grain": "month", "column": None},
-                "filters": [],
+                "filters": filters,
                 "join_paths": [],
                 "readiness": "READY",
             }],
         },
     })
 
-    assert [item["artifact_kind"] for item in result["gold_metadata_drafts"]] == ["DIMENSION", "FACT"]
-    assert [item["target_gold_table"] for item in captured] == ["main.gold.dim_claims", "main.gold.fact_total_claims"]
+    assert [item["artifact_kind"] for item in result["gold_metadata_drafts"]] == expected_kinds
+    assert [item["target_gold_table"] for item in captured] == [
+        "main.gold.dim_claims",
+        *(["main.gold.fact_total_claims"] if "FACT" in expected_kinds else []),
+    ]
     assert captured[0]["merge_keys"] == ["claimid"]
-    assert captured[1]["merge_keys"] == ["claimstatus"]
-    assert result["gold_metadata_rejections"] == []
+    if "FACT" in expected_kinds:
+        assert captured[1]["merge_keys"] == ["claimstatus"]
+    assert [item["code"] for item in result["gold_metadata_rejections"]] == (
+        [rejection_code] if rejection_code else []
+    )
 
 
 def test_gate5_rejects_unimplemented_snowflake_multi_input_gold_before_metadata_write(monkeypatch) -> None:
@@ -1175,12 +1221,90 @@ def test_metadata_native_execution_confirmation_enqueues_only_bronze_roots(monke
         }],
     }
 
-    queued = pipeline_runtime.execute_database_native_layers("design-run", state=state)
+    queued = pipeline_runtime._enqueue_metadata_native_runtime(state)
 
     assert queued["status"] == "RUNTIME_QUEUED"
     assert [item["ingestion_object_id"] for item in queued["metadata_runtime_queue"]] == [101]
     assert [item["priority"] for item in captured] == [300]
     assert len({item["logical_work_id"] for item in captured}) == 1
+
+
+def test_metadata_native_execution_is_drained_by_application_worker(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_runtime_worker, metadata_selection
+
+    logical_work_id = "logical-design-run"
+    outcomes = [{
+        "outcomes": [
+            {"queue": {"queue_id": 1, "ingestion_object_id": 101}, "run": {"run_id": "runtime-1"}, "status": "SUCCESS"},
+            {"queue": {"queue_id": 2, "ingestion_object_id": 201}, "run": {"run_id": "runtime-2"}, "status": "SUCCESS"},
+            {"queue": {"queue_id": 3, "ingestion_object_id": 301}, "run": {"run_id": "runtime-3"}, "status": "SUCCESS"},
+        ],
+        "progress_state": {},
+    }, None]
+    calls = []
+
+    class Repository:
+        def queue_items_for_logical_work(self, value):
+            assert value == logical_work_id
+            return [
+                {"queue_id": 1, "ingestion_object_id": 101, "queue_status": "SUCCESS"},
+                {"queue_id": 2, "ingestion_object_id": 201, "queue_status": "SUCCESS"},
+                {"queue_id": 3, "ingestion_object_id": 301, "queue_status": "SUCCESS"},
+            ]
+
+    def process(_repository, **kwargs):
+        calls.append(kwargs)
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(metadata_runtime_worker, "process_metadata_work_batch", process)
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+    state = {
+        "run_id": "design-run",
+        "target_warehouse": "databricks",
+        "metadata_runtime_queue": [{"logical_work_id": logical_work_id}],
+        "bronze_generation_results": [{"ingestion_object_id": 101, "metadata_activation_status": "ACTIVE"}],
+        "silver_generation_results": [{"silver_ingestion_object_id": 201, "metadata_activation_status": "ACTIVE"}],
+        "gold_generation_results": [{"gold_ingestion_object_id": 301, "metadata_activation_status": "ACTIVE"}],
+    }
+
+    result = pipeline_runtime._execute_queued_metadata_native_runtime(state)
+
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert result["databricks_gold_execution_status"] == "COMPLETED"
+    assert len(result["metadata_runtime_results"]) == 3
+    assert all(call["logical_work_id"] == logical_work_id for call in calls)
+
+
+def test_metadata_native_execution_fails_closed_when_an_active_artifact_is_missing(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_runtime_worker, metadata_selection
+
+    class Repository:
+        def queue_items_for_logical_work(self, _value):
+            return [{"queue_id": 1, "ingestion_object_id": 101, "queue_status": "SUCCESS"}]
+
+    monkeypatch.setattr(metadata_runtime_worker, "process_metadata_work_batch", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    state = {
+        "run_id": "design-run",
+        "target_warehouse": "databricks",
+        "metadata_runtime_queue": [{"logical_work_id": "logical-design-run"}],
+        "bronze_generation_results": [{"ingestion_object_id": 101, "metadata_activation_status": "ACTIVE"}],
+        "silver_generation_results": [{"silver_ingestion_object_id": 201, "metadata_activation_status": "ACTIVE"}],
+    }
+
+    with pytest.raises(RuntimeError, match="every active artifact"):
+        pipeline_runtime._execute_queued_metadata_native_runtime(state)
 
 
 def test_failed_kpi_artifact_does_not_open_empty_gate1():

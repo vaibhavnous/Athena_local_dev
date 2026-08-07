@@ -98,6 +98,32 @@ export const updateProject = (id: string, data: object) => api.put(`/projects/${
 export const deleteProject = (id: string) => api.delete(`/projects/${id}`, { timeout: WRITE_TIMEOUT })
 export const getProjectRuns = (id: string) => api.get(`/projects/${id}/runs`, { timeout: RUNS_LIST_TIMEOUT })
 
+export interface MetadataSourceConnectionOption {
+  connection_id: string
+  connection_name: string
+  connection_type: string
+  database_name: string
+  config_version: number
+  active: boolean
+  design_time_fallback: boolean
+}
+
+export interface MetadataSourceSystemOption {
+  source_system_id: string
+  source_system_name: string
+  connections: MetadataSourceConnectionOption[]
+}
+
+export const getMetadataSourceOptions = (targetWarehouse: string, projectId?: string) =>
+  api.get('/metadata/source-options', {
+    params: { target_warehouse: targetWarehouse, project_id: projectId || undefined },
+    timeout: READ_TIMEOUT,
+  }) as unknown as Promise<{
+    target_warehouse: string
+    target_environment: string
+    source_systems: MetadataSourceSystemOption[]
+  }>
+
 export const startRun = (payload: {
   project_id?: string
   brd_text?: string
@@ -108,6 +134,9 @@ export const startRun = (payload: {
   database_type?: string
   database_name?: string
   target_warehouse?: string
+  target_environment?: string
+  source_system_id?: string
+  source_connection_id?: string
   execution_engine?: 'native' | 'dbt'
   dbt_deployment_mode?: 'generate_only' | 'generate_and_deploy'
   dbt_target_name?: string

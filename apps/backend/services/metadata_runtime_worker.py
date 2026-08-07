@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional
 
 from services.metadata_repository import MetadataRepository
@@ -95,18 +96,9 @@ def _execute_registered_artifact(
     mapping: Optional[Dict[str, Any]] = None,
     on_submitted=None,
 ) -> Dict[str, Any]:
-    from utilis.generated_code_paths import verified_execution_artifact
-
-    try:
-        execution_spec = json.loads(str(obj.get("execution_spec_json") or ""))
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("The active execution specification is invalid.") from exc
-    platform = str(execution_spec.get("target_platform") or "").upper()
-    artifact_path = verified_execution_artifact(execution_spec, platform=platform.lower())
-    state = _runtime_state(
-        run, obj, execution_spec, str(artifact_path), runtime_context, mapping=mapping
+    state, stage, platform = _registered_artifact_state(
+        run, obj, runtime_context, mapping=mapping
     )
-    stage = str(obj.get("processing_stage") or "").upper()
     if platform == "DATABRICKS":
         from services.databricks_runtime import (
             run_databricks_bronze_scripts,
@@ -140,6 +132,27 @@ def _execute_registered_artifact(
 
         return run_snowflake_gold_scripts(state)
     raise ValueError(f"Unsupported runtime target platform: {platform}")
+
+
+def _registered_artifact_state(
+    run: Dict[str, Any],
+    obj: Dict[str, Any],
+    runtime_context: Dict[str, Any],
+    mapping: Optional[Dict[str, Any]] = None,
+) -> tuple[Dict[str, Any], str, str]:
+    from utilis.generated_code_paths import verified_execution_artifact
+
+    try:
+        execution_spec = json.loads(str(obj.get("execution_spec_json") or ""))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("The active execution specification is invalid.") from exc
+    platform = str(execution_spec.get("target_platform") or "").upper()
+    artifact_path = verified_execution_artifact(execution_spec, platform=platform.lower())
+    state = _runtime_state(
+        run, obj, execution_spec, str(artifact_path), runtime_context, mapping=mapping
+    )
+    stage = str(obj.get("processing_stage") or "").upper()
+    return state, stage, platform
 
 
 def _assert_execution_completed(
@@ -279,17 +292,328 @@ def _execute_with_lease_heartbeat(
     return result
 
 
+def _retryable_execution_error(exc: BaseException) -> bool:
+    return (
+        bool(getattr(exc, "retryable", False))
+        or isinstance(exc, (ConnectionError, TimeoutError))
+        or type(exc).__name__ in {"OperationalError", "InterfaceError"}
+        or "dependency is not committed" in str(exc).lower()
+    )
+
+
+def _execute_registered_artifact_batch(
+    prepared: list[Dict[str, Any]],
+    progress_state: Dict[str, Any],
+    on_submitted: Callable[[str], None],
+) -> Dict[str, Any]:
+    from services.databricks_runtime import (
+        run_databricks_bronze_scripts,
+        run_databricks_gold_scripts,
+        run_databricks_silver_scripts,
+    )
+
+    states: list[Dict[str, Any]] = []
+    stages: set[str] = set()
+    for item in prepared:
+        state, stage, platform = _registered_artifact_state(
+            item["run"], item["obj"], item["runtime_context"], mapping=item["mapping"]
+        )
+        if platform != "DATABRICKS":
+            raise ValueError("Metadata batch execution is supported only for Databricks.")
+        states.append(state)
+        stages.add(stage)
+    if len(stages) != 1:
+        raise RuntimeError("A Databricks metadata batch must contain exactly one processing stage.")
+
+    stage = stages.pop()
+    layer, result_key, runner = {
+        "SOURCE_TO_BRONZE": ("bronze", "bronze_generation_results", run_databricks_bronze_scripts),
+        "BRONZE_TO_SILVER": ("silver", "silver_generation_results", run_databricks_silver_scripts),
+        "SILVER_TO_GOLD": ("gold", "gold_generation_results", run_databricks_gold_scripts),
+    }[stage]
+    scripts = [script for state in states for script in state.get(result_key) or []]
+    if len(scripts) != len(prepared):
+        raise RuntimeError("Every claimed metadata item must resolve to exactly one registered artifact.")
+    batch_state = {
+        **progress_state,
+        "run_id": str(progress_state.get("run_id") or ""),
+        "target_warehouse": "databricks",
+        "metadata_runtime_batch": True,
+        "metadata_runtime_context": dict(prepared[0]["runtime_context"]),
+        "_metadata_runtime_scripts": scripts,
+    }
+    return runner(batch_state, approved_only=False, on_submitted=on_submitted)
+
+
+def process_metadata_work_batch(
+    repository: MetadataRepository,
+    *,
+    worker_id: str,
+    progress_state: Dict[str, Any],
+    lease_seconds: int = 300,
+    logical_work_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Execute all currently ready Databricks items in one serverless submission."""
+    from services.databricks_runtime import DatabricksBatchExecutionError
+
+    prepared: list[Dict[str, Any]] = []
+    outcomes: list[Dict[str, Any]] = []
+    stage: Optional[str] = None
+    recovery_attempted = False
+
+    while True:
+        queue_item = repository.claim_next_queue_item(
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            logical_work_id=logical_work_id,
+        )
+        if not queue_item:
+            if not prepared and not recovery_attempted:
+                recovery_attempted = True
+                if repository.release_ready_downstream_from_successes(logical_work_id=logical_work_id):
+                    continue
+            break
+        recovered = repository.recover_committed_queue_item(
+            queue_id=int(queue_item["queue_id"]), worker_id=worker_id
+        )
+        if recovered:
+            outcomes.append({"queue": queue_item, "run": recovered, "status": "RECOVERED_SUCCESS"})
+            continue
+        context = repository.create_run_attempt(
+            queue_item, pipeline_name="metadata_runtime_worker", worker_id=worker_id
+        )
+        run = context["run"]
+        obj = context["ingestion_object"]
+        item_stage = str(obj.get("processing_stage") or "").upper()
+        if stage is None:
+            stage = item_stage
+        if item_stage != stage:
+            raise RuntimeError("Ready metadata work unexpectedly crossed a processing-stage boundary.")
+        if not context.get("metadata_snapshot_matches", True):
+            raise RuntimeError("Queued metadata snapshot is no longer the active executable configuration.")
+        repository.assert_runtime_dependencies(obj, logical_work_id=str(run.get("logical_work_id") or ""))
+        if obj.get("watermark_column") or str(obj.get("checkpoint_type") or "").strip():
+            raise RuntimeError(
+                "Stateful metadata execution requires the generated artifact checkpoint-output protocol, which is not configured."
+            )
+        runtime_context = {
+            **context["runtime_context"],
+            "resumed_attempt": bool(context.get("resumed_attempt")),
+        }
+        repository.heartbeat_queue_item(
+            queue_id=int(queue_item["queue_id"]), worker_id=worker_id, lease_seconds=lease_seconds
+        )
+        prepared.append({
+            "queue": queue_item,
+            "run": run,
+            "obj": obj,
+            "mapping": context["mapping"],
+            "runtime_context": runtime_context,
+        })
+
+    if not prepared:
+        return {"outcomes": outcomes, "progress_state": progress_state} if outcomes else None
+
+    stop = threading.Event()
+    heartbeat_error: list[BaseException] = []
+    interval = max(5.0, min(60.0, max(30, int(lease_seconds)) / 3.0))
+
+    def renew() -> None:
+        while not stop.wait(interval):
+            try:
+                def heartbeat(item: Dict[str, Any]) -> None:
+                    repository.heartbeat_queue_item(
+                        queue_id=int(item["queue"]["queue_id"]),
+                        worker_id=worker_id,
+                        lease_seconds=lease_seconds,
+                    )
+
+                with ThreadPoolExecutor(max_workers=min(4, len(prepared))) as executor:
+                    list(executor.map(heartbeat, prepared))
+            except BaseException as exc:
+                heartbeat_error.append(exc)
+                stop.set()
+
+    thread = threading.Thread(target=renew, name="metadata-batch-leases", daemon=True)
+    thread.start()
+    batch_results: list[Dict[str, Any]] = []
+    batch_error: Optional[BaseException] = None
+
+    def on_submitted(target_write_id: str) -> None:
+        if not str(target_write_id or "").strip():
+            raise RuntimeError("The target platform did not return an execution receipt.")
+
+        def mark_submitted(item: Dict[str, Any]) -> None:
+            repository.update_run_phase(
+                str(item["run"]["run_id"]),
+                "TARGET_SUBMITTED",
+                queue_id=int(item["queue"]["queue_id"]),
+                worker_id=worker_id,
+                target_write_id=str(target_write_id),
+                target_commit_status="SUBMITTED",
+            )
+
+        with ThreadPoolExecutor(max_workers=min(4, len(prepared))) as executor:
+            list(executor.map(mark_submitted, prepared))
+
+    try:
+        try:
+            result = _execute_registered_artifact_batch(prepared, progress_state, on_submitted)
+            layer = {"SOURCE_TO_BRONZE": "bronze", "BRONZE_TO_SILVER": "silver", "SILVER_TO_GOLD": "gold"}[stage or ""]
+            batch_results = [
+                item for item in result.get(f"databricks_{layer}_execution_results") or []
+                if isinstance(item, dict)
+            ]
+            progress_state = result
+        except DatabricksBatchExecutionError as exc:
+            batch_error = exc
+            batch_results = list(exc.results)
+        except BaseException as exc:
+            batch_error = exc
+    finally:
+        stop.set()
+        thread.join(timeout=min(5.0, interval))
+
+    results_by_run = {
+        str(item.get("runtime_run_id") or ""): item
+        for item in batch_results
+        if str(item.get("runtime_run_id") or "")
+    }
+    if batch_error and bool(getattr(batch_error, "preserve_attempt", False)):
+        for item in prepared:
+            repository.record_run_error(
+                run=item["run"],
+                error_stage="WRITE",
+                error=batch_error,
+                retryable=True,
+                detail={"operation": "DATABRICKS_BATCH_SUBMISSION"},
+                worker_id=worker_id,
+            )
+            repository.release_queue_for_same_attempt_resume(
+                queue_id=int(item["queue"]["queue_id"]),
+                worker_id=worker_id,
+                message=str(batch_error),
+            )
+        raise batch_error
+    layer = {"SOURCE_TO_BRONZE": "bronze", "BRONZE_TO_SILVER": "silver", "SILVER_TO_GOLD": "gold"}[stage or ""]
+    def finalize(item: Dict[str, Any]) -> Dict[str, Any]:
+        queue_item = item["queue"]
+        run = item["run"]
+        obj = item["obj"]
+        runtime_context = item["runtime_context"]
+        target_committed = False
+        try:
+            if heartbeat_error:
+                raise RuntimeError("Queue lease was lost during target execution.") from heartbeat_error[0]
+            script_result = results_by_run.get(str(run["run_id"]))
+            if not script_result:
+                raise RuntimeError(str(batch_error or "Databricks batch omitted this artifact result."))
+            if str(script_result.get("status") or "").upper() != "SUCCESS":
+                raise RuntimeError(str(script_result.get("error") or batch_error or "Databricks artifact execution failed."))
+            result = {
+                f"databricks_{layer}_execution_status": "COMPLETED",
+                f"databricks_{layer}_execution_results": [script_result],
+            }
+            execution_evidence = _assert_execution_completed(result, obj, runtime_context)
+            validation_evidence = _assert_blocking_validation(
+                result, obj, execution_evidence["execution_result"]
+            )
+            target_committed = True
+            repository.begin_queue_finalization(
+                queue_id=int(queue_item["queue_id"]), worker_id=worker_id
+            )
+            repository.update_run_phase(
+                str(run["run_id"]),
+                "TARGET_WRITTEN",
+                queue_id=int(queue_item["queue_id"]),
+                worker_id=worker_id,
+                rows_read=execution_evidence["execution_result"].get("rows_read"),
+                rows_written=execution_evidence["execution_result"].get("rows_written"),
+                target_write_id=str(execution_evidence["execution_result"]["target_commit_id"]),
+                target_commit_status="COMMITTED",
+                validation_status="PASSED",
+                validation_summary_json=json.dumps(
+                    {"target_execution": execution_evidence, "blocking_validation": validation_evidence},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                watermark_commit_status="SKIPPED",
+            )
+            repository.finalize_successful_run(
+                run_id=str(run["run_id"]),
+                queue_id=int(queue_item["queue_id"]),
+                worker_id=worker_id,
+            )
+            downstream_release_status = "COMPLETED"
+            try:
+                repository.enqueue_ready_downstream(
+                    completed_object=obj,
+                    logical_work_id=str(run.get("logical_work_id") or ""),
+                    parent_work_scope=json.loads(str(queue_item.get("work_scope_json") or "{}")),
+                )
+            except Exception as release_error:
+                downstream_release_status = "PENDING_RECOVERY"
+                repository.record_run_error(
+                    run=run,
+                    error_stage="FINALIZE",
+                    error=release_error,
+                    retryable=True,
+                    detail={"operation": "DOWNSTREAM_RELEASE"},
+                )
+            return {
+                "queue": queue_item,
+                "run": run,
+                "status": "SUCCESS",
+                "downstream_release_status": downstream_release_status,
+            }
+        except BaseException as exc:
+            retryable = _retryable_execution_error(exc)
+            repository.record_run_error(
+                run=run,
+                error_stage="FINALIZE" if target_committed else "WRITE",
+                error=exc,
+                retryable=retryable,
+                detail={"ingestion_object_id": run.get("ingestion_object_id")},
+                worker_id=worker_id,
+            )
+            if not target_committed:
+                repository.finalize_failed_run(
+                    run=run,
+                    worker_id=worker_id,
+                    retryable=retryable,
+                    message=str(exc),
+                )
+            return {"queue": queue_item, "run": run, "status": "FAILED", "error": str(exc)}
+
+    # ponytail: Databricks control rows are independent; bounded parallelism removes per-row API latency.
+    with ThreadPoolExecutor(max_workers=min(4, len(prepared))) as executor:
+        outcomes.extend(executor.map(finalize, prepared))
+
+    return {"outcomes": outcomes, "progress_state": progress_state}
+
+
 def process_next_metadata_work(
     repository: MetadataRepository,
     *,
     worker_id: str,
     lease_seconds: int = 300,
+    logical_work_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Claim and execute one stateless, registered metadata work item."""
-    repository.release_ready_downstream_from_successes()
-    queue_item = repository.claim_next_queue_item(worker_id=worker_id, lease_seconds=lease_seconds)
+    queue_item = repository.claim_next_queue_item(
+        worker_id=worker_id,
+        lease_seconds=lease_seconds,
+        logical_work_id=logical_work_id,
+    )
     if not queue_item:
-        return None
+        repository.release_ready_downstream_from_successes(logical_work_id=logical_work_id)
+        queue_item = repository.claim_next_queue_item(
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            logical_work_id=logical_work_id,
+        )
+        if not queue_item:
+            return None
     recovered = repository.recover_committed_queue_item(
         queue_id=int(queue_item["queue_id"]), worker_id=worker_id
     )

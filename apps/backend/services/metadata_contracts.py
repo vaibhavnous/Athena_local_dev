@@ -21,6 +21,9 @@ METADATA_TABLES = (
 SUPPORTED_METADATA_TARGETS = {"databricks", "snowflake"}
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 _DDL_ROOT = Path(__file__).resolve().parents[3] / "prereq" / "metadata"
+CANONICAL_COLUMN_NAME_CORRECTIONS = {
+    "rererence_id": "reference_id",
+}
 
 
 @dataclass(frozen=True)
@@ -70,7 +73,7 @@ def normalize_bronze_column_name(value: Any) -> str:
     normalized = re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower()).strip("_")
     if normalized and normalized[0].isdigit():
         normalized = "col_" + normalized
-    return normalized
+    return CANONICAL_COLUMN_NAME_CORRECTIONS.get(normalized, normalized)
 
 
 def bronze_target_data_type(platform: str, column: Mapping[str, Any]) -> str:

@@ -22,6 +22,12 @@ class DatabricksAmbiguousSubmissionError(DatabricksTransientError):
     preserve_attempt = True
 
 
+class DatabricksBatchExecutionError(RuntimeError):
+    def __init__(self, message: str, results: List[Dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.results = results
+
+
 def _env_flag(*names: str) -> bool:
     for name in names:
         value = os.getenv(name)
@@ -528,7 +534,12 @@ def _filtered_scripts(scripts: List[Dict[str, Any]], review_artifact: Optional[D
 
 
 def _generated_scripts_for_layer(state: Dict[str, Any], layer: str) -> List[Dict[str, Any]]:
-    scripts = [item for item in (state.get(f"{layer}_generation_results") or []) if isinstance(item, dict)]
+    runtime_scripts = state.get("_metadata_runtime_scripts")
+    scripts = (
+        [item for item in runtime_scripts if isinstance(item, dict)]
+        if isinstance(runtime_scripts, list)
+        else [item for item in (state.get(f"{layer}_generation_results") or []) if isinstance(item, dict)]
+    )
     if not scripts:
         from services.pipeline_runtime import load_bronze_scripts, load_gold_scripts, load_silver_scripts
 
@@ -637,6 +648,7 @@ def _build_batch_driver_notebook(
     *,
     workspace_dir: str,
     runtime_context: Optional[Dict[str, Any]] = None,
+    metadata_runtime_batch: bool = False,
 ) -> str:
     script_items = [
         {
@@ -648,6 +660,7 @@ def _build_batch_driver_notebook(
             "mapping_contract": script.get("mapping_contract") or [],
             "merge_keys": script.get("merge_keys") or [],
             "approved_source_tables": script.get("approved_source_tables") or [],
+            "runtime_context": script.get("metadata_runtime_context") or {},
         }
         for script in scripts
     ]
@@ -655,9 +668,12 @@ def _build_batch_driver_notebook(
     context_encoded = base64.b64encode(
         json.dumps(dict(runtime_context or {}), sort_keys=True).encode("utf-8")
     ).decode("ascii")
-    metadata_driven = any(script.get("gold_ingestion_object_id") is not None for script in scripts)
+    metadata_driven = any(
+        script.get("metadata_runtime") or script.get("gold_ingestion_object_id") is not None
+        for script in scripts
+    )
     allow_partial_success = _gold_partial_success_enabled(layer) and not metadata_driven
-    continue_on_error = allow_partial_success or _env_flag(
+    continue_on_error = metadata_runtime_batch or allow_partial_success or _env_flag(
         f"ATHENA_DATABRICKS_{str(layer or '').upper()}_CONTINUE_ON_ERROR",
         "ATHENA_DATABRICKS_CONTINUE_ON_ERROR",
     )
@@ -675,27 +691,32 @@ _SCRIPT_ITEMS = json.loads(base64.b64decode("{encoded}").decode("utf-8"))
 _RUNTIME_CONTEXT = json.loads(base64.b64decode("{context_encoded}").decode("utf-8"))
 _CONTINUE_ON_ERROR = {str(continue_on_error)}
 _ALLOW_PARTIAL_SUCCESS = {str(allow_partial_success)}
+_METADATA_RUNTIME_BATCH = {str(metadata_runtime_batch)}
 _RESULTS = []
 _WORKSPACE_DIR = "{workspace_dir}"
-_COMMIT_METADATA = json.dumps({{
-    "logical_work_id": _RUNTIME_CONTEXT.get("logical_work_id"),
-    "runtime_run_id": _RUNTIME_CONTEXT.get("runtime_run_id"),
-}}, sort_keys=True, separators=(",", ":")) if _RUNTIME_CONTEXT else ""
-if _COMMIT_METADATA:
-    spark.conf.set("spark.databricks.delta.commitInfo.userMetadata", _COMMIT_METADATA)
 if _WORKSPACE_DIR not in sys.path:
     sys.path.append(_WORKSPACE_DIR)
 
 for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
     _started = time.time()
     _name = _item.get("script_name") or f"script_{{_index}}"
+    _target = str(_item.get("target_table") or "").strip()
+    _ITEM_RUNTIME_CONTEXT = _item.get("runtime_context") or _RUNTIME_CONTEXT
     try:
+        _target_existed_before = False
+        _version_before = None
+        if _ITEM_RUNTIME_CONTEXT and _target and _target.casefold() != "gold_dimensions":
+            _target_existed_before = spark.catalog.tableExists(_target)
+            if _target_existed_before:
+                _before = DeltaTable.forName(spark, _target).history(1).select("version").first()
+                if not _before:
+                    raise RuntimeError(f"Delta history is unavailable before executing {{_target}}")
+                _version_before = int(_before["version"])
         _script_globals = dict(globals())
         _script_globals["__name__"] = f"__athena_{{_name}}"
         _script_globals["__file__"] = _item.get("script_path") or f"<athena:{{_name}}>"
-        _script_globals["ATHENA_RUNTIME_CONTEXT"] = dict(_RUNTIME_CONTEXT)
+        _script_globals["ATHENA_RUNTIME_CONTEXT"] = dict(_ITEM_RUNTIME_CONTEXT)
         exec(compile(_item.get("script_text") or "", f"<athena:{{_name}}>", "exec"), _script_globals)
-        _target = str(_item.get("target_table") or "").strip()
         _verification_status = "UNVERIFIED"
         _verification_warning = None
         if _target and _target.casefold() != "gold_dimensions":
@@ -721,7 +742,7 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
             }}
             _scoped_target = _target_df
             if "_logical_work_id" in _target_columns:
-                _logical_literal = str(_RUNTIME_CONTEXT.get("logical_work_id") or "").replace("'", "''")
+                _logical_literal = str(_ITEM_RUNTIME_CONTEXT.get("logical_work_id") or "").replace("'", "''")
                 _scoped_target = _target_df.filter(f"`_logical_work_id` = '{{_logical_literal}}'")
             _script_rule_results = {{
                 str(_row.get("rule_type") or _row.get("rule") or "").upper(): _row
@@ -775,12 +796,20 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
                 if _status != "PASSED":
                     raise RuntimeError(f"Blocking validation failed: {{_result}}")
         _execution_result = None
-        if _RUNTIME_CONTEXT and _target and _target.casefold() != "gold_dimensions":
+        if _ITEM_RUNTIME_CONTEXT and _target and _target.casefold() != "gold_dimensions":
             _history = DeltaTable.forName(spark, _target).history(1).select(
-                "version", "operationMetrics", "userMetadata"
+                "version", "operationMetrics"
             ).first()
-            if not _history or str(_history["userMetadata"] or "") != _COMMIT_METADATA:
-                raise RuntimeError(f"Latest Delta commit for {{_target}} is not owned by this logical work")
+            if not _history:
+                raise RuntimeError(f"Delta history is unavailable after executing {{_target}}")
+            _version_after = int(_history["version"])
+            if _target_existed_before and _version_after != _version_before + 1:
+                raise RuntimeError(
+                    f"Expected exactly one Delta commit for {{_target}}; "
+                    f"history advanced from {{_version_before}} to {{_version_after}}"
+                )
+            if not _target_existed_before and _version_after < 0:
+                raise RuntimeError(f"No Delta commit was created for {{_target}}")
             _metrics = dict(_history["operationMetrics"] or {{}})
             _rows_written = _metrics.get("numOutputRows")
             if _rows_written is None:
@@ -791,19 +820,21 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
             _execution_result = {{
                 "contract_version": "1.0",
                 "status": "COMPLETED",
-                "logical_work_id": _RUNTIME_CONTEXT.get("logical_work_id"),
-                "runtime_run_id": _RUNTIME_CONTEXT.get("runtime_run_id"),
+                "logical_work_id": _ITEM_RUNTIME_CONTEXT.get("logical_work_id"),
+                "runtime_run_id": _ITEM_RUNTIME_CONTEXT.get("runtime_run_id"),
                 "target_table": _target,
                 "target_commit_id": f"delta:{{_target}}:v{{_history['version']}}",
                 "rows_written": int(_rows_written or 0),
                 "validation_status": "PASSED",
-                "validation_policy_hash": _RUNTIME_CONTEXT.get("validation_policy_hash"),
+                "validation_policy_hash": _ITEM_RUNTIME_CONTEXT.get("validation_policy_hash"),
                 "validation_results": _validation_results,
             }}
         _result = {{
             "script_name": _name,
             "script_path": _item.get("script_path"),
             "target_table": _target or None,
+            "runtime_run_id": _ITEM_RUNTIME_CONTEXT.get("runtime_run_id"),
+            "queue_id": _ITEM_RUNTIME_CONTEXT.get("queue_id"),
             "status": "SUCCESS",
             "verification_status": _verification_status,
             "elapsed_seconds": round(time.time() - _started, 2),
@@ -818,6 +849,8 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
             "script_name": _name,
             "script_path": _item.get("script_path"),
             "target_table": _item.get("target_table"),
+            "runtime_run_id": _ITEM_RUNTIME_CONTEXT.get("runtime_run_id"),
+            "queue_id": _ITEM_RUNTIME_CONTEXT.get("queue_id"),
             "status": "FAILED",
             "error": str(_exc),
             "traceback": traceback.format_exc()[-12000:],
@@ -828,11 +861,6 @@ for _index, _item in enumerate(_SCRIPT_ITEMS, start=1):
 
 _SCRIPTS_OK = builtins.sum(1 for _r in _RESULTS if _r.get("status") == "SUCCESS")
 _SCRIPTS_FAILED = builtins.sum(1 for _r in _RESULTS if _r.get("status") == "FAILED")
-if _COMMIT_METADATA:
-    try:
-        spark.conf.unset("spark.databricks.delta.commitInfo.userMetadata")
-    except Exception:
-        pass
 _PARTIAL_SUCCESS = _ALLOW_PARTIAL_SUCCESS and _SCRIPTS_FAILED > 0 and _SCRIPTS_OK >= _SCRIPTS_FAILED
 _SUMMARY = {{
     "status": "COMPLETED_WITH_WARNINGS" if _PARTIAL_SUCCESS else "FAILED" if _SCRIPTS_FAILED else "SUCCESS",
@@ -844,7 +872,8 @@ _SUMMARY = {{
 }}
 
 if _SUMMARY["status"] == "FAILED":
-    raise RuntimeError(json.dumps(_SUMMARY, default=str))
+    if not _METADATA_RUNTIME_BATCH:
+        raise RuntimeError(json.dumps(_SUMMARY, default=str))
 
 dbutils.notebook.exit(json.dumps(_SUMMARY, default=str))
 '''
@@ -958,7 +987,11 @@ def _execute_databricks_stage_batch(
     _workspace_import_notebook(
         notebook_path,
         _build_batch_driver_notebook(
-            layer, scripts, workspace_dir=workspace_dir, runtime_context=runtime_context
+            layer,
+            scripts,
+            workspace_dir=workspace_dir,
+            runtime_context=runtime_context,
+            metadata_runtime_batch=bool(state.get("metadata_runtime_batch")),
         ),
     )
 
@@ -1034,6 +1067,8 @@ def _execute_databricks_stage_batch(
             current_target=first_failed.get("target_table"),
             message=failure,
         )
+        if state.get("metadata_runtime_batch"):
+            raise DatabricksBatchExecutionError(failure, partial_results)
         raise RuntimeError(failure)
 
     output_warning = None
@@ -1061,7 +1096,10 @@ def _execute_databricks_stage_batch(
     )
     failed = [item for item in executed_scripts if str(item.get("status") or "").upper() == "FAILED"]
     succeeded_count = sum(1 for item in executed_scripts if str(item.get("status") or "").upper() == "SUCCESS")
-    metadata_driven = any(script.get("gold_ingestion_object_id") is not None for script in scripts)
+    metadata_driven = any(
+        script.get("metadata_runtime") or script.get("gold_ingestion_object_id") is not None
+        for script in scripts
+    )
     partial_success = (
         _gold_partial_success_enabled(layer)
         and not metadata_driven
@@ -1070,10 +1108,33 @@ def _execute_databricks_stage_batch(
     )
     if failed and not partial_success:
         first = failed[0]
-        raise RuntimeError(
+        failure = (
             f"Databricks {layer} batch execution failed for {first.get('script_name')}: "
             f"{first.get('error') or 'unknown error'}"
         )
+        save_external_execution_progress(
+            {
+                **state,
+                "status": "FAILED",
+                "failed_background_stage": f"{layer}_code_execution",
+                "error": failure,
+                f"databricks_{layer}_execution_results": executed_scripts,
+            },
+            run_id=run_id,
+            platform="databricks",
+            layer=layer,
+            stage_key=f"{layer}_code_execution",
+            status="FAILED",
+            total_count=len(scripts),
+            completed_count=succeeded_count,
+            current_index=executed_scripts.index(first) + 1,
+            current_name=first.get("script_name"),
+            current_target=first.get("target_table"),
+            message=failure,
+        )
+        if state.get("metadata_runtime_batch"):
+            raise DatabricksBatchExecutionError(failure, executed_scripts)
+        raise RuntimeError(failure)
 
     execution_status = "COMPLETED_WITH_WARNINGS" if partial_success else "COMPLETED"
     failed_names = [str(item.get("script_name") or item.get("target_table") or "unknown script") for item in failed]

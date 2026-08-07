@@ -843,7 +843,8 @@ def _mapping_driven_bronze_state(state: Dict[str, Any]) -> Dict[str, Any]:
             mapping_version=int(certified.get("source_to_bronze_mapping_version") or 0),
             expected_hash=str(certified.get("source_to_bronze_mapping_hash") or ""),
             expected_target=target_table,
-            require_active=False,
+            # An exact active bundle is valid content-addressed reuse on later design runs.
+            require_active=None,
         )
         loaded_bundles.append(bundle)
         source_table = discovered_by_object.get(object_id)
@@ -3548,6 +3549,7 @@ def _materialize_gate2_ingestion_objects(
             expected_connection_version=int(selection.connection["config_version"]),
             expected_connection_hash=str(selection.connection["config_hash"]),
             target_bronze_table=target_bronze_table,
+            allow_inactive_connection=bool(getattr(selection, "uses_environment_source", False)),
         )
         materialized.append(
             {
@@ -4289,8 +4291,9 @@ def _materialize_silver_to_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any
             reject("FACT", name, "INCOMPLETE_KPI_CONTRACT", "The approved KPI contract is marked BLOCKED.")
             continue
         filters = list(raw.get("filters") or [])
-        if filters:
-            reject("FACT", name, "UNSUPPORTED_FILTER", "Gold filters require a validated structured expression contract.")
+        executable_filters = [item for item in filters if not isinstance(item, str)]
+        if executable_filters:
+            reject("FACT", name, "UNSUPPORTED_FILTER", "Executable Gold filters require a validated structured expression contract.")
             continue
         measure = dict(raw.get("measure") or {})
         measure_input = source(measure.get("table") or raw.get("source_silver_table"))
@@ -5220,6 +5223,117 @@ def _enqueue_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
     return queued_state
 
 
+def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
+    from services.metadata_runtime_worker import process_metadata_work_batch, process_next_metadata_work
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Metadata runtime execution requires a valid target selection.")
+    logical_ids = {
+        str(item.get("logical_work_id") or "").strip()
+        for item in state.get("metadata_runtime_queue") or []
+        if isinstance(item, dict) and str(item.get("logical_work_id") or "").strip()
+    }
+    if len(logical_ids) != 1:
+        raise RuntimeError("Metadata runtime queue must contain exactly one logical work identity.")
+    logical_work_id = logical_ids.pop()
+    worker_id = f"design:{state.get('run_id')}:{uuid.uuid4()}"
+    completed: List[Dict[str, Any]] = []
+    progress_state = dict(state)
+
+    while True:
+        if str(state.get("target_warehouse") or "").lower() == "databricks":
+            batch = process_metadata_work_batch(
+                selection.repository,
+                worker_id=worker_id,
+                logical_work_id=logical_work_id,
+                progress_state=progress_state,
+            )
+            if batch is None:
+                break
+            progress_state = dict(batch.get("progress_state") or progress_state)
+            progress_state.pop("_metadata_runtime_scripts", None)
+            progress_state.pop("metadata_runtime_context", None)
+            outcomes = batch.get("outcomes") or []
+        else:
+            outcome = process_next_metadata_work(
+                selection.repository,
+                worker_id=worker_id,
+                logical_work_id=logical_work_id,
+            )
+            if outcome is None:
+                break
+            outcomes = [outcome]
+        for outcome in outcomes:
+            queue_item = outcome.get("queue") or {}
+            runtime_run = outcome.get("run") or {}
+            completed.append({
+                "queue_id": queue_item.get("queue_id"),
+                "ingestion_object_id": queue_item.get("ingestion_object_id"),
+                "runtime_run_id": runtime_run.get("run_id"),
+                "status": outcome.get("status"),
+            })
+
+    queue_items = selection.repository.queue_items_for_logical_work(logical_work_id)
+    expected_object_ids = {
+        int(item.get(object_key) or 0)
+        for result_key, object_key in (
+            ("bronze_generation_results", "ingestion_object_id"),
+            ("silver_generation_results", "silver_ingestion_object_id"),
+            ("gold_generation_results", "gold_ingestion_object_id"),
+        )
+        for item in state.get(result_key) or []
+        if isinstance(item, dict)
+        and item.get("metadata_activation_status") == "ACTIVE"
+        and int(item.get(object_key) or 0) > 0
+    }
+    successful_object_ids = {
+        int(item.get("ingestion_object_id") or 0)
+        for item in queue_items
+        if str(item.get("queue_status") or "").upper() == "SUCCESS"
+    }
+    failed = [item for item in queue_items if str(item.get("queue_status") or "").upper() == "FAILED"]
+    incomplete = [
+        item for item in queue_items
+        if str(item.get("queue_status") or "").upper() not in {"SUCCESS", "FAILED"}
+    ]
+    missing = expected_object_ids - successful_object_ids
+    if failed:
+        raise RuntimeError(
+            "Metadata target execution failed for queue item(s): "
+            + ", ".join(str(item.get("queue_id")) for item in failed)
+        )
+    if incomplete or missing:
+        raise RuntimeError(
+            "Metadata target execution did not reach a terminal success state for every active artifact."
+        )
+
+    target = str(state.get("target_warehouse") or "").lower()
+    final_state = {
+        **progress_state,
+        "status": "PIPELINE_COMPLETED",
+        "execution_ready": False,
+        "background_stage": None,
+        "failed_background_stage": None,
+        "last_completed_stage_key": "gold_code_execution",
+        "last_completed_stage_label": "Gold Target Execution",
+        "next_stage_key": None,
+        "next_stage_label": None,
+        "metadata_runtime_results": completed,
+        f"{target}_bronze_execution_status": "COMPLETED",
+        f"{target}_silver_execution_status": "COMPLETED",
+        f"{target}_gold_execution_status": "COMPLETED",
+        "resume_message": "Bronze, Silver, and Gold metadata target execution completed.",
+    }
+    save_checkpoint_state_timed(
+        str(state.get("run_id") or ""),
+        final_state,
+        context="metadata_runtime:complete",
+    )
+    return final_state
+
+
 def _native_execution_completed(state: Dict[str, Any], target_warehouse: str, layer: str) -> bool:
     status = state.get(f"{target_warehouse}_{layer}_execution_status")
     if target_warehouse == "databricks":
@@ -5283,7 +5397,9 @@ def execute_database_native_layers(
         isinstance(item, dict) and item.get("gold_ingestion_object_id") is not None
         for item in working_state.get("gold_generation_results") or []
     ):
-        return _enqueue_metadata_native_runtime(working_state)
+        return _execute_queued_metadata_native_runtime(
+            _enqueue_metadata_native_runtime(working_state)
+        )
     validation_errors = _database_native_execution_validation_errors(working_state)
     if validation_errors:
         raise RuntimeError(
@@ -5754,6 +5870,8 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
         "gold_review_decision": decision,
         "gold_review_artifact": current_review_artifact,
         "next_review_key": None,
+        "failed_background_stage": None,
+        "error": None,
     }
 
     if decision == "APPROVED":

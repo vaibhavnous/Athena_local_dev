@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import pytest
 
-from services.metadata_contracts import TargetMetadataContext
+from services.metadata_contracts import TargetMetadataContext, normalize_bronze_column_name
 from services.metadata_contracts import validate_jdbc_connection
 from services.metadata_repository import (
     DatabricksMetadataRepository,
@@ -17,6 +17,32 @@ from services.metadata_repository import (
     metadata_repository_for_target,
 )
 from utilis.logger import SecretRedactionFilter
+
+
+def test_bronze_column_normalization_uses_the_shared_canonical_name() -> None:
+    assert normalize_bronze_column_name("RERERENCE_ID") == "reference_id"
+
+
+def test_source_to_bronze_mapping_persists_canonical_reference_id() -> None:
+    repository = StubMetadataRepository()
+    bundle = repository.upsert_source_to_bronze_mapping_draft(
+        ingestion_object={
+            "ingestion_object_id": 123,
+            "config_version": 1,
+            "config_hash": "sha256:object",
+            "object_kind": "INGESTION",
+            "ingestion_type": "DATABASE",
+            "processing_stage": "SOURCE_TO_BRONZE",
+            "active_flag": False,
+            "is_current": False,
+            "object_name": "ClaimsDB.dbo.Claims",
+            "target_bronze_table": "main.bronze.bronze_Claims",
+        },
+        columns=[{"column_name": "RERERENCE_ID", "data_type": "bigint", "ordinal_position": 1}],
+    )
+
+    assert bundle["mappings"][0]["source_field_path"] == "RERERENCE_ID"
+    assert bundle["mappings"][0]["target_column_name"] == "reference_id"
 
 
 class StubMetadataRepository(MetadataRepository):
@@ -104,6 +130,9 @@ class StubMetadataRepository(MetadataRepository):
     def get_connection(self, connection_id: int, config_version: Optional[int] = None) -> Optional[Dict[str, Any]]:
         return dict(self.connection) if connection_id == 11 and config_version == 1 else None
 
+    def get_latest_connection(self, connection_id: int) -> Optional[Dict[str, Any]]:
+        return dict(self.connection) if connection_id == 11 else None
+
 
 def test_gate2_database_object_is_inactive_idempotent_source_to_bronze_draft() -> None:
     repository = StubMetadataRepository()
@@ -150,6 +179,59 @@ def test_gate2_object_requires_complete_source_identity() -> None:
             source_system_id=7,
             connection_id=11,
             table={"schema_name": "dbo"},
+        )
+
+
+def test_gate2_environment_fallback_explicitly_allows_inactive_connection() -> None:
+    repository = StubMetadataRepository()
+    repository.connection.update({"active_flag": False, "is_current": False})
+    table = {"database_name": "ClaimsDB", "schema_name": "dbo", "table_name": "Claims"}
+
+    with pytest.raises(ValueError, match="inactive"):
+        repository.upsert_database_ingestion_object_draft(
+            source_system_id=7,
+            connection_id=11,
+            table=table,
+        )
+
+    draft = repository.upsert_database_ingestion_object_draft(
+        source_system_id=7,
+        connection_id=11,
+        table=table,
+        allow_inactive_connection=True,
+    )
+
+    assert draft["active_flag"] is False
+    assert draft["connection_id"] == 11
+
+
+def test_environment_fallback_does_not_allow_runtime_snapshot_with_inactive_connection() -> None:
+    repository = StubMetadataRepository()
+    repository.connection.update({"active_flag": False, "is_current": False})
+    spec = {
+        "mapping_version": 3,
+        "mapping_hash": "sha256:mapping",
+        "processing_stage": "SOURCE_TO_BRONZE",
+        "runtime_context_contract_version": "1.0",
+        "idempotency_identity": "logical_work_id",
+        "source_resource": {"database": "ClaimsDB", "schema": "dbo", "table": "Claims"},
+    }
+    ingestion_object = {
+        "ingestion_object_id": 101,
+        "config_version": 2,
+        "config_hash": "sha256:object",
+        "connection_id": 11,
+        "processing_stage": "SOURCE_TO_BRONZE",
+        "object_name": "ClaimsDB.dbo.Claims",
+        "database_schema": "dbo",
+        "table_name": "Claims",
+        "execution_spec_json": json.dumps(spec),
+    }
+
+    with pytest.raises(ValueError, match="runtime source connection is not active"):
+        repository._runtime_snapshot(
+            ingestion_object,
+            {"mapping_version": 3, "mapping_hash": "sha256:mapping"},
         )
 
 
@@ -240,6 +322,78 @@ def test_source_to_bronze_mapping_bundle_is_deterministic_and_inactive() -> None
     assert "UNION ALL" in next(sql for sql, _ in repository.executed if "cfg_mapping" in sql)
     assert [row["target_column_name"] for row in first["mappings"]] == ["claim_id", "amount"]
     assert [row["target_data_type"] for row in first["mappings"]] == ["int", "decimal(12,2)"]
+
+
+def test_source_to_bronze_mapping_reuses_exact_active_bundle_on_later_run() -> None:
+    repository = StubMetadataRepository()
+    ingestion_object = {
+        "ingestion_object_id": 123,
+        "config_version": 1,
+        "config_hash": "sha256:object",
+        "object_kind": "INGESTION",
+        "ingestion_type": "DATABASE",
+        "processing_stage": "SOURCE_TO_BRONZE",
+        "active_flag": False,
+        "is_current": False,
+        "object_name": "ClaimsDB.dbo.Claims",
+        "target_bronze_table": "main.bronze.bronze_Claims",
+    }
+    columns = [{"column_name": "claim_id", "data_type": "int", "ordinal_position": 1}]
+    first = repository.upsert_source_to_bronze_mapping_draft(
+        ingestion_object=ingestion_object,
+        columns=columns,
+    )
+    for row in repository.mappings:
+        row.update({"active_flag": True, "is_current": True})
+
+    reused = repository.upsert_source_to_bronze_mapping_draft(
+        ingestion_object=ingestion_object,
+        columns=columns,
+    )
+
+    assert reused["mapping_version"] == first["mapping_version"]
+    assert reused["mapping_hash"] == first["mapping_hash"]
+    assert reused["active_flag"] is True
+    with pytest.raises(RuntimeError, match="pinned contract"):
+        repository.get_mapping_bundle(
+            ingestion_object_id=123,
+            processing_stage="SOURCE_TO_BRONZE",
+            mapping_version=first["mapping_version"],
+            expected_hash=first["mapping_hash"],
+            expected_target="main.bronze.bronze_Claims",
+            require_active=False,
+        )
+
+
+def test_mapping_reuse_rejects_inconsistent_lifecycle_flags() -> None:
+    repository = StubMetadataRepository()
+    ingestion_object = {
+        "ingestion_object_id": 123,
+        "config_version": 1,
+        "config_hash": "sha256:object",
+        "object_kind": "INGESTION",
+        "ingestion_type": "DATABASE",
+        "processing_stage": "SOURCE_TO_BRONZE",
+        "active_flag": False,
+        "is_current": False,
+        "object_name": "ClaimsDB.dbo.Claims",
+        "target_bronze_table": "main.bronze.bronze_Claims",
+    }
+    bundle = repository.upsert_source_to_bronze_mapping_draft(
+        ingestion_object=ingestion_object,
+        columns=[{"column_name": "claim_id", "data_type": "int", "ordinal_position": 1}],
+    )
+    repository.mappings[0].update({"active_flag": True, "is_current": False})
+
+    with pytest.raises(RuntimeError, match="inconsistent lifecycle"):
+        repository.get_mapping_bundle(
+            ingestion_object_id=123,
+            processing_stage="SOURCE_TO_BRONZE",
+            mapping_version=bundle["mapping_version"],
+            expected_hash=bundle["mapping_hash"],
+            expected_target="main.bronze.bronze_Claims",
+            require_active=None,
+        )
 
 
 def test_source_to_bronze_mapping_rejects_normalization_collision_before_write() -> None:
@@ -392,6 +546,20 @@ def test_bronze_to_silver_draft_is_exact_inactive_and_idempotent() -> None:
     assert [row["transformation_rule"] for row in first["mapping_bundle"]["mappings"]] == ["CAST", "TRIM_CAST"]
     dependency = json.loads(first["ingestion_object"]["dependency_objects_json"])["dependencies"][0]
     assert dependency["mapping_hash"] == source_mapping["mapping_hash"]
+
+    silver_id = first["ingestion_object"]["ingestion_object_id"]
+    for row in repository.mappings:
+        if row["ingestion_object_id"] == silver_id:
+            row.update({"active_flag": True, "is_current": True})
+    reused_active = repository.upsert_bronze_to_silver_draft(
+        source_system_id=7,
+        source_object=source_object,
+        source_mapping=source_mapping,
+        target_silver_table="main.silver.silver_claims",
+        merge_keys=["claimid"],
+        columns=columns,
+    )
+    assert reused_active["mapping_bundle"]["active_flag"] is True
 
 
 def test_bronze_to_silver_rejects_unknown_key_before_creating_transform() -> None:
@@ -701,6 +869,23 @@ def test_queue_claim_uses_conditional_lease_ownership() -> None:
     assert "queue_status = :running" in running_reclaim
 
 
+def test_queue_claim_can_be_scoped_to_one_logical_work_id() -> None:
+    class Repository(StubMetadataRepository):
+        def query(self, sql, parameters=None):
+            self.executed.append((sql, parameters or {}))
+            return []
+
+    repository = Repository()
+
+    assert repository.claim_next_queue_item(
+        worker_id="worker-a",
+        logical_work_id="logical-run-1",
+    ) is None
+    sql, parameters = repository.executed[-1]
+    assert "AND logical_work_id = :logical_work_id" in sql
+    assert parameters["logical_work_id"] == "logical-run-1"
+
+
 def test_full_enqueue_persists_exact_runtime_context_and_rejects_incremental() -> None:
     class Repository(StubMetadataRepository):
         def __init__(self):
@@ -845,6 +1030,26 @@ def test_downstream_release_waits_for_every_pinned_dependency_and_deduplicates()
 
     assert first[0]["logical_work_id"] == "logical-1"
     assert len(repository.enqueued) == 1
+
+
+def test_downstream_recovery_scan_is_scoped_to_the_requested_logical_work() -> None:
+    class Repository(StubMetadataRepository):
+        def __init__(self):
+            super().__init__()
+            self.recovery_query = None
+
+        def query(self, sql, parameters=None):
+            if "ctl_run" in sql and "work_scope_json" in sql:
+                self.recovery_query = (sql, dict(parameters or {}))
+                return []
+            return super().query(sql, parameters)
+
+    repository = Repository()
+
+    assert repository.release_ready_downstream_from_successes(logical_work_id="logical-1") == []
+    sql, parameters = repository.recovery_query
+    assert "runtime_run.logical_work_id = :logical_work_id" in sql
+    assert parameters["logical_work_id"] == "logical-1"
 
 
 @pytest.mark.parametrize("existing_status", ["RUNNING", "FAILED"])
@@ -1143,3 +1348,124 @@ def test_metadata_selection_revalidates_pinned_connection_and_project_access(mon
 
     assert selected is not None
     assert selected.connection["config_version"] == 2
+    assert selected.uses_environment_source is False
+
+
+def test_metadata_selection_environment_fallback_uses_latest_inactive_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services import metadata_selection
+
+    connection = validate_jdbc_connection(
+        {
+            "source_system_id": 7,
+            "connection_name": "claims-db",
+            "host_name": "db.internal",
+            "port": 1433,
+            "database_name": "ClaimsDB",
+            "auth_type": "BASIC",
+            "secrets_json": {
+                "username": {"scope": "qa-source", "key": "username"},
+                "password": {"scope": "qa-source", "key": "password"},
+            },
+            "config_json": {"allowed_project_ids": ["project-1"]},
+        }
+    )
+    connection.update({"connection_id": 11, "config_version": 1, "active_flag": False, "is_current": False})
+
+    class Repository:
+        def preflight(self):
+            return None
+
+        def get_source_system(self, _source_id):
+            return {"source_system_id": 7, "active_flag": True}
+
+        def get_active_connection(self, _connection_id):
+            return None
+
+        def get_latest_connection(self, _connection_id):
+            return dict(connection)
+
+    monkeypatch.setattr(metadata_selection, "metadata_repository_for_target", lambda **_: Repository())
+    monkeypatch.setattr(metadata_selection, "validate_deployment_database_binding", lambda _row, **_kwargs: None)
+    state = {
+        "target_warehouse": "databricks",
+        "target_environment": "qa",
+        "source_system_id": 7,
+        "source_connection_id": 11,
+        "project_id": "project-1",
+    }
+
+    monkeypatch.delenv("ATHENA_METADATA_ALLOW_ENV_SOURCE_FALLBACK", raising=False)
+    with pytest.raises(ValueError, match="not active"):
+        metadata_selection.validated_metadata_selection(state)
+
+    monkeypatch.setenv("ATHENA_METADATA_ALLOW_ENV_SOURCE_FALLBACK", "true")
+    selected = metadata_selection.validated_metadata_selection(state)
+
+    assert selected is not None
+    assert selected.connection["config_version"] == 1
+    assert selected.uses_environment_source is True
+
+
+def test_metadata_source_options_return_safe_latest_fallback_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services import metadata_selection
+
+    connection = validate_jdbc_connection(
+        {
+            "source_system_id": 7,
+            "connection_name": "claims-db",
+            "host_name": "db.internal",
+            "port": 1433,
+            "database_name": "ClaimsDB",
+            "auth_type": "BASIC",
+            "secrets_json": {
+                "username": {"scope": "qa-source", "key": "username"},
+                "password": {"scope": "qa-source", "key": "password"},
+            },
+            "config_json": {"allowed_project_ids": ["*"]},
+        }
+    )
+    connection.update({
+        "connection_id": 11,
+        "config_version": 1,
+        "active_flag": False,
+        "is_current": False,
+    })
+
+    class Repository:
+        def preflight(self):
+            return None
+
+        def table(self, name):
+            return f"metadata.{name}"
+
+        def query(self, sql, _parameters):
+            if "cfg_source_system" in sql:
+                return [{"source_system_id": 7, "source_system_name": "Claims", "active_flag": True}]
+            return [dict(connection)]
+
+    monkeypatch.setenv("ATHENA_METADATA_ALLOW_ENV_SOURCE_FALLBACK", "true")
+    monkeypatch.setattr(metadata_selection, "metadata_repository_for_target", lambda **_: Repository())
+
+    options = metadata_selection.metadata_source_options(
+        platform="databricks",
+        environment="qa",
+        project_id="project-1",
+    )
+
+    assert options == [{
+        "source_system_id": "7",
+        "source_system_name": "Claims",
+        "connections": [{
+            "connection_id": "11",
+            "connection_name": "claims-db",
+            "connection_type": "JDBC",
+            "database_name": "ClaimsDB",
+            "config_version": 1,
+            "active": False,
+            "design_time_fallback": True,
+        }],
+    }]
+    assert "host_name" not in options[0]["connections"][0]
+    assert "secrets_json" not in options[0]["connections"][0]

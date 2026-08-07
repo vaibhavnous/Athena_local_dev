@@ -333,6 +333,38 @@ def health() -> Dict[str, str]:
     return {"status": "ok", "service": "athena-fastapi"}
 
 
+@router.get("/metadata/source-options")
+def get_metadata_source_options(
+    target_warehouse: str,
+    project_id: str | None = None,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    platform = str(target_warehouse or "").strip().lower()
+    if platform not in {"databricks", "snowflake"}:
+        raise HTTPException(status_code=400, detail="target_warehouse must be Databricks or Snowflake")
+    if project_id:
+        load_project_for_user(project_id, user)
+    environment = str(os.getenv("ATHENA_TARGET_ENVIRONMENT") or "").strip()
+    if not environment:
+        raise HTTPException(status_code=503, detail="Target metadata environment is not configured")
+    try:
+        from services.metadata_selection import metadata_source_options
+
+        sources = metadata_source_options(
+            platform=platform,
+            environment=environment,
+            project_id=project_id,
+        )
+    except Exception:
+        logger.error("Failed to load metadata source options", exc_info=True, extra={"target": platform})
+        raise HTTPException(status_code=503, detail="Target metadata source options are unavailable") from None
+    return {
+        "target_warehouse": platform,
+        "target_environment": environment,
+        "source_systems": sources,
+    }
+
+
 # -------------------------
 # ✅ Run Pipeline
 # -------------------------

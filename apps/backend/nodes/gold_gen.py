@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from state import Stage01State
+from services.metadata_contracts import CANONICAL_COLUMN_NAME_CORRECTIONS
 from utilis.db import ai_store_db_writer
 from utilis.domain_kb import KB_CONTENT_GOLD_RULE, get_domain_kb_config, load_domain_kb
 from utilis.generated_code_paths import generated_code_dir
@@ -24,9 +25,7 @@ from utilis.logger import logger
 USE_LLM_ENV_KEYS = ("ATHENA_GOLD_USE_LLM", "USE_LLM")
 DEFAULT_MAX_GOLD_SOURCE_TABLES = 3
 DEFAULT_MAX_GOLD_DIMENSION_TABLES = 2
-SILVER_COLUMN_NAME_CORRECTIONS = {
-    "rererence_id": "reference_id",
-}
+SILVER_COLUMN_NAME_CORRECTIONS = CANONICAL_COLUMN_NAME_CORRECTIONS
 
 
 def _gold_output_dir_for(target_warehouse: str = "databricks") -> str:
@@ -2772,15 +2771,14 @@ if mapped.filter(" OR ".join(f"`{{key}}` IS NULL" for key in KEYS)).limit(1).cou
     raise ValueError("Gold dimension business keys contain NULL values")
 if mapped.groupBy(*KEYS).count().filter("count > 1").limit(1).count():
     raise ValueError("Gold dimension business keys are not unique")
-if spark.catalog.tableExists(TARGET_TABLE):
-    if set(spark.table(TARGET_TABLE).columns) != set(TARGET_COLUMNS):
-        raise ValueError("Gold dimension target schema differs from the approved mapping")
-    condition = " AND ".join(f"target.`{{key}}` <=> source.`{{key}}`" for key in KEYS)
-    DeltaTable.forName(spark, TARGET_TABLE).alias("target").merge(
-        mapped.alias("source"), condition
-    ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
-else:
-    mapped.write.format("delta").mode("errorifexists").saveAsTable(TARGET_TABLE)
+if not spark.catalog.tableExists(TARGET_TABLE):
+    mapped.limit(0).write.format("delta").mode("ignore").saveAsTable(TARGET_TABLE)
+if set(spark.table(TARGET_TABLE).columns) != set(TARGET_COLUMNS):
+    raise ValueError("Gold dimension target schema differs from the approved mapping")
+condition = " AND ".join(f"target.`{{key}}` <=> source.`{{key}}`" for key in KEYS)
+DeltaTable.forName(spark, TARGET_TABLE).alias("target").merge(
+    mapped.alias("source"), condition
+).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
 '''
 
 
@@ -2955,15 +2953,15 @@ if KEYS and mapped.groupBy(*KEYS).count().filter("count > 1").limit(1).count():
     raise ValueError("Gold fact business grain is not unique")
 if WRITE_MODE == "SNAPSHOT_REPLACE":
     mapped.write.format("delta").mode("overwrite").option("overwriteSchema", "false").saveAsTable(TARGET_TABLE)
-elif spark.catalog.tableExists(TARGET_TABLE):
+else:
+    if not spark.catalog.tableExists(TARGET_TABLE):
+        mapped.limit(0).write.format("delta").mode("ignore").saveAsTable(TARGET_TABLE)
     if spark.table(TARGET_TABLE).columns != TARGET_COLUMNS:
         raise ValueError("Gold fact target schema differs from the approved mapping")
     condition = " AND ".join(f"target.`{{key}}` <=> source.`{{key}}`" for key in KEYS)
     DeltaTable.forName(spark, TARGET_TABLE).alias("target").merge(
         mapped.alias("source"), condition
     ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
-else:
-    mapped.write.format("delta").mode("errorifexists").saveAsTable(TARGET_TABLE)
 '''
 
 

@@ -37,3 +37,15 @@ test('normalizes backend run scripts into one history viewer file', () => {
   expect(files[0].code).toContain('create table fact_claims;')
   expect(files[0].code).toContain('create table dim_policy;')
 })
+
+test('preserves exact script endings when a merged review is expanded unchanged', () => {
+  const source = [
+    { key: 'none', fileName: 'none.py', code: 'print("none")' },
+    { key: 'lf', fileName: 'lf.py', code: 'print("lf")\n' },
+    { key: 'crlf', fileName: 'crlf.py', code: 'print("crlf")\r\n' },
+  ]
+
+  const expanded = expandMergedCodeReviewItems(mergeCodeReviewItems(source, 'silver'))
+
+  expect(expanded.map((item) => item.code)).toEqual(source.map((item) => item.code))
+})

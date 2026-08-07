@@ -17,9 +17,11 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from services.metadata_repository import metadata_repository_for_target
 from services.metadata_runtime_worker import process_next_metadata_work
+from utilis.env import load_backend_env
 
 
 def main() -> int:
+    load_backend_env()
     parser = argparse.ArgumentParser(description="Process one metadata ingestion queue item.")
     parser.add_argument("--platform", required=True, choices=("databricks", "snowflake"))
     parser.add_argument("--environment", required=True)

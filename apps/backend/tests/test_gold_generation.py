@@ -100,6 +100,8 @@ def test_metadata_gold_generation_emits_one_artifact_per_fact_and_dimension(monk
     generated_code = [Path(item["script_path"]).read_text(encoding="utf-8") for item in result["gold_generation_results"]]
     assert all('globals().get("ATHENA_RUNTIME_CONTEXT")' in code for code in generated_code)
     assert any("__ATHENA_LOGICAL_WORK_ID__" in code for code in generated_code)
+    assert all('mode("errorifexists")' not in code for code in generated_code)
+    assert all('limit(0).write.format("delta").mode("ignore")' in code for code in generated_code)
 
 
 def test_snowflake_metadata_fact_uses_exact_mapping_types_keys_and_write_mode() -> None:
@@ -180,6 +182,37 @@ def test_databricks_metadata_fact_reports_observed_join_multiplier() -> None:
     assert "ROOT_COUNT_QUERY" in code
     assert '"rule_type": "MAX_JOIN_MULTIPLIER"' in code
     assert "observed_join_multiplier" in code
+    assert 'mode("errorifexists")' not in code
+    assert 'limit(0).write.format("delta").mode("ignore")' in code
+
+
+def test_databricks_metadata_dimension_creates_then_merges_idempotently() -> None:
+    code = gold_gen._metadata_dimension_code(
+        {
+            "object": {"target_table": "main.gold.dim_claims"},
+            "bundle": {"mappings": [
+                {
+                    "source_object_name": "main.silver.claims",
+                    "source_field_path": "claim_id",
+                    "target_column_name": "claim_id",
+                    "target_data_type": "BIGINT",
+                    "is_primary_key": True,
+                },
+                {
+                    "source_object_name": "main.silver.claims",
+                    "source_field_path": "claim_status",
+                    "target_column_name": "claim_status",
+                    "target_data_type": "STRING",
+                    "is_primary_key": False,
+                },
+            ]},
+        },
+        target_warehouse="databricks",
+    )
+
+    assert 'mode("errorifexists")' not in code
+    assert 'limit(0).write.format("delta").mode("ignore")' in code
+    assert ".whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()" in code
 
 
 def test_snowflake_gold_returns_observed_join_multiplier_validation() -> None:
@@ -1297,6 +1330,61 @@ def test_databricks_gold_failure_persists_exact_script_and_stage(monkeypatch):
     assert failed_state["error"].endswith("missing gold.dim_claims")
     assert failed_progress["status"] == "FAILED"
     assert failed_progress["total_count"] == 1
+
+
+def test_databricks_metadata_batch_output_failure_persists_failed_progress(monkeypatch):
+    monkeypatch.setenv("ATHENA_EXECUTE_DATABRICKS_GOLD", "true")
+    monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_: None)
+    monkeypatch.setattr(databricks_runtime, "_workspace_import_notebook", lambda *_: {})
+    monkeypatch.setattr(databricks_runtime, "_submit_run", lambda *_args, **_kwargs: {"run_id": 42})
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_wait_for_run",
+        lambda *_: {"run_id": 42, "result_state": "SUCCESS", "life_cycle_state": "TERMINATED"},
+    )
+    monkeypatch.setattr(databricks_runtime, "_task_run_id", lambda *_: 42)
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_get_run_output",
+        lambda *_: {"notebook_output": {"result": json.dumps({
+            "status": "FAILED",
+            "results": [{
+                "script_name": "gold_fact_one",
+                "target_table": "gold.fact_one",
+                "status": "FAILED",
+                "error": "unsupported expression",
+            }],
+        })}},
+    )
+    saved = []
+
+    def capture_progress(state, **kwargs):
+        saved.append((state, kwargs))
+        return state
+
+    monkeypatch.setattr(databricks_runtime, "save_external_execution_progress", capture_progress)
+    script = {
+        "status": "APPROVED",
+        "script_body": "raise RuntimeError('unsupported expression')",
+        "target_table": "gold.fact_one",
+        "gold_ingestion_object_id": 301,
+        "metadata_runtime": True,
+    }
+
+    with pytest.raises(databricks_runtime.DatabricksBatchExecutionError, match="unsupported expression"):
+        databricks_runtime.run_databricks_gold_scripts({
+            "run_id": "design-run",
+            "target_warehouse": "databricks",
+            "metadata_runtime_batch": True,
+            "metadata_runtime_context": {"queue_id": 1, "attempt_number": 1},
+            "_metadata_runtime_scripts": [script],
+        })
+
+    failed_state, failed_progress = saved[-1]
+    assert failed_state["failed_background_stage"] == "gold_code_execution"
+    assert failed_progress["status"] == "FAILED"
+    assert failed_progress["current_name"] == "gold_fact_one"
+    assert failed_progress["current_target"] == "gold.fact_one"
 
 
 def test_databricks_gold_batch_failure_persists_partial_results(monkeypatch):

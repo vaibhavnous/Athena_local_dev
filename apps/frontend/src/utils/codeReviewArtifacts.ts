@@ -28,7 +28,7 @@ export function mergeCodeReviewItems(items: CodeReviewItem[], layer: keyof typeo
     key: `${layer}-merged-code`,
     title: `${fileNames[layer]}${extension}`,
     fileName: `${fileNames[layer]}${extension}`,
-    code: items.map((item, index) => `${markers[index]}\n${String(item.code || '').trimEnd()}`).join('\n\n'),
+    code: items.map((item, index) => `${markers[index]}\n${String(item.code || '')}`).join('\n'),
     sourceItems: items,
     mergeMarkers: markers,
   }]
@@ -78,9 +78,10 @@ export function expandMergedCodeReviewItems(items: CodeReviewItem[]): CodeReview
     return item.sourceItems.map((sourceItem: CodeReviewItem, index: number) => {
       const contentStart = starts[index] + item.mergeMarkers[index].length
       const contentEnd = starts[index + 1] ?? String(item.code || '').length
+      const content = String(item.code || '').slice(contentStart, contentEnd).replace(/^\r?\n/, '')
       return {
         ...sourceItem,
-        code: String(item.code || '').slice(contentStart, contentEnd).replace(/^\r?\n/, '').replace(/\r?\n\r?\n$/, ''),
+        code: index + 1 < item.sourceItems.length ? content.replace(/\r?\n$/, '') : content,
         decisionKey: item.key,
       }
     })

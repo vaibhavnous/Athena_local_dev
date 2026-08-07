@@ -81,8 +81,8 @@ class Repository:
         self.calls.append(("claim", kwargs))
         return self.queue
 
-    def release_ready_downstream_from_successes(self):
-        self.calls.append(("release", None))
+    def release_ready_downstream_from_successes(self, **kwargs):
+        self.calls.append(("release", kwargs))
         return []
 
     def create_run_attempt(self, *_args, **_kwargs):
@@ -139,6 +139,54 @@ class Repository:
         self.calls.append(("resume_same_attempt", None))
 
 
+class BatchRepository(Repository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.queues = [
+            {"queue_id": 10, "ingestion_object_id": 20, "attempt_count": 1, "work_scope_json": "{}"},
+            {"queue_id": 11, "ingestion_object_id": 21, "attempt_count": 1, "work_scope_json": "{}"},
+        ]
+
+    def claim_next_queue_item(self, **kwargs):
+        self.calls.append(("claim", kwargs))
+        return self.queues.pop(0) if self.queues else None
+
+    def create_run_attempt(self, queue_item, **_kwargs):
+        object_id = int(queue_item["ingestion_object_id"])
+        queue_id = int(queue_item["queue_id"])
+        run_id = f"runtime-{object_id}"
+        target = f"main.gold.fact_{object_id}"
+        run = {
+            "run_id": run_id,
+            "queue_id": queue_id,
+            "attempt_number": 1,
+            "ingestion_object_id": object_id,
+            "logical_work_id": "logical-work",
+        }
+        obj = {
+            "ingestion_object_id": object_id,
+            "processing_stage": "SILVER_TO_GOLD",
+            "target_table": target,
+            "execution_spec_json": '{"target_platform":"DATABRICKS"}',
+        }
+        self.calls.append(("create_run", run_id))
+        return {
+            "run": run,
+            "ingestion_object": obj,
+            "mapping": {},
+            "runtime_context": {
+                "contract_version": "1.0",
+                "logical_work_id": "logical-work",
+                "queue_id": queue_id,
+                "ingestion_object_id": object_id,
+                "processing_stage": "SILVER_TO_GOLD",
+                "target_table": target,
+                "runtime_run_id": run_id,
+            },
+            "metadata_snapshot_matches": True,
+        }
+
+
 def test_snowflake_bronze_runtime_state_uses_pinned_source_and_landing_resources():
     state = metadata_runtime_worker._runtime_state(
         {"run_id": "runtime-1"},
@@ -164,6 +212,100 @@ def test_snowflake_bronze_runtime_state_uses_pinned_source_and_landing_resources
     assert artifact["snowflake_landing_table"] == "raw_Claims"
 
 
+def test_databricks_worker_batches_ready_items_but_finalizes_each_attempt(monkeypatch):
+    repository = BatchRepository()
+    calls = []
+
+    def execute(prepared, progress_state, on_submitted):
+        calls.append([item["run"]["run_id"] for item in prepared])
+        on_submitted("databricks-batch-1")
+        results = []
+        for item in prepared:
+            context = item["runtime_context"]
+            target = context["target_table"]
+            results.append({
+                "status": "SUCCESS",
+                "verification_status": "VERIFIED",
+                "runtime_run_id": context["runtime_run_id"],
+                "queue_id": context["queue_id"],
+                "execution_result": {
+                    "contract_version": "1.0",
+                    "status": "COMPLETED",
+                    "logical_work_id": "logical-work",
+                    "runtime_run_id": context["runtime_run_id"],
+                    "target_table": target,
+                    "target_commit_id": f"delta:{target}:v1",
+                    "rows_written": 1,
+                    "validation_status": "PASSED",
+                },
+            })
+        return {**progress_state, "databricks_gold_execution_results": results}
+
+    monkeypatch.setattr(metadata_runtime_worker, "_execute_registered_artifact_batch", execute)
+
+    result = metadata_runtime_worker.process_metadata_work_batch(
+        repository,
+        worker_id="worker-1",
+        logical_work_id="logical-work",
+        progress_state={"run_id": "design-run", "target_warehouse": "databricks"},
+    )
+
+    assert calls == [["runtime-20", "runtime-21"]]
+    assert [item["status"] for item in result["outcomes"]] == ["SUCCESS", "SUCCESS"]
+    assert sum(1 for call in repository.calls if call[0] == "success") == 2
+    submitted = [call for call in repository.calls if call[0] == "phase" and call[2] == "TARGET_SUBMITTED"]
+    written = [call for call in repository.calls if call[0] == "phase" and call[2] == "TARGET_WRITTEN"]
+    assert len(submitted) == len(written) == 2
+
+
+def test_databricks_batch_preserves_success_when_a_sibling_artifact_fails(monkeypatch):
+    from services.databricks_runtime import DatabricksBatchExecutionError
+
+    repository = BatchRepository()
+
+    def execute(prepared, _progress_state, on_submitted):
+        on_submitted("databricks-batch-1")
+        first = prepared[0]["runtime_context"]
+        second = prepared[1]["runtime_context"]
+        raise DatabricksBatchExecutionError("one artifact failed", [
+            {
+                "status": "SUCCESS",
+                "verification_status": "VERIFIED",
+                "runtime_run_id": first["runtime_run_id"],
+                "queue_id": first["queue_id"],
+                "execution_result": {
+                    "contract_version": "1.0",
+                    "status": "COMPLETED",
+                    "logical_work_id": "logical-work",
+                    "runtime_run_id": first["runtime_run_id"],
+                    "target_table": first["target_table"],
+                    "target_commit_id": f"delta:{first['target_table']}:v1",
+                    "rows_written": 1,
+                    "validation_status": "PASSED",
+                },
+            },
+            {
+                "status": "FAILED",
+                "runtime_run_id": second["runtime_run_id"],
+                "queue_id": second["queue_id"],
+                "error": "blocking validation failed",
+            },
+        ])
+
+    monkeypatch.setattr(metadata_runtime_worker, "_execute_registered_artifact_batch", execute)
+
+    result = metadata_runtime_worker.process_metadata_work_batch(
+        repository,
+        worker_id="worker-1",
+        logical_work_id="logical-work",
+        progress_state={"run_id": "design-run", "target_warehouse": "databricks"},
+    )
+
+    assert [item["status"] for item in result["outcomes"]] == ["SUCCESS", "FAILED"]
+    assert sum(1 for call in repository.calls if call[0] == "success") == 1
+    assert sum(1 for call in repository.calls if call[0] == "failed") == 1
+
+
 def test_worker_commits_control_state_only_after_verified_target_execution(monkeypatch):
     repository = Repository()
     monkeypatch.setattr(
@@ -175,7 +317,7 @@ def test_worker_commits_control_state_only_after_verified_target_execution(monke
     call_names = [call[0] for call in repository.calls]
     assert result["status"] == "SUCCESS"
     assert call_names == [
-        "release", "claim", "recover", "create_run", "dependencies", "heartbeat", "heartbeat",
+        "claim", "recover", "create_run", "dependencies", "heartbeat", "heartbeat",
         "begin_finalize", "phase", "success", "enqueue_downstream"
     ]
     phase = next(call for call in repository.calls if call[0] == "phase")
@@ -284,7 +426,22 @@ def test_worker_recovers_committed_attempt_without_reexecuting(monkeypatch):
     result = metadata_runtime_worker.process_next_metadata_work(repository, worker_id="worker-1")
 
     assert result["status"] == "RECOVERED_SUCCESS"
-    assert [call[0] for call in repository.calls] == ["release", "claim"]
+    assert [call[0] for call in repository.calls] == ["claim"]
+
+
+def test_worker_scopes_recovery_scan_and_only_runs_it_when_queue_is_empty():
+    repository = Repository()
+    repository.claim_next_queue_item = lambda **kwargs: (
+        repository.calls.append(("claim", kwargs)) or None
+    )
+
+    result = metadata_runtime_worker.process_next_metadata_work(
+        repository, worker_id="worker-1", logical_work_id="logical-work"
+    )
+
+    assert result is None
+    assert [call[0] for call in repository.calls] == ["claim", "release", "claim"]
+    assert repository.calls[1][1] == {"logical_work_id": "logical-work"}
 
 
 def test_worker_records_permanent_failure_for_stale_metadata_snapshot(monkeypatch):

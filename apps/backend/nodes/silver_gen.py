@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, TypedDict
 
 from services import dbt_snowflake_runtime
+from services.metadata_contracts import CANONICAL_COLUMN_NAME_CORRECTIONS
 from state import Stage01State
 from utilis.db import ai_store_db_writer
 from utilis.generated_code_paths import generated_code_dir
@@ -714,9 +715,7 @@ def _key_columns(enriched_columns: List[Dict[str, Any]]) -> List[str]:
     ))
 
 
-COLUMN_NAME_CORRECTIONS = {
-    "rererence_id": "reference_id",
-}
+COLUMN_NAME_CORRECTIONS = CANONICAL_COLUMN_NAME_CORRECTIONS
 
 
 def _normalized_column_name(column: Dict[str, Any]) -> str:

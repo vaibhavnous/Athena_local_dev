@@ -337,8 +337,40 @@ def test_databricks_batch_driver_injects_metadata_runtime_context():
     ).group(1)
 
     assert json.loads(base64.b64decode(encoded).decode("utf-8")) == runtime_context
-    assert '_script_globals["ATHENA_RUNTIME_CONTEXT"] = dict(_RUNTIME_CONTEXT)' in notebook
-    assert 'spark.databricks.delta.commitInfo.userMetadata' in notebook
+    assert '_script_globals["ATHENA_RUNTIME_CONTEXT"] = dict(_ITEM_RUNTIME_CONTEXT)' in notebook
+
+
+def test_databricks_metadata_batch_embeds_one_runtime_context_per_script():
+    from services import databricks_runtime
+
+    notebook = databricks_runtime._build_batch_driver_notebook(
+        "bronze",
+        [
+            {
+                "target_table": "main.bronze.claims",
+                "script_body": "print('claims')",
+                "metadata_runtime_context": {"queue_id": 1, "runtime_run_id": "run-1"},
+            },
+            {
+                "target_table": "main.bronze.policy",
+                "script_body": "print('policy')",
+                "metadata_runtime_context": {"queue_id": 2, "runtime_run_id": "run-2"},
+            },
+        ],
+        workspace_dir="/Workspace/athena/design-1",
+        metadata_runtime_batch=True,
+    )
+    encoded = re.search(
+        r'_SCRIPT_ITEMS = json.loads\(base64\.b64decode\("([^"]+)"\)', notebook
+    ).group(1)
+    items = json.loads(base64.b64decode(encoded).decode("utf-8"))
+
+    assert [item["runtime_context"]["runtime_run_id"] for item in items] == ["run-1", "run-2"]
+    assert "_CONTINUE_ON_ERROR = True" in notebook
+    assert "_METADATA_RUNTIME_BATCH = True" in notebook
+    assert "if not _METADATA_RUNTIME_BATCH:" in notebook
+    assert 'spark.databricks.delta.commitInfo.userMetadata' not in notebook
+    assert '_version_after != _version_before + 1' in notebook
     assert '"target_commit_id": f"delta:{_target}:v{_history[\'version\']}"' in notebook
     assert '_result["execution_result"] = _execution_result' in notebook
 

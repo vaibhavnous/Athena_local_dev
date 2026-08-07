@@ -165,8 +165,9 @@ def _table_name(script: Dict[str, Any]) -> str:
 
 
 def _silver_output_column_name(value: Any) -> str:
-    normalized = str(value or "").strip().strip('"').lower()
-    return {"rererence_id": "reference_id"}.get(normalized, normalized)
+    from services.metadata_contracts import normalize_bronze_column_name
+
+    return normalize_bronze_column_name(str(value or "").strip().strip('"'))
 
 
 def _validate_canonical_source_references(sql: str, required_columns: List[str], *, layer: str, context: str) -> None:

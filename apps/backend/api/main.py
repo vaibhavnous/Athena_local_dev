@@ -22,6 +22,28 @@ from utilis.embedding_status import get_embedding_runtime_status
 from utilis.logger import logger
 
 
+JAVASCRIPT_MAX_SAFE_INTEGER = (1 << 53) - 1
+
+
+def _javascript_safe_json(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and abs(value) > JAVASCRIPT_MAX_SAFE_INTEGER:
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _javascript_safe_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_javascript_safe_json(item) for item in value]
+    return value
+
+
+class JavaScriptSafeJSONResponse(JSONResponse):
+    """Preserve BIGINT values across JSON clients that use JavaScript numbers."""
+
+    def render(self, content) -> bytes:
+        return super().render(_javascript_safe_json(content))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     embedding_status = get_embedding_runtime_status(probe_models=False)
@@ -52,6 +74,7 @@ app = FastAPI(
     redoc_url="/redoc",
     openapi_url="/openapi.json",
     lifespan=lifespan,
+    default_response_class=JavaScriptSafeJSONResponse,
 )
 
 

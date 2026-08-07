@@ -236,6 +236,14 @@ class MetadataRepository(ABC):
             raise RuntimeError("Multiple active/current connection versions were found.")
         return rows[0] if rows else None
 
+    def get_latest_connection(self, connection_id: int) -> Optional[Dict[str, Any]]:
+        rows = self.query(
+            f"SELECT * FROM {self.table('cfg_connection')} "
+            "WHERE connection_id = :connection_id ORDER BY config_version DESC LIMIT 1",
+            {"connection_id": int(connection_id)},
+        )
+        return rows[0] if rows else None
+
     def get_ingestion_object(self, ingestion_object_id: int, config_version: int) -> Optional[Dict[str, Any]]:
         rows = self.query(
             f"SELECT * FROM {self.table('cfg_ingestion_object')} "
@@ -363,9 +371,12 @@ class MetadataRepository(ABC):
         expected_connection_version: Optional[int] = None,
         expected_connection_hash: Optional[str] = None,
         target_bronze_table: Optional[str] = None,
+        allow_inactive_connection: bool = False,
     ) -> Dict[str, Any]:
         source_system = self.get_source_system(source_system_id)
         connection = self.get_active_connection(connection_id)
+        if not connection and allow_inactive_connection:
+            connection = self.get_latest_connection(connection_id)
         if not source_system or not _as_bool(source_system.get("active_flag")):
             raise ValueError("The selected source system is missing or inactive.")
         if not connection:
@@ -373,7 +384,7 @@ class MetadataRepository(ABC):
         if int(connection.get("source_system_id") or 0) != int(source_system_id):
             raise ValueError("The selected connection belongs to a different source system.")
         if str(connection.get("connection_type") or "").upper() != "JDBC":
-            raise ValueError("Database ingestion requires an active JDBC connection.")
+            raise ValueError("Database ingestion requires a JDBC connection.")
         if expected_connection_version is not None and int(connection.get("config_version") or 0) != int(
             expected_connection_version
         ):
@@ -641,7 +652,7 @@ class MetadataRepository(ABC):
             mapping_version=mapping_version,
             expected_hash=bundle_hash,
             expected_target=target_table,
-            require_active=False,
+            require_active=None,
         )
 
     def get_mapping_bundle(
@@ -652,7 +663,7 @@ class MetadataRepository(ABC):
         mapping_version: int,
         expected_hash: str,
         expected_target: str,
-        require_active: bool,
+        require_active: Optional[bool],
     ) -> Dict[str, Any]:
         rows = self.query(
             f"SELECT * FROM {self.table('cfg_mapping')} "
@@ -666,16 +677,23 @@ class MetadataRepository(ABC):
         )
         if not rows:
             raise ValueError("The exact mapping bundle was not found.")
-        active = require_active
+        # None accepts either consistent lifecycle state for idempotent design-time reuse.
         for row in rows:
             if (
                 str(row.get("mapping_hash") or "") != str(expected_hash)
                 or str(row.get("target_table") or "").casefold() != str(expected_target).casefold()
                 or str(row.get("processing_stage") or "").upper() != str(processing_stage).upper()
-                or _as_bool(row.get("active_flag")) != active
-                or _as_bool(row.get("is_current")) != active
             ):
                 raise RuntimeError("The persisted mapping bundle does not match the pinned contract.")
+        lifecycle_states = {
+            (_as_bool(row.get("active_flag")), _as_bool(row.get("is_current")))
+            for row in rows
+        }
+        if len(lifecycle_states) != 1 or any(active != current for active, current in lifecycle_states):
+            raise RuntimeError("The persisted mapping bundle has an inconsistent lifecycle state.")
+        active = next(iter(lifecycle_states))[0]
+        if require_active is not None and active != require_active:
+            raise RuntimeError("The persisted mapping bundle does not match the pinned contract.")
         stage = str(processing_stage).upper()
         if stage == "SOURCE_TO_BRONZE":
             try:
@@ -1087,7 +1105,7 @@ class MetadataRepository(ABC):
             mapping_version=mapping_version,
             expected_hash=mapping_hash,
             expected_target=target_table,
-            require_active=False,
+            require_active=None,
         )
         if len(persisted["mappings"]) != len(rows):
             raise RuntimeError("Bronze-to-Silver mapping bundle is incomplete.")
@@ -1409,7 +1427,7 @@ class MetadataRepository(ABC):
             mapping_version=mapping_version,
             expected_hash=mapping_hash,
             expected_target=target_table,
-            require_active=False,
+            require_active=None,
         )
         if len(persisted["mappings"]) != len(rows):
             raise RuntimeError("Silver-to-Gold mapping bundle is incomplete.")
@@ -1827,26 +1845,36 @@ class MetadataRepository(ABC):
         return rows[0]
 
     def claim_next_queue_item(
-        self, *, worker_id: str, lease_seconds: int = 300
+        self,
+        *,
+        worker_id: str,
+        lease_seconds: int = 300,
+        logical_work_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         worker = str(worker_id or "").strip()
         if not worker:
             raise ValueError("worker_id is required.")
+        logical_id = str(logical_work_id or "").strip()
+        scope_sql = " AND logical_work_id = :logical_work_id" if logical_id else ""
+        query_values = {
+            "pending": "PENDING",
+            "retry_wait": "RETRY_WAIT",
+            "running": "RUNNING",
+            "finalizing": "FINALIZING",
+        }
+        if logical_id:
+            query_values["logical_work_id"] = logical_id
         candidate_rows = self.query(
-            f"SELECT * FROM {self.table('ctl_ingestion_queue')} WHERE "
+            f"SELECT * FROM {self.table('ctl_ingestion_queue')} WHERE ("
             "(queue_status = :finalizing AND lease_expires_at <= CURRENT_TIMESTAMP()) OR "
             "(queue_status = :running AND lease_expires_at <= CURRENT_TIMESTAMP() "
             "AND (last_heartbeat_at IS NULL OR last_heartbeat_at <= lease_expires_at)) OR "
             "(attempt_count < max_attempts AND (queue_status = :pending "
             "OR (queue_status = :retry_wait AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP())) "
-            ")) "
+            ")))"
+            f"{scope_sql} "
             "ORDER BY priority DESC, requested_at ASC LIMIT 1",
-            {
-                "pending": "PENDING",
-                "retry_wait": "RETRY_WAIT",
-                "running": "RUNNING",
-                "finalizing": "FINALIZING",
-            },
+            query_values,
         )
         if not candidate_rows:
             return None
@@ -1890,6 +1918,16 @@ class MetadataRepository(ABC):
             {"queue_id": queue_id, "status": "RUNNING", "worker_id": worker},
         )
         return claimed[0] if len(claimed) == 1 else None
+
+    def queue_items_for_logical_work(self, logical_work_id: str) -> List[Dict[str, Any]]:
+        logical_id = str(logical_work_id or "").strip()
+        if not logical_id:
+            raise ValueError("logical_work_id is required.")
+        return self.query(
+            f"SELECT * FROM {self.table('ctl_ingestion_queue')} "
+            "WHERE logical_work_id = :logical_work_id ORDER BY requested_at, queue_id",
+            {"logical_work_id": logical_id},
+        )
 
     def heartbeat_queue_item(self, *, queue_id: int, worker_id: str, lease_seconds: int = 300) -> None:
         lease_duration = max(30, int(lease_seconds))
@@ -2312,7 +2350,14 @@ class MetadataRepository(ABC):
             )
         return queued
 
-    def release_ready_downstream_from_successes(self, *, limit: int = 100) -> List[Dict[str, Any]]:
+    def release_ready_downstream_from_successes(
+        self, *, logical_work_id: Optional[str] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        logical_id = str(logical_work_id or "").strip()
+        scope_sql = " AND runtime_run.logical_work_id = :logical_work_id" if logical_id else ""
+        parameters: Dict[str, Any] = {"success": "SUCCESS", "committed": "COMMITTED"}
+        if logical_id:
+            parameters["logical_work_id"] = logical_id
         rows = self.query(
             f"SELECT runtime_run.ingestion_object_id, runtime_run.ingestion_object_config_version, "
             f"runtime_run.logical_work_id, queue_item.work_scope_json "
@@ -2320,8 +2365,9 @@ class MetadataRepository(ABC):
             f"JOIN {self.table('ctl_ingestion_queue')} AS queue_item "
             "ON queue_item.queue_id = runtime_run.queue_id "
             "WHERE runtime_run.status = :success AND runtime_run.target_commit_status = :committed "
+            f"{scope_sql} "
             f"ORDER BY runtime_run.created_at DESC LIMIT {max(1, min(1000, int(limit)))}",
-            {"success": "SUCCESS", "committed": "COMMITTED"},
+            parameters,
         )
         released: List[Dict[str, Any]] = []
         for row in rows:
