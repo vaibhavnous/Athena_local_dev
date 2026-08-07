@@ -187,6 +187,41 @@ class BatchRepository(Repository):
         }
 
 
+class SetBasedBatchRepository(BatchRepository):
+    def claim_queue_items(self, **kwargs):
+        self.calls.append(("claim_many", kwargs))
+        claimed, self.queues = self.queues, []
+        return claimed
+
+    def recover_committed_queue_items(self, **kwargs):
+        self.calls.append(("recover_many", kwargs))
+        return {}
+
+    def create_run_attempts(self, queue_items, **kwargs):
+        items = list(queue_items)
+        self.calls.append(("create_many", len(items)))
+        return [self.create_run_attempt(item, **kwargs) for item in items]
+
+    def heartbeat_queue_items(self, **kwargs):
+        self.calls.append(("heartbeat_many", tuple(kwargs["queue_ids"])))
+
+    def assert_runtime_dependencies_batch(self, _objects, **_kwargs):
+        self.calls.append(("dependencies_many", None))
+
+    def update_run_phases(self, **kwargs):
+        self.calls.append(("phase_many", kwargs["phase"], len(kwargs["updates"])))
+
+    def begin_queue_finalizations(self, **kwargs):
+        self.calls.append(("begin_many", tuple(kwargs["queue_ids"])))
+
+    def finalize_successful_runs(self, **kwargs):
+        self.calls.append(("success_many", len(kwargs["attempts"])))
+
+    def enqueue_ready_downstream_batch(self, **kwargs):
+        self.calls.append(("release_many", len(kwargs["completed"])))
+        return []
+
+
 def test_snowflake_bronze_runtime_state_uses_pinned_source_and_landing_resources():
     state = metadata_runtime_worker._runtime_state(
         {"run_id": "runtime-1"},
@@ -256,6 +291,49 @@ def test_databricks_worker_batches_ready_items_but_finalizes_each_attempt(monkey
     submitted = [call for call in repository.calls if call[0] == "phase" and call[2] == "TARGET_SUBMITTED"]
     written = [call for call in repository.calls if call[0] == "phase" and call[2] == "TARGET_WRITTEN"]
     assert len(submitted) == len(written) == 2
+
+
+def test_databricks_worker_uses_set_based_control_operations_when_available(monkeypatch):
+    repository = SetBasedBatchRepository()
+
+    def execute(prepared, progress_state, on_submitted):
+        on_submitted("databricks-batch-1")
+        return {
+            **progress_state,
+            "databricks_gold_execution_results": [{
+                "status": "SUCCESS",
+                "verification_status": "VERIFIED",
+                "runtime_run_id": item["runtime_context"]["runtime_run_id"],
+                "queue_id": item["runtime_context"]["queue_id"],
+                "execution_result": {
+                    "contract_version": "1.0", "status": "COMPLETED",
+                    "logical_work_id": "logical-work",
+                    "runtime_run_id": item["runtime_context"]["runtime_run_id"],
+                    "target_table": item["runtime_context"]["target_table"],
+                    "target_commit_id": f"delta:{item['runtime_context']['target_table']}:v1",
+                    "rows_written": 1, "validation_status": "PASSED",
+                },
+            } for item in prepared],
+        }
+
+    monkeypatch.setattr(metadata_runtime_worker, "_execute_registered_artifact_batch", execute)
+    result = metadata_runtime_worker.process_metadata_work_batch(
+        repository,
+        worker_id="worker-1",
+        logical_work_id="logical-work",
+        progress_state={"run_id": "design-run", "target_warehouse": "databricks"},
+    )
+
+    assert [item["status"] for item in result["outcomes"]] == ["SUCCESS", "SUCCESS"]
+    call_names = [call[0] for call in repository.calls]
+    assert {
+        "claim_many", "recover_many", "create_many", "heartbeat_many",
+        "dependencies_many", "begin_many", "success_many", "release_many",
+    } <= set(call_names)
+    assert [(call[1], call[2]) for call in repository.calls if call[0] == "phase_many"] == [
+        ("TARGET_SUBMITTED", 2), ("TARGET_WRITTEN", 2)
+    ]
+    assert "success" not in call_names
 
 
 def test_databricks_batch_preserves_success_when_a_sibling_artifact_fails(monkeypatch):

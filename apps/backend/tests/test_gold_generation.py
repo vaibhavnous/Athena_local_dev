@@ -182,8 +182,19 @@ def test_databricks_metadata_fact_reports_observed_join_multiplier() -> None:
     assert "ROOT_COUNT_QUERY" in code
     assert '"rule_type": "MAX_JOIN_MULTIPLIER"' in code
     assert "observed_join_multiplier" in code
+    assert "NOT_NULL_KEYS = []" in code
+    assert 'if NOT_NULL_KEYS and mapped.filter(' in code
     assert 'mode("errorifexists")' not in code
     assert 'limit(0).write.format("delta").mode("ignore")' in code
+
+    plan["object"]["validation_policy_json"] = json.dumps({
+        "schema_version": "1.0",
+        "rules": [{"rule_type": "KEYS_NOT_NULL", "columns": ["status"], "threshold_value": 0}],
+    })
+    strict_code = gold_gen._metadata_fact_code(plan, target_warehouse="databricks")
+
+    assert "NOT_NULL_KEYS = ['status']" in strict_code
+    assert 'if NOT_NULL_KEYS and mapped.filter(' in strict_code
 
 
 def test_databricks_metadata_dimension_creates_then_merges_idempotently() -> None:

@@ -920,6 +920,54 @@ def test_gate5_silver_artifact_is_hashed_and_activated_from_exact_draft(monkeypa
     assert activated["silver_transformation_objects"][0]["active_config_version"] == 4
 
 
+def test_bronze_review_activates_one_set_based_stage_bundle(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    class Repository:
+        def __init__(self):
+            self.calls = []
+
+        def register_and_activate_artifacts(self, *, processing_stage, artifacts):
+            items = list(artifacts)
+            self.calls.append((processing_stage, items))
+            return [{
+                "ingestion_object": {
+                    "ingestion_object_id": item["ingestion_object_id"],
+                    "config_version": 2,
+                    "config_hash": f"active-{item['ingestion_object_id']}",
+                },
+                "mapping_bundle": {},
+                "execution_spec": item["execution_spec"],
+            } for item in items]
+
+    repository = Repository()
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=repository),
+    )
+    results = [{
+        "ingestion_object_id": object_id,
+        "ingestion_object_config_version": 1,
+        "mapping_version": object_id + 10,
+        "mapping_hash": f"mapping-{object_id}",
+        "execution_spec": {"engine": "DATABRICKS_JOB"},
+    } for object_id in (101, 102)]
+    activated = pipeline_runtime._activate_reviewed_bronze_metadata({
+        "source_system_id": 7,
+        "bronze_generation_results": results,
+        "certified_tables": [{"ingestion_object_id": 101}, {"ingestion_object_id": 102}],
+    })
+
+    assert len(repository.calls) == 1
+    assert repository.calls[0][0] == "SOURCE_TO_BRONZE"
+    assert len(repository.calls[0][1]) == 2
+    assert [item["metadata_activation_status"] for item in activated["bronze_generation_results"]] == [
+        "ACTIVE", "ACTIVE"
+    ]
+
+
 def test_gate5_metadata_rejects_edited_executable_code(monkeypatch) -> None:
     artifact_root = Path.cwd() / ".tmp-tests" / f"gate5-edited-{uuid.uuid4().hex}"
     artifact = artifact_root / "silver" / "claims.py"

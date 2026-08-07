@@ -359,29 +359,68 @@ def process_metadata_work_batch(
     prepared: list[Dict[str, Any]] = []
     outcomes: list[Dict[str, Any]] = []
     stage: Optional[str] = None
-    recovery_attempted = False
-
-    while True:
-        queue_item = repository.claim_next_queue_item(
+    claim_many = getattr(repository, "claim_queue_items", None)
+    if callable(claim_many):
+        claimed_items = claim_many(
             worker_id=worker_id,
             lease_seconds=lease_seconds,
             logical_work_id=logical_work_id,
+            limit=100,
         )
-        if not queue_item:
-            if not prepared and not recovery_attempted:
-                recovery_attempted = True
-                if repository.release_ready_downstream_from_successes(logical_work_id=logical_work_id):
-                    continue
-            break
-        recovered = repository.recover_committed_queue_item(
-            queue_id=int(queue_item["queue_id"]), worker_id=worker_id
+    else:
+        claimed_items = []
+        while True:
+            queue_item = repository.claim_next_queue_item(
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+                logical_work_id=logical_work_id,
+            )
+            if not queue_item:
+                break
+            claimed_items.append(queue_item)
+    if not claimed_items and repository.release_ready_downstream_from_successes(logical_work_id=logical_work_id):
+        if callable(claim_many):
+            claimed_items = claim_many(
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+                logical_work_id=logical_work_id,
+                limit=100,
+            )
+        else:
+            while True:
+                queue_item = repository.claim_next_queue_item(
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                    logical_work_id=logical_work_id,
+                )
+                if not queue_item:
+                    break
+                claimed_items.append(queue_item)
+
+    recover_many = getattr(repository, "recover_committed_queue_items", None)
+    recovered_by_queue = recover_many(
+        queue_ids=[int(item["queue_id"]) for item in claimed_items], worker_id=worker_id
+    ) if callable(recover_many) and claimed_items else {}
+    unrecovered = []
+    for queue_item in claimed_items:
+        queue_id = int(queue_item["queue_id"])
+        recovered = recovered_by_queue.get(queue_id) if callable(recover_many) else repository.recover_committed_queue_item(
+            queue_id=queue_id, worker_id=worker_id
         )
         if recovered:
             outcomes.append({"queue": queue_item, "run": recovered, "status": "RECOVERED_SUCCESS"})
             continue
-        context = repository.create_run_attempt(
+        unrecovered.append(queue_item)
+    create_many = getattr(repository, "create_run_attempts", None)
+    contexts = create_many(
+        unrecovered, pipeline_name="metadata_runtime_worker", worker_id=worker_id
+    ) if callable(create_many) and unrecovered else [
+        repository.create_run_attempt(
             queue_item, pipeline_name="metadata_runtime_worker", worker_id=worker_id
         )
+        for queue_item in unrecovered
+    ]
+    for queue_item, context in zip(unrecovered, contexts):
         run = context["run"]
         obj = context["ingestion_object"]
         item_stage = str(obj.get("processing_stage") or "").upper()
@@ -391,7 +430,6 @@ def process_metadata_work_batch(
             raise RuntimeError("Ready metadata work unexpectedly crossed a processing-stage boundary.")
         if not context.get("metadata_snapshot_matches", True):
             raise RuntimeError("Queued metadata snapshot is no longer the active executable configuration.")
-        repository.assert_runtime_dependencies(obj, logical_work_id=str(run.get("logical_work_id") or ""))
         if obj.get("watermark_column") or str(obj.get("checkpoint_type") or "").strip():
             raise RuntimeError(
                 "Stateful metadata execution requires the generated artifact checkpoint-output protocol, which is not configured."
@@ -400,9 +438,6 @@ def process_metadata_work_batch(
             **context["runtime_context"],
             "resumed_attempt": bool(context.get("resumed_attempt")),
         }
-        repository.heartbeat_queue_item(
-            queue_id=int(queue_item["queue_id"]), worker_id=worker_id, lease_seconds=lease_seconds
-        )
         prepared.append({
             "queue": queue_item,
             "run": run,
@@ -410,6 +445,33 @@ def process_metadata_work_batch(
             "mapping": context["mapping"],
             "runtime_context": runtime_context,
         })
+
+    if prepared:
+        assert_many = getattr(repository, "assert_runtime_dependencies_batch", None)
+        if callable(assert_many):
+            assert_many(
+                [item["obj"] for item in prepared],
+                logical_work_id=str(prepared[0]["run"].get("logical_work_id") or ""),
+            )
+        else:
+            for item in prepared:
+                repository.assert_runtime_dependencies(
+                    item["obj"], logical_work_id=str(item["run"].get("logical_work_id") or "")
+                )
+        heartbeat_many = getattr(repository, "heartbeat_queue_items", None)
+        if callable(heartbeat_many):
+            heartbeat_many(
+                queue_ids=[int(item["queue"]["queue_id"]) for item in prepared],
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+            )
+        else:
+            for item in prepared:
+                repository.heartbeat_queue_item(
+                    queue_id=int(item["queue"]["queue_id"]),
+                    worker_id=worker_id,
+                    lease_seconds=lease_seconds,
+                )
 
     if not prepared:
         return {"outcomes": outcomes, "progress_state": progress_state} if outcomes else None
@@ -421,15 +483,23 @@ def process_metadata_work_batch(
     def renew() -> None:
         while not stop.wait(interval):
             try:
-                def heartbeat(item: Dict[str, Any]) -> None:
-                    repository.heartbeat_queue_item(
-                        queue_id=int(item["queue"]["queue_id"]),
+                heartbeat_many = getattr(repository, "heartbeat_queue_items", None)
+                if callable(heartbeat_many):
+                    heartbeat_many(
+                        queue_ids=[int(item["queue"]["queue_id"]) for item in prepared],
                         worker_id=worker_id,
                         lease_seconds=lease_seconds,
                     )
+                else:
+                    def heartbeat(item: Dict[str, Any]) -> None:
+                        repository.heartbeat_queue_item(
+                            queue_id=int(item["queue"]["queue_id"]),
+                            worker_id=worker_id,
+                            lease_seconds=lease_seconds,
+                        )
 
-                with ThreadPoolExecutor(max_workers=min(4, len(prepared))) as executor:
-                    list(executor.map(heartbeat, prepared))
+                    with ThreadPoolExecutor(max_workers=min(4, len(prepared))) as executor:
+                        list(executor.map(heartbeat, prepared))
             except BaseException as exc:
                 heartbeat_error.append(exc)
                 stop.set()
@@ -443,18 +513,31 @@ def process_metadata_work_batch(
         if not str(target_write_id or "").strip():
             raise RuntimeError("The target platform did not return an execution receipt.")
 
-        def mark_submitted(item: Dict[str, Any]) -> None:
-            repository.update_run_phase(
-                str(item["run"]["run_id"]),
-                "TARGET_SUBMITTED",
-                queue_id=int(item["queue"]["queue_id"]),
+        update_many = getattr(repository, "update_run_phases", None)
+        if callable(update_many):
+            update_many(
+                phase="TARGET_SUBMITTED",
                 worker_id=worker_id,
-                target_write_id=str(target_write_id),
-                target_commit_status="SUBMITTED",
+                updates=[{
+                    "run_id": str(item["run"]["run_id"]),
+                    "queue_id": int(item["queue"]["queue_id"]),
+                    "target_write_id": str(target_write_id),
+                    "target_commit_status": "SUBMITTED",
+                } for item in prepared],
             )
+        else:
+            def mark_submitted(item: Dict[str, Any]) -> None:
+                repository.update_run_phase(
+                    str(item["run"]["run_id"]),
+                    "TARGET_SUBMITTED",
+                    queue_id=int(item["queue"]["queue_id"]),
+                    worker_id=worker_id,
+                    target_write_id=str(target_write_id),
+                    target_commit_status="SUBMITTED",
+                )
 
-        with ThreadPoolExecutor(max_workers=min(4, len(prepared))) as executor:
-            list(executor.map(mark_submitted, prepared))
+            with ThreadPoolExecutor(max_workers=min(4, len(prepared))) as executor:
+                list(executor.map(mark_submitted, prepared))
 
     try:
         try:
@@ -496,6 +579,99 @@ def process_metadata_work_batch(
             )
         raise batch_error
     layer = {"SOURCE_TO_BRONZE": "bronze", "BRONZE_TO_SILVER": "silver", "SILVER_TO_GOLD": "gold"}[stage or ""]
+
+    bulk_finalization = all(
+        str((results_by_run.get(str(item["run"]["run_id"])) or {}).get("status") or "").upper() == "SUCCESS"
+        for item in prepared
+    ) and not batch_error and not heartbeat_error
+    if bulk_finalization:
+        verified_items = []
+        try:
+            for item in prepared:
+                queue_item = item["queue"]
+                run = item["run"]
+                obj = item["obj"]
+                script_result = results_by_run[str(run["run_id"])]
+                result = {
+                    f"databricks_{layer}_execution_status": "COMPLETED",
+                    f"databricks_{layer}_execution_results": [script_result],
+                }
+                execution_evidence = _assert_execution_completed(result, obj, item["runtime_context"])
+                validation_evidence = _assert_blocking_validation(
+                    result, obj, execution_evidence["execution_result"]
+                )
+                verified_items.append({
+                    **item,
+                    "phase_update": {
+                        "run_id": str(run["run_id"]),
+                        "queue_id": int(queue_item["queue_id"]),
+                        "rows_read": execution_evidence["execution_result"].get("rows_read"),
+                        "rows_written": execution_evidence["execution_result"].get("rows_written"),
+                        "target_write_id": str(execution_evidence["execution_result"]["target_commit_id"]),
+                        "target_commit_status": "COMMITTED",
+                        "validation_status": "PASSED",
+                        "validation_summary_json": json.dumps(
+                            {"target_execution": execution_evidence, "blocking_validation": validation_evidence},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        "watermark_commit_status": "SKIPPED",
+                    },
+                })
+        except BaseException:
+            bulk_finalization = False
+
+    if bulk_finalization:
+        begin_many = getattr(repository, "begin_queue_finalizations", None)
+        update_many = getattr(repository, "update_run_phases", None)
+        finalize_many = getattr(repository, "finalize_successful_runs", None)
+        if callable(begin_many) and callable(update_many) and callable(finalize_many):
+            begin_many(
+                queue_ids=[int(item["queue"]["queue_id"]) for item in verified_items],
+                worker_id=worker_id,
+            )
+            update_many(
+                phase="TARGET_WRITTEN",
+                updates=[item["phase_update"] for item in verified_items],
+                worker_id=worker_id,
+            )
+            finalize_many(
+                attempts=[{
+                    "run_id": str(item["run"]["run_id"]),
+                    "queue_id": int(item["queue"]["queue_id"]),
+                } for item in verified_items],
+                worker_id=worker_id,
+            )
+
+            downstream_status = "COMPLETED"
+            try:
+                release_many = getattr(repository, "enqueue_ready_downstream_batch", None)
+                if callable(release_many):
+                    release_many(completed=[{
+                        "completed_object": item["obj"],
+                        "logical_work_id": str(item["run"].get("logical_work_id") or ""),
+                        "parent_work_scope": json.loads(str(item["queue"].get("work_scope_json") or "{}")),
+                    } for item in verified_items])
+                else:
+                    for item in verified_items:
+                        repository.enqueue_ready_downstream(
+                            completed_object=item["obj"],
+                            logical_work_id=str(item["run"].get("logical_work_id") or ""),
+                            parent_work_scope=json.loads(str(item["queue"].get("work_scope_json") or "{}")),
+                        )
+            except Exception as release_error:
+                downstream_status = "PENDING_RECOVERY"
+                for item in verified_items:
+                    repository.record_run_error(
+                        run=item["run"], error_stage="FINALIZE", error=release_error,
+                        retryable=True, detail={"operation": "DOWNSTREAM_RELEASE"},
+                    )
+            outcomes.extend({
+                "queue": item["queue"], "run": item["run"], "status": "SUCCESS",
+                "downstream_release_status": downstream_status,
+            } for item in verified_items)
+            return {"outcomes": outcomes, "progress_state": progress_state}
+
     def finalize(item: Dict[str, Any]) -> Dict[str, Any]:
         queue_item = item["queue"]
         run = item["run"]

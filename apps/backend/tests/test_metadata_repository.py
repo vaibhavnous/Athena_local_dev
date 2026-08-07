@@ -1298,6 +1298,87 @@ def test_reviewed_artifact_creates_and_activates_a_new_executable_version(tmp_pa
     assert reactivated["ingestion_object"]["config_version"] % 2 == 0
 
 
+def test_reviewed_artifacts_use_one_set_based_activation_bundle(monkeypatch) -> None:
+    from services import metadata_contracts
+    from utilis import generated_code_paths
+
+    repository = StubMetadataRepository()
+    monkeypatch.setenv("ATHENA_GENERATED_CODE_DIR", "durable-artifacts")
+    monkeypatch.setattr(metadata_contracts, "validate_execution_spec", lambda spec, **_kwargs: dict(spec))
+    monkeypatch.setattr(generated_code_paths, "verified_execution_artifact", lambda *_args, **_kwargs: Path(__file__))
+    drafts = {
+        (object_id, 1): {
+            "ingestion_object_id": object_id,
+            "config_version": 1,
+            "config_hash": f"draft-{object_id}",
+            "processing_stage": "SOURCE_TO_BRONZE",
+            "object_name": f"ClaimsDB.dbo.Table{object_id}",
+            "database_schema": "dbo",
+            "table_name": f"Table{object_id}",
+            "target_bronze_table": f"main.bronze.table_{object_id}",
+            "write_mode": "APPEND",
+            "active_flag": False,
+            "is_current": False,
+        }
+        for object_id in (101, 102)
+    }
+    active_objects = {}
+    statements = []
+
+    repository.get_ingestion_objects = lambda _refs, **_kwargs: drafts
+
+    def bundles(refs):
+        return {
+            (int(item["ingestion_object_id"]), str(item["processing_stage"]), int(item["mapping_version"])): {
+                "mapping_version": int(item["mapping_version"]),
+                "mapping_hash": str(item["expected_hash"]),
+                "active_flag": bool(item.get("require_active")),
+                "mappings": [{}],
+            }
+            for item in refs
+        }
+
+    repository.get_mapping_bundles = bundles
+    repository.get_active_ingestion_objects = lambda object_ids: {
+        object_id: active_objects[object_id] for object_id in object_ids
+    }
+
+    def execute(sql, parameters=None):
+        values = dict(parameters or {})
+        statements.append((sql, values))
+        if "WHEN NOT MATCHED THEN INSERT" in sql and "cfg_ingestion_object" in sql:
+            for index in range(2):
+                object_id = int(values[f"exec{index}_ingestion_object_id"])
+                active_objects[object_id] = {
+                    "ingestion_object_id": object_id,
+                    "config_version": int(values[f"exec{index}_config_version"]),
+                    "config_hash": str(values[f"exec{index}_config_hash"]),
+                    "active_flag": True,
+                    "is_current": True,
+                }
+
+    repository.execute = execute
+    artifacts = [{
+        "ingestion_object_id": object_id,
+        "draft_config_version": 1,
+        "mapping_version": object_id + 10,
+        "mapping_hash": f"mapping-{object_id}",
+        "execution_spec": {
+            "mapping_version": object_id + 10,
+            "source_resource": {"database": "ClaimsDB", "schema": "dbo", "table": f"Table{object_id}"},
+        },
+    } for object_id in (101, 102)]
+
+    activated = repository.register_and_activate_artifacts(
+        processing_stage="SOURCE_TO_BRONZE", artifacts=artifacts
+    )
+
+    assert len(activated) == 2
+    assert len(statements) == 3
+    assert "UNION ALL" in statements[0][0]
+    assert all(item["ingestion_object"]["active_flag"] for item in activated)
+
+
 def test_metadata_selection_revalidates_pinned_connection_and_project_access(monkeypatch: pytest.MonkeyPatch) -> None:
     from services import metadata_selection
 

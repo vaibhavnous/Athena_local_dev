@@ -2789,6 +2789,18 @@ def _metadata_fact_code(plan: Dict[str, Any], *, target_warehouse: str) -> str:
     write_mode = str(plan["object"].get("write_mode") or "").upper()
     keys = json.loads(str(plan["object"].get("merge_keys_json") or "[]"))
     validation_policy = json.loads(str(plan["object"].get("validation_policy_json") or "{}"))
+    null_key_rule = next(
+        (
+            rule for rule in validation_policy.get("rules") or []
+            if isinstance(rule, dict) and str(rule.get("rule_type") or "").upper() == "KEYS_NOT_NULL"
+        ),
+        None,
+    )
+    not_null_keys = (
+        [str(key) for key in null_key_rule.get("columns") or keys]
+        if null_key_rule
+        else []
+    )
     join_multiplier_rule = next(
         (
             rule for rule in validation_policy.get("rules") or []
@@ -2918,6 +2930,7 @@ from delta.tables import DeltaTable
 TARGET_TABLE = {target_table!r}
 TARGET_COLUMNS = {[str(row["target_column_name"]) for row in rows]!r}
 KEYS = {keys!r}
+NOT_NULL_KEYS = {not_null_keys!r}
 WRITE_MODE = {write_mode!r}
 QUERY = {query!r}
 JOINED_COUNT_QUERY = {joined_count_query!r}
@@ -2947,7 +2960,7 @@ if MAX_JOIN_MULTIPLIER is not None:
 mapped = spark.sql(QUERY)
 if mapped.columns != TARGET_COLUMNS:
     raise ValueError("Gold fact output schema differs from the approved mapping")
-if KEYS and mapped.filter(" OR ".join(f"`{{key}}` IS NULL" for key in KEYS)).limit(1).count():
+if NOT_NULL_KEYS and mapped.filter(" OR ".join(f"`{{key}}` IS NULL" for key in NOT_NULL_KEYS)).limit(1).count():
     raise ValueError("Gold fact business grain contains NULL values")
 if KEYS and mapped.groupBy(*KEYS).count().filter("count > 1").limit(1).count():
     raise ValueError("Gold fact business grain is not unique")

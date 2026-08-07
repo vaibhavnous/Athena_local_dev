@@ -555,6 +555,21 @@ def _attach_bronze_execution_specs(state: Dict[str, Any]) -> Dict[str, Any]:
     return {**state, "bronze_generation_results": enriched_results}
 
 
+def _register_and_activate_artifact_bundle(
+    repository: Any, *, processing_stage: str, artifacts: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    bulk = getattr(repository, "register_and_activate_artifacts", None)
+    if callable(bulk):
+        return bulk(processing_stage=processing_stage, artifacts=artifacts)
+    method_name = {
+        "SOURCE_TO_BRONZE": "register_and_activate_source_to_bronze_artifact",
+        "BRONZE_TO_SILVER": "register_and_activate_bronze_to_silver_artifact",
+        "SILVER_TO_GOLD": "register_and_activate_silver_to_gold_artifact",
+    }[processing_stage]
+    single = getattr(repository, method_name)
+    return [single(**artifact) for artifact in artifacts]
+
+
 def _activate_reviewed_bronze_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     from services.metadata_selection import validated_metadata_selection
 
@@ -563,19 +578,37 @@ def _activate_reviewed_bronze_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     selection = validated_metadata_selection(state)
     if not selection:
         raise ValueError("Bronze activation requires a valid target metadata selection.")
+    generated_results = list(state.get("bronze_generation_results") or [])
+    activatable = [
+        result for result in generated_results
+        if str((result.get("execution_spec") or {}).get("engine") or "").upper() != "SNOWFLAKE_DBT"
+    ]
+    activated_by_object = {}
+    if activatable:
+        activated_by_object = {
+            int(result["ingestion_object_id"]): activated
+            for result, activated in zip(
+                activatable,
+                _register_and_activate_artifact_bundle(
+                    selection.repository,
+                    processing_stage="SOURCE_TO_BRONZE",
+                    artifacts=[{
+                        "draft_config_version": int(result["ingestion_object_config_version"]),
+                        "ingestion_object_id": int(result["ingestion_object_id"]),
+                        "mapping_version": int(result["mapping_version"]),
+                        "mapping_hash": str(result["mapping_hash"]),
+                        "execution_spec": result["execution_spec"],
+                    } for result in activatable],
+                ),
+            )
+        }
     activated_results = []
     active_versions: Dict[int, tuple[int, str]] = {}
-    for result in state.get("bronze_generation_results") or []:
+    for result in generated_results:
         if str((result.get("execution_spec") or {}).get("engine") or "").upper() == "SNOWFLAKE_DBT":
             activated_results.append({**result, "metadata_activation_status": "PENDING_FINAL_DBT_PACKAGE"})
             continue
-        activated = selection.repository.register_and_activate_source_to_bronze_artifact(
-            draft_config_version=int(result["ingestion_object_config_version"]),
-            ingestion_object_id=int(result["ingestion_object_id"]),
-            mapping_version=int(result["mapping_version"]),
-            mapping_hash=str(result["mapping_hash"]),
-            execution_spec=result["execution_spec"],
-        )
+        activated = activated_by_object[int(result["ingestion_object_id"])]
         active_object = activated["ingestion_object"]
         active_versions[int(result["ingestion_object_id"])] = (
             int(active_object["config_version"]),
@@ -670,19 +703,37 @@ def _activate_reviewed_silver_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     selection = validated_metadata_selection(state)
     if not selection:
         raise ValueError("Silver activation requires a valid target metadata selection.")
+    generated_results = list(state.get("silver_generation_results") or [])
+    activatable = [
+        result for result in generated_results
+        if str((result.get("execution_spec") or {}).get("engine") or "").upper() != "SNOWFLAKE_DBT"
+    ]
+    activated_by_object = {}
+    if activatable:
+        activated_by_object = {
+            int(result["silver_ingestion_object_id"]): activated
+            for result, activated in zip(
+                activatable,
+                _register_and_activate_artifact_bundle(
+                    selection.repository,
+                    processing_stage="BRONZE_TO_SILVER",
+                    artifacts=[{
+                        "draft_config_version": int(result["silver_ingestion_object_config_version"]),
+                        "ingestion_object_id": int(result["silver_ingestion_object_id"]),
+                        "mapping_version": int(result["bronze_to_silver_mapping_version"]),
+                        "mapping_hash": str(result["bronze_to_silver_mapping_hash"]),
+                        "execution_spec": result["execution_spec"],
+                    } for result in activatable],
+                ),
+            )
+        }
     active_versions: Dict[int, tuple[int, str]] = {}
     results = []
-    for result in state.get("silver_generation_results") or []:
+    for result in generated_results:
         if str((result.get("execution_spec") or {}).get("engine") or "").upper() == "SNOWFLAKE_DBT":
             results.append({**result, "metadata_activation_status": "PENDING_FINAL_DBT_PACKAGE"})
             continue
-        activated = selection.repository.register_and_activate_bronze_to_silver_artifact(
-            draft_config_version=int(result["silver_ingestion_object_config_version"]),
-            ingestion_object_id=int(result["silver_ingestion_object_id"]),
-            mapping_version=int(result["bronze_to_silver_mapping_version"]),
-            mapping_hash=str(result["bronze_to_silver_mapping_hash"]),
-            execution_spec=result["execution_spec"],
-        )
+        activated = activated_by_object[int(result["silver_ingestion_object_id"])]
         active_object = activated["ingestion_object"]
         object_id = int(result["silver_ingestion_object_id"])
         active_versions[object_id] = (
@@ -769,16 +820,28 @@ def _activate_reviewed_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     selection = validated_metadata_selection(state)
     if not selection:
         raise ValueError("Gold activation requires a valid target metadata selection.")
+    generated_results = list(state.get("gold_generation_results") or [])
+    activated_by_object = {
+        int(result["gold_ingestion_object_id"]): activated
+        for result, activated in zip(
+            generated_results,
+            _register_and_activate_artifact_bundle(
+                selection.repository,
+                processing_stage="SILVER_TO_GOLD",
+                artifacts=[{
+                    "draft_config_version": int(result["gold_ingestion_object_config_version"]),
+                    "ingestion_object_id": int(result["gold_ingestion_object_id"]),
+                    "mapping_version": int(result["silver_to_gold_mapping_version"]),
+                    "mapping_hash": str(result["silver_to_gold_mapping_hash"]),
+                    "execution_spec": result["execution_spec"],
+                } for result in generated_results],
+            ) if generated_results else [],
+        )
+    }
     active_versions: Dict[int, tuple[int, str]] = {}
     results = []
-    for result in state.get("gold_generation_results") or []:
-        activated = selection.repository.register_and_activate_silver_to_gold_artifact(
-            draft_config_version=int(result["gold_ingestion_object_config_version"]),
-            ingestion_object_id=int(result["gold_ingestion_object_id"]),
-            mapping_version=int(result["silver_to_gold_mapping_version"]),
-            mapping_hash=str(result["silver_to_gold_mapping_hash"]),
-            execution_spec=result["execution_spec"],
-        )
+    for result in generated_results:
+        activated = activated_by_object[int(result["gold_ingestion_object_id"])]
         active_object = activated["ingestion_object"]
         object_id = int(result["gold_ingestion_object_id"])
         active_versions[object_id] = (int(active_object["config_version"]), str(active_object["config_hash"]))
@@ -826,10 +889,41 @@ def _mapping_driven_bronze_state(state: Dict[str, Any]) -> Dict[str, Any]:
     mapped_discovery = []
     loaded_bundles = []
     pinned_target_namespace: Optional[tuple[str, str]] = None
+    object_refs = [
+        {
+            "ingestion_object_id": int(item.get("ingestion_object_id") or 0),
+            "config_version": int(item.get("ingestion_object_config_version") or 0),
+        }
+        for item in certified_tables
+    ]
+    load_objects = getattr(selection.repository, "get_ingestion_objects", None)
+    objects = load_objects(object_refs) if callable(load_objects) else {
+        (item["ingestion_object_id"], item["config_version"]): selection.repository.get_ingestion_object(
+            item["ingestion_object_id"], item["config_version"]
+        )
+        for item in object_refs
+    }
+    bundle_refs = []
     for certified in certified_tables:
         object_id = int(certified.get("ingestion_object_id") or 0)
         config_version = int(certified.get("ingestion_object_config_version") or 0)
-        ingestion_object = selection.repository.get_ingestion_object(object_id, config_version)
+        ingestion_object = objects.get((object_id, config_version))
+        if not ingestion_object:
+            raise ValueError(f"Missing ingestion-object draft for object {object_id}/{config_version}.")
+        bundle_refs.append({
+            "ingestion_object_id": object_id,
+            "processing_stage": "SOURCE_TO_BRONZE",
+            "mapping_version": int(certified.get("source_to_bronze_mapping_version") or 0),
+            "expected_hash": str(certified.get("source_to_bronze_mapping_hash") or ""),
+            "expected_target": str(ingestion_object.get("target_bronze_table") or "").strip(),
+            "require_active": None,
+        })
+    load_bundles = getattr(selection.repository, "get_mapping_bundles", None)
+    bundles = load_bundles(bundle_refs) if callable(load_bundles) else {}
+    for certified in certified_tables:
+        object_id = int(certified.get("ingestion_object_id") or 0)
+        config_version = int(certified.get("ingestion_object_config_version") or 0)
+        ingestion_object = objects.get((object_id, config_version))
         if not ingestion_object:
             raise ValueError(f"Missing ingestion-object draft for object {object_id}/{config_version}.")
         if str(ingestion_object.get("config_hash") or "") != str(
@@ -837,15 +931,15 @@ def _mapping_driven_bronze_state(state: Dict[str, Any]) -> Dict[str, Any]:
         ):
             raise ValueError(f"Ingestion-object configuration hash mismatch for object {object_id}.")
         target_table = str(ingestion_object.get("target_bronze_table") or "").strip()
-        bundle = selection.repository.get_mapping_bundle(
-            ingestion_object_id=object_id,
-            processing_stage="SOURCE_TO_BRONZE",
-            mapping_version=int(certified.get("source_to_bronze_mapping_version") or 0),
-            expected_hash=str(certified.get("source_to_bronze_mapping_hash") or ""),
-            expected_target=target_table,
-            # An exact active bundle is valid content-addressed reuse on later design runs.
-            require_active=None,
-        )
+        mapping_version = int(certified.get("source_to_bronze_mapping_version") or 0)
+        bundle = bundles.get((object_id, "SOURCE_TO_BRONZE", mapping_version)) or selection.repository.get_mapping_bundle(
+                ingestion_object_id=object_id,
+                processing_stage="SOURCE_TO_BRONZE",
+                mapping_version=mapping_version,
+                expected_hash=str(certified.get("source_to_bronze_mapping_hash") or ""),
+                expected_target=target_table,
+                require_active=None,
+            )
         loaded_bundles.append(bundle)
         source_table = discovered_by_object.get(object_id)
         if not source_table:
@@ -3539,25 +3633,43 @@ def _materialize_gate2_ingestion_objects(
         bronze_schema = os.getenv("BRONZE_SCHEMA", "bronze")
     bronze_catalog = validate_identifier(bronze_catalog, label="Bronze catalog")
     bronze_schema = validate_identifier(bronze_schema, label="Bronze schema")
+    requests = []
     for table in approved:
         bronze_table = validate_identifier(f"bronze_{table.get('table_name') or ''}", label="Bronze table")
         target_bronze_table = f"{bronze_catalog}.{bronze_schema}.{bronze_table}"
-        ingestion_object = selection.repository.upsert_database_ingestion_object_draft(
+        requests.append({"table": table, "target_bronze_table": target_bronze_table})
+    bulk_upsert = getattr(selection.repository, "upsert_database_ingestion_object_drafts", None)
+    if callable(bulk_upsert):
+        ingestion_objects = bulk_upsert(
             source_system_id=int(state["source_system_id"]),
             connection_id=int(state["source_connection_id"]),
-            table=table,
             expected_connection_version=int(selection.connection["config_version"]),
             expected_connection_hash=str(selection.connection["config_hash"]),
-            target_bronze_table=target_bronze_table,
             allow_inactive_connection=bool(getattr(selection, "uses_environment_source", False)),
+            requests=requests,
         )
+    else:
+        ingestion_objects = [
+            selection.repository.upsert_database_ingestion_object_draft(
+                source_system_id=int(state["source_system_id"]),
+                connection_id=int(state["source_connection_id"]),
+                table=request["table"],
+                expected_connection_version=int(selection.connection["config_version"]),
+                expected_connection_hash=str(selection.connection["config_hash"]),
+                target_bronze_table=request["target_bronze_table"],
+                allow_inactive_connection=bool(getattr(selection, "uses_environment_source", False)),
+            )
+            for request in requests
+        ]
+    for request, ingestion_object in zip(requests, ingestion_objects):
+        table = request["table"]
         materialized.append(
             {
                 **table,
                 "ingestion_object_id": int(ingestion_object["ingestion_object_id"]),
                 "ingestion_object_config_version": int(ingestion_object["config_version"]),
                 "ingestion_object_config_hash": str(ingestion_object["config_hash"]),
-                "target_bronze_table": target_bronze_table,
+                "target_bronze_table": request["target_bronze_table"],
             }
         )
     return materialized
@@ -3580,14 +3692,23 @@ def _materialize_source_to_bronze_mappings(
 
     mapped_tables: List[Dict[str, Any]] = []
     bundles: List[Dict[str, Any]] = []
+    references = [
+        {
+            "ingestion_object_id": int(table["ingestion_object_id"]),
+            "config_version": int(table["ingestion_object_config_version"]),
+        }
+        for table in certified_tables
+        if table.get("ingestion_object_id") is not None and table.get("ingestion_object_config_version") is not None
+    ]
+    load_objects = getattr(selection.repository, "get_ingestion_objects", None)
+    objects = load_objects(references) if callable(load_objects) else {}
     for table in certified_tables:
         ingestion_object_id = table.get("ingestion_object_id")
         config_version = table.get("ingestion_object_config_version")
         if ingestion_object_id is None or config_version is None:
             raise ValueError("Metadata-enabled Bronze mapping requires ingestion-object lineage for every table.")
-        ingestion_object = selection.repository.get_ingestion_object(
-            int(ingestion_object_id),
-            int(config_version),
+        ingestion_object = objects.get((int(ingestion_object_id), int(config_version))) or selection.repository.get_ingestion_object(
+            int(ingestion_object_id), int(config_version)
         )
         if not ingestion_object:
             raise ValueError(f"Ingestion-object draft not found: {ingestion_object_id}/{config_version}")
@@ -4149,8 +4270,25 @@ def _materialize_silver_to_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any
         gold_schema = validate_identifier(os.getenv("GOLD_SCHEMA", "gold"), label="Gold schema")
         target_prefix = f"{gold_catalog}.{gold_schema}"
 
+    approved_silver = [
+        result for result in state.get("silver_generation_results") or []
+        if isinstance(result, dict) and result.get("metadata_activation_status") == "ACTIVE"
+    ]
+    silver_ids = [int(result["silver_ingestion_object_id"]) for result in approved_silver]
+    load_active = getattr(selection.repository, "get_active_ingestion_objects", None)
+    active_silver = load_active(silver_ids) if callable(load_active) else {}
+    silver_bundle_refs = [{
+        "ingestion_object_id": int(result["silver_ingestion_object_id"]),
+        "processing_stage": "BRONZE_TO_SILVER",
+        "mapping_version": int(result["bronze_to_silver_mapping_version"]),
+        "expected_hash": str(result["bronze_to_silver_mapping_hash"]),
+        "expected_target": str(result.get("target_table") or result.get("target_silver_table") or ""),
+        "require_active": True,
+    } for result in approved_silver]
+    load_bundles = getattr(selection.repository, "get_mapping_bundles", None)
+    active_bundles = load_bundles(silver_bundle_refs) if callable(load_bundles) else {}
     silver_by_logical: Dict[str, Dict[str, Any]] = {}
-    for result in state.get("silver_generation_results") or []:
+    for result in approved_silver:
         if not isinstance(result, dict) or result.get("metadata_activation_status") != "ACTIVE":
             continue
         logical = str(result.get("table") or result.get("table_name") or "").split(".")[-1].casefold()
@@ -4159,15 +4297,16 @@ def _materialize_silver_to_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any
             raise ValueError("Approved Silver results contain an ambiguous logical table identity.")
         object_id = int(result["silver_ingestion_object_id"])
         target = str(result.get("target_table") or result.get("target_silver_table") or "")
-        bundle = selection.repository.get_mapping_bundle(
+        mapping_version = int(result["bronze_to_silver_mapping_version"])
+        bundle = active_bundles.get((object_id, "BRONZE_TO_SILVER", mapping_version)) or selection.repository.get_mapping_bundle(
             ingestion_object_id=object_id,
             processing_stage="BRONZE_TO_SILVER",
-            mapping_version=int(result["bronze_to_silver_mapping_version"]),
+            mapping_version=mapping_version,
             expected_hash=str(result["bronze_to_silver_mapping_hash"]),
             expected_target=target,
             require_active=True,
         )
-        active = selection.repository.get_active_ingestion_object(object_id)
+        active = active_silver.get(object_id) or selection.repository.get_active_ingestion_object(object_id)
         if not active:
             raise ValueError(f"Active Silver transformation object not found: {object_id}")
         columns = {
@@ -4827,19 +4966,39 @@ def _materialize_bronze_to_silver_metadata(
             f"Silver merge-key review does not identify ingestion object {object_id} unambiguously."
         )
 
+    reviewed_bronze = [(bronze, reviewed_feed_for(bronze)) for bronze in bronze_results]
     results = []
     bundles = []
     objects = []
+    bronze_ids = [int(item.get("ingestion_object_id") or 0) for item in bronze_results]
+    load_active = getattr(selection.repository, "get_active_ingestion_objects", None)
+    active_bronze = load_active(bronze_ids) if callable(load_active) else {}
+    bronze_bundle_refs = []
     for bronze in bronze_results:
         object_id = int(bronze.get("ingestion_object_id") or 0)
-        feed = reviewed_feed_for(bronze)
-        source_object = selection.repository.get_active_ingestion_object(object_id)
+        active = active_bronze.get(object_id) or selection.repository.get_active_ingestion_object(object_id)
+        if not active:
+            raise ValueError(f"Active Bronze ingestion object not found: {object_id}")
+        bronze_bundle_refs.append({
+            "ingestion_object_id": object_id,
+            "processing_stage": "SOURCE_TO_BRONZE",
+            "mapping_version": int(bronze["mapping_version"]),
+            "expected_hash": str(bronze["mapping_hash"]),
+            "expected_target": str(active["target_bronze_table"]),
+            "require_active": True,
+        })
+    load_bundles = getattr(selection.repository, "get_mapping_bundles", None)
+    active_source_bundles = load_bundles(bronze_bundle_refs) if callable(load_bundles) else {}
+    for bronze, feed in reviewed_bronze:
+        object_id = int(bronze.get("ingestion_object_id") or 0)
+        source_object = active_bronze.get(object_id) or selection.repository.get_active_ingestion_object(object_id)
         if not source_object:
             raise ValueError(f"Active Bronze ingestion object not found: {object_id}")
-        source_mapping = selection.repository.get_mapping_bundle(
+        mapping_version = int(bronze["mapping_version"])
+        source_mapping = active_source_bundles.get((object_id, "SOURCE_TO_BRONZE", mapping_version)) or selection.repository.get_mapping_bundle(
             ingestion_object_id=object_id,
             processing_stage="SOURCE_TO_BRONZE",
-            mapping_version=int(bronze["mapping_version"]),
+            mapping_version=mapping_version,
             expected_hash=str(bronze["mapping_hash"]),
             expected_target=str(source_object["target_bronze_table"]),
             require_active=True,
@@ -5182,6 +5341,7 @@ def _enqueue_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
     })
     # Runtime queues only roots; successful workers release metadata-pinned dependants.
     layers = (("SOURCE_TO_BRONZE", "bronze_generation_results", "ingestion_object_id", 300),)
+    requests = []
     for stage, result_key, object_key, priority in layers:
         for result in state.get(result_key) or []:
             if not isinstance(result, dict) or result.get("metadata_activation_status") != "ACTIVE":
@@ -5192,18 +5352,24 @@ def _enqueue_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
                 "processing_stage": stage,
                 "target_table": result.get("target_table"),
             }
-            item = selection.repository.enqueue_work(
-                ingestion_object_id=object_id,
-                trigger_type="MANUAL",
-                work_scope=work_scope,
-                requested_by=requested_by,
-                priority=priority,
-                logical_work_id=batch_logical_work_id,
-            )
+            requests.append({
+                "ingestion_object_id": object_id, "trigger_type": "MANUAL",
+                "work_scope": work_scope, "requested_by": requested_by, "priority": priority,
+                "logical_work_id": batch_logical_work_id, "processing_stage": stage,
+            })
+    enqueue_many = getattr(selection.repository, "enqueue_work_batch", None)
+    items = enqueue_many(requests) if callable(enqueue_many) else [
+        selection.repository.enqueue_work(**{
+            key: value for key, value in request.items() if key != "processing_stage"
+        })
+        for request in requests
+    ]
+    for request, item in zip(requests, items):
+            object_id = int(request["ingestion_object_id"])
             queued.append({
                 "queue_id": int(item["queue_id"]),
                 "ingestion_object_id": object_id,
-                "processing_stage": stage,
+                "processing_stage": request["processing_stage"],
                 "queue_status": str(item.get("queue_status") or ""),
                 "logical_work_id": str(item.get("logical_work_id") or ""),
             })
