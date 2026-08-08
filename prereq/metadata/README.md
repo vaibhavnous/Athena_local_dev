@@ -1,7 +1,25 @@
-# Target metadata prerequisite
+# Metadata storage and setup
 
-Run this setup once per target environment before onboarding a source. The
-scripts create only the eight tables defined by `metadata-README.md`.
+The revised database-source flow has two explicit storage boundaries:
+
+- Before target execution, approved ingestion objects and mappings are stored
+  in the application Azure SQL database. Run `application_azure_sql.sql` once
+  for that database. It creates only `cfg_ingestion_object` and `cfg_mapping`
+  from the approved eight-table model.
+- During code generation, the application produces the selected target's
+  complete eight-table DDL as a reviewed, hash-pinned artifact. The first step
+  of Target Execution runs that artifact and idempotently deploys the approved
+  configuration snapshot before Bronze/Silver/Gold execution.
+
+The checked-in Databricks and Snowflake scripts remain useful for administrator
+inspection and emergency bootstrap, but normal pipeline onboarding does not
+read or write target metadata.
+
+## Application Azure SQL
+
+Run `application_azure_sql.sql` once against the same pipeline database and
+schema used by `ai_store`. It is safe to repeat and adds no table outside the
+approved metadata model.
 
 ## Databricks
 

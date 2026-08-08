@@ -43,13 +43,18 @@ class SilverTableRef(TypedDict):
     bronze_model_name: str | None
 
 
-def _metadata_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
+def _metadata_tables_for_silver(
+    state: Stage01State, *, _selection: Any = None
+) -> List[SilverTableRef]:
     """Reload the exact approved draft; checkpoint data only selects its immutable version."""
     from services.metadata_selection import validated_metadata_selection
 
-    selection = validated_metadata_selection(state)
+    selection = _selection or validated_metadata_selection(state)
     if not selection:
         raise ValueError("Metadata-driven Silver generation requires a valid target selection.")
+    if _selection is None and callable(getattr(selection.repository, "unit_of_work", None)):
+        with selection.repository.unit_of_work():
+            return _metadata_tables_for_silver(state, _selection=selection)
     refs: List[SilverTableRef] = []
     seen_objects: set[int] = set()
     for bronze in state.get("bronze_generation_results") or []:
@@ -82,7 +87,7 @@ def _metadata_tables_for_silver(state: Stage01State) -> List[SilverTableRef]:
             mapping_version=mapping_version,
             expected_hash=mapping_hash,
             expected_target=target_table,
-            require_active=False,
+            require_active=None,
         )
         rows = bundle["mappings"]
         input_pin = json.loads(str(rows[0].get("input_objects_json") or "[]"))

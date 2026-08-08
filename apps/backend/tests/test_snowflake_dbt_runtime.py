@@ -379,7 +379,7 @@ def test_snowflake_dbt_deploys_then_builds_inside_snowflake(monkeypatch):
 
     def fake_run(command, **kwargs):
         commands.append(command)
-        return SimpleNamespace(returncode=0, stdout=f"{command[2]} ok", stderr="")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(dbt_snowflake_runtime.subprocess, "run", fake_run)
 
@@ -393,14 +393,17 @@ def test_snowflake_dbt_deploys_then_builds_inside_snowflake(monkeypatch):
         }
     )
 
-    assert [command[2] for command in commands] == ["deploy", "execute"]
+    assert ["deploy" in command for command in commands] == [True, False]
+    assert ["execute" in command for command in commands] == [False, True]
     assert "--no-force" in commands[0]
     assert "--fail-fast" in commands[1]
     assert state["snowflake_dbt_status"] == "EXECUTED"
     assert state["snowflake_dbt_deploy_status"] == "COMPLETED"
     assert state["snowflake_dbt_validation_status"] == "DBT_VALIDATED"
     assert state["completion_mode"] == "dbt_executed"
-    assert state["snowflake_dbt_project_fqn"] == "ATHENA_DB.PUBLIC.ATHENA_RUN_RUN_2"
+    assert state["snowflake_dbt_project_fqn"] == (
+        f"{dbt_snowflake_runtime._native_project_database()}.PUBLIC.ATHENA_RUN_RUN_2"
+    )
 
 
 def test_snowflake_dbt_failed_receipt_blocks_automatic_retry(monkeypatch):
@@ -648,7 +651,7 @@ def test_generation_first_dbt_gold_review_finalizes_then_pauses(monkeypatch):
     assert result["status"] == "PAUSED_FOR_STAGE_CONFIRMATION"
     assert result["execution_ready"] is True
     assert result["next_stage_key"] == "gold_code_execution"
-    assert result["next_stage_label"] == "Code Execution"
+    assert result["next_stage_label"] == "Metadata Setup Execution"
     assert result["stage_confirmation"]["last_completed_stage_key"] == "gold_review"
     assert result["snowflake_dbt_artifact_set_hash"] == "reviewed-hash"
     assert "snowflake_bronze_source_load_status" not in result

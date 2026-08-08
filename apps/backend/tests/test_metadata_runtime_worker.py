@@ -51,6 +51,13 @@ def test_databricks_execution_receipt_must_bind_exact_delta_target():
         )
 
 
+def test_per_object_worker_rejects_snowflake_dbt_package_execution():
+    with pytest.raises(RuntimeError, match="single project coordinator"):
+        metadata_runtime_worker._execute_registered_artifact(
+            {}, {"execution_spec_json": '{"engine":"SNOWFLAKE_DBT"}'}, {}
+        )
+
+
 class Repository:
     def __init__(self, *, stateful: bool = False, snapshot_matches: bool = True) -> None:
         self.calls = []

@@ -58,6 +58,8 @@ export const PIPELINE_PHASE_TEMPLATES = {
       id: 'phase-3',
       label: 'Code Generation & Reviews',
       keys: [
+        'metadata_ddl',
+        'metadata_ddl_review',
         'bronze',
         'gate4',
         'silver_merge_key_resolution',
@@ -71,7 +73,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-4',
       label: 'Target Execution',
-      keys: ['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'],
+      keys: ['metadata_setup_execution', 'bronze_code_execution', 'silver_code_execution', 'gold_code_execution'],
     },
   ],
   databaseDbt: [
@@ -116,6 +118,8 @@ export const PIPELINE_PHASE_TEMPLATES = {
       id: 'phase-3',
       label: 'Code Generation & Reviews',
       keys: [
+        'metadata_ddl',
+        'metadata_ddl_review',
         'bronze',
         'gate4',
         'silver_merge_key_resolution',
@@ -129,7 +133,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-4',
       label: 'Code Execution & Report Generation',
-      keys: ['gold_code_execution', 'report_generation'],
+      keys: ['metadata_setup_execution', 'gold_code_execution', 'report_generation'],
     },
   ],
   file: [
@@ -204,7 +208,7 @@ export function isGenerationFirstDatabaseRun(run) {
     run?.flow_version ||
     ''
   ).toLowerCase()
-  if (flowVersion === 'generation_first_v1') return true
+  if (['generation_first_v1', 'generation_first_v2'].includes(flowVersion)) return true
 
   const confirmation = run?.stage_confirmation || {}
   if (
@@ -474,6 +478,12 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
     ]
   }
 
+  if (run?.next_review_key === 'metadata_ddl_review') {
+    return steps.map((step) => step.key === 'metadata_ddl_review'
+      ? { ...step, state: 'HITL_WAIT', complete: false }
+      : step)
+  }
+
   if (run?.next_review_key === 'gold_review') {
     if (!isGenerationFirstDatabaseRun(run)) {
       return steps.map((step) => step.key === 'gold_code_execution'
@@ -609,6 +619,8 @@ function fallbackStepLabel(key, sourceType = 'database') {
     profiling: 'Column Profiling',
     enrichment: 'Semantic Enrichment',
     gate3: 'Semantic Review',
+    metadata_ddl: 'Metadata DDL Generation',
+    metadata_ddl_review: 'Metadata DDL Review',
     bronze: 'Bronze Code Generation',
     gate4: 'Bronze Review',
     pre_bronze_bootstrap_metadata: 'Bootstrap Metadata',
@@ -620,6 +632,7 @@ function fallbackStepLabel(key, sourceType = 'database') {
     pre_bronze_validate_source: 'Validate Source Access',
     pre_bronze_discover_source_objects: 'Discover Source Objects',
     pre_bronze_stage_to_landing: 'Stage Files to Landing',
+    metadata_setup_execution: 'Metadata Setup Execution',
     bronze_code_execution: 'Bronze Code Execution',
     bronze_runtime_validation: 'Bronze Runtime Validation',
     silver_merge_key_resolution: 'Silver Merge Key Resolution',

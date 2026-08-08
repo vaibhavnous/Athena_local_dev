@@ -598,7 +598,7 @@ def test_new_native_database_checkpoint_is_versioned_for_generation_first(monkey
         owner_email="test@example.com",
     )
 
-    assert saved["state"]["database_flow_version"] == "generation_first_v1"
+    assert saved["state"]["database_flow_version"] == "generation_first_v2"
 
 
 def test_new_snowflake_dbt_checkpoint_is_versioned_for_generation_first(monkeypatch):
@@ -624,7 +624,7 @@ def test_new_snowflake_dbt_checkpoint_is_versioned_for_generation_first(monkeypa
         owner_email="test@example.com",
     )
 
-    assert saved["state"]["database_flow_version"] == "generation_first_v1"
+    assert saved["state"]["database_flow_version"] == "generation_first_v2"
 
 
 def test_existing_unversioned_snowflake_dbt_checkpoint_keeps_legacy_flow(monkeypatch):

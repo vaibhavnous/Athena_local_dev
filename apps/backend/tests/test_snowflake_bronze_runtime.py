@@ -630,14 +630,10 @@ def test_load_azure_sql_table_to_snowflake_replaces_landing_table_and_logs_progr
     class FakeSnowflakeCursor:
         def __init__(self):
             self.sql = []
-            self.executemany_calls = []
             self.closed = False
 
         def execute(self, sql):
             self.sql.append(sql)
-
-        def executemany(self, sql, values):
-            self.executemany_calls.append((sql, values))
 
         def close(self):
             self.closed = True
@@ -655,6 +651,13 @@ def test_load_azure_sql_table_to_snowflake_replaces_landing_table_and_logs_progr
     monkeypatch.setattr(snowflake_bronze_runtime, "get_client_connection", lambda database_name: fake_source_conn)
     monkeypatch.setattr(snowflake_bronze_runtime, "_batch_size", lambda: 2)
     monkeypatch.setattr(snowflake_bronze_runtime, "_progress_log_interval", lambda: 3)
+    bulk_calls = []
+
+    def fake_bulk_write(connection, **kwargs):
+        bulk_calls.append((connection, kwargs))
+        return len(kwargs["rows"])
+
+    monkeypatch.setattr(snowflake_bronze_runtime, "_write_pandas_batch", fake_bulk_write)
 
     def capture_info(message, *args, **kwargs):
         progress_messages.append(message % args if args else message)
@@ -673,7 +676,9 @@ def test_load_azure_sql_table_to_snowflake_replaces_landing_table_and_logs_progr
 
     assert result["rows_loaded"] == 4
     assert any(sql.startswith('CREATE OR REPLACE TABLE "insurance"."dbo"."claim_payment_indemnity"') for sql in fake_snowflake_conn.cursor_instance.sql)
-    assert len(fake_snowflake_conn.cursor_instance.executemany_calls) == 2
+    assert len(bulk_calls) == 2
+    assert all(call[0] is fake_snowflake_conn for call in bulk_calls)
+    assert bulk_calls[0][1]["table"] == "claim_payment_indemnity"
     assert any("rows_loaded=4" in message for message in progress_messages)
     assert fake_source_conn.closed is True
     assert fake_snowflake_conn.cursor_instance.closed is True

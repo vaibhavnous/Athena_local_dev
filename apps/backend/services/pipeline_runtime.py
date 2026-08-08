@@ -50,7 +50,8 @@ GENERATION_ARTIFACT_TYPES = {
     "silver": {"SILVER_GENERATION", "SILVER_SCRIPTS", "SFTP_SILVER_GENERATION"},
     "gold": {"GOLD_GENERATION", "GOLD_SCRIPTS", "SFTP_GOLD_GENERATION"},
 }
-DATABASE_GENERATION_FIRST_FLOW_VERSION = "generation_first_v1"
+DATABASE_GENERATION_FIRST_FLOW_VERSION = "generation_first_v2"
+LEGACY_DATABASE_GENERATION_FIRST_FLOW_VERSION = "generation_first_v1"
 
 
 def _status_completed(value: Any) -> bool:
@@ -59,10 +60,18 @@ def _status_completed(value: Any) -> bool:
 
 def generation_first_database_flow(state: Dict[str, Any]) -> bool:
     return (
-        str(state.get("database_flow_version") or "") == DATABASE_GENERATION_FIRST_FLOW_VERSION
+        str(state.get("database_flow_version") or "")
+        in {
+            DATABASE_GENERATION_FIRST_FLOW_VERSION,
+            LEGACY_DATABASE_GENERATION_FIRST_FLOW_VERSION,
+        }
         and str(state.get("source") or "database").lower() == "database"
         and str(state.get("target_warehouse") or "").lower() in {"databricks", "snowflake"}
     )
+
+
+def revised_metadata_database_flow(state: Dict[str, Any]) -> bool:
+    return str(state.get("database_flow_version") or "") == DATABASE_GENERATION_FIRST_FLOW_VERSION
 
 
 def generation_first_native_database_flow(state: Dict[str, Any]) -> bool:
@@ -200,6 +209,7 @@ DATABASE_STAGE_SEQUENCE = [
     ("profiling", "Column Profiling"),
     ("enrichment", "Semantic Enrichment"),
     ("gate3", "Semantic Review"),
+    ("metadata_ddl", "Metadata DDL Generation"),
     ("bronze", "Bronze Generation"),
     ("silver", "Silver Generation"),
     ("gold", "Gold Generation"),
@@ -438,6 +448,8 @@ def _database_stage_runner(stage_key: str):
         from nodes.hitl import build_hitl_enrichment_review_node
 
         return build_hitl_enrichment_review_node()
+    if stage_key == "metadata_ddl":
+        return _run_database_metadata_ddl_stage
     if stage_key == "bronze":
         return _run_database_bronze_stage
     if stage_key == "silver":
@@ -464,6 +476,66 @@ def _run_database_nomination_stage(state: Dict[str, Any]) -> Dict[str, Any]:
             "source_connection_config_hash": selection.connection.get("config_hash"),
         }
     return table_nomination_node(state)
+
+
+def _run_database_metadata_ddl_stage(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate target DDL without opening a target connection."""
+    from services.metadata_contracts import TargetMetadataContext, file_sha256, render_ddl
+    from utilis.generated_code_paths import generated_artifact_uri, generated_run_dir
+
+    platform = str(state.get("target_warehouse") or "").strip().lower()
+    environment = str(state.get("target_environment") or "").strip()
+    namespace_variable = {
+        "databricks": "ATHENA_DATABRICKS_METADATA_CATALOG",
+        "snowflake": "ATHENA_SNOWFLAKE_METADATA_DATABASE",
+    }.get(platform)
+    if not namespace_variable:
+        raise ValueError(f"Unsupported metadata DDL target: {platform!r}")
+    namespace = str(os.getenv(namespace_variable) or "").strip()
+    if not namespace:
+        raise RuntimeError(f"{namespace_variable} is required for metadata DDL generation.")
+
+    context = TargetMetadataContext(
+        platform=platform,
+        environment=environment,
+        namespace=namespace,
+        schema="metadata",
+    )
+    output_dir = generated_run_dir(platform, state.get("run_id"), "metadata")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = output_dir / "metadata_schema.sql"
+    temporary_path = artifact_path.with_suffix(".sql.tmp")
+    ddl_text = render_ddl(context)
+    temporary_path.write_text(ddl_text, encoding="utf-8")
+    temporary_path.replace(artifact_path)
+    artifact = {
+        "schema_version": "1.0",
+        "platform": platform,
+        "environment": environment,
+        "namespace": namespace,
+        "schema": "metadata",
+        "artifact_uri": generated_artifact_uri(artifact_path),
+        "artifact_hash": file_sha256(artifact_path),
+    }
+    return {
+        **state,
+        "status": "HITL_WAIT",
+        "background_stage": None,
+        "next_gate": None,
+        "next_review_key": "metadata_ddl_review",
+        "metadata_ddl_generation_status": "COMPLETED",
+        "metadata_ddl_review_status": "PENDING",
+        "metadata_ddl_artifact": artifact,
+        "metadata_ddl_review": {
+            "title": "Target Metadata Schema DDL",
+            "file_name": artifact_path.name,
+            "script_language": "sql",
+            "script_body": ddl_text,
+            "artifact_hash": artifact["artifact_hash"],
+            "review_status": "PENDING",
+        },
+        "resume_message": "Metadata DDL Review is pending. Review the generated target schema before Bronze generation.",
+    }
 
 
 def _run_database_bronze_stage(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -570,7 +642,9 @@ def _register_and_activate_artifact_bundle(
     return [single(**artifact) for artifact in artifacts]
 
 
-def _activate_reviewed_bronze_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+def _activate_reviewed_bronze_metadata(
+    state: Dict[str, Any], *, activate_finalized_dbt: bool = False
+) -> Dict[str, Any]:
     from services.metadata_selection import validated_metadata_selection
 
     if state.get("source_system_id") is None:
@@ -581,7 +655,8 @@ def _activate_reviewed_bronze_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     generated_results = list(state.get("bronze_generation_results") or [])
     activatable = [
         result for result in generated_results
-        if str((result.get("execution_spec") or {}).get("engine") or "").upper() != "SNOWFLAKE_DBT"
+        if activate_finalized_dbt
+        or str((result.get("execution_spec") or {}).get("engine") or "").upper() != "SNOWFLAKE_DBT"
     ]
     activated_by_object = {}
     if activatable:
@@ -605,7 +680,10 @@ def _activate_reviewed_bronze_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     activated_results = []
     active_versions: Dict[int, tuple[int, str]] = {}
     for result in generated_results:
-        if str((result.get("execution_spec") or {}).get("engine") or "").upper() == "SNOWFLAKE_DBT":
+        if (
+            not activate_finalized_dbt
+            and str((result.get("execution_spec") or {}).get("engine") or "").upper() == "SNOWFLAKE_DBT"
+        ):
             activated_results.append({**result, "metadata_activation_status": "PENDING_FINAL_DBT_PACKAGE"})
             continue
         activated = activated_by_object[int(result["ingestion_object_id"])]
@@ -697,7 +775,9 @@ def _attach_silver_execution_specs(state: Dict[str, Any]) -> Dict[str, Any]:
     return {**state, "silver_generation_results": results}
 
 
-def _activate_reviewed_silver_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+def _activate_reviewed_silver_metadata(
+    state: Dict[str, Any], *, activate_finalized_dbt: bool = False
+) -> Dict[str, Any]:
     from services.metadata_selection import validated_metadata_selection
 
     selection = validated_metadata_selection(state)
@@ -706,7 +786,8 @@ def _activate_reviewed_silver_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     generated_results = list(state.get("silver_generation_results") or [])
     activatable = [
         result for result in generated_results
-        if str((result.get("execution_spec") or {}).get("engine") or "").upper() != "SNOWFLAKE_DBT"
+        if activate_finalized_dbt
+        or str((result.get("execution_spec") or {}).get("engine") or "").upper() != "SNOWFLAKE_DBT"
     ]
     activated_by_object = {}
     if activatable:
@@ -730,7 +811,10 @@ def _activate_reviewed_silver_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     active_versions: Dict[int, tuple[int, str]] = {}
     results = []
     for result in generated_results:
-        if str((result.get("execution_spec") or {}).get("engine") or "").upper() == "SNOWFLAKE_DBT":
+        if (
+            not activate_finalized_dbt
+            and str((result.get("execution_spec") or {}).get("engine") or "").upper() == "SNOWFLAKE_DBT"
+        ):
             results.append({**result, "metadata_activation_status": "PENDING_FINAL_DBT_PACKAGE"})
             continue
         activated = activated_by_object[int(result["silver_ingestion_object_id"])]
@@ -788,11 +872,21 @@ def _attach_gold_execution_specs(state: Dict[str, Any]) -> Dict[str, Any]:
         path = Path(str(result.get("script_path") or ""))
         reviewed = review_by_object.get(object_id) or {}
         reviewed_body = str(reviewed.get("generated_gold_script") or reviewed.get("script_body") or "")
-        if reviewed_body and reviewed_body != path.read_text(encoding="utf-8"):
+        if (
+            reviewed_body
+            and str(result.get("code_generation_format") or "").lower() != "dbt"
+            and reviewed_body != path.read_text(encoding="utf-8")
+        ):
             raise ValueError(
                 "Metadata-driven Gold review cannot replace executable code; update the approved mapping and regenerate."
             )
-        engine = "SNOWFLAKE_SQL" if platform == "snowflake" else "DATABRICKS_JOB"
+        engine = (
+            "SNOWFLAKE_DBT"
+            if platform == "snowflake" and str(result.get("code_generation_format") or "").lower() == "dbt"
+            else "SNOWFLAKE_SQL"
+            if platform == "snowflake"
+            else "DATABRICKS_JOB"
+        )
         spec = validate_execution_spec(
             {
                 "contract_version": "1.0",
@@ -800,7 +894,7 @@ def _attach_gold_execution_specs(state: Dict[str, Any]) -> Dict[str, Any]:
                 "target_platform": platform.upper(),
                 "engine": engine,
                 "artifact_uri": generated_artifact_uri(path),
-                "entry_point": "script",
+                "entry_point": str(result.get("dbt_model_name") or "script"),
                 "artifact_hash": file_sha256(path),
                 "generator_version": "astra-codegen-1.0.0",
                 "mapping_version": int(result["silver_to_gold_mapping_version"]),
@@ -814,17 +908,24 @@ def _attach_gold_execution_specs(state: Dict[str, Any]) -> Dict[str, Any]:
     return {**state, "gold_generation_results": results}
 
 
-def _activate_reviewed_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+def _activate_reviewed_gold_metadata(
+    state: Dict[str, Any], *, activate_finalized_dbt: bool = False
+) -> Dict[str, Any]:
     from services.metadata_selection import validated_metadata_selection
 
     selection = validated_metadata_selection(state)
     if not selection:
         raise ValueError("Gold activation requires a valid target metadata selection.")
     generated_results = list(state.get("gold_generation_results") or [])
+    activatable = [
+        result for result in generated_results
+        if activate_finalized_dbt
+        or str((result.get("execution_spec") or {}).get("engine") or "").upper() != "SNOWFLAKE_DBT"
+    ]
     activated_by_object = {
         int(result["gold_ingestion_object_id"]): activated
         for result, activated in zip(
-            generated_results,
+            activatable,
             _register_and_activate_artifact_bundle(
                 selection.repository,
                 processing_stage="SILVER_TO_GOLD",
@@ -834,13 +935,19 @@ def _activate_reviewed_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
                     "mapping_version": int(result["silver_to_gold_mapping_version"]),
                     "mapping_hash": str(result["silver_to_gold_mapping_hash"]),
                     "execution_spec": result["execution_spec"],
-                } for result in generated_results],
-            ) if generated_results else [],
+                } for result in activatable],
+            ) if activatable else [],
         )
     }
     active_versions: Dict[int, tuple[int, str]] = {}
     results = []
     for result in generated_results:
+        if (
+            not activate_finalized_dbt
+            and str((result.get("execution_spec") or {}).get("engine") or "").upper() == "SNOWFLAKE_DBT"
+        ):
+            results.append({**result, "metadata_activation_status": "PENDING_FINAL_DBT_PACKAGE"})
+            continue
         activated = activated_by_object[int(result["gold_ingestion_object_id"])]
         active_object = activated["ingestion_object"]
         object_id = int(result["gold_ingestion_object_id"])
@@ -870,15 +977,81 @@ def _activate_reviewed_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
     return {**state, "gold_generation_results": results, "gold_transformation_objects": objects}
 
 
-def _mapping_driven_bronze_state(state: Dict[str, Any]) -> Dict[str, Any]:
+def _activate_finalized_snowflake_dbt_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Bind one reviewed dbt package to its exact model drafts before activation."""
+    from services.metadata_contracts import validate_execution_spec
+
+    if not snowflake_dbt_enabled(state):
+        return state
+    package_hash = str(state.get("snowflake_dbt_artifact_set_hash") or "").strip()
+    package_id = str(state.get("snowflake_dbt_idempotency_key") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", package_hash) or not package_id:
+        raise RuntimeError("The finalized Snowflake dbt package identity is missing or invalid.")
+    if str(state.get("snowflake_dbt_validation_status") or "").upper() != "STATIC_VALIDATED":
+        raise RuntimeError("Snowflake dbt metadata cannot activate before static project validation passes.")
+
+    bound = dict(state)
+    for layer in ("bronze", "silver"):
+        key = f"{layer}_generation_results"
+        results = []
+        for result in bound.get(key) or []:
+            if not isinstance(result, dict):
+                continue
+            spec = dict(result.get("execution_spec") or {})
+            if str(spec.get("engine") or "").upper() != "SNOWFLAKE_DBT":
+                raise RuntimeError(f"The finalized dbt package contains a non-dbt {layer} artifact.")
+            spec.update({"dbt_package_hash": package_hash, "dbt_package_id": package_id})
+            results.append({**result, "execution_spec": validate_execution_spec(spec, platform="snowflake")})
+        bound[key] = results
+
+    bound = _activate_reviewed_bronze_metadata(bound, activate_finalized_dbt=True)
+    bound = _activate_reviewed_silver_metadata(bound, activate_finalized_dbt=True)
+    refreshed = _materialize_silver_to_gold_metadata(bound)
+    drafts_by_target = {
+        str(item.get("target_table") or "").casefold(): item
+        for item in refreshed.get("gold_metadata_drafts") or []
+        if isinstance(item, dict)
+    }
+    refreshed_results = []
+    for result in bound.get("gold_generation_results") or []:
+        target = str(result.get("target_table") or "").casefold()
+        draft = drafts_by_target.get(target)
+        if not draft:
+            raise RuntimeError(f"The finalized dbt package has no refreshed Gold metadata for {target}.")
+        refreshed_results.append({**result, **draft})
+    bound = {
+        **refreshed,
+        "gold_generation_results": refreshed_results,
+    }
+    bound = _attach_gold_execution_specs(bound)
+    bound["gold_generation_results"] = [{
+        **result,
+        "execution_spec": validate_execution_spec(
+            {
+                **dict(result.get("execution_spec") or {}),
+                "dbt_package_hash": package_hash,
+                "dbt_package_id": package_id,
+            },
+            platform="snowflake",
+        ),
+    } for result in bound.get("gold_generation_results") or []]
+    return _activate_reviewed_gold_metadata(bound, activate_finalized_dbt=True)
+
+
+def _mapping_driven_bronze_state(
+    state: Dict[str, Any], *, _selection: Any = None
+) -> Dict[str, Any]:
     if state.get("source_system_id") is None:
         return state
     from services.metadata_contracts import validate_identifier
     from services.metadata_selection import validated_metadata_selection
 
-    selection = validated_metadata_selection(state)
+    selection = _selection or validated_metadata_selection(state)
     if not selection:
         raise ValueError("Metadata-enabled Bronze generation requires a valid target metadata selection.")
+    if _selection is None and callable(getattr(selection.repository, "unit_of_work", None)):
+        with selection.repository.unit_of_work():
+            return _mapping_driven_bronze_state(state, _selection=selection)
     certified_tables = state.get("certified_tables") or []
     discovered = dict(state.get("discovered_metadata") or {})
     discovered_by_object = {
@@ -2668,6 +2841,18 @@ def build_pipeline_steps(
             "detail": "Human enrichment approval",
         },
         {
+            "key": "metadata_ddl",
+            "label": "Metadata DDL Generation",
+            "complete": checkpoint.get("metadata_ddl_generation_status") == "COMPLETED",
+            "detail": "Target-specific metadata schema DDL generated without target access",
+        },
+        {
+            "key": "metadata_ddl_review",
+            "label": "Metadata DDL Review",
+            "complete": checkpoint.get("metadata_ddl_review_status") == "COMPLETED",
+            "detail": "Generated target metadata schema reviewed before Bronze generation",
+        },
+        {
             "key": "bronze",
             "label": "Bronze dbt Model Generation" if dbt_codegen else "Bronze Code Generation",
             "complete": bool(bronze_generation_completed),
@@ -2822,6 +3007,14 @@ def build_pipeline_steps(
                         if generation_first_snowflake_dbt_flow(checkpoint)
                         else "Generated Gold scripts approved before target execution starts"
                     ),
+                }
+            )
+            steps.append(
+                {
+                    "key": "metadata_setup_execution",
+                    "label": "Metadata Setup Execution",
+                    "complete": checkpoint.get("metadata_setup_execution_status") == "COMPLETED",
+                    "detail": "Generated metadata DDL is verified and executed on the selected target",
                 }
             )
             execution_layers = (
@@ -3433,6 +3626,7 @@ def start_pipeline(
     target_environment: Optional[str] = None,
     source_system_id: Optional[int] = None,
     source_connection_id: Optional[int] = None,
+    source_profile: Optional[str] = None,
     execution_engine: str = "native",
     dbt_deployment_mode: str = "generate_only",
     dbt_project_object_name: Optional[str] = None,
@@ -3467,6 +3661,7 @@ def start_pipeline(
         "target_environment": target_environment,
         "source_system_id": source_system_id,
         "source_connection_id": source_connection_id,
+        "source_profile": source_profile,
         "execution_engine": str(execution_engine or "native").lower(),
         "dbt_deployment_mode": str(dbt_deployment_mode or "generate_only").lower(),
         "dbt_project_object_name": dbt_project_object_name,
@@ -3679,12 +3874,22 @@ def _materialize_source_to_bronze_mappings(
     state: Dict[str, Any],
     approved_metadata: Dict[str, Any],
     certified_tables: List[Dict[str, Any]],
+    *,
+    _selection: Any = None,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     from services.metadata_selection import validated_metadata_selection
 
-    selection = validated_metadata_selection(state)
+    selection = _selection or validated_metadata_selection(state)
     if not selection:
         return certified_tables, []
+    if _selection is None and callable(getattr(selection.repository, "unit_of_work", None)):
+        with selection.repository.unit_of_work():
+            return _materialize_source_to_bronze_mappings(
+                state,
+                approved_metadata,
+                certified_tables,
+                _selection=selection,
+            )
     columns_by_object: Dict[int, List[Dict[str, Any]]] = {}
     for column in approved_metadata.get("columns") or []:
         if isinstance(column, dict) and column.get("ingestion_object_id") is not None:
@@ -3925,7 +4130,7 @@ def submit_gate3_review(
     if str(bronze_state.get("target_warehouse") or "").lower() == "snowflake":
         bronze_state["gold_catalog"] = os.getenv("SNOWFLAKE_GOLD_CATALOG") or os.getenv("SNOWFLAKE_SILVER_CATALOG") or "ATHENA_DB"
         bronze_state["gold_schema"] = os.getenv("SNOWFLAKE_GOLD_SCHEMA", "GOLD")
-    return continue_database_pipeline(run_id, start_stage_key="bronze", state=bronze_state)
+    return continue_database_pipeline(run_id, start_stage_key="metadata_ddl", state=bronze_state)
 
 
 def _apply_gate4_merge_keys_to_metadata(metadata: Dict[str, Any], review_artifact: Dict[str, Any]) -> Dict[str, Any]:
@@ -4241,18 +4446,20 @@ def _filter_gold_contract_by_silver_results(contract: Dict[str, Any], silver_res
     return {**contract, "kpi_mappings": mappings, "warnings": warnings}
 
 
-def _materialize_silver_to_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any]:
+def _materialize_silver_to_gold_metadata(
+    state: Dict[str, Any], *, _selection: Any = None
+) -> Dict[str, Any]:
     """Persist only computable Gold facts/dimensions after Silver approval."""
     from services.metadata_contracts import normalize_bronze_column_name, validate_identifier
     from services.metadata_selection import validated_metadata_selection
 
-    selection = validated_metadata_selection(state)
+    selection = _selection or validated_metadata_selection(state)
     if not selection:
         raise ValueError("Silver-to-Gold metadata requires a valid target selection.")
-    if str(state.get("execution_engine") or "").lower() == "dbt":
-        raise RuntimeError(
-            "Metadata-driven Gold requires the reviewed dbt package to be registered before Silver inputs can be activated."
-        )
+    if _selection is None and callable(getattr(selection.repository, "unit_of_work", None)):
+        with selection.repository.unit_of_work():
+            return _materialize_silver_to_gold_metadata(state, _selection=selection)
+    dbt_codegen = snowflake_dbt_enabled(state)
 
     platform = str(state.get("target_warehouse") or "").lower()
     if platform == "snowflake":
@@ -4272,24 +4479,46 @@ def _materialize_silver_to_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any
 
     approved_silver = [
         result for result in state.get("silver_generation_results") or []
-        if isinstance(result, dict) and result.get("metadata_activation_status") == "ACTIVE"
+        if isinstance(result, dict)
+        and result.get("metadata_activation_status") in (
+            {"ACTIVE", "PENDING_FINAL_DBT_PACKAGE"} if dbt_codegen else {"ACTIVE"}
+        )
     ]
+    pending_dbt_inputs = [
+        result for result in approved_silver
+        if result.get("metadata_activation_status") == "PENDING_FINAL_DBT_PACKAGE"
+    ]
+    if pending_dbt_inputs and len(pending_dbt_inputs) != len(approved_silver):
+        raise RuntimeError("Snowflake dbt Silver metadata cannot mix draft and active package inputs.")
+    using_dbt_drafts = bool(pending_dbt_inputs)
     silver_ids = [int(result["silver_ingestion_object_id"]) for result in approved_silver]
+    silver_object_refs = [{
+        "ingestion_object_id": int(result["silver_ingestion_object_id"]),
+        "config_version": int(result["silver_ingestion_object_config_version"]),
+    } for result in approved_silver] if using_dbt_drafts else []
+    load_objects = getattr(selection.repository, "get_ingestion_objects", None)
+    reviewed_silver = (
+        load_objects(silver_object_refs, require_active=False)
+        if using_dbt_drafts and callable(load_objects)
+        else {}
+    )
     load_active = getattr(selection.repository, "get_active_ingestion_objects", None)
-    active_silver = load_active(silver_ids) if callable(load_active) else {}
+    active_silver = load_active(silver_ids) if not using_dbt_drafts and callable(load_active) else {}
     silver_bundle_refs = [{
         "ingestion_object_id": int(result["silver_ingestion_object_id"]),
         "processing_stage": "BRONZE_TO_SILVER",
         "mapping_version": int(result["bronze_to_silver_mapping_version"]),
         "expected_hash": str(result["bronze_to_silver_mapping_hash"]),
         "expected_target": str(result.get("target_table") or result.get("target_silver_table") or ""),
-        "require_active": True,
+        "require_active": None if using_dbt_drafts else True,
     } for result in approved_silver]
     load_bundles = getattr(selection.repository, "get_mapping_bundles", None)
     active_bundles = load_bundles(silver_bundle_refs) if callable(load_bundles) else {}
     silver_by_logical: Dict[str, Dict[str, Any]] = {}
     for result in approved_silver:
-        if not isinstance(result, dict) or result.get("metadata_activation_status") != "ACTIVE":
+        if not isinstance(result, dict) or result.get("metadata_activation_status") not in (
+            {"ACTIVE", "PENDING_FINAL_DBT_PACKAGE"} if dbt_codegen else {"ACTIVE"}
+        ):
             continue
         logical = str(result.get("table") or result.get("table_name") or "").split(".")[-1].casefold()
         logical = logical.removeprefix("silver_")
@@ -4304,11 +4533,15 @@ def _materialize_silver_to_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any
             mapping_version=mapping_version,
             expected_hash=str(result["bronze_to_silver_mapping_hash"]),
             expected_target=target,
-            require_active=True,
+            require_active=False if using_dbt_drafts else True,
         )
-        active = active_silver.get(object_id) or selection.repository.get_active_ingestion_object(object_id)
+        active = (
+            reviewed_silver.get((object_id, int(result["silver_ingestion_object_config_version"])))
+            if using_dbt_drafts
+            else active_silver.get(object_id) or selection.repository.get_active_ingestion_object(object_id)
+        )
         if not active:
-            raise ValueError(f"Active Silver transformation object not found: {object_id}")
+            raise ValueError(f"Reviewed Silver transformation object not found: {object_id}")
         columns = {
             str(row.get("target_column_name") or "").casefold(): row
             for row in bundle["mappings"]
@@ -4406,6 +4639,7 @@ def _materialize_silver_to_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any
             definition=definition,
             build_order=10,
             validation_policy={"fail_on_null_key": True, "fail_on_duplicate_key": True, "fail_on_schema_mismatch": True},
+            allow_inactive_inputs=using_dbt_drafts,
         )
         used_targets.add(target.casefold())
         drafts.append({
@@ -4599,6 +4833,7 @@ def _materialize_silver_to_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any
                 "fail_on_schema_mismatch": True,
                 "max_join_multiplier": float(os.getenv("ATHENA_GOLD_MAX_JOIN_MULTIPLIER", "1.05")),
             },
+            allow_inactive_inputs=using_dbt_drafts,
         )
         used_targets.add(target.casefold())
         drafts.append({
@@ -4626,6 +4861,29 @@ def _materialize_silver_to_gold_metadata(state: Dict[str, Any]) -> Dict[str, Any
         "gold_catalog": gold_catalog,
         "gold_schema": f"{gold_catalog}.{gold_schema}" if platform == "databricks" else gold_schema,
     }
+
+
+def submit_metadata_ddl_review(run_id: str) -> Dict[str, Any]:
+    """Approve the generated DDL checkpoint and continue to Bronze generation."""
+    checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+    if is_run_aborted(run_id, checkpoint):
+        return aborted_run_state(run_id, checkpoint)
+    if not checkpoint.get("metadata_ddl_artifact") or not checkpoint.get("metadata_ddl_review"):
+        raise RuntimeError("Metadata DDL review is not ready.")
+    reviewed = {
+        **checkpoint,
+        "status": "RUNNING",
+        "background_stage": None,
+        "next_review_key": None,
+        "metadata_ddl_review_status": "COMPLETED",
+        "metadata_ddl_review": {
+            **checkpoint["metadata_ddl_review"],
+            "review_status": "APPROVED",
+        },
+        "resume_message": "Metadata DDL review completed. Bronze generation is starting.",
+    }
+    save_checkpoint_state_timed(run_id, reviewed, context="metadata_ddl_review:complete")
+    return continue_database_pipeline(run_id, start_stage_key="bronze", state=reviewed)
 
 
 def submit_gate4_review(
@@ -4909,14 +5167,19 @@ def submit_silver_merge_key_review(run_id: str, action: str = "APPROVED", review
 
 
 def _materialize_bronze_to_silver_metadata(
-    state: Dict[str, Any], review_artifact: Dict[str, Any]
+    state: Dict[str, Any], review_artifact: Dict[str, Any], *, _selection: Any = None
 ) -> Dict[str, Any]:
     from services.metadata_contracts import normalize_bronze_column_name, validate_identifier
     from services.metadata_selection import validated_metadata_selection
 
-    selection = validated_metadata_selection(state)
+    selection = _selection or validated_metadata_selection(state)
     if not selection:
         raise ValueError("Bronze-to-Silver metadata requires a valid target selection.")
+    if _selection is None and callable(getattr(selection.repository, "unit_of_work", None)):
+        with selection.repository.unit_of_work():
+            return _materialize_bronze_to_silver_metadata(
+                state, review_artifact, _selection=selection
+            )
     platform = str(state.get("target_warehouse") or "").lower()
     if platform == "snowflake":
         silver_catalog = validate_identifier(os.getenv("SNOWFLAKE_SILVER_CATALOG", "ATHENA_DB"), label="Silver catalog")
@@ -5324,11 +5587,133 @@ NATIVE_EXECUTION_STAGES = (
 )
 
 
+def _metadata_runtime_object_ids(state: Dict[str, Any]) -> List[int]:
+    return sorted({
+        int(item.get(object_key) or 0)
+        for result_key, object_key in (
+            ("bronze_generation_results", "ingestion_object_id"),
+            ("silver_generation_results", "silver_ingestion_object_id"),
+            ("gold_generation_results", "gold_ingestion_object_id"),
+        )
+        for item in state.get(result_key) or []
+        if isinstance(item, dict)
+        and item.get("metadata_activation_status") == "ACTIVE"
+        and int(item.get(object_key) or 0) > 0
+    })
+
+
+def _execute_metadata_setup(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute the reviewed DDL and deploy missing runtime config versions."""
+    from services.metadata_contracts import file_sha256, split_sql_statements
+    from services.metadata_repository import metadata_repository_for_target
+    from services.metadata_selection import validated_metadata_selection
+    from services.source_connection_validation import validate_deployment_database_binding
+    from utilis.generated_code_paths import resolve_generated_artifact_uri
+
+    artifact = state.get("metadata_ddl_artifact") or {}
+    if not artifact:
+        # ponytail: in-flight generation_first_v1 runs created before this stage
+        # get one execution-boundary migration path; new runs always generate it
+        # before Bronze and persist the same artifact contract.
+        state = _run_database_metadata_ddl_stage(state)
+        artifact = state.get("metadata_ddl_artifact") or {}
+    artifact_uri = str(artifact.get("artifact_uri") or "")
+    artifact_path = resolve_generated_artifact_uri(artifact_uri)
+    if file_sha256(artifact_path) != str(artifact.get("artifact_hash") or ""):
+        raise RuntimeError("Metadata DDL artifact failed its SHA-256 verification.")
+
+    platform = str(state.get("target_warehouse") or "").strip().lower()
+    environment = str(state.get("target_environment") or "").strip()
+    repository = metadata_repository_for_target(platform=platform, environment=environment)
+    running_state = {
+        **state,
+        "status": "RUNNING",
+        "background_stage": "metadata_setup_execution",
+        "next_stage_key": "metadata_setup_execution",
+        "next_stage_label": "Metadata Setup Execution",
+        "metadata_setup_execution_status": "RUNNING",
+        "resume_message": "Creating and validating target metadata before layer execution.",
+    }
+    save_checkpoint_state_timed(
+        str(state.get("run_id") or ""), running_state, context="metadata_setup_execution:running"
+    )
+
+    for statement in split_sql_statements(artifact_path.read_text(encoding="utf-8")):
+        repository.execute(statement)
+    repository.preflight()
+
+    design = validated_metadata_selection(state)
+    if not design:
+        raise ValueError("Metadata setup requires an application design metadata selection.")
+    object_ids = _metadata_runtime_object_ids(state)
+    if not object_ids:
+        raise RuntimeError("Metadata setup found no approved active ingestion objects.")
+    active_objects = list(design.repository.get_active_ingestion_objects(object_ids).values())
+    draft_references = []
+    for obj in active_objects:
+        try:
+            design_version = int(json.loads(str(obj.get("execution_spec_json") or "{}"))["design_config_version"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("An active execution specification is missing its pinned design version.") from exc
+        draft_references.append({
+            "ingestion_object_id": int(obj["ingestion_object_id"]),
+            "config_version": design_version,
+        })
+    pinned_drafts = design.repository.get_ingestion_objects(
+        draft_references, require_active=False
+    )
+    # Runtime mappings pin the design row; execution pins the active artifact row.
+    objects_by_version = {
+        (int(obj["ingestion_object_id"]), int(obj["config_version"])): obj
+        for obj in [*active_objects, *pinned_drafts.values()]
+    }
+    objects = list(objects_by_version.values())
+    id_parameters = {f"object_id_{index}": object_id for index, object_id in enumerate(object_ids)}
+    mappings = design.repository.query(
+        f"SELECT * FROM {design.repository.table('cfg_mapping')} "
+        "WHERE active_flag = :active_flag AND is_current = :is_current AND ingestion_object_id IN ("
+        + ", ".join(f":object_id_{index}" for index in range(len(object_ids)))
+        + ")",
+        {**id_parameters, "active_flag": True, "is_current": True},
+    )
+    if not mappings:
+        raise RuntimeError("Metadata setup found no approved active mapping rows.")
+
+    with repository.unit_of_work():
+        repository.upsert_source_system(design.source_system)
+        connection = repository.upsert_connection_draft(design.connection)
+        repository.validate_and_activate_connection(
+            int(connection["connection_id"]),
+            int(connection["config_version"]),
+            lambda payload: validate_deployment_database_binding(payload, target_platform=platform),
+        )
+        repository.deploy_configuration_snapshot(
+            ingestion_objects=objects,
+            mappings=mappings,
+        )
+
+    completed_state = {
+        **running_state,
+        "background_stage": None,
+        "last_completed_stage_key": "metadata_setup_execution",
+        "last_completed_stage_label": "Metadata Setup Execution",
+        "next_stage_key": "bronze_code_execution" if platform != "snowflake" or not snowflake_dbt_enabled(state) else "gold_code_execution",
+        "next_stage_label": "Bronze Target Execution" if platform != "snowflake" or not snowflake_dbt_enabled(state) else "Code Execution",
+        "metadata_setup_execution_status": "COMPLETED",
+        "metadata_setup_artifact_hash": str(artifact["artifact_hash"]),
+        "resume_message": "Target metadata is ready. Starting approved layer execution.",
+    }
+    save_checkpoint_state_timed(
+        str(state.get("run_id") or ""), completed_state, context="metadata_setup_execution:complete"
+    )
+    return completed_state
+
+
 def _enqueue_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
     from services.metadata_contracts import canonical_json_hash
-    from services.metadata_selection import validated_metadata_selection
+    from services.metadata_selection import validated_target_metadata_selection
 
-    selection = validated_metadata_selection(state)
+    selection = validated_target_metadata_selection(state)
     if not selection:
         raise ValueError("Metadata runtime queueing requires a valid target selection.")
     requested_by = str(state.get("requested_by") or state.get("user_email") or "design-pipeline")
@@ -5389,11 +5774,94 @@ def _enqueue_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
     return queued_state
 
 
+def _metadata_native_progress_state(
+    state: Dict[str, Any], completed: List[Dict[str, Any]]
+) -> tuple[Dict[str, Any], bool]:
+    """Project child runtime outcomes onto the design run watched by the UI."""
+    layer_specs = (
+        ("bronze", "bronze_generation_results", "ingestion_object_id"),
+        ("silver", "silver_generation_results", "silver_ingestion_object_id"),
+        ("gold", "gold_generation_results", "gold_ingestion_object_id"),
+    )
+    successful_ids = {
+        int(item.get("ingestion_object_id") or 0)
+        for item in completed
+        if str(item.get("status") or "").upper() in {"SUCCESS", "RECOVERED_SUCCESS"}
+    }
+    expected_by_layer = {
+        layer: {
+            int(item.get(object_key) or 0)
+            for item in state.get(result_key) or []
+            if isinstance(item, dict)
+            and item.get("metadata_activation_status") == "ACTIVE"
+            and int(item.get(object_key) or 0) > 0
+        }
+        for layer, result_key, object_key in layer_specs
+    }
+    completion = {
+        layer: not expected or expected.issubset(successful_ids)
+        for layer, expected in expected_by_layer.items()
+    }
+    active_layer = next(
+        (layer for layer, _result_key, _object_key in layer_specs if not completion[layer]),
+        None,
+    )
+    if active_layer is None:
+        return {**state, "metadata_runtime_results": list(completed)}, True
+
+    labels = {
+        "bronze": "Bronze Target Execution",
+        "silver": "Silver Target Execution",
+        "gold": "Gold Target Execution",
+    }
+    updated = {**state, "status": "RUNNING", "metadata_runtime_results": list(completed)}
+    last_completed_layer = None
+    for layer, _result_key, _object_key in layer_specs:
+        if layer == active_layer:
+            break
+        if expected_by_layer[layer] and completion[layer]:
+            last_completed_layer = layer
+    for layer, _result_key, _object_key in layer_specs:
+        expected = expected_by_layer[layer]
+        completed_count = len(expected & successful_ids)
+        status = "COMPLETED" if completion[layer] else "RUNNING" if layer == active_layer else "PENDING"
+        progress = {
+            "platform": "snowflake",
+            "layer": layer,
+            "stage_key": f"{layer}_code_execution",
+            "status": status,
+            "total_count": len(expected),
+            "completed_count": completed_count,
+            "message": f"Snowflake {layer.capitalize()} target execution: {completed_count}/{len(expected)} completed.",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        updated[f"snowflake_{layer}_execution_status"] = status
+        updated[f"snowflake_{layer}_execution_progress"] = progress
+    active_progress = updated[f"snowflake_{active_layer}_execution_progress"]
+    updated.update(
+        {
+            "background_stage": f"{active_layer}_code_execution",
+            "external_execution": active_progress,
+            "next_stage_key": f"{active_layer}_code_execution",
+            "next_stage_label": labels[active_layer],
+            "resume_message": active_progress["message"],
+        }
+    )
+    if last_completed_layer:
+        updated.update(
+            {
+                "last_completed_stage_key": f"{last_completed_layer}_code_execution",
+                "last_completed_stage_label": labels[last_completed_layer],
+            }
+        )
+    return updated, False
+
+
 def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, Any]:
     from services.metadata_runtime_worker import process_metadata_work_batch, process_next_metadata_work
-    from services.metadata_selection import validated_metadata_selection
+    from services.metadata_selection import validated_target_metadata_selection
 
-    selection = validated_metadata_selection(state)
+    selection = validated_target_metadata_selection(state)
     if not selection:
         raise ValueError("Metadata runtime execution requires a valid target selection.")
     logical_ids = {
@@ -5407,9 +5875,11 @@ def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, 
     worker_id = f"design:{state.get('run_id')}:{uuid.uuid4()}"
     completed: List[Dict[str, Any]] = []
     progress_state = dict(state)
+    target = str(state.get("target_warehouse") or "").lower()
 
     while True:
-        if str(state.get("target_warehouse") or "").lower() == "databricks":
+        worker_error: Optional[BaseException] = None
+        if target == "databricks":
             batch = process_metadata_work_batch(
                 selection.repository,
                 worker_id=worker_id,
@@ -5423,14 +5893,35 @@ def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, 
             progress_state.pop("metadata_runtime_context", None)
             outcomes = batch.get("outcomes") or []
         else:
-            outcome = process_next_metadata_work(
-                selection.repository,
-                worker_id=worker_id,
-                logical_work_id=logical_work_id,
-            )
-            if outcome is None:
+            try:
+                worker_count = max(
+                    1,
+                    min(8, int(os.getenv("ATHENA_SNOWFLAKE_NATIVE_WORKERS", "4"))),
+                )
+            except ValueError:
+                worker_count = 4
+            # ponytail: queue claims remain atomic and per-object; only independent ready work runs concurrently.
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [
+                    executor.submit(
+                        process_next_metadata_work,
+                        selection.repository,
+                        worker_id=f"{worker_id}:{index}",
+                        logical_work_id=logical_work_id,
+                    )
+                    for index in range(worker_count)
+                ]
+                outcomes = []
+                for future in futures:
+                    try:
+                        outcome = future.result()
+                    except BaseException as exc:
+                        worker_error = worker_error or exc
+                    else:
+                        if outcome is not None:
+                            outcomes.append(outcome)
+            if not outcomes and not worker_error:
                 break
-            outcomes = [outcome]
         for outcome in outcomes:
             queue_item = outcome.get("queue") or {}
             runtime_run = outcome.get("run") or {}
@@ -5440,6 +5931,31 @@ def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, 
                 "runtime_run_id": runtime_run.get("run_id"),
                 "status": outcome.get("status"),
             })
+        if target == "snowflake":
+            if worker_error:
+                # Project durable queue successes before surfacing a downstream
+                # validation failure; the UI must not retain an older 4/7 view.
+                completed = [
+                    {
+                        "queue_id": item.get("queue_id"),
+                        "ingestion_object_id": item.get("ingestion_object_id"),
+                        "runtime_run_id": item.get("run_id"),
+                        "status": "SUCCESS",
+                    }
+                    for item in selection.repository.queue_items_for_logical_work(logical_work_id)
+                    if str(item.get("queue_status") or "").upper() == "SUCCESS"
+                ]
+            progress_state, execution_complete = _metadata_native_progress_state(
+                progress_state, completed
+            )
+            if not execution_complete or worker_error:
+                save_checkpoint_state_timed(
+                    str(state.get("run_id") or ""),
+                    progress_state,
+                    context="metadata_runtime:progress",
+                )
+        if worker_error:
+            raise worker_error
 
     queue_items = selection.repository.queue_items_for_logical_work(logical_work_id)
     expected_object_ids = {
@@ -5475,7 +5991,6 @@ def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, 
             "Metadata target execution did not reach a terminal success state for every active artifact."
         )
 
-    target = str(state.get("target_warehouse") or "").lower()
     final_state = {
         **progress_state,
         "status": "PIPELINE_COMPLETED",
@@ -5559,17 +6074,38 @@ def execute_database_native_layers(
 ) -> Dict[str, Any]:
     working_state = dict(state or load_checkpoint_state(run_id) or {"run_id": run_id})
     working_state["run_id"] = run_id
-    if any(
-        isinstance(item, dict) and item.get("gold_ingestion_object_id") is not None
-        for item in working_state.get("gold_generation_results") or []
-    ):
-        return _execute_queued_metadata_native_runtime(
-            _enqueue_metadata_native_runtime(working_state)
-        )
     validation_errors = _database_native_execution_validation_errors(working_state)
     if validation_errors:
         raise RuntimeError(
             "Database target execution is not ready: " + "; ".join(validation_errors) + "."
+        )
+    metadata_runtime = bool(
+        working_state.get("source_system_id") is not None
+        and _metadata_runtime_object_ids(working_state)
+    )
+    if metadata_runtime:
+        if revised_metadata_database_flow(working_state):
+            try:
+                working_state = _execute_metadata_setup(working_state)
+            except Exception as exc:
+                failed_state = {
+                    **working_state,
+                    "status": "FAILED",
+                    "execution_ready": True,
+                    "background_stage": "metadata_setup_execution",
+                    "failed_background_stage": "metadata_setup_execution",
+                    "next_stage_key": "metadata_setup_execution",
+                    "next_stage_label": "Metadata Setup Execution",
+                    "metadata_setup_execution_status": "FAILED",
+                    "error": str(exc),
+                    "resume_message": "Target metadata setup failed. Retry safely reuses the verified DDL and existing configuration versions.",
+                }
+                save_checkpoint_state_timed(
+                    run_id, failed_state, context="metadata_setup_execution:failed"
+                )
+                raise
+        return _execute_queued_metadata_native_runtime(
+            _enqueue_metadata_native_runtime(working_state)
         )
 
     target_warehouse = str(working_state.get("target_warehouse") or "").lower()
@@ -5742,7 +6278,192 @@ def _database_dbt_execution_validation_errors(state: Dict[str, Any]) -> List[str
         errors.append("finalized Snowflake dbt project is missing")
     if not str(state.get("snowflake_dbt_artifact_set_hash") or "").strip():
         errors.append("finalized Snowflake dbt project hash is missing")
+    if state.get("source_system_id") is not None:
+        package_hash = str(state.get("snowflake_dbt_artifact_set_hash") or "")
+        for layer in ("bronze", "silver", "gold"):
+            artifacts = [
+                item for item in state.get(f"{layer}_generation_results") or []
+                if isinstance(item, dict)
+            ]
+            if any(
+                item.get("metadata_activation_status") != "ACTIVE"
+                or str((item.get("execution_spec") or {}).get("engine") or "").upper() != "SNOWFLAKE_DBT"
+                or str((item.get("execution_spec") or {}).get("dbt_package_hash") or "") != package_hash
+                for item in artifacts
+            ):
+                errors.append(f"{layer.capitalize()} dbt metadata is not active for the finalized package")
     return errors
+
+
+def _start_snowflake_dbt_control_attempt(
+    state: Dict[str, Any], *, _selection: Any = None
+) -> Optional[Dict[str, Any]]:
+    """Create one fenced control attempt for the already-finalized dbt package."""
+    if state.get("source_system_id") is None:
+        return None
+    from services.metadata_contracts import canonical_json_hash
+    from services.metadata_selection import validated_target_metadata_selection
+
+    if (
+        _selection is None
+        and str(state.get("target_warehouse") or "").strip()
+        and revised_metadata_database_flow(state)
+        and str(state.get("metadata_setup_execution_status") or "").upper() != "COMPLETED"
+    ):
+        state = _execute_metadata_setup(state)
+    selection = _selection or validated_target_metadata_selection(state)
+    if not selection:
+        raise ValueError("Snowflake dbt execution requires a valid metadata selection.")
+    if _selection is None and callable(getattr(selection.repository, "unit_of_work", None)):
+        with selection.repository.unit_of_work():
+            return _start_snowflake_dbt_control_attempt(state, _selection=selection)
+    gold_ids = sorted({
+        int(item.get("gold_ingestion_object_id") or 0)
+        for item in state.get("gold_generation_results") or []
+        if isinstance(item, dict)
+        and item.get("metadata_activation_status") == "ACTIVE"
+        and int(item.get("gold_ingestion_object_id") or 0) > 0
+    })
+    if not gold_ids:
+        raise RuntimeError("Snowflake dbt execution has no active Gold metadata object.")
+    package_object_ids = sorted({
+        int(item.get(object_key) or 0)
+        for layer, object_key in (
+            ("bronze", "ingestion_object_id"),
+            ("silver", "silver_ingestion_object_id"),
+            ("gold", "gold_ingestion_object_id"),
+        )
+        for item in state.get(f"{layer}_generation_results") or []
+        if isinstance(item, dict)
+        and item.get("metadata_activation_status") == "ACTIVE"
+        and int(item.get(object_key) or 0) > 0
+    })
+    package_hash = str(state.get("snowflake_dbt_artifact_set_hash") or "")
+    logical_work_id = canonical_json_hash({
+        "design_run_id": str(state.get("run_id") or ""),
+        "target_platform": "snowflake",
+        "execution_engine": "dbt",
+        "package_hash": package_hash,
+    })
+    queue_item = selection.repository.enqueue_work(
+        ingestion_object_id=gold_ids[0],
+        trigger_type="MANUAL",
+        work_scope={
+            "design_run_id": str(state.get("run_id") or ""),
+            "execution_unit": "SNOWFLAKE_DBT_PROJECT",
+            "package_hash": package_hash,
+            "ingestion_object_ids": package_object_ids,
+        },
+        requested_by=str(state.get("requested_by") or state.get("user_email") or "design-pipeline"),
+        priority=100,
+        logical_work_id=logical_work_id,
+    )
+    if str(queue_item.get("queue_status") or "").upper() == "SUCCESS":
+        return {"repository": selection.repository, "queue": queue_item, "completed": True}
+
+    worker_id = f"dbt:{state.get('run_id')}:{uuid.uuid4()}"
+    lease_seconds = max(300, int(state.get("dbt_command_timeout_secs") or 900) + 300)
+    claimed = selection.repository.claim_next_queue_item(
+        worker_id=worker_id,
+        lease_seconds=lease_seconds,
+        logical_work_id=logical_work_id,
+    )
+    if not claimed:
+        raise RuntimeError("The Snowflake dbt package is already claimed or is waiting for its retry window.")
+    context = selection.repository.create_run_attempt(
+        claimed, pipeline_name="snowflake_dbt", worker_id=worker_id
+    )
+    if not context.get("metadata_snapshot_matches", True):
+        raise RuntimeError("The Snowflake dbt queue snapshot no longer matches active metadata.")
+    return {
+        "repository": selection.repository,
+        "queue": claimed,
+        "run": context["run"],
+        "worker_id": worker_id,
+        "lease_seconds": lease_seconds,
+        "attempt_number": int(claimed.get("attempt_count") or 0),
+        "error_stage": "READ",
+        "completed": False,
+    }
+
+
+def _finish_snowflake_dbt_control_attempt(
+    control: Optional[Dict[str, Any]], state: Dict[str, Any], *, _within_unit: bool = False
+) -> None:
+    if not control or control.get("completed"):
+        return
+    repository = control["repository"]
+    if not _within_unit and callable(getattr(repository, "unit_of_work", None)):
+        with repository.unit_of_work():
+            return _finish_snowflake_dbt_control_attempt(
+                control, state, _within_unit=True
+            )
+    queue_item = control["queue"]
+    run = control["run"]
+    worker_id = control["worker_id"]
+    receipt = state.get("snowflake_dbt_execution") or {}
+    if str(receipt.get("status") or "").upper() != "COMPLETED":
+        raise RuntimeError("Snowflake dbt did not produce a completed execution receipt.")
+    package_hash = str(state.get("snowflake_dbt_artifact_set_hash") or "")
+    repository.update_run_phase(
+        str(run["run_id"]),
+        "TARGET_WRITTEN",
+        queue_id=int(queue_item["queue_id"]),
+        worker_id=worker_id,
+        target_write_id=f"dbt:{package_hash}",
+        target_commit_status="COMMITTED",
+        validation_status="PASSED",
+        validation_summary_json=json.dumps(
+            {
+                "execution_unit": "SNOWFLAKE_DBT_PROJECT",
+                "package_hash": package_hash,
+                "receipt_status": "COMPLETED",
+                "model_count": state.get("snowflake_dbt_model_count"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        watermark_commit_status="SKIPPED",
+    )
+    repository.begin_queue_finalization(
+        queue_id=int(queue_item["queue_id"]), worker_id=worker_id
+    )
+    repository.finalize_successful_run(
+        run_id=str(run["run_id"]),
+        queue_id=int(queue_item["queue_id"]),
+        worker_id=worker_id,
+    )
+
+
+def _fail_snowflake_dbt_control_attempt(
+    control: Optional[Dict[str, Any]], error: BaseException, *, _within_unit: bool = False
+) -> None:
+    if not control or control.get("completed") or not control.get("run"):
+        return
+    retryable = isinstance(error, (ConnectionError, TimeoutError)) or type(error).__name__ in {
+        "OperationalError", "InterfaceError"
+    }
+    repository = control["repository"]
+    if not _within_unit and callable(getattr(repository, "unit_of_work", None)):
+        with repository.unit_of_work():
+            return _fail_snowflake_dbt_control_attempt(
+                control, error, _within_unit=True
+            )
+    run = control["run"]
+    repository.record_run_error(
+        run=run,
+        error_stage=str(control.get("error_stage") or "WRITE"),
+        error=error,
+        retryable=retryable,
+        detail={"execution_unit": "SNOWFLAKE_DBT_PROJECT"},
+        worker_id=control["worker_id"],
+    )
+    repository.finalize_failed_run(
+        run=run,
+        worker_id=control["worker_id"],
+        retryable=retryable,
+        message=str(error),
+    )
 
 
 def build_run_report(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -5901,6 +6622,33 @@ def execute_generation_first_snowflake_dbt(
             "Snowflake dbt deployment is not ready: " + "; ".join(validation_errors) + "."
         )
 
+    if (
+        working_state.get("source_system_id") is not None
+        and revised_metadata_database_flow(working_state)
+    ):
+        try:
+            working_state = _execute_metadata_setup(working_state)
+        except Exception as exc:
+            failed_state = {
+                **working_state,
+                "status": "FAILED",
+                "execution_ready": True,
+                "background_stage": "metadata_setup_execution",
+                "failed_background_stage": "metadata_setup_execution",
+                "next_stage_key": "metadata_setup_execution",
+                "next_stage_label": "Metadata Setup Execution",
+                "metadata_setup_execution_status": "FAILED",
+                "error": str(exc),
+                "resume_message": (
+                    "Target metadata setup failed. Retry safely reuses the verified DDL "
+                    "and existing configuration versions."
+                ),
+            }
+            save_checkpoint_state_timed(
+                run_id, failed_state, context="metadata_setup_execution:failed"
+            )
+            raise
+
     stage_key = "gold_code_execution"
     execution_state = {
         **working_state,
@@ -5917,7 +6665,9 @@ def execute_generation_first_snowflake_dbt(
     }
     save_checkpoint_state_timed(run_id, execution_state, context="snowflake_dbt_deployment:running")
 
+    control: Optional[Dict[str, Any]] = None
     try:
+        control = _start_snowflake_dbt_control_attempt(execution_state)
         if str(execution_state.get("snowflake_bronze_source_load_status") or "").upper() != "COMPLETED":
             from services.snowflake_bronze_runtime import run_snowflake_bronze_scripts
 
@@ -5940,7 +6690,26 @@ def execute_generation_first_snowflake_dbt(
             )
             save_checkpoint_state_timed(run_id, working_state, context="snowflake_dbt_source_landing:complete")
 
+        if control and not control.get("completed"):
+            control["error_stage"] = "WRITE"
+            if int(control.get("attempt_number") or 0) > 1:
+                # ponytail: full-load dbt models are idempotent, so a fenced retry may replace a failed receipt.
+                working_state["force_dbt_deploy"] = True
+            control["repository"].heartbeat_queue_item(
+                queue_id=int(control["queue"]["queue_id"]),
+                worker_id=control["worker_id"],
+                lease_seconds=int(control["lease_seconds"]),
+            )
+            control["repository"].update_run_phase(
+                str(control["run"]["run_id"]),
+                "TARGET_SUBMITTED",
+                queue_id=int(control["queue"]["queue_id"]),
+                worker_id=control["worker_id"],
+                target_write_id=f"dbt:{working_state.get('snowflake_dbt_artifact_set_hash')}",
+                target_commit_status="SUBMITTED",
+            )
         deployed_state = execute_finalized_snowflake_dbt_project(working_state)
+        _finish_snowflake_dbt_control_attempt(control, deployed_state)
         working_state = {
             **working_state,
             **deployed_state,
@@ -5998,6 +6767,13 @@ def execute_generation_first_snowflake_dbt(
         save_checkpoint_state_timed(run_id, working_state, context="report_generation:complete")
         return working_state
     except Exception as exc:
+        try:
+            _fail_snowflake_dbt_control_attempt(control, exc)
+        except Exception:
+            logger.exception(
+                "Snowflake dbt control finalization failed",
+                extra={"run_id": run_id, "stage": "gold_execution"},
+            )
         latest_checkpoint = load_checkpoint_state(run_id) or {}
         failed_state = {
             **execution_state,
@@ -6040,12 +6816,17 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
         "error": None,
     }
 
+    metadata_gold = False
     if decision == "APPROVED":
         final_state["gold_generation_results"] = _filter_gold_results_by_review(
             [item for item in final_state.get("gold_generation_results") or [] if isinstance(item, dict)],
             final_state["gold_review_artifact"],
         )
-        if any(item.get("gold_ingestion_object_id") is not None for item in final_state["gold_generation_results"]):
+        metadata_gold = any(
+            item.get("gold_ingestion_object_id") is not None
+            for item in final_state["gold_generation_results"]
+        )
+        if metadata_gold and not snowflake_dbt_enabled(final_state):
             final_state = _activate_reviewed_gold_metadata(_attach_gold_execution_specs(final_state))
 
     if decision == "REJECTED":
@@ -6068,6 +6849,9 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
         save_checkpoint_state(run_id, generation_state)
         try:
             final_state = finalize_snowflake_dbt_project(generation_state)
+            if metadata_gold:
+                final_state = _attach_gold_execution_specs(final_state)
+                final_state = _activate_finalized_snowflake_dbt_metadata(final_state)
         except Exception as exc:
             failed_state = {
                 **generation_state,
@@ -6105,16 +6889,16 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
                     "last_completed_stage_key": "gold_review",
                     "last_completed_stage_label": "Gold Code Review",
                     "next_stage_key": "gold_code_execution",
-                    "next_stage_label": "Code Execution",
-                    "resume_message": "All dbt models are reviewed and frozen. Start deployment and build when ready.",
+                    "next_stage_label": "Metadata Setup Execution",
+                    "resume_message": "All dbt models are reviewed and frozen. Start target metadata setup and deployment when ready.",
                     "stage_confirmation": {
                         "enabled": True,
                         "awaiting_confirmation": True,
                         "last_completed_stage_key": "gold_review",
                         "last_completed_stage_label": "Gold Code Review",
                         "next_stage_key": "gold_code_execution",
-                        "next_stage_label": "Code Execution",
-                        "resume_message": "All dbt models are reviewed and frozen. Start deployment and build when ready.",
+                        "next_stage_label": "Metadata Setup Execution",
+                        "resume_message": "All dbt models are reviewed and frozen. Start target metadata setup and deployment when ready.",
                     },
                 }
             )
@@ -6177,16 +6961,16 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
                 "last_completed_stage_key": "gold_review",
                 "last_completed_stage_label": "Gold Code Review",
                 "next_stage_key": "bronze_code_execution",
-                "next_stage_label": "Bronze Target Execution",
-                "resume_message": "All generated code is approved. Start target execution when ready.",
+                "next_stage_label": "Metadata Setup Execution",
+                "resume_message": "All generated code is approved. Start target metadata setup and execution when ready.",
                 "stage_confirmation": {
                     "enabled": True,
                     "awaiting_confirmation": True,
                     "last_completed_stage_key": "gold_review",
                     "last_completed_stage_label": "Gold Code Review",
                     "next_stage_key": "bronze_code_execution",
-                    "next_stage_label": "Bronze Target Execution",
-                    "resume_message": "All generated code is approved. Start target execution when ready.",
+                    "next_stage_label": "Metadata Setup Execution",
+                    "resume_message": "All generated code is approved. Start target metadata setup and execution when ready.",
                 },
             }
         )

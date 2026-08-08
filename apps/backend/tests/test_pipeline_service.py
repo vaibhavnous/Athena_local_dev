@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import uuid
@@ -11,6 +12,81 @@ from fastapi import HTTPException
 from api.models import PipelineRunRequest
 from api.services import pipeline_service
 from services import pipeline_runtime
+
+
+def test_metadata_setup_is_the_first_target_access_and_deploys_approved_snapshot(monkeypatch):
+    from types import SimpleNamespace
+    from services import metadata_contracts, metadata_repository, metadata_selection
+    from utilis import generated_code_paths
+
+    calls = []
+
+    class TargetRepository:
+        def execute(self, sql):
+            calls.append(("ddl", sql))
+
+        def preflight(self):
+            calls.append(("preflight", None))
+
+        def unit_of_work(self):
+            return nullcontext(self)
+
+        def upsert_source_system(self, payload):
+            calls.append(("source", payload["source_system_id"]))
+
+        def upsert_connection_draft(self, payload):
+            calls.append(("connection", payload["connection_id"]))
+            return payload
+
+        def validate_and_activate_connection(self, connection_id, config_version, validator):
+            calls.append(("activate_connection", (connection_id, config_version)))
+
+        def deploy_configuration_snapshot(self, *, ingestion_objects, mappings):
+            calls.append(("deploy", (len(ingestion_objects), len(mappings))))
+
+    class DesignRepository:
+        def get_active_ingestion_objects(self, object_ids):
+            return {object_id: {"ingestion_object_id": object_id} for object_id in object_ids}
+
+        def table(self, name):
+            return name
+
+        def query(self, _sql, _parameters):
+            return [{"mapping_id": 1, "ingestion_object_id": 101}]
+
+    artifact_path = Path(__file__)
+    monkeypatch.setattr(metadata_repository, "metadata_repository_for_target", lambda **_: TargetRepository())
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(
+            repository=DesignRepository(),
+            source_system={"source_system_id": 7},
+            connection={"connection_id": 11, "config_version": 1},
+        ),
+    )
+    monkeypatch.setattr(generated_code_paths, "resolve_generated_artifact_uri", lambda _uri: artifact_path)
+    monkeypatch.setattr(metadata_contracts, "file_sha256", lambda _path: "artifact-hash")
+    monkeypatch.setattr(metadata_contracts, "split_sql_statements", lambda _sql: ["CREATE SCHEMA", "CREATE TABLE"])
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+
+    result = pipeline_runtime._execute_metadata_setup({
+        "run_id": "design-run",
+        "target_warehouse": "databricks",
+        "target_environment": "qa",
+        "metadata_ddl_artifact": {
+            "artifact_uri": "generated-code://metadata.sql",
+            "artifact_hash": "artifact-hash",
+        },
+        "bronze_generation_results": [{
+            "ingestion_object_id": 101,
+            "metadata_activation_status": "ACTIVE",
+        }],
+    })
+
+    assert [name for name, _ in calls[:3]] == ["ddl", "ddl", "preflight"]
+    assert calls[-1] == ("deploy", (1, 1))
+    assert result["metadata_setup_execution_status"] == "COMPLETED"
 
 
 def test_pipeline_request_preserves_bigint_metadata_ids_from_json_strings():
@@ -24,6 +100,19 @@ def test_pipeline_request_preserves_bigint_metadata_ids_from_json_strings():
 
     assert payload.source_system_id == 7499026347042686646
     assert payload.source_connection_id == 3358264270364792816
+
+
+def test_resume_payload_preserves_the_application_source_profile():
+    payload = pipeline_service.seed_payload_from_checkpoint({
+        "brd_text": "claims requirements",
+        "source_system_id": 7499026347042686646,
+        "source_connection_id": 3358264270364792816,
+        "source_profile": "insurance_azure_sql",
+        "target_warehouse": "databricks",
+        "target_environment": "qa",
+    })
+
+    assert payload.source_profile == "insurance_azure_sql"
 
 
 def test_validate_pipeline_result_rejects_non_dict():
@@ -46,6 +135,20 @@ def test_next_status_derives_database_and_file_source_defaults():
     assert pipeline_service._next_status(None, pending_gate1=True, file_source=False) == "HITL_WAIT"
     assert pipeline_service._next_status(None, pending_gate1=False, file_source=True) == "COMPLETED"
     assert pipeline_service._next_status("done", pending_gate1=False, file_source=True) == "done"
+
+
+def test_revised_flow_version_preserves_generation_first_v1_compatibility():
+    base = {"source": "database", "target_warehouse": "databricks"}
+
+    assert pipeline_runtime.generation_first_database_flow(
+        {**base, "database_flow_version": "generation_first_v1"}
+    )
+    assert not pipeline_runtime.revised_metadata_database_flow(
+        {**base, "database_flow_version": "generation_first_v1"}
+    )
+    assert pipeline_runtime.revised_metadata_database_flow(
+        {**base, "database_flow_version": "generation_first_v2"}
+    )
 
 
 def _generation_first_state(target: str = "databricks"):
@@ -111,7 +214,7 @@ def test_generation_first_gold_review_pauses_at_start_execution(monkeypatch):
     assert result["last_completed_stage_key"] == "gold_review"
     assert result["next_stage_key"] == "bronze_code_execution"
     assert result["execution_ready"] is True
-    assert result["stage_confirmation"]["next_stage_label"] == "Bronze Target Execution"
+    assert result["stage_confirmation"]["next_stage_label"] == "Metadata Setup Execution"
     assert result["failed_background_stage"] is None
     assert result["error"] is None
     assert not result.get("databricks_bronze_execution_status")
@@ -1253,7 +1356,7 @@ def test_metadata_native_execution_confirmation_enqueues_only_bronze_roots(monke
                 "logical_work_id": kwargs["logical_work_id"],
             }
 
-    monkeypatch.setattr(metadata_selection, "validated_metadata_selection", lambda _state: SimpleNamespace(repository=Repository()))
+    monkeypatch.setattr(metadata_selection, "validated_target_metadata_selection", lambda _state: SimpleNamespace(repository=Repository()))
     monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
     state = {
         "run_id": "design-run",
@@ -1308,7 +1411,7 @@ def test_metadata_native_execution_is_drained_by_application_worker(monkeypatch)
     monkeypatch.setattr(metadata_runtime_worker, "process_metadata_work_batch", process)
     monkeypatch.setattr(
         metadata_selection,
-        "validated_metadata_selection",
+        "validated_target_metadata_selection",
         lambda _state: SimpleNamespace(repository=Repository()),
     )
     monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
@@ -1329,6 +1432,149 @@ def test_metadata_native_execution_is_drained_by_application_worker(monkeypatch)
     assert all(call["logical_work_id"] == logical_work_id for call in calls)
 
 
+def test_snowflake_native_execution_uses_bounded_parallel_workers(monkeypatch) -> None:
+    import threading
+    from types import SimpleNamespace
+    from services import metadata_runtime_worker, metadata_selection
+
+    logical_work_id = "logical-snowflake-run"
+    barrier = threading.Barrier(4)
+    worker_ids = []
+
+    class Repository:
+        def queue_items_for_logical_work(self, _value):
+            return [{"queue_id": 1, "ingestion_object_id": 101, "queue_status": "SUCCESS"}]
+
+    def process(_repository, **kwargs):
+        worker_ids.append(kwargs["worker_id"])
+        barrier.wait(timeout=2)
+        return None
+
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_NATIVE_WORKERS", "4")
+    monkeypatch.setattr(metadata_runtime_worker, "process_next_metadata_work", process)
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_target_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+    state = {
+        "run_id": "design-snowflake",
+        "target_warehouse": "snowflake",
+        "metadata_runtime_queue": [{"logical_work_id": logical_work_id}],
+        "bronze_generation_results": [
+            {"ingestion_object_id": 101, "metadata_activation_status": "ACTIVE"}
+        ],
+    }
+
+    result = pipeline_runtime._execute_queued_metadata_native_runtime(state)
+
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert len(worker_ids) == 4
+    assert len(set(worker_ids)) == 4
+
+
+def test_snowflake_native_progress_advances_design_run_between_layers() -> None:
+    state = {
+        "run_id": "design-snowflake",
+        "target_warehouse": "snowflake",
+        "bronze_generation_results": [
+            {"ingestion_object_id": object_id, "metadata_activation_status": "ACTIVE"}
+            for object_id in (101, 102)
+        ],
+        "silver_generation_results": [
+            {"silver_ingestion_object_id": object_id, "metadata_activation_status": "ACTIVE"}
+            for object_id in (201, 202)
+        ],
+        "gold_generation_results": [
+            {"gold_ingestion_object_id": 301, "metadata_activation_status": "ACTIVE"}
+        ],
+    }
+    outcomes = [
+        {"ingestion_object_id": 101, "status": "SUCCESS"},
+        {"ingestion_object_id": 102, "status": "SUCCESS"},
+    ]
+
+    silver_state, complete = pipeline_runtime._metadata_native_progress_state(state, outcomes)
+
+    assert complete is False
+    assert silver_state["snowflake_bronze_execution_status"] == "COMPLETED"
+    assert silver_state["snowflake_silver_execution_status"] == "RUNNING"
+    assert silver_state["snowflake_gold_execution_status"] == "PENDING"
+    assert silver_state["background_stage"] == "silver_code_execution"
+
+    outcomes.extend(
+        [
+            {"ingestion_object_id": 201, "status": "SUCCESS"},
+            {"ingestion_object_id": 202, "status": "RECOVERED_SUCCESS"},
+        ]
+    )
+    gold_state, complete = pipeline_runtime._metadata_native_progress_state(
+        silver_state, outcomes
+    )
+
+    assert complete is False
+    assert gold_state["snowflake_silver_execution_status"] == "COMPLETED"
+    assert gold_state["snowflake_gold_execution_status"] == "RUNNING"
+    assert gold_state["background_stage"] == "gold_code_execution"
+
+
+def test_snowflake_native_execution_checkpoints_layer_transitions(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_runtime_worker, metadata_selection
+
+    logical_work_id = "logical-progress-run"
+    outcomes = [
+        {"queue": {"queue_id": 1, "ingestion_object_id": 101}, "run": {"run_id": "r1"}, "status": "SUCCESS"},
+        {"queue": {"queue_id": 2, "ingestion_object_id": 201}, "run": {"run_id": "r2"}, "status": "SUCCESS"},
+        {"queue": {"queue_id": 3, "ingestion_object_id": 301}, "run": {"run_id": "r3"}, "status": "SUCCESS"},
+        None,
+    ]
+    saved = []
+
+    class Repository:
+        def queue_items_for_logical_work(self, _value):
+            return [
+                {"queue_id": queue_id, "ingestion_object_id": object_id, "queue_status": "SUCCESS"}
+                for queue_id, object_id in ((1, 101), (2, 201), (3, 301))
+            ]
+
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_NATIVE_WORKERS", "1")
+    monkeypatch.setattr(
+        metadata_runtime_worker,
+        "process_next_metadata_work",
+        lambda *_args, **_kwargs: outcomes.pop(0),
+    )
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_target_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state_timed",
+        lambda _run_id, checkpoint, **kwargs: saved.append((dict(checkpoint), kwargs.get("context"))),
+    )
+    state = {
+        "run_id": "design-progress",
+        "target_warehouse": "snowflake",
+        "metadata_runtime_queue": [{"logical_work_id": logical_work_id}],
+        "bronze_generation_results": [{"ingestion_object_id": 101, "metadata_activation_status": "ACTIVE"}],
+        "silver_generation_results": [{"silver_ingestion_object_id": 201, "metadata_activation_status": "ACTIVE"}],
+        "gold_generation_results": [{"gold_ingestion_object_id": 301, "metadata_activation_status": "ACTIVE"}],
+    }
+
+    pipeline_runtime._execute_queued_metadata_native_runtime(state)
+
+    progress = [checkpoint for checkpoint, context in saved if context == "metadata_runtime:progress"]
+    assert [checkpoint["background_stage"] for checkpoint in progress] == [
+        "silver_code_execution",
+        "gold_code_execution",
+    ]
+    assert progress[0]["snowflake_bronze_execution_status"] == "COMPLETED"
+    assert progress[1]["snowflake_silver_execution_status"] == "COMPLETED"
+
+
 def test_metadata_native_execution_fails_closed_when_an_active_artifact_is_missing(monkeypatch) -> None:
     from types import SimpleNamespace
     from services import metadata_runtime_worker, metadata_selection
@@ -1340,7 +1586,7 @@ def test_metadata_native_execution_fails_closed_when_an_active_artifact_is_missi
     monkeypatch.setattr(metadata_runtime_worker, "process_metadata_work_batch", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         metadata_selection,
-        "validated_metadata_selection",
+        "validated_target_metadata_selection",
         lambda _state: SimpleNamespace(repository=Repository()),
     )
     state = {
@@ -3276,3 +3522,211 @@ def test_gate5_review_matches_table_only_approval_to_generated_silver_target():
     )
 
     assert [item["table"] for item in filtered_silver] == ["claim_payment_indemnity"]
+
+
+def test_finalized_snowflake_dbt_package_activates_each_metadata_layer(monkeypatch):
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    calls = []
+
+    class Repository:
+        def register_and_activate_artifacts(self, *, processing_stage, artifacts):
+            artifacts = list(artifacts)
+            calls.append((processing_stage, artifacts))
+            return [{
+                "ingestion_object": {
+                    "config_version": 20 + index,
+                    "config_hash": f"active-{processing_stage}-{index}",
+                },
+                "execution_spec": artifact["execution_spec"],
+            } for index, artifact in enumerate(artifacts)]
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_materialize_silver_to_gold_metadata",
+        lambda current: {
+            **current,
+            "gold_metadata_drafts": [{
+                "target_table": "INSURANCE.GOLD.fact_claims",
+                "gold_ingestion_object_id": 301,
+                "gold_ingestion_object_config_version": 3,
+                "silver_to_gold_mapping_version": 31,
+                "silver_to_gold_mapping_hash": "gold-map",
+            }],
+        },
+    )
+    monkeypatch.setattr(pipeline_runtime, "_attach_gold_execution_specs", lambda current: current)
+
+    def spec(mapping_version):
+        return {
+            "contract_version": "1.0",
+            "execution_mode": "GENERATED_ARTIFACT",
+            "target_platform": "SNOWFLAKE",
+            "engine": "SNOWFLAKE_DBT",
+            "artifact_uri": "generated-code://model.sql",
+            "entry_point": "model",
+            "artifact_hash": "sha256:" + "1" * 64,
+            "generator_version": "test",
+            "mapping_version": mapping_version,
+        }
+
+    state = {
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "snowflake_dbt_validation_status": "STATIC_VALIDATED",
+        "snowflake_dbt_artifact_set_hash": "a" * 64,
+        "snowflake_dbt_idempotency_key": "package-1",
+        "source_system_id": 7,
+        "bronze_generation_results": [{
+            "ingestion_object_id": 101, "ingestion_object_config_version": 1,
+            "mapping_version": 11, "mapping_hash": "bronze-map", "execution_spec": spec(11),
+        }],
+        "certified_tables": [{"ingestion_object_id": 101}],
+        "silver_generation_results": [{
+            "silver_ingestion_object_id": 201, "silver_ingestion_object_config_version": 2,
+            "bronze_to_silver_mapping_version": 21, "bronze_to_silver_mapping_hash": "silver-map",
+            "execution_spec": spec(21),
+        }],
+        "silver_transformation_objects": [{"ingestion_object_id": 201}],
+        "gold_generation_results": [{
+            "gold_ingestion_object_id": 301, "gold_ingestion_object_config_version": 3,
+            "silver_to_gold_mapping_version": 31, "silver_to_gold_mapping_hash": "gold-map",
+            "target_table": "INSURANCE.GOLD.fact_claims", "execution_spec": spec(31),
+        }],
+        "gold_transformation_objects": [{"ingestion_object_id": 301}],
+    }
+
+    result = pipeline_runtime._activate_finalized_snowflake_dbt_metadata(state)
+
+    assert [call[0] for call in calls] == [
+        "SOURCE_TO_BRONZE", "BRONZE_TO_SILVER", "SILVER_TO_GOLD"
+    ]
+    assert all(
+        item["metadata_activation_status"] == "ACTIVE"
+        for layer in ("bronze", "silver", "gold")
+        for item in result[f"{layer}_generation_results"]
+    )
+    assert all(
+        artifact["execution_spec"]["dbt_package_hash"] == "a" * 64
+        for _, artifacts in calls for artifact in artifacts
+    )
+
+
+def test_snowflake_dbt_gold_metadata_uses_exact_reviewed_silver_draft(monkeypatch):
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    silver = {
+        "ingestion_object_id": 201, "source_system_id": 7, "config_version": 2,
+        "config_hash": "silver-object", "processing_stage": "BRONZE_TO_SILVER",
+        "target_table": "INSURANCE.SILVER.silver_claims",
+    }
+    bundle = {
+        "mapping_version": 21, "mapping_hash": "silver-map",
+        "mappings": [{
+            "target_column_name": "claimid", "target_data_type": "NUMBER",
+            "is_primary_key": True, "is_nullable": False,
+        }],
+    }
+
+    class Repository:
+        def get_ingestion_objects(self, _refs, *, require_active):
+            assert require_active is False
+            return {(201, 2): silver}
+
+        def get_mapping_bundles(self, refs):
+            assert refs[0]["require_active"] is None
+            return {(201, "BRONZE_TO_SILVER", 21): bundle}
+
+        def upsert_silver_to_gold_draft(self, **_kwargs):
+            return {
+                "ingestion_object": {
+                    "ingestion_object_id": 301, "config_version": 3, "config_hash": "gold-object"
+                },
+                "mapping_bundle": {"mapping_version": 31, "mapping_hash": "gold-map"},
+            }
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    result = pipeline_runtime._materialize_silver_to_gold_metadata({
+        "target_warehouse": "snowflake", "execution_engine": "dbt",
+        "silver_generation_results": [{
+            "table": "claims", "target_table": "INSURANCE.SILVER.silver_claims",
+            "silver_ingestion_object_id": 201, "silver_ingestion_object_config_version": 2,
+            "bronze_to_silver_mapping_version": 21, "bronze_to_silver_mapping_hash": "silver-map",
+            "metadata_activation_status": "PENDING_FINAL_DBT_PACKAGE",
+        }],
+        "gold_generation_contract": {
+            "dimension_mappings": [{
+                "logical_table": "claims", "source_silver_table": "INSURANCE.SILVER.silver_claims",
+                "columns": ["claimid"],
+            }],
+            "kpi_mappings": [],
+        },
+    })
+
+    assert result["gold_metadata_drafts"][0]["gold_ingestion_object_id"] == 301
+    assert result["gold_metadata_rejections"] == []
+
+
+def test_snowflake_dbt_uses_one_control_attempt_for_the_project(monkeypatch):
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    events = []
+
+    class Repository:
+        def enqueue_work(self, **kwargs):
+            events.append(("enqueue", kwargs))
+            return {"queue_id": 91, "queue_status": "PENDING", "logical_work_id": kwargs["logical_work_id"]}
+
+        def claim_next_queue_item(self, **kwargs):
+            events.append(("claim", kwargs))
+            return {"queue_id": 91, "attempt_count": 1, "queue_status": "RUNNING"}
+
+        def create_run_attempt(self, *_args, **_kwargs):
+            events.append(("run", None))
+            return {"run": {"run_id": "runtime-1", "queue_id": 91}, "metadata_snapshot_matches": True}
+
+        def update_run_phase(self, *args, **kwargs):
+            events.append(("phase", (args, kwargs)))
+
+        def begin_queue_finalization(self, **kwargs):
+            events.append(("finalizing", kwargs))
+
+        def finalize_successful_run(self, **kwargs):
+            events.append(("success", kwargs))
+
+    repository = Repository()
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_target_metadata_selection",
+        lambda _state: SimpleNamespace(repository=repository),
+    )
+    state = {
+        "run_id": "design-1", "source_system_id": 7,
+        "snowflake_dbt_artifact_set_hash": "b" * 64,
+        "snowflake_dbt_model_count": 3,
+        "bronze_generation_results": [{"ingestion_object_id": 101, "metadata_activation_status": "ACTIVE"}],
+        "silver_generation_results": [{"silver_ingestion_object_id": 201, "metadata_activation_status": "ACTIVE"}],
+        "gold_generation_results": [{"gold_ingestion_object_id": 301, "metadata_activation_status": "ACTIVE"}],
+    }
+
+    control = pipeline_runtime._start_snowflake_dbt_control_attempt(state)
+    pipeline_runtime._finish_snowflake_dbt_control_attempt(
+        control, {**state, "snowflake_dbt_execution": {"status": "COMPLETED"}}
+    )
+
+    assert [event[0] for event in events].count("enqueue") == 1
+    assert [event[0] for event in events].count("run") == 1
+    assert [event[0] for event in events].count("success") == 1
+    assert events[0][1]["work_scope"]["ingestion_object_ids"] == [101, 201, 301]

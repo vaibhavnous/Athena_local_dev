@@ -244,12 +244,13 @@ test('renders the SFTP metadata-bootstrap phase in the latest monitor UI', () =>
   expect(display.status).toBe('Running')
 })
 
-test('keeps code review gates out of the monitor substage list', () => {
+test('shows metadata DDL generation while keeping review gates out of the monitor substage list', () => {
   const phase = {
     id: 'phase-3',
     label: 'Code Generation & Reviews',
     status: 'Review',
     steps: [
+      { key: 'metadata_ddl', state: 'COMPLETED' },
       { key: 'bronze', state: 'COMPLETED' },
       { key: 'gate4', state: 'COMPLETED' },
       { key: 'silver_merge_key_resolution', state: 'COMPLETED' },
@@ -264,6 +265,7 @@ test('keeps code review gates out of the monitor substage list', () => {
   const display = buildPipelineDisplayPhase(phase, phase.steps, { source: 'database' })
 
   expect(display.steps.map((step) => step.key)).toEqual([
+    'metadata_ddl',
     'bronze',
     'silver_merge_key_resolution',
     'silver_merge_key_review',
@@ -278,6 +280,7 @@ test('renders deployment followed by report generation for enabled Snowflake dbt
     label: 'Code Execution & Report Generation',
     status: 'Pending',
     steps: [
+      { key: 'metadata_setup_execution', label: 'Metadata Setup Execution', state: 'PENDING' },
       { key: 'gold_code_execution', label: 'Code Execution', state: 'PENDING' },
       { key: 'report_generation', label: 'Report Generation', state: 'PENDING' },
     ],
@@ -287,13 +290,14 @@ test('renders deployment followed by report generation for enabled Snowflake dbt
     target_warehouse: 'snowflake',
     execution_engine: 'dbt',
     dbt_deployment_mode: 'generate_and_deploy',
-    database_flow_version: 'generation_first_v1',
+    database_flow_version: 'generation_first_v2',
     report_generation_enabled: true,
   }
 
   const display = buildPipelineDisplayPhase(phase, phase.steps, run)
 
   expect(display.steps).toMatchObject([
+    { key: 'metadata_setup_execution', label: 'Metadata Setup Execution', state: 'PENDING' },
     { key: 'gold_code_execution', label: 'Code Execution', state: 'PENDING' },
     { key: 'report_generation', label: 'Report Generation', state: 'PENDING' },
   ])

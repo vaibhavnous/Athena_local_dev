@@ -374,6 +374,32 @@ def test_checkpoint_fallback_does_not_add_gold_review_to_legacy_flow():
     }
 
 
+def test_checkpoint_fallback_preserves_v2_gold_review_frontier():
+    from api.routers.runs_router import _fallback_run_detail
+
+    detail = _fallback_run_detail(
+        "run-v2-gold-review",
+        {
+            "run_id": "run-v2-gold-review",
+            "source": "database",
+            "target_warehouse": "snowflake",
+            "execution_engine": "native",
+            "database_flow_version": "generation_first_v2",
+            "status": "HITL_WAIT",
+            "last_completed_stage_key": "gold",
+            "gold_generation_status": "COMPLETED",
+            "next_review_key": "gold_review",
+        },
+    )
+
+    assert detail["status"] == "HITL_WAIT"
+    assert detail["next_review_key"] == "gold_review"
+    assert detail["generation_first_execution"] is True
+    assert next(
+        step for step in detail["pipeline_steps"] if step["key"] == "gold_review"
+    )["state"] == "HITL_WAIT"
+
+
 @pytest.mark.parametrize(
     ("source", "target", "execution_engine", "dbt_mode", "active_stage"),
     [

@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
@@ -81,9 +82,54 @@ def _validate_snowflake_transformation_contract(sql: str, obj: Mapping[str, Any]
     validate_snowflake_logical_work_filters(clean_sql, expected_sources)
 
 
+def _validate_snowflake_registered_artifact(
+    artifact_path: Any,
+    obj: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    processing_stage: str,
+    target_table: str,
+) -> None:
+    engine = str(spec.get("engine") or "").upper()
+    if engine == "SNOWFLAKE_DBT":
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", str(spec.get("dbt_package_hash") or ""))
+            or not str(spec.get("dbt_package_id") or "").strip()
+            or artifact_path.suffix.lower() != ".sql"
+        ):
+            raise ValueError("Snowflake dbt activation requires a finalized package and SQL model artifact.")
+        return
+    if engine != "SNOWFLAKE_SQL":
+        raise ValueError("Snowflake artifact activation received an unsupported execution engine.")
+
+    from nodes.bronze_gen import _snowflake_qualified_name, validate_snowflake_bronze_sql
+
+    sql = artifact_path.read_text(encoding="utf-8")
+    if processing_stage == "SOURCE_TO_BRONZE":
+        landing = spec.get("landing_resource")
+        if not isinstance(landing, dict):
+            raise ValueError("Snowflake Bronze activation requires a pinned landing resource.")
+        target_parts = target_table.split(".")
+        if len(target_parts) != 3:
+            raise ValueError("Snowflake Bronze activation requires a three-part target table.")
+        validate_snowflake_bronze_sql(
+            sql,
+            source_table=_snowflake_qualified_name(
+                landing["database"], landing["schema"], landing["table"]
+            ),
+            target_table=_snowflake_qualified_name(*target_parts),
+            metadata_driven=True,
+        )
+    else:
+        _validate_snowflake_transformation_contract(sql, obj)
+
+
 class MetadataRepository(ABC):
     def __init__(self, context: TargetMetadataContext) -> None:
         self.context = context
+
+    @contextmanager
+    def unit_of_work(self):
+        yield self
 
     @abstractmethod
     def execute(self, sql: str, parameters: Optional[Mapping[str, Any]] = None) -> None:
@@ -96,6 +142,97 @@ class MetadataRepository(ABC):
     def execute_batch(self, statements: Iterable[tuple[str, Mapping[str, Any]]]) -> None:
         for sql, parameters in statements:
             self.execute(sql, parameters)
+
+    def deploy_configuration_snapshot(
+        self,
+        *,
+        ingestion_objects: Iterable[Mapping[str, Any]],
+        mappings: Iterable[Mapping[str, Any]],
+    ) -> None:
+        """Idempotently deploy an approved application metadata snapshot to a target."""
+        object_rows = [dict(row) for row in ingestion_objects]
+        mapping_rows = [dict(row) for row in mappings]
+        self._deploy_configuration_rows(
+            table_name="cfg_ingestion_object",
+            rows=object_rows,
+            key_columns=("ingestion_object_id", "config_version"),
+            hash_column="config_hash",
+        )
+        self._deploy_configuration_rows(
+            table_name="cfg_mapping",
+            rows=mapping_rows,
+            key_columns=("mapping_id", "mapping_version"),
+            hash_column="mapping_hash",
+        )
+
+    def _deploy_configuration_rows(
+        self,
+        *,
+        table_name: str,
+        rows: List[Dict[str, Any]],
+        key_columns: tuple[str, ...],
+        hash_column: str,
+    ) -> None:
+        if not rows:
+            return
+        columns = tuple(rows[0])
+        if any(tuple(row) != columns for row in rows):
+            raise ValueError(f"{table_name} snapshot rows do not share one schema contract.")
+        if any(column not in columns for column in (*key_columns, hash_column)):
+            raise ValueError(f"{table_name} snapshot is missing its immutable identity contract.")
+        lookup_where, lookup_parameters = self._where_pairs(
+            [{column: row[column] for column in key_columns} for row in rows],
+            prefix="existing_deploy_",
+        )
+        existing_rows = self.query(
+            f"SELECT {', '.join((*key_columns, hash_column))} FROM {self.table(table_name)} "
+            f"WHERE {lookup_where}",
+            lookup_parameters,
+        )
+        existing = {
+            tuple(row.get(column) for column in key_columns): str(row.get(hash_column) or "")
+            for row in existing_rows
+        }
+        for row in rows:
+            key = tuple(row[column] for column in key_columns)
+            if key in existing and existing[key] != str(row.get(hash_column) or ""):
+                raise RuntimeError(f"{table_name} target contains a conflicting immutable version.")
+        rows = [row for row in rows if tuple(row[column] for column in key_columns) not in existing]
+        if not rows:
+            return
+        update_columns = tuple(column for column in columns if column not in key_columns and column != "created_at")
+        for offset in range(0, len(rows), 50):
+            chunk = rows[offset : offset + 50]
+            _, source, parameters = self._source_rows(chunk, prefix=f"deploy_{offset}_")
+            join = " AND ".join(f"target.{column} = source.{column}" for column in key_columns)
+            updates = ", ".join(f"target.{column} = source.{column}" for column in update_columns)
+            self.execute(
+                f"MERGE INTO {self.table(table_name)} AS target USING ({source}) AS source "
+                f"ON {join} "
+                f"WHEN MATCHED AND target.{hash_column} = source.{hash_column} THEN UPDATE SET {updates} "
+                f"WHEN NOT MATCHED THEN INSERT ({', '.join(columns)}) "
+                f"VALUES ({', '.join('source.' + column for column in columns)})",
+                parameters,
+            )
+
+        where, parameters = self._where_pairs(
+            [{column: row[column] for column in key_columns} for row in rows],
+            prefix="verify_deploy_",
+        )
+        saved = self.query(
+            f"SELECT {', '.join((*key_columns, hash_column))} FROM {self.table(table_name)} WHERE {where}",
+            parameters,
+        )
+        expected = {
+            tuple(row[column] for column in key_columns): str(row.get(hash_column) or "")
+            for row in rows
+        }
+        actual = {
+            tuple(row.get(column) for column in key_columns): str(row.get(hash_column) or "")
+            for row in saved
+        }
+        if actual != expected:
+            raise RuntimeError(f"{table_name} target deployment failed its immutable postcondition.")
 
     @staticmethod
     def _source_rows(
@@ -1473,6 +1610,7 @@ class MetadataRepository(ABC):
         build_order: int,
         write_mode: str = "MERGE",
         validation_policy: Optional[Mapping[str, Any]] = None,
+        allow_inactive_inputs: bool = False,
     ) -> Dict[str, Any]:
         target_table = str(target_gold_table or "").strip()
         target_parts = target_table.split(".")
@@ -1484,14 +1622,21 @@ class MetadataRepository(ABC):
         source_columns: Dict[str, Dict[str, str]] = {}
         for requested in inputs:
             object_id = int(requested.get("ingestion_object_id") or 0)
-            active = self.get_active_ingestion_object(object_id)
+            active = (
+                self.get_ingestion_object(object_id, int(requested.get("config_version") or 0))
+                if allow_inactive_inputs
+                else self.get_active_ingestion_object(object_id)
+            )
             if (
                 not active
                 or str(active.get("processing_stage") or "").upper() != "BRONZE_TO_SILVER"
                 or int(active.get("config_version") or 0) != int(requested.get("config_version") or 0)
                 or str(active.get("config_hash") or "") != str(requested.get("config_hash") or "")
+                or _as_bool(active.get("active_flag")) == bool(allow_inactive_inputs)
+                or _as_bool(active.get("is_current")) == bool(allow_inactive_inputs)
             ):
-                raise ValueError("Silver-to-Gold requires exact active Silver input objects.")
+                lifecycle = "inactive reviewed" if allow_inactive_inputs else "active"
+                raise ValueError(f"Silver-to-Gold requires exact {lifecycle} Silver input objects.")
             source_target = str(active.get("target_silver_table") or active.get("target_table") or "")
             bundle = self.get_mapping_bundle(
                 ingestion_object_id=object_id,
@@ -1499,7 +1644,7 @@ class MetadataRepository(ABC):
                 mapping_version=int(requested.get("mapping_version") or 0),
                 expected_hash=str(requested.get("mapping_hash") or ""),
                 expected_target=source_target,
-                require_active=True,
+                require_active=None if allow_inactive_inputs else True,
             )
             input_pins.append({
                 "ingestion_object_id": object_id,
@@ -1883,26 +2028,9 @@ class MetadataRepository(ABC):
             raise RuntimeError("ATHENA_GENERATED_CODE_DIR must identify durable shared storage before metadata activation.")
         artifact_path = verified_execution_artifact(spec, platform=self.context.platform)
         if self.context.platform == "snowflake":
-            from nodes.bronze_gen import _snowflake_qualified_name, validate_snowflake_bronze_sql
-
-            sql = artifact_path.read_text(encoding="utf-8")
-            if processing_stage == "SOURCE_TO_BRONZE":
-                landing = spec.get("landing_resource")
-                if not isinstance(landing, dict):
-                    raise ValueError("Snowflake Bronze activation requires a pinned landing resource.")
-                target_parts = target_table.split(".")
-                if len(target_parts) != 3:
-                    raise ValueError("Snowflake Bronze activation requires a three-part target table.")
-                validate_snowflake_bronze_sql(
-                    sql,
-                    source_table=_snowflake_qualified_name(
-                        landing["database"], landing["schema"], landing["table"]
-                    ),
-                    target_table=_snowflake_qualified_name(*target_parts),
-                    metadata_driven=True,
-                )
-            else:
-                _validate_snowflake_transformation_contract(sql, draft)
+            _validate_snowflake_registered_artifact(
+                artifact_path, draft, spec, processing_stage, target_table
+            )
         if int(spec["mapping_version"]) != int(mapping_version):
             raise ValueError("The execution artifact was generated from a different mapping version.")
         spec = {
@@ -2083,26 +2211,9 @@ class MetadataRepository(ABC):
                 raise RuntimeError("ATHENA_GENERATED_CODE_DIR must identify durable shared storage before metadata activation.")
             artifact_path = verified_execution_artifact(spec, platform=self.context.platform)
             if self.context.platform == "snowflake":
-                from nodes.bronze_gen import _snowflake_qualified_name, validate_snowflake_bronze_sql
-
-                sql = artifact_path.read_text(encoding="utf-8")
-                if stage == "SOURCE_TO_BRONZE":
-                    landing = spec.get("landing_resource")
-                    if not isinstance(landing, dict):
-                        raise ValueError("Snowflake Bronze activation requires a pinned landing resource.")
-                    target_parts = target_table.split(".")
-                    if len(target_parts) != 3:
-                        raise ValueError("Snowflake Bronze activation requires a three-part target table.")
-                    validate_snowflake_bronze_sql(
-                        sql,
-                        source_table=_snowflake_qualified_name(
-                            landing["database"], landing["schema"], landing["table"]
-                        ),
-                        target_table=_snowflake_qualified_name(*target_parts),
-                        metadata_driven=True,
-                    )
-                else:
-                    _validate_snowflake_transformation_contract(sql, draft)
+                _validate_snowflake_registered_artifact(
+                    artifact_path, draft, spec, stage, target_table
+                )
             if int(spec["mapping_version"]) != mapping_version:
                 raise ValueError("The execution artifact was generated from a different mapping version.")
             spec = {
@@ -4207,6 +4318,66 @@ class SnowflakeMetadataRepository(MetadataRepository):
     def _transaction_connection(self) -> Any:
         return getattr(self._transaction, "connection", None)
 
+    @contextmanager
+    def unit_of_work(self):
+        existing = self._transaction_connection()
+        if existing is not None:
+            yield self
+            return
+
+        from services.snowflake_bronze_runtime import _snowflake_connect
+
+        connection = _snowflake_connect(autocommit=False)
+        self._transaction.connection = connection
+        try:
+            yield self
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            del self._transaction.connection
+            connection.close()
+
+    def _within_unit_of_work(self, operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        with self.unit_of_work():
+            return operation(*args, **kwargs)
+
+    def upsert_database_ingestion_object_drafts(
+        self, *args: Any, **kwargs: Any
+    ) -> List[Dict[str, Any]]:
+        return self._within_unit_of_work(
+            super().upsert_database_ingestion_object_drafts, *args, **kwargs
+        )
+
+    def upsert_source_to_bronze_mapping_draft(
+        self, *args: Any, **kwargs: Any
+    ) -> Dict[str, Any]:
+        return self._within_unit_of_work(
+            super().upsert_source_to_bronze_mapping_draft, *args, **kwargs
+        )
+
+    def upsert_bronze_to_silver_draft(
+        self, *args: Any, **kwargs: Any
+    ) -> Dict[str, Any]:
+        return self._within_unit_of_work(
+            super().upsert_bronze_to_silver_draft, *args, **kwargs
+        )
+
+    def upsert_silver_to_gold_draft(
+        self, *args: Any, **kwargs: Any
+    ) -> Dict[str, Any]:
+        return self._within_unit_of_work(
+            super().upsert_silver_to_gold_draft, *args, **kwargs
+        )
+
+    def register_and_activate_artifacts(
+        self, *args: Any, **kwargs: Any
+    ) -> List[Dict[str, Any]]:
+        return self._within_unit_of_work(
+            super().register_and_activate_artifacts, *args, **kwargs
+        )
+
     def _adapt(self, sql: str, parameters: Optional[Mapping[str, Any]]) -> tuple[str, List[Any]]:
         values = parameters or {}
         ordered: List[Any] = []
@@ -4226,6 +4397,7 @@ class SnowflakeMetadataRepository(MetadataRepository):
         adapted, ordered = self._adapt(sql, parameters)
         connection = self._transaction_connection() or _snowflake_connect(autocommit=False)
         owns_connection = self._transaction_connection() is None
+        cursor = None
         try:
             cursor = connection.cursor()
             cursor.execute(adapted, tuple(ordered))
@@ -4236,6 +4408,9 @@ class SnowflakeMetadataRepository(MetadataRepository):
                 connection.rollback()
             raise
         finally:
+            close_cursor = getattr(cursor, "close", None)
+            if callable(close_cursor):
+                close_cursor()
             if owns_connection:
                 connection.close()
 
@@ -4244,6 +4419,7 @@ class SnowflakeMetadataRepository(MetadataRepository):
 
         connection = self._transaction_connection() or _snowflake_connect(autocommit=False)
         owns_connection = self._transaction_connection() is None
+        cursor = None
         try:
             cursor = connection.cursor()
             for sql, parameters in statements:
@@ -4256,6 +4432,9 @@ class SnowflakeMetadataRepository(MetadataRepository):
                 connection.rollback()
             raise
         finally:
+            close_cursor = getattr(cursor, "close", None)
+            if callable(close_cursor):
+                close_cursor()
             if owns_connection:
                 connection.close()
 
@@ -4265,12 +4444,16 @@ class SnowflakeMetadataRepository(MetadataRepository):
         adapted, ordered = self._adapt(sql, parameters)
         connection = self._transaction_connection() or _snowflake_connect(autocommit=False)
         owns_connection = self._transaction_connection() is None
+        cursor = None
         try:
             cursor = connection.cursor()
             cursor.execute(adapted, tuple(ordered))
             columns = [str(column[0]).lower() for column in (cursor.description or [])]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
         finally:
+            close_cursor = getattr(cursor, "close", None)
+            if callable(close_cursor):
+                close_cursor()
             if owns_connection:
                 connection.rollback()
                 connection.close()

@@ -207,11 +207,11 @@ def _source_select_sql(schema_name: str, table_name: str, limit: int) -> str:
 
 
 def _batch_size() -> int:
-    raw = os.getenv("ATHENA_SNOWFLAKE_BRONZE_BATCH_SIZE", "5000")
+    raw = os.getenv("ATHENA_SNOWFLAKE_BRONZE_BATCH_SIZE", "10000")
     try:
         return max(1, int(raw))
     except ValueError:
-        return 5000
+        return 10000
 
 
 def _progress_log_interval() -> int:
@@ -232,6 +232,40 @@ def _source_load_limit() -> int:
 
 def _string_rows(rows: Iterable[Sequence[Any]]) -> List[tuple[Any, ...]]:
     return [tuple(None if value is None else str(value) for value in row) for row in rows]
+
+
+def _write_pandas_batch(
+    connection: Any,
+    *,
+    database: str,
+    schema: str,
+    table: str,
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+) -> int:
+    """Load one bounded batch through Snowflake PUT/COPY on the existing session."""
+    import pandas as pd
+    from snowflake.connector.pandas_tools import write_pandas
+
+    frame = pd.DataFrame.from_records(rows, columns=list(columns))
+    success, _chunks, loaded_rows, _output = write_pandas(
+        connection,
+        frame,
+        table_name=table,
+        database=database,
+        schema=schema,
+        chunk_size=len(frame),
+        bulk_upload_chunks=True,
+        quote_identifiers=True,
+        auto_create_table=False,
+        overwrite=False,
+    )
+    if not success or int(loaded_rows) != len(frame):
+        raise RuntimeError(
+            f"Snowflake bulk source load wrote {loaded_rows} of {len(frame)} rows to "
+            f"{database}.{schema}.{table}."
+        )
+    return int(loaded_rows)
 
 
 def _table_name(script: Dict[str, Any]) -> str:
@@ -293,8 +327,6 @@ def load_azure_sql_table_to_snowflake(
         landing_database, landing_schema, landing_name = _landing_relation(script)
         landing_table = _snowflake_qualified_name(landing_database, landing_schema, landing_name)
         column_defs = ", ".join(f"{_snowflake_quote_identifier(column)} VARCHAR" for column in columns)
-        column_list = ", ".join(_snowflake_quote_identifier(column) for column in columns)
-        placeholders = ", ".join(["%s"] * len(columns))
 
         # ponytail: source landing is raw VARCHAR; generated bronze SQL owns all typing via TRY_CAST.
         snowflake_cursor = snowflake_conn.cursor()
@@ -308,14 +340,19 @@ def load_azure_sql_table_to_snowflake(
                 f"CREATE OR REPLACE {table_kind} {landing_table} ({column_defs})"
             )
 
-            insert_sql = f"INSERT INTO {landing_table} ({column_list}) VALUES ({placeholders})"
             while True:
                 rows = source_cursor.fetchmany(_batch_size())
                 if not rows:
                     break
                 values = _string_rows(rows)
-                snowflake_cursor.executemany(insert_sql, values)
-                inserted_rows += len(values)
+                inserted_rows += _write_pandas_batch(
+                    snowflake_conn,
+                    database=landing_database,
+                    schema=landing_schema,
+                    table=landing_name,
+                    columns=columns,
+                    rows=values,
+                )
                 if progress_every and inserted_rows >= next_progress_log:
                     logger.info(
                         "Snowflake Bronze source load progress for %s: rows_loaded=%s",

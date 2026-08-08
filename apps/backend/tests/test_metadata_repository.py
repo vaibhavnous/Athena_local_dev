@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -16,11 +17,51 @@ from services.metadata_repository import (
     SnowflakeMetadataRepository,
     metadata_repository_for_target,
 )
+from services import metadata_repository
 from utilis.logger import SecretRedactionFilter
 
 
 def test_bronze_column_normalization_uses_the_shared_canonical_name() -> None:
     assert normalize_bronze_column_name("RERERENCE_ID") == "reference_id"
+
+
+def test_target_configuration_deployment_does_not_reload_existing_versions() -> None:
+    class Repository(MetadataRepository):
+        def execute(self, _sql, _parameters=None):
+            raise AssertionError("an existing immutable version must not be rewritten")
+
+        def query(self, _sql, _parameters=None):
+            return [{"ingestion_object_id": 101, "config_version": 2, "config_hash": "sha256:object"}]
+
+    repository = Repository(TargetMetadataContext("databricks", "qa", "main"))
+    repository._deploy_configuration_rows(
+        table_name="cfg_ingestion_object",
+        rows=[{
+            "ingestion_object_id": 101,
+            "config_version": 2,
+            "config_hash": "sha256:object",
+            "active_flag": True,
+        }],
+        key_columns=("ingestion_object_id", "config_version"),
+        hash_column="config_hash",
+    )
+
+
+def test_snowflake_dbt_activation_requires_finalized_package_identity() -> None:
+    spec = {
+        "engine": "SNOWFLAKE_DBT",
+        "dbt_package_hash": "a" * 64,
+        "dbt_package_id": "package-1",
+    }
+
+    metadata_repository._validate_snowflake_registered_artifact(
+        Path("model.sql"), {}, spec, "SILVER_TO_GOLD", "INSURANCE.GOLD.fact_claims"
+    )
+    with pytest.raises(ValueError, match="finalized package"):
+        metadata_repository._validate_snowflake_registered_artifact(
+            Path("model.sql"), {}, {**spec, "dbt_package_hash": "bad"},
+            "SILVER_TO_GOLD", "INSURANCE.GOLD.fact_claims",
+        )
 
 
 def test_source_to_bronze_mapping_persists_canonical_reference_id() -> None:
@@ -766,6 +807,60 @@ def test_silver_to_gold_draft_pins_active_inputs_and_structured_rules() -> None:
     assert rule_types == {"INPUTS_PRESENT", "TARGET_SCHEMA_MATCH", "KEYS_NOT_NULL", "KEYS_UNIQUE"}
 
 
+def test_dbt_gold_draft_can_pin_inactive_silver_with_reused_active_mapping() -> None:
+    repository = StubMetadataRepository()
+    source_object, source_mapping = _active_bronze_contract(repository)
+    silver = repository.upsert_bronze_to_silver_draft(
+        source_system_id=7,
+        source_object=source_object,
+        source_mapping=source_mapping,
+        target_silver_table="main.silver.silver_claims",
+        merge_keys=["claimid"],
+        columns=[{
+            "source_field_path": row["target_column_name"],
+            "source_data_type": row["target_data_type"],
+            "target_column_name": row["target_column_name"],
+            "target_data_type": row["target_data_type"],
+            "ordinal_position": row["ordinal_position"],
+        } for row in source_mapping["mappings"]],
+    )
+    silver_id = silver["ingestion_object"]["ingestion_object_id"]
+    for row in repository.mappings:
+        if row["ingestion_object_id"] == silver_id:
+            row.update({"active_flag": True, "is_current": True})
+
+    gold = repository.upsert_silver_to_gold_draft(
+        source_system_id=7,
+        target_gold_table="main.gold.dim_claims",
+        inputs=[{
+            "ingestion_object_id": silver_id,
+            "config_version": silver["ingestion_object"]["config_version"],
+            "config_hash": silver["ingestion_object"]["config_hash"],
+            "mapping_version": silver["mapping_bundle"]["mapping_version"],
+            "mapping_hash": silver["mapping_bundle"]["mapping_hash"],
+        }],
+        columns=[{
+            "source_object_name": "main.silver.silver_claims",
+            "source_field_path": "claimid",
+            "source_data_type": "int",
+            "target_column_name": "claimid",
+            "target_data_type": "int",
+            "ordinal_position": 1,
+            "is_primary_key": True,
+            "transformation_rule": "IDENTITY",
+        }],
+        merge_keys=["claimid"],
+        join_rules=[],
+        definition={"artifact_kind": "DIMENSION"},
+        build_order=10,
+        allow_inactive_inputs=True,
+    )
+
+    pinned = json.loads(gold["mapping_bundle"]["mappings"][0]["input_objects_json"])[0]
+    assert pinned["config_version"] == silver["ingestion_object"]["config_version"]
+    assert gold["ingestion_object"]["active_flag"] is False
+
+
 def test_runtime_error_sanitizer_removes_credentials() -> None:
     safe = MetadataRepository._safe_error_text(
         "Authorization: Bearer abc.def password=hunter2 token=secret-value", 2000
@@ -1234,6 +1329,51 @@ def test_snowflake_enqueue_serializes_on_ingestion_object_in_one_transaction(mon
     assert [call[0] for call in calls[-2:]] == ["commit", "close"]
 
 
+def test_snowflake_unit_of_work_reuses_one_connection(monkeypatch) -> None:
+    from services import snowflake_bronze_runtime
+
+    events = []
+
+    class Cursor:
+        def execute(self, sql, parameters=None):
+            events.append(("execute", sql, parameters))
+
+        def close(self):
+            events.append(("cursor_close",))
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            events.append(("commit",))
+
+        def rollback(self):
+            events.append(("rollback",))
+
+        def close(self):
+            events.append(("close",))
+
+    connections = []
+
+    def connect(**_kwargs):
+        connection = Connection()
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(snowflake_bronze_runtime, "_snowflake_connect", connect)
+    repository = SnowflakeMetadataRepository(TargetMetadataContext("snowflake", "qa", "ATHENA"))
+
+    with repository.unit_of_work():
+        repository.execute("UPDATE first_table SET value = :value", {"value": 1})
+        repository.execute("UPDATE second_table SET value = :value", {"value": 2})
+
+    assert len(connections) == 1
+    assert [event[0] for event in events].count("execute") == 2
+    assert [event[0] for event in events].count("commit") == 1
+    assert events[-1] == ("close",)
+
+
 def test_reviewed_artifact_creates_and_activates_a_new_executable_version(tmp_path, monkeypatch) -> None:
     from services.metadata_contracts import file_sha256
     from utilis.generated_code_paths import generated_artifact_uri
@@ -1381,153 +1521,86 @@ def test_reviewed_artifacts_use_one_set_based_activation_bundle(monkeypatch) -> 
 
 def test_metadata_selection_revalidates_pinned_connection_and_project_access(monkeypatch: pytest.MonkeyPatch) -> None:
     from services import metadata_selection
+    from services.application_metadata_repository import ApplicationMetadataRepository
+    from services.database_source_catalog import database_source_contract
 
-    connection = validate_jdbc_connection(
-        {
-            "source_system_id": 7,
-            "connection_name": "claims-db",
-            "host_name": "db.internal",
-            "port": 1433,
-            "database_name": "ClaimsDB",
-            "auth_type": "BASIC",
-            "secrets_json": {
-                "username": {"scope": "DEPLOYMENT_ENV", "key": "AZURE_SQL_SOURCE_USERNAME"},
-                "password": {"scope": "DEPLOYMENT_ENV", "key": "AZURE_SQL_SOURCE_PASSWORD"},
-            },
-            "config_json": {"allowed_project_ids": ["project-1"]},
-        }
-    )
-    connection.update({"connection_id": 11, "config_version": 2, "active_flag": True, "is_current": True})
-
-    class Repository:
-        def preflight(self):
-            return None
-
-        def get_source_system(self, _source_id):
-            return {"source_system_id": 7, "active_flag": True}
-
-        def get_connection(self, _connection_id, _version):
-            return dict(connection)
-
-        def get_active_connection(self, _connection_id):
-            raise AssertionError("Pinned selection must use the exact version")
-
-    monkeypatch.setattr(metadata_selection, "metadata_repository_for_target", lambda **_: Repository())
+    _, connection = database_source_contract(platform="databricks")
+    monkeypatch.setattr(ApplicationMetadataRepository, "preflight", lambda _self: None)
+    monkeypatch.setattr(ApplicationMetadataRepository, "unit_of_work", lambda self: nullcontext(self))
     monkeypatch.setattr(metadata_selection, "validate_deployment_database_binding", lambda _row, **_kwargs: None)
 
     selected = metadata_selection.validated_metadata_selection(
         {
             "target_warehouse": "databricks",
             "target_environment": "qa",
-            "source_system_id": 7,
-            "source_connection_id": 11,
-            "source_connection_config_version": 2,
+            "database_flow_version": "generation_first_v2",
+            "source_system_id": 7499026347042686646,
+            "source_connection_id": 3358264270364792816,
+            "source_connection_config_version": 1,
             "source_connection_config_hash": connection["config_hash"],
             "project_id": "project-1",
         }
     )
 
     assert selected is not None
-    assert selected.connection["config_version"] == 2
-    assert selected.uses_environment_source is False
+    assert selected.connection["config_version"] == 1
+    assert selected.uses_environment_source is True
 
 
 def test_metadata_selection_environment_fallback_uses_latest_inactive_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from services import metadata_selection
-
-    connection = validate_jdbc_connection(
-        {
-            "source_system_id": 7,
-            "connection_name": "claims-db",
-            "host_name": "db.internal",
-            "port": 1433,
-            "database_name": "ClaimsDB",
-            "auth_type": "BASIC",
-            "secrets_json": {
-                "username": {"scope": "qa-source", "key": "username"},
-                "password": {"scope": "qa-source", "key": "password"},
-            },
-            "config_json": {"allowed_project_ids": ["project-1"]},
-        }
-    )
-    connection.update({"connection_id": 11, "config_version": 1, "active_flag": False, "is_current": False})
-
-    class Repository:
-        def preflight(self):
-            return None
-
-        def get_source_system(self, _source_id):
-            return {"source_system_id": 7, "active_flag": True}
-
-        def get_active_connection(self, _connection_id):
-            return None
-
-        def get_latest_connection(self, _connection_id):
-            return dict(connection)
-
-    monkeypatch.setattr(metadata_selection, "metadata_repository_for_target", lambda **_: Repository())
-    monkeypatch.setattr(metadata_selection, "validate_deployment_database_binding", lambda _row, **_kwargs: None)
     state = {
         "target_warehouse": "databricks",
         "target_environment": "qa",
+        "database_flow_version": "generation_first_v2",
         "source_system_id": 7,
         "source_connection_id": 11,
         "project_id": "project-1",
     }
-
-    monkeypatch.delenv("ATHENA_METADATA_ALLOW_ENV_SOURCE_FALLBACK", raising=False)
-    with pytest.raises(ValueError, match="not active"):
+    monkeypatch.setattr(
+        metadata_selection,
+        "metadata_repository_for_target",
+        lambda **_: (_ for _ in ()).throw(AssertionError("design selection must not read target metadata")),
+    )
+    with pytest.raises(ValueError, match="application source catalog"):
         metadata_selection.validated_metadata_selection(state)
 
-    monkeypatch.setenv("ATHENA_METADATA_ALLOW_ENV_SOURCE_FALLBACK", "true")
-    selected = metadata_selection.validated_metadata_selection(state)
 
-    assert selected is not None
-    assert selected.connection["config_version"] == 1
-    assert selected.uses_environment_source is True
+def test_generation_first_v1_selection_keeps_the_target_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services import metadata_selection
+
+    repository = object()
+    monkeypatch.setattr(
+        metadata_selection,
+        "metadata_repository_for_target",
+        lambda **_: repository,
+    )
+    monkeypatch.setattr(
+        metadata_selection,
+        "_validated_metadata_selection",
+        lambda _state, selected_repository: selected_repository,
+    )
+
+    selected = metadata_selection.validated_metadata_selection({
+        "target_warehouse": "databricks",
+        "target_environment": "qa",
+        "database_flow_version": "generation_first_v1",
+        "source_system_id": 7,
+        "source_connection_id": 11,
+    })
+
+    assert selected is repository
 
 
 def test_metadata_source_options_return_safe_latest_fallback_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     from services import metadata_selection
-
-    connection = validate_jdbc_connection(
-        {
-            "source_system_id": 7,
-            "connection_name": "claims-db",
-            "host_name": "db.internal",
-            "port": 1433,
-            "database_name": "ClaimsDB",
-            "auth_type": "BASIC",
-            "secrets_json": {
-                "username": {"scope": "qa-source", "key": "username"},
-                "password": {"scope": "qa-source", "key": "password"},
-            },
-            "config_json": {"allowed_project_ids": ["*"]},
-        }
+    monkeypatch.setattr(
+        metadata_selection,
+        "metadata_repository_for_target",
+        lambda **_: (_ for _ in ()).throw(AssertionError("dropdown must not read target metadata")),
     )
-    connection.update({
-        "connection_id": 11,
-        "config_version": 1,
-        "active_flag": False,
-        "is_current": False,
-    })
-
-    class Repository:
-        def preflight(self):
-            return None
-
-        def table(self, name):
-            return f"metadata.{name}"
-
-        def query(self, sql, _parameters):
-            if "cfg_source_system" in sql:
-                return [{"source_system_id": 7, "source_system_name": "Claims", "active_flag": True}]
-            return [dict(connection)]
-
-    monkeypatch.setenv("ATHENA_METADATA_ALLOW_ENV_SOURCE_FALLBACK", "true")
-    monkeypatch.setattr(metadata_selection, "metadata_repository_for_target", lambda **_: Repository())
 
     options = metadata_selection.metadata_source_options(
         platform="databricks",
@@ -1535,18 +1608,34 @@ def test_metadata_source_options_return_safe_latest_fallback_connection(monkeypa
         project_id="project-1",
     )
 
-    assert options == [{
-        "source_system_id": "7",
-        "source_system_name": "Claims",
-        "connections": [{
-            "connection_id": "11",
-            "connection_name": "claims-db",
-            "connection_type": "JDBC",
-            "database_name": "ClaimsDB",
-            "config_version": 1,
-            "active": False,
-            "design_time_fallback": True,
-        }],
-    }]
+    assert options[0]["source_system_id"] == "7499026347042686646"
+    assert options[0]["source_profile"] == "insurance_azure_sql"
+    assert options[0]["connections"][0]["connection_id"] == "3358264270364792816"
+    assert options[0]["connections"][0]["database_name"] == "insurance"
     assert "host_name" not in options[0]["connections"][0]
     assert "secrets_json" not in options[0]["connections"][0]
+
+
+def test_application_metadata_preflight_rejects_schema_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.application_metadata_repository import ApplicationMetadataRepository
+    from services.database_source_catalog import database_source_contract
+    from services.metadata_contracts import expected_columns
+
+    source_system, connection = database_source_contract(platform="databricks")
+    repository = ApplicationMetadataRepository(
+        platform="databricks",
+        environment="qa",
+        source_system=source_system,
+        connection=connection,
+    )
+    columns = expected_columns()
+    rows = [
+        {"table_name": table_name, "column_name": column_name}
+        for table_name in ("cfg_ingestion_object", "cfg_mapping")
+        for column_name in columns[table_name]
+        if not (table_name == "cfg_mapping" and column_name == "mapping_hash")
+    ]
+    monkeypatch.setattr(repository, "query", lambda *_args, **_kwargs: rows)
+
+    with pytest.raises(RuntimeError, match="cfg_mapping missing columns: mapping_hash"):
+        repository.preflight()

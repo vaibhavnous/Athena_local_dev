@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from state import Stage01State
+from services import dbt_snowflake_runtime
 from services.metadata_contracts import CANONICAL_COLUMN_NAME_CORRECTIONS
 from utilis.db import ai_store_db_writer
 from utilis.domain_kb import KB_CONTENT_GOLD_RULE, get_domain_kb_config, load_domain_kb
@@ -2637,15 +2638,21 @@ def _persist_gold_generation(*, state: Stage01State, bundle: Dict[str, Any]) -> 
     )
 
 
-def _metadata_gold_plans(state: Stage01State) -> List[Dict[str, Any]]:
+def _metadata_gold_plans(
+    state: Stage01State, *, _selection: Any = None
+) -> List[Dict[str, Any]]:
     from services.metadata_selection import validated_metadata_selection
 
     references = [item for item in state.get("gold_metadata_drafts") or [] if isinstance(item, dict)]
     if not references:
         return []
-    selection = validated_metadata_selection(state)
+    selection = _selection or validated_metadata_selection(state)
     if not selection:
         raise ValueError("Metadata-driven Gold generation requires a valid target selection.")
+    if _selection is None and callable(getattr(selection.repository, "unit_of_work", None)):
+        with selection.repository.unit_of_work():
+            return _metadata_gold_plans(state, _selection=selection)
+    dbt_codegen = _snowflake_dbt_codegen_enabled(state)
     plans: List[Dict[str, Any]] = []
     for reference in references:
         object_id = int(reference["gold_ingestion_object_id"])
@@ -2665,17 +2672,23 @@ def _metadata_gold_plans(state: Stage01State) -> List[Dict[str, Any]]:
             mapping_version=int(reference["silver_to_gold_mapping_version"]),
             expected_hash=str(reference["silver_to_gold_mapping_hash"]),
             expected_target=target,
-            require_active=False,
+            require_active=None,
         )
         first = bundle["mappings"][0]
         definition = json.loads(str(first.get("aggregation_rules_json") or "{}"))
         inputs = json.loads(str(first.get("input_objects_json") or "[]"))
         for pin in inputs:
-            active = selection.repository.get_active_ingestion_object(int(pin["ingestion_object_id"]))
+            pinned = (
+                selection.repository.get_ingestion_object(
+                    int(pin["ingestion_object_id"]), int(pin["config_version"])
+                )
+                if dbt_codegen
+                else selection.repository.get_active_ingestion_object(int(pin["ingestion_object_id"]))
+            )
             if (
-                not active
-                or int(active.get("config_version") or 0) != int(pin["config_version"])
-                or str(active.get("config_hash") or "") != str(pin["config_hash"])
+                not pinned
+                or int(pinned.get("config_version") or 0) != int(pin["config_version"])
+                or str(pinned.get("config_hash") or "") != str(pin["config_hash"])
             ):
                 raise ValueError("A pinned Silver input changed after the Gold draft was approved.")
             selection.repository.get_mapping_bundle(
@@ -2684,13 +2697,34 @@ def _metadata_gold_plans(state: Stage01State) -> List[Dict[str, Any]]:
                 mapping_version=int(pin["mapping_version"]),
                 expected_hash=str(pin["mapping_hash"]),
                 expected_target=str(pin["object_name"]),
-                require_active=True,
+                require_active=None if dbt_codegen else True,
             )
         plans.append({"reference": reference, "object": obj, "bundle": bundle, "definition": definition, "inputs": inputs})
     return sorted(plans, key=lambda item: (int(item["bundle"]["mappings"][0].get("build_order") or 0), str(item["object"].get("target_table") or "")))
 
 
-def _metadata_dimension_code(plan: Dict[str, Any], *, target_warehouse: str) -> str:
+def _metadata_snowflake_dbt_config(target_table: str, keys: List[str]) -> str:
+    parts = target_table.split(".")
+    if len(parts) not in {2, 3} or not keys:
+        raise ValueError("Metadata Gold dbt requires a qualified target and business keys.")
+    database = parts[-3] if len(parts) == 3 else _snowflake_gold_catalog()
+    schema = parts[-2]
+    unique_key: Any = f'"{keys[0]}"' if len(keys) == 1 else [f'"{key}"' for key in keys]
+    return f"""{{{{ config(
+    materialized=env_var('ATHENA_SNOWFLAKE_DBT_MATERIALIZATION', 'table'),
+    database=env_var('SNOWFLAKE_GOLD_CATALOG', {json.dumps(database)}),
+    schema=env_var('SNOWFLAKE_GOLD_SCHEMA', {json.dumps(schema)}),
+    alias={json.dumps(parts[-1])},
+    unique_key={json.dumps(unique_key)},
+    incremental_strategy='merge',
+    on_schema_change='fail'
+) }}}}
+"""
+
+
+def _metadata_dimension_code(
+    plan: Dict[str, Any], *, target_warehouse: str, dbt_compatible: bool = False
+) -> str:
     rows = plan["bundle"]["mappings"]
     source_table = str(rows[0]["source_object_name"])
     target_table = str(plan["object"]["target_table"])
@@ -2698,7 +2732,11 @@ def _metadata_dimension_code(plan: Dict[str, Any], *, target_warehouse: str) -> 
     if not keys:
         raise ValueError(f"Gold dimension {target_table} has no business key.")
     if target_warehouse == "snowflake":
-        source_q = _snowflake_qualified_name(*source_table.split("."))
+        source_q = (
+            dbt_snowflake_runtime.dbt_ref(source_table.split(".")[-1])
+            if dbt_compatible
+            else _snowflake_qualified_name(*source_table.split("."))
+        )
         target_q = _snowflake_qualified_name(*target_table.split("."))
         columns = [str(row["target_column_name"]) for row in rows]
         definitions = ",\n    ".join(
@@ -2711,6 +2749,13 @@ def _metadata_dimension_code(plan: Dict[str, Any], *, target_warehouse: str) -> 
             f"AS {_snowflake_quote_identifier(str(row['target_column_name']))}"
             for row in rows
         )
+        if dbt_compatible:
+            return (
+                _metadata_snowflake_dbt_config(target_table, keys)
+                + "\nSELECT\n        "
+                + projections
+                + f"\nFROM {source_q} AS src\n"
+            )
         on_clause = " AND ".join(
             f"target.{_snowflake_quote_identifier(key)} = source.{_snowflake_quote_identifier(key)}" for key in keys
         )
@@ -2782,7 +2827,9 @@ DeltaTable.forName(spark, TARGET_TABLE).alias("target").merge(
 '''
 
 
-def _metadata_fact_code(plan: Dict[str, Any], *, target_warehouse: str) -> str:
+def _metadata_fact_code(
+    plan: Dict[str, Any], *, target_warehouse: str, dbt_compatible: bool = False
+) -> str:
     """Generate a fact only from the exact persisted mapping/write contract."""
     rows = plan["bundle"]["mappings"]
     target_table = str(plan["object"]["target_table"])
@@ -2813,6 +2860,8 @@ def _metadata_fact_code(plan: Dict[str, Any], *, target_warehouse: str) -> str:
     aggregate_rows = [row for row in rows if str(row.get("transformation_rule") or "").startswith("AGG_")]
     if len(aggregate_rows) != 1 or write_mode not in {"MERGE", "SNAPSHOT_REPLACE"}:
         raise ValueError("Gold fact requires exactly one controlled aggregate and a supported write mode.")
+    if not keys:
+        raise ValueError("Gold fact requires approved business-grain keys.")
     root = str(aggregate_rows[0]["source_object_name"])
     if root not in sources:
         raise ValueError("Gold fact aggregate source is not one of its pinned inputs.")
@@ -2820,7 +2869,11 @@ def _metadata_fact_code(plan: Dict[str, Any], *, target_warehouse: str) -> str:
     aliases = {source: f"s{index}" for index, source in enumerate(sources)}
     quote = _snowflake_quote_identifier if target_warehouse == "snowflake" else lambda value: f"`{str(value).replace('`', '``')}`"
     if target_warehouse == "snowflake":
-        qualify = lambda value: _snowflake_qualified_name(*str(value).split("."))
+        qualify = (
+            lambda value: dbt_snowflake_runtime.dbt_ref(str(value).split(".")[-1])
+            if dbt_compatible
+            else lambda value: _snowflake_qualified_name(*str(value).split("."))
+        )
     else:
         qualify = lambda value: ".".join(quote(part) for part in str(value).split("."))
     visited = {root}
@@ -2848,7 +2901,11 @@ def _metadata_fact_code(plan: Dict[str, Any], *, target_warehouse: str) -> str:
             join_sql.append(
                 f"{join_type} JOIN {qualify(new_source)} AS {aliases[new_source]} ON "
                 f"{aliases[existing_source]}.{quote(existing_column)} = {aliases[new_source]}.{quote(new_column)} "
-                f"AND {aliases[new_source]}.{quote('_logical_work_id')} = {logical_scope_value}"
+                + (
+                    ""
+                    if dbt_compatible
+                    else f"AND {aliases[new_source]}.{quote('_logical_work_id')} = {logical_scope_value}"
+                )
             )
             visited.add(new_source)
             pending.remove(rule)
@@ -2881,10 +2938,13 @@ def _metadata_fact_code(plan: Dict[str, Any], *, target_warehouse: str) -> str:
     from_clause = f"FROM {qualify(root)} AS {aliases[root]}"
     if join_sql:
         from_clause += "\n    " + "\n    ".join(join_sql)
-    from_clause += f"\n    WHERE {aliases[root]}.{quote('_logical_work_id')} = {logical_scope_value}"
+    if not dbt_compatible:
+        from_clause += f"\n    WHERE {aliases[root]}.{quote('_logical_work_id')} = {logical_scope_value}"
     query = "SELECT\n        " + ",\n        ".join(projections) + f"\n    {from_clause}"
     if groups:
         query += "\n    GROUP BY " + ", ".join(groups)
+    if target_warehouse == "snowflake" and dbt_compatible:
+        return _metadata_snowflake_dbt_config(target_table, keys) + "\n" + query + "\n"
     joined_count_query = f"SELECT COUNT(*) AS joined_count {from_clause}"
     root_count_query = (
         f"SELECT COUNT(*) AS root_count FROM {qualify(root)} AS {aliases[root]} "
@@ -2980,6 +3040,7 @@ else:
 
 def _generate_metadata_gold(state: Stage01State, plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     target_warehouse = _target_warehouse(state)
+    dbt_codegen = _snowflake_dbt_codegen_enabled(state)
     run_id = str(state.get("run_id") or "GOLD_RUN")
     gold_schema = str(state.get("gold_schema") or (_snowflake_gold_schema() if target_warehouse == "snowflake" else "gold"))
     gold_catalog = str(state.get("gold_catalog") or (_snowflake_gold_catalog() if target_warehouse == "snowflake" else ""))
@@ -2989,15 +3050,19 @@ def _generate_metadata_gold(state: Stage01State, plans: List[Dict[str, Any]]) ->
         definition = plan["definition"]
         kind = str(definition.get("artifact_kind") or reference.get("artifact_kind") or "").upper()
         if kind == "FACT":
-            code = _metadata_fact_code(plan, target_warehouse=target_warehouse)
+            code = _metadata_fact_code(
+                plan, target_warehouse=target_warehouse, dbt_compatible=dbt_codegen
+            )
             if target_warehouse != "snowflake":
                 _validate_python(code)
-            output_dir = _gold_output_dir_for(target_warehouse)
-            os.makedirs(output_dir, exist_ok=True)
-            extension = "sql" if target_warehouse == "snowflake" else "py"
-            path = os.path.join(output_dir, f"gold_{_run_slug(run_id)}_{reference['name']}.{extension}")
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(code)
+            path = None
+            if not dbt_codegen:
+                output_dir = _gold_output_dir_for(target_warehouse)
+                os.makedirs(output_dir, exist_ok=True)
+                extension = "sql" if target_warehouse == "snowflake" else "py"
+                path = os.path.join(output_dir, f"gold_{_run_slug(run_id)}_{reference['name']}.{extension}")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(code)
             result = {
                 "run_id": run_id,
                 "kpi_name": reference["name"],
@@ -3008,21 +3073,30 @@ def _generate_metadata_gold(state: Stage01State, plans: List[Dict[str, Any]]) ->
                 "script_body": code,
                 "script_language": "sql" if target_warehouse == "snowflake" else "python",
                 "target_warehouse": target_warehouse,
-                "code_generation_format": "native",
-                "generation_mode": "METADATA_DETERMINISTIC",
+                "code_generation_format": "dbt" if dbt_codegen else "native",
+                "dbt_model_sql": code if dbt_codegen else None,
+                "dbt_model_name": dbt_snowflake_runtime.dbt_safe_name(
+                    f"gold_{reference['name']}", prefix="gold"
+                ) if dbt_codegen else None,
+                "dbt_alias": str(reference["target_table"]).split(".")[-1] if dbt_codegen else None,
+                "generation_mode": "METADATA_DBT_SQL" if dbt_codegen else "METADATA_DETERMINISTIC",
                 "validation_columns": [str(row["source_field_path"]) for row in plan["bundle"]["mappings"]],
                 "source_table_guard": {"strict_metadata": True, "dropped_source_tables": [], "dropped_dimension_tables": []},
             }
         elif kind == "DIMENSION":
-            code = _metadata_dimension_code(plan, target_warehouse=target_warehouse)
+            code = _metadata_dimension_code(
+                plan, target_warehouse=target_warehouse, dbt_compatible=dbt_codegen
+            )
             if target_warehouse != "snowflake":
                 _validate_python(code)
-            output_dir = _gold_output_dir_for(target_warehouse)
-            os.makedirs(output_dir, exist_ok=True)
-            extension = "sql" if target_warehouse == "snowflake" else "py"
-            path = os.path.join(output_dir, f"gold_{_run_slug(run_id)}_{reference['name']}.{extension}")
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(code)
+            path = None
+            if not dbt_codegen:
+                output_dir = _gold_output_dir_for(target_warehouse)
+                os.makedirs(output_dir, exist_ok=True)
+                extension = "sql" if target_warehouse == "snowflake" else "py"
+                path = os.path.join(output_dir, f"gold_{_run_slug(run_id)}_{reference['name']}.{extension}")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(code)
             result = {
                 "run_id": run_id,
                 "kpi_name": reference["name"],
@@ -3034,8 +3108,13 @@ def _generate_metadata_gold(state: Stage01State, plans: List[Dict[str, Any]]) ->
                 "script_body": code,
                 "script_language": "sql" if target_warehouse == "snowflake" else "python",
                 "target_warehouse": target_warehouse,
-                "code_generation_format": "native",
-                "generation_mode": "METADATA_DETERMINISTIC",
+                "code_generation_format": "dbt" if dbt_codegen else "native",
+                "dbt_model_sql": code if dbt_codegen else None,
+                "dbt_model_name": dbt_snowflake_runtime.dbt_safe_name(
+                    f"gold_{reference['name']}", prefix="gold"
+                ) if dbt_codegen else None,
+                "dbt_alias": str(reference["target_table"]).split(".")[-1] if dbt_codegen else None,
+                "generation_mode": "METADATA_DBT_SQL" if dbt_codegen else "METADATA_DETERMINISTIC",
                 "validation_columns": [str(row["source_field_path"]) for row in plan["bundle"]["mappings"]],
                 "source_table_guard": {"strict_metadata": True, "dropped_source_tables": [], "dropped_dimension_tables": []},
             }
@@ -3060,8 +3139,6 @@ def gold_code_generation_node(state: Stage01State) -> Stage01State:
     dbt_codegen = _snowflake_dbt_codegen_enabled(state)
     metadata_plans = _metadata_gold_plans(state)
     metadata_driven = bool(metadata_plans)
-    if metadata_driven and dbt_codegen:
-        raise RuntimeError("Metadata-driven Gold dbt generation requires final package registration and is not yet executable.")
     mappings = _normalize_contract_mappings(
         contract,
         canonicalize_columns=target_warehouse == "databricks",

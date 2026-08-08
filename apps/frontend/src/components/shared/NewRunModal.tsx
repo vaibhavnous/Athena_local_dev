@@ -365,6 +365,10 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         target_environment: sourceValue === 'database' ? form.targetEnvironment : undefined,
         source_system_id: sourceValue === 'database' ? String(form.sourceSystemId) : undefined,
         source_connection_id: sourceValue === 'database' ? String(form.sourceConnectionId) : undefined,
+        source_profile: sourceValue === 'database'
+          ? metadataConnections.find((item) => String(item.connection_id) === String(form.sourceConnectionId))?.source_profile
+            || selectedMetadataSource?.source_profile
+          : undefined,
         execution_engine: executionEngineValue,
         dbt_deployment_mode: dbtDeploymentModeValue,
         dbt_target_name: form.dbtTargetName || undefined,

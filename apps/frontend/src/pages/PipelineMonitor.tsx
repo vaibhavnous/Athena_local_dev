@@ -16,6 +16,7 @@ import {
   getBronzeReview,
   getEnrichmentReviews,
   getGoldReview,
+  getMetadataDdlReview,
   getRunStatus,
   getRunScripts,
   getSilverMergeKeyReview,
@@ -31,9 +32,10 @@ import { activeReviewKey, hasRenderableReviewData } from '../utils/reviewReadine
 const ACTIVE_RUN_REFRESH_INTERVAL_MS = 5000
 const ACTIVE_RUN_FAST_REFRESH_INTERVAL_MS = 1500
 const REVIEW_READY_POLL_INTERVAL_MS = 1500
-const HIDDEN_CODE_REVIEW_STEPS = new Set(['gate4', 'gate5', 'gold_review'])
+const HIDDEN_CODE_REVIEW_STEPS = new Set(['metadata_ddl_review', 'gate4', 'gate5', 'gold_review'])
 
 async function fetchReviewPayload(runId, reviewKey) {
+  if (reviewKey === 'metadata_ddl_review') return getMetadataDdlReview(runId)
   if (reviewKey === 'silver_merge_key_review') return getSilverMergeKeyReview(runId)
   if (reviewKey === 'gold_review') return getGoldReview(runId)
   if (reviewKey === 5) return getSilverReview(runId)
@@ -60,6 +62,15 @@ export function reviewWaitPatchFromLogs(logs = []) {
     }
     if (status !== 'HITL_WAIT' && !/\bHITL_WAIT\b/i.test(text)) continue
 
+    if (/\bmetadata_ddl_review\b/i.test(text)) {
+      return {
+        status: 'HITL_WAIT',
+        next_gate: 0,
+        next_review_key: 'metadata_ddl_review',
+        background_stage: 'metadata_ddl_review',
+        resume_message: 'Metadata DDL Review is loading.',
+      }
+    }
     if (/\bsilver_merge_key_review\b/i.test(text)) {
       return {
         status: 'HITL_WAIT',
@@ -1324,6 +1335,8 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
 
   if (!fileFlow && phase.label === 'Code Generation & Reviews') {
     displaySteps = [
+      ...(byKey.has('metadata_ddl') ? [makeStep('metadata_ddl', 'Metadata DDL Generation')] : []),
+      ...(byKey.has('metadata_ddl_review') ? [makeStep('metadata_ddl_review', 'Metadata DDL Review')] : []),
       makeStep('bronze', 'Bronze Code Generation'),
       makeStep('gate4', 'Bronze Review', reviewAwareStepState(byKey.get('gate4'), phase, run, 4)),
       makeStep('silver_merge_key_resolution', 'Silver Merge Key Resolution'),
@@ -1336,12 +1349,14 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
   } else if (!fileFlow && ['Target Execution', 'Code Execution & Report Generation', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
     displaySteps = isGenerationFirstDatabaseRun(run) && isSnowflakeDbtRun(run)
       ? [
+          ...(byKey.has('metadata_setup_execution') ? [makeStep('metadata_setup_execution', 'Metadata Setup Execution')] : []),
           makeStep('gold_code_execution', 'Code Execution'),
           ...(run?.report_generation_enabled || byKey.has('report_generation')
             ? [makeStep('report_generation', 'Report Generation')]
             : []),
         ]
       : [
+          ...(byKey.has('metadata_setup_execution') ? [makeStep('metadata_setup_execution', 'Metadata Setup Execution')] : []),
           makeStep('bronze_code_execution', 'Bronze Target Execution'),
           makeStep('silver_code_execution', 'Silver Target Execution'),
           makeStep('gold_code_execution', 'Gold Target Execution'),

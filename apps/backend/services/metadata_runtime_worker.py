@@ -3,10 +3,16 @@ from __future__ import annotations
 import json
 import re
 import threading
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional
 
 from services.metadata_repository import MetadataRepository
+
+
+def _repository_unit_of_work(repository: MetadataRepository):
+    factory = getattr(repository, "unit_of_work", None)
+    return factory() if callable(factory) else nullcontext(repository)
 
 
 def _runtime_state(
@@ -96,6 +102,12 @@ def _execute_registered_artifact(
     mapping: Optional[Dict[str, Any]] = None,
     on_submitted=None,
 ) -> Dict[str, Any]:
+    try:
+        engine = str(json.loads(str(obj.get("execution_spec_json") or "{}"))["engine"]).upper()
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("The active execution specification is invalid.") from exc
+    if engine == "SNOWFLAKE_DBT":
+        raise RuntimeError("Snowflake dbt packages must execute through the single project coordinator.")
     state, stage, platform = _registered_artifact_state(
         run, obj, runtime_context, mapping=mapping
     )
@@ -270,9 +282,10 @@ def _execute_with_lease_heartbeat(
     def renew() -> None:
         while not stop.wait(interval):
             try:
-                repository.heartbeat_queue_item(
-                    queue_id=queue_id, worker_id=worker_id, lease_seconds=lease_seconds
-                )
+                with _repository_unit_of_work(repository):
+                    repository.heartbeat_queue_item(
+                        queue_id=queue_id, worker_id=worker_id, lease_seconds=lease_seconds
+                    )
             except BaseException as exc:  # the owner must fail closed if its lease cannot renew
                 heartbeat_error.append(exc)
                 stop.set()
@@ -286,9 +299,10 @@ def _execute_with_lease_heartbeat(
         thread.join(timeout=min(5.0, interval))
     if heartbeat_error:
         raise RuntimeError("Queue lease was lost during target execution.") from heartbeat_error[0]
-    repository.heartbeat_queue_item(
-        queue_id=queue_id, worker_id=worker_id, lease_seconds=lease_seconds
-    )
+    with _repository_unit_of_work(repository):
+        repository.heartbeat_queue_item(
+            queue_id=queue_id, worker_id=worker_id, lease_seconds=lease_seconds
+        )
     return result
 
 
@@ -776,32 +790,35 @@ def process_next_metadata_work(
     logical_work_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Claim and execute one stateless, registered metadata work item."""
-    queue_item = repository.claim_next_queue_item(
-        worker_id=worker_id,
-        lease_seconds=lease_seconds,
-        logical_work_id=logical_work_id,
-    )
-    if not queue_item:
-        repository.release_ready_downstream_from_successes(logical_work_id=logical_work_id)
+    with _repository_unit_of_work(repository):
         queue_item = repository.claim_next_queue_item(
             worker_id=worker_id,
             lease_seconds=lease_seconds,
             logical_work_id=logical_work_id,
         )
         if not queue_item:
-            return None
-    recovered = repository.recover_committed_queue_item(
-        queue_id=int(queue_item["queue_id"]), worker_id=worker_id
-    )
+            repository.release_ready_downstream_from_successes(logical_work_id=logical_work_id)
+            queue_item = repository.claim_next_queue_item(
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+                logical_work_id=logical_work_id,
+            )
+            if not queue_item:
+                return None
+    with _repository_unit_of_work(repository):
+        recovered = repository.recover_committed_queue_item(
+            queue_id=int(queue_item["queue_id"]), worker_id=worker_id
+        )
     if recovered:
         return {"queue": queue_item, "run": recovered, "status": "RECOVERED_SUCCESS"}
     context: Optional[Dict[str, Any]] = None
     target_committed = False
     error_stage = "FINALIZE"
     try:
-        context = repository.create_run_attempt(
-            queue_item, pipeline_name="metadata_runtime_worker", worker_id=worker_id
-        )
+        with _repository_unit_of_work(repository):
+            context = repository.create_run_attempt(
+                queue_item, pipeline_name="metadata_runtime_worker", worker_id=worker_id
+            )
         run = context["run"]
         obj = context["ingestion_object"]
         runtime_context = {
@@ -811,14 +828,19 @@ def process_next_metadata_work(
         error_stage = "VALIDATE"
         if not context.get("metadata_snapshot_matches", True):
             raise RuntimeError("Queued metadata snapshot is no longer the active executable configuration.")
-        repository.assert_runtime_dependencies(obj, logical_work_id=str(run.get("logical_work_id") or ""))
-        if obj.get("watermark_column") or str(obj.get("checkpoint_type") or "").strip():
-            raise RuntimeError(
-                "Stateful metadata execution requires the generated artifact checkpoint-output protocol, which is not configured."
+        with _repository_unit_of_work(repository):
+            repository.assert_runtime_dependencies(
+                obj, logical_work_id=str(run.get("logical_work_id") or "")
             )
-        repository.heartbeat_queue_item(
-            queue_id=int(queue_item["queue_id"]), worker_id=worker_id, lease_seconds=lease_seconds
-        )
+            if obj.get("watermark_column") or str(obj.get("checkpoint_type") or "").strip():
+                raise RuntimeError(
+                    "Stateful metadata execution requires the generated artifact checkpoint-output protocol, which is not configured."
+                )
+            repository.heartbeat_queue_item(
+                queue_id=int(queue_item["queue_id"]),
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+            )
         error_stage = "WRITE"
         receipt = {"value": ""}
 
@@ -826,14 +848,15 @@ def process_next_metadata_work(
             if not str(target_write_id or "").strip():
                 raise RuntimeError("The target platform did not return an execution receipt.")
             receipt["value"] = str(target_write_id)
-            repository.update_run_phase(
-                str(run["run_id"]),
-                "TARGET_SUBMITTED",
-                queue_id=int(queue_item["queue_id"]),
-                worker_id=worker_id,
-                target_write_id=receipt["value"],
-                target_commit_status="SUBMITTED",
-            )
+            with _repository_unit_of_work(repository):
+                repository.update_run_phase(
+                    str(run["run_id"]),
+                    "TARGET_SUBMITTED",
+                    queue_id=int(queue_item["queue_id"]),
+                    worker_id=worker_id,
+                    target_write_id=receipt["value"],
+                    target_commit_status="SUBMITTED",
+                )
 
         result = _execute_with_lease_heartbeat(
             repository,
@@ -853,47 +876,48 @@ def process_next_metadata_work(
         # A verified target receipt is durable even if the control-plane update below fails.
         target_committed = True
         error_stage = "FINALIZE"
-        repository.begin_queue_finalization(
-            queue_id=int(queue_item["queue_id"]), worker_id=worker_id
-        )
-        repository.update_run_phase(
-            str(run["run_id"]),
-            "TARGET_WRITTEN",
-            queue_id=int(queue_item["queue_id"]),
-            worker_id=worker_id,
-            rows_read=execution_evidence["execution_result"].get("rows_read"),
-            rows_written=execution_evidence["execution_result"].get("rows_written"),
-            target_write_id=str(execution_evidence["execution_result"]["target_commit_id"]),
-            target_commit_status="COMMITTED",
-            validation_status="PASSED",
-            validation_summary_json=json.dumps(
-                {"target_execution": execution_evidence, "blocking_validation": validation_evidence},
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-            watermark_commit_status="SKIPPED",
-        )
-        repository.finalize_successful_run(
-            run_id=str(run["run_id"]),
-            queue_id=int(queue_item["queue_id"]),
-            worker_id=worker_id,
-        )
         downstream_release_status = "COMPLETED"
-        try:
-            repository.enqueue_ready_downstream(
-                completed_object=obj,
-                logical_work_id=str(run.get("logical_work_id") or ""),
-                parent_work_scope=json.loads(str(queue_item.get("work_scope_json") or "{}")),
+        with _repository_unit_of_work(repository):
+            repository.begin_queue_finalization(
+                queue_id=int(queue_item["queue_id"]), worker_id=worker_id
             )
-        except Exception as release_error:
-            downstream_release_status = "PENDING_RECOVERY"
-            repository.record_run_error(
-                run=run,
-                error_stage="FINALIZE",
-                error=release_error,
-                retryable=True,
-                detail={"operation": "DOWNSTREAM_RELEASE"},
+            repository.update_run_phase(
+                str(run["run_id"]),
+                "TARGET_WRITTEN",
+                queue_id=int(queue_item["queue_id"]),
+                worker_id=worker_id,
+                rows_read=execution_evidence["execution_result"].get("rows_read"),
+                rows_written=execution_evidence["execution_result"].get("rows_written"),
+                target_write_id=str(execution_evidence["execution_result"]["target_commit_id"]),
+                target_commit_status="COMMITTED",
+                validation_status="PASSED",
+                validation_summary_json=json.dumps(
+                    {"target_execution": execution_evidence, "blocking_validation": validation_evidence},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                watermark_commit_status="SKIPPED",
             )
+            repository.finalize_successful_run(
+                run_id=str(run["run_id"]),
+                queue_id=int(queue_item["queue_id"]),
+                worker_id=worker_id,
+            )
+            try:
+                repository.enqueue_ready_downstream(
+                    completed_object=obj,
+                    logical_work_id=str(run.get("logical_work_id") or ""),
+                    parent_work_scope=json.loads(str(queue_item.get("work_scope_json") or "{}")),
+                )
+            except Exception as release_error:
+                downstream_release_status = "PENDING_RECOVERY"
+                repository.record_run_error(
+                    run=run,
+                    error_stage="FINALIZE",
+                    error=release_error,
+                    retryable=True,
+                    detail={"operation": "DOWNSTREAM_RELEASE"},
+                )
         return {
             "queue": queue_item,
             "run": run,
@@ -910,27 +934,26 @@ def process_next_metadata_work(
                 or type(exc).__name__ in {"OperationalError", "InterfaceError"}
                 or "dependency is not committed" in str(exc).lower()
             )
-            repository.record_run_error(
-                run=run,
-                error_stage=error_stage,
-                error=exc,
-                retryable=retryable,
-                detail={"ingestion_object_id": run.get("ingestion_object_id")},
-                worker_id=worker_id,
-            )
-            if bool(getattr(exc, "preserve_attempt", False)):
-                repository.release_queue_for_same_attempt_resume(
-                    queue_id=int(queue_item["queue_id"]),
+            with _repository_unit_of_work(repository):
+                repository.record_run_error(
+                    run=run,
+                    error_stage=error_stage,
+                    error=exc,
+                    retryable=retryable,
+                    detail={"ingestion_object_id": run.get("ingestion_object_id")},
                     worker_id=worker_id,
-                    message=str(exc),
                 )
-                raise
-            if target_committed:
-                raise
-            repository.finalize_failed_run(
-                run=run,
-                worker_id=worker_id,
-                retryable=retryable,
-                message=str(exc),
-            )
+                if bool(getattr(exc, "preserve_attempt", False)):
+                    repository.release_queue_for_same_attempt_resume(
+                        queue_id=int(queue_item["queue_id"]),
+                        worker_id=worker_id,
+                        message=str(exc),
+                    )
+                elif not target_committed:
+                    repository.finalize_failed_run(
+                        run=run,
+                        worker_id=worker_id,
+                        retryable=retryable,
+                        message=str(exc),
+                    )
         raise

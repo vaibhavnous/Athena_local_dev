@@ -126,6 +126,7 @@ def run_pipeline_background(
     target_environment: Optional[str] = None,
     source_system_id: Optional[int] = None,
     source_connection_id: Optional[int] = None,
+    source_profile: Optional[str] = None,
     execution_engine: str = "native",
     dbt_deployment_mode: str = "generate_only",
     dbt_project_object_name: Optional[str] = None,
@@ -171,6 +172,7 @@ def run_pipeline_background(
                 target_environment=target_environment,
                 source_system_id=source_system_id,
                 source_connection_id=source_connection_id,
+                source_profile=source_profile,
                 execution_engine=execution_engine,
                 dbt_deployment_mode=dbt_deployment_mode,
                 dbt_project_object_name=dbt_project_object_name,
@@ -239,6 +241,7 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             target_environment=payload.target_environment,
             source_system_id=payload.source_system_id,
             source_connection_id=payload.source_connection_id,
+            source_profile=payload.source_profile,
             execution_engine=str(payload.execution_engine or "native").lower(),
             dbt_deployment_mode=str(payload.dbt_deployment_mode or "generate_only").lower(),
             dbt_project_object_name=payload.dbt_project_object_name,
@@ -280,6 +283,7 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
         target_environment=checkpoint.get("target_environment"),
         source_system_id=checkpoint.get("source_system_id"),
         source_connection_id=checkpoint.get("source_connection_id"),
+        source_profile=checkpoint.get("source_profile"),
         execution_engine=checkpoint.get("execution_engine") or "native",
         dbt_deployment_mode=checkpoint.get("dbt_deployment_mode") or "generate_only",
         dbt_target_name=checkpoint.get("dbt_target_name"),
@@ -332,7 +336,9 @@ def continue_database_pipeline_job(
         and generation_first_snowflake_dbt_flow(state)
     ):
         return execute_generation_first_snowflake_dbt(run_id, state=state)
-    if str(start_stage_key or "").strip().lower() in {
+    normalized_stage = str(start_stage_key or "").strip().lower()
+    if normalized_stage in {
+        "metadata_setup_execution",
         "bronze_code_execution",
         "silver_code_execution",
         "gold_code_execution",
@@ -340,7 +346,11 @@ def continue_database_pipeline_job(
         return execute_database_native_layers(
             run_id,
             state=state,
-            start_stage_key=str(start_stage_key).strip().lower(),
+            start_stage_key=(
+                "bronze_code_execution"
+                if normalized_stage == "metadata_setup_execution"
+                else normalized_stage
+            ),
         )
     return continue_database_pipeline(
         run_id,
@@ -363,6 +373,8 @@ def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Option
     def _pipeline_stage(value: Any) -> Optional[str]:
         raw_stage = str(value or "").strip().lower()
         if raw_stage == "snowflake_dbt_codegen":
+            return raw_stage
+        if raw_stage == "metadata_setup_execution" and generation_first_database_flow(checkpoint):
             return raw_stage
         generation_first_execution = generation_first_database_flow(checkpoint)
         if raw_stage == "gold_code_execution":

@@ -90,9 +90,8 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "execution_engine": checkpoint.get("execution_engine") or "native",
             "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or "generate_only",
             "database_flow_version": checkpoint.get("database_flow_version"),
-            "generation_first_execution": bool(
-                checkpoint.get("database_flow_version") == "generation_first_v1"
-            ),
+            "generation_first_execution": str(checkpoint.get("database_flow_version") or "")
+            in {"generation_first_v1", "generation_first_v2"},
             "dbt_target_name": checkpoint.get("dbt_target_name"),
             "dbt_threads": checkpoint.get("dbt_threads"),
             "dbt_command_timeout_secs": checkpoint.get("dbt_command_timeout_secs"),
@@ -199,6 +198,7 @@ def _seed_run_checkpoint(
             "target_environment": existing.get("target_environment") or payload.target_environment,
             "source_system_id": existing.get("source_system_id") or payload.source_system_id,
             "source_connection_id": existing.get("source_connection_id") or payload.source_connection_id,
+            "source_profile": existing.get("source_profile") or payload.source_profile,
             "database_flow_version": existing.get("database_flow_version") or (
                 DATABASE_GENERATION_FIRST_FLOW_VERSION
                 if source == "database"
@@ -356,8 +356,8 @@ def get_metadata_source_options(
             project_id=project_id,
         )
     except Exception:
-        logger.error("Failed to load metadata source options", exc_info=True, extra={"target": platform})
-        raise HTTPException(status_code=503, detail="Target metadata source options are unavailable") from None
+        logger.error("Failed to load application source options", exc_info=True, extra={"target": platform})
+        raise HTTPException(status_code=503, detail="Application source options are unavailable") from None
     return {
         "target_warehouse": platform,
         "target_environment": environment,

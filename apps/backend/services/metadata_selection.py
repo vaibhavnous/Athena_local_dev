@@ -30,63 +30,10 @@ def environment_source_fallback_enabled() -> bool:
 def metadata_source_options(
     *, platform: str, environment: str, project_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    repository = metadata_repository_for_target(platform=platform, environment=environment)
-    repository.preflight()
-    fallback_enabled = environment_source_fallback_enabled()
-    sources = repository.query(
-        f"SELECT * FROM {repository.table('cfg_source_system')} WHERE active_flag = :active_flag "
-        "ORDER BY source_system_name",
-        {"active_flag": True},
-    )
-    connections = repository.query(
-        f"SELECT * FROM {repository.table('cfg_connection')} "
-        "WHERE connection_type = :connection_type ORDER BY connection_id, config_version DESC",
-        {"connection_type": "JDBC"},
-    )
-    latest_connections: Dict[int, Dict[str, Any]] = {}
-    for connection in connections:
-        connection_id = int(connection.get("connection_id") or 0)
-        if connection_id and connection_id not in latest_connections:
-            latest_connections[connection_id] = connection
+    del platform, environment, project_id
+    from services.database_source_catalog import database_source_options
 
-    grouped: Dict[int, List[Dict[str, Any]]] = {}
-    for connection in latest_connections.values():
-        active = str(connection.get("active_flag") or "").lower() in {"1", "true"}
-        current = str(connection.get("is_current") or "").lower() in {"1", "true"}
-        if not (active and current) and not fallback_enabled:
-            continue
-        normalized = validate_jdbc_connection(connection)
-        if normalized["config_hash"] != str(connection.get("config_hash") or ""):
-            raise ValueError("A configured source connection has an invalid configuration hash.")
-        allowed_projects = set(json.loads(normalized["config_json"])["allowed_project_ids"])
-        if "*" not in allowed_projects and str(project_id or "").strip() not in allowed_projects:
-            continue
-        source_system_id = int(connection.get("source_system_id") or 0)
-        grouped.setdefault(source_system_id, []).append(
-            {
-                # JSON clients cannot safely represent arbitrary BIGINT identifiers as numbers.
-                "connection_id": str(connection["connection_id"]),
-                "connection_name": str(connection.get("connection_name") or ""),
-                "connection_type": str(connection.get("connection_type") or ""),
-                "database_name": str(connection.get("database_name") or ""),
-                "config_version": int(connection.get("config_version") or 0),
-                "active": active and current,
-                "design_time_fallback": not (active and current),
-            }
-        )
-
-    return [
-        {
-            "source_system_id": str(source["source_system_id"]),
-            "source_system_name": str(source.get("source_system_name") or ""),
-            "connections": sorted(
-                grouped[int(source["source_system_id"])],
-                key=lambda item: item["connection_name"].casefold(),
-            ),
-        }
-        for source in sources
-        if int(source.get("source_system_id") or 0) in grouped
-    ]
+    return database_source_options()
 
 
 def validated_metadata_selection(state: Mapping[str, Any]) -> Optional[ValidatedMetadataSelection]:
@@ -97,10 +44,63 @@ def validated_metadata_selection(state: Mapping[str, Any]) -> Optional[Validated
     if source_system_id is None or connection_id is None:
         raise ValueError("source_system_id and source_connection_id must be supplied together.")
 
-    repository = metadata_repository_for_target(
-        platform=str(state.get("target_warehouse") or ""),
-        environment=str(state.get("target_environment") or ""),
+    platform = str(state.get("target_warehouse") or "").strip().lower()
+    environment = str(state.get("target_environment") or "").strip()
+    if str(state.get("database_flow_version") or "") != "generation_first_v2":
+        repository = metadata_repository_for_target(platform=platform, environment=environment)
+        return _validated_metadata_selection(state, repository)
+    from services.application_metadata_repository import application_metadata_repository
+    from services.database_source_catalog import selected_database_source
+
+    source_system, connection = selected_database_source(
+        source_system_id=source_system_id,
+        connection_id=connection_id,
+        platform=platform,
     )
+    selected_profile = str(state.get("source_profile") or "").strip()
+    if selected_profile and selected_profile != "insurance_azure_sql":
+        raise ValueError("The selected source profile does not match the application source catalog.")
+    repository = application_metadata_repository(
+        platform=platform,
+        environment=environment,
+        source_system=source_system,
+        connection=connection,
+    )
+    unit_of_work = getattr(repository, "unit_of_work", None)
+    if callable(unit_of_work):
+        with unit_of_work():
+            return _validated_metadata_selection(state, repository)
+    return _validated_metadata_selection(state, repository)
+
+
+def validated_target_metadata_selection(state: Mapping[str, Any]) -> Optional[ValidatedMetadataSelection]:
+    """Resolve the target repository only after target execution has started."""
+    source_system_id = state.get("source_system_id")
+    connection_id = state.get("source_connection_id")
+    if source_system_id is None and connection_id is None:
+        return None
+    if source_system_id is None or connection_id is None:
+        raise ValueError("source_system_id and source_connection_id must be supplied together.")
+
+    platform = str(state.get("target_warehouse") or "").strip().lower()
+    environment = str(state.get("target_environment") or "").strip()
+    from services.database_source_catalog import selected_database_source
+
+    source_system, connection = selected_database_source(
+        source_system_id=source_system_id,
+        connection_id=connection_id,
+        platform=platform,
+    )
+    repository = metadata_repository_for_target(platform=platform, environment=environment)
+    repository.preflight()
+    return ValidatedMetadataSelection(repository, source_system, connection, True)
+
+
+def _validated_metadata_selection(
+    state: Mapping[str, Any], repository: MetadataRepository
+) -> ValidatedMetadataSelection:
+    source_system_id = state["source_system_id"]
+    connection_id = state["source_connection_id"]
     repository.preflight()
     source_system = repository.get_source_system(int(source_system_id))
     expected_version = state.get("source_connection_config_version")
@@ -109,7 +109,7 @@ def validated_metadata_selection(state: Mapping[str, Any]) -> Optional[Validated
         if expected_version is not None
         else repository.get_active_connection(int(connection_id))
     )
-    uses_environment_source = False
+    uses_environment_source = bool(getattr(repository, "uses_environment_source", False))
     if not connection and expected_version is None and environment_source_fallback_enabled():
         connection = repository.get_latest_connection(int(connection_id))
         uses_environment_source = connection is not None

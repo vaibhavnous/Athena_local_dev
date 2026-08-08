@@ -1,4 +1,10 @@
-import { getPhaseGroups, getPipelineSteps, normalizeState, summarizeRunSource } from './pipelinePhases'
+import {
+  getPhaseGroups,
+  getPipelineSteps,
+  isGenerationFirstDatabaseRun,
+  normalizeState,
+  summarizeRunSource,
+} from './pipelinePhases'
 
 const phaseState = (run: any, phaseId: string, stepKey: string) => {
   const phase = getPhaseGroups(run, getPipelineSteps(run)).find((item) => item.id === phaseId)
@@ -138,6 +144,7 @@ test('groups marked database runs into generation and execution phases', () => {
     'Target Execution',
   ])
   expect(phases.find((phase) => phase.id === 'phase-3')?.steps.map((step) => step.key)).toEqual([
+    'metadata_ddl',
     'bronze',
     'gate4',
     'silver_merge_key_resolution',
@@ -149,10 +156,19 @@ test('groups marked database runs into generation and execution phases', () => {
   ])
   expect(phaseState(run, 'phase-3', 'gold_review')).toBe('HITL_WAIT')
   expect(phases.find((phase) => phase.id === 'phase-4')?.steps.map((step) => step.key)).toEqual([
+    'metadata_setup_execution',
     'bronze_code_execution',
     'silver_code_execution',
     'gold_code_execution',
   ])
+})
+
+test('recognizes the revised generation-first database flow version', () => {
+  expect(isGenerationFirstDatabaseRun({
+    source: 'database',
+    target_warehouse: 'databricks',
+    database_flow_version: 'generation_first_v2',
+  })).toBe(true)
 })
 
 test('does not infer missing generation stages from legacy Bronze execution progress', () => {
@@ -235,8 +251,8 @@ test('recognizes Snowflake dbt deployment mode when a sparse response omits the 
   const phases = getPhaseGroups(run, getPipelineSteps(run))
   const target = phases.find((phase) => phase.label === 'Code Execution & Report Generation')
 
-  expect(target?.steps).toHaveLength(1)
-  expect(target?.steps[0]?.label).toBe('Code Execution')
+  expect(target?.steps).toHaveLength(2)
+  expect(target?.steps.map((step) => step.label)).toEqual(['Metadata Setup Execution', 'Code Execution'])
 })
 
 test('groups marked Snowflake dbt runs into generation and one deployment phase', () => {
@@ -273,8 +289,13 @@ test('groups marked Snowflake dbt runs into generation and one deployment phase'
     'Code Generation & Reviews',
     'Code Execution & Report Generation',
   ])
-  expect(phases.find((phase) => phase.label === 'Code Execution & Report Generation')?.steps).toHaveLength(1)
+  expect(phases.find((phase) => phase.label === 'Code Execution & Report Generation')?.steps).toHaveLength(2)
   expect(phases.find((phase) => phase.label === 'Code Execution & Report Generation')?.steps[0]).toMatchObject({
+    key: 'metadata_setup_execution',
+    label: 'Metadata Setup Execution',
+    state: 'PENDING',
+  })
+  expect(phases.find((phase) => phase.label === 'Code Execution & Report Generation')?.steps[1]).toMatchObject({
     key: 'gold_code_execution',
     label: 'Code Execution',
     state: 'PENDING',
@@ -302,6 +323,7 @@ test('adds report generation after deployment only for report-enabled dbt runs',
     .find((phase) => phase.label === 'Code Execution & Report Generation')
 
   expect(target?.steps).toMatchObject([
+    { key: 'metadata_setup_execution', state: 'COMPLETED' },
     { key: 'gold_code_execution', state: 'COMPLETED' },
     { key: 'report_generation', state: 'RUNNING' },
   ])

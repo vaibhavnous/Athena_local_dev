@@ -399,6 +399,34 @@ def submit_enrichment_review(
 # -------------------------
 # ✅ BRONZE REVIEWS (GET)
 # -------------------------
+@router.get("/metadata-ddl-reviews/{run_id}")
+def metadata_ddl_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
+    from services.pipeline_runtime import load_checkpoint_state
+
+    checkpoint = _checkpoint_for_user(run_id, user) or load_checkpoint_state(run_id) or {}
+    return {
+        "run_id": run_id,
+        "next_review_key": checkpoint.get("next_review_key"),
+        "resume_message": checkpoint.get("resume_message"),
+        "metadata_ddl_review": checkpoint.get("metadata_ddl_review") or {},
+    }
+
+
+@router.post("/metadata-ddl-reviews/{run_id}")
+def submit_metadata_ddl_reviews(
+    run_id: str,
+    payload: GenericGateDecisionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    from services.pipeline_runtime import submit_background, submit_metadata_ddl_review
+
+    _checkpoint_for_user(run_id, user)
+    if str(payload.action or "APPROVED").upper() != "APPROVED":
+        raise HTTPException(status_code=400, detail="Metadata DDL review only supports submit and proceed.")
+    submit_background(run_id, "bronze", submit_metadata_ddl_review, run_id)
+    return {"run_id": run_id, "status": "SUBMITTED", "action": "APPROVED"}
+
+
 @router.get("/bronze-reviews/{run_id}")
 def bronze_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():

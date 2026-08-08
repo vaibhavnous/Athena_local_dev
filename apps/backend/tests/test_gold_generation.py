@@ -104,6 +104,135 @@ def test_metadata_gold_generation_emits_one_artifact_per_fact_and_dimension(monk
     assert all('limit(0).write.format("delta").mode("ignore")' in code for code in generated_code)
 
 
+def test_metadata_gold_dbt_generation_uses_exact_plan_and_silver_ref(monkeypatch):
+    monkeypatch.setenv("SNOWFLAKE_GOLD_CATALOG", "INSURANCE")
+    monkeypatch.setenv("SNOWFLAKE_GOLD_SCHEMA", "GOLD")
+    monkeypatch.setattr(gold_gen, "ai_store_db_writer", lambda **_: None)
+    workdir = Path.cwd() / ".tmp-tests" / f"gold_metadata_dbt_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    reference = {
+        "artifact_kind": "DIMENSION",
+        "name": "dim_claims",
+        "target_table": "INSURANCE.GOLD.dim_claims",
+        "gold_ingestion_object_id": 301,
+        "gold_ingestion_object_config_version": 3,
+        "gold_ingestion_object_config_hash": "sha256:dim",
+        "silver_to_gold_mapping_version": 31,
+        "silver_to_gold_mapping_hash": "sha256:dim-map",
+    }
+    plan = {
+        "reference": reference,
+        "object": {"target_table": reference["target_table"]},
+        "inputs": [{"object_name": "INSURANCE.SILVER.silver_claims"}],
+        "definition": {"artifact_kind": "DIMENSION", "logical_table": "claims"},
+        "bundle": {"mappings": [
+            {
+                "source_object_name": "INSURANCE.SILVER.silver_claims",
+                "source_field_path": "claimid",
+                "target_column_name": "claimid",
+                "target_data_type": "NUMBER",
+                "is_primary_key": True,
+            },
+            {
+                "source_object_name": "INSURANCE.SILVER.silver_claims",
+                "source_field_path": "claimstatus",
+                "target_column_name": "claimstatus",
+                "target_data_type": "VARCHAR",
+                "is_primary_key": False,
+            },
+        ]},
+    }
+    monkeypatch.setattr(gold_gen, "_metadata_gold_plans", lambda _state: [plan])
+    state = {
+        "run_id": "metadata-dbt-gold",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "gold_catalog": "INSURANCE",
+        "gold_schema": "GOLD",
+        "gold_metadata_drafts": [reference],
+        "gold_generation_contract": {"status": "READY", "dimension_mappings": [{}]},
+    }
+    dbt_snowflake_runtime.write_snowflake_dbt_scaffold(state)
+    silver_path = dbt_snowflake_runtime.dbt_model_path(
+        state["run_id"], "silver", "silver_claims"
+    )
+    silver_path.parent.mkdir(parents=True, exist_ok=True)
+    silver_path.write_text("select 1\n", encoding="utf-8")
+
+    result = gold_gen.gold_code_generation_node(state)
+    generated = result["gold_generation_results"][0]
+    sql = Path(generated["script_path"]).read_text(encoding="utf-8")
+
+    assert generated["code_generation_format"] == "dbt"
+    assert generated["generation_mode"] == "METADATA_DBT_SQL"
+    assert generated["dbt_alias"] == "dim_claims"
+    assert "{{ ref('silver_claims') }}" in sql
+    assert "CREATE TABLE" not in sql
+    assert "MERGE INTO" not in sql
+
+
+def test_metadata_gold_dbt_plan_reuses_exact_active_mapping(monkeypatch):
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    pin = {
+        "ingestion_object_id": 201,
+        "config_version": 2,
+        "config_hash": "silver-object",
+        "mapping_version": 21,
+        "mapping_hash": "silver-map",
+        "object_name": "INSURANCE.SILVER.silver_claims",
+    }
+
+    class Repository:
+        def get_ingestion_object(self, object_id, config_version):
+            if (object_id, config_version) == (301, 3):
+                return {
+                    "ingestion_object_id": 301,
+                    "config_version": 3,
+                    "config_hash": "gold-object",
+                    "target_table": "INSURANCE.GOLD.dim_claims",
+                    "active_flag": False,
+                    "is_current": False,
+                }
+            assert (object_id, config_version) == (201, 2)
+            return {"config_version": 2, "config_hash": "silver-object"}
+
+        def get_mapping_bundle(self, **kwargs):
+            assert kwargs["require_active"] is None
+            if kwargs["processing_stage"] == "SILVER_TO_GOLD":
+                return {"mappings": [{
+                    "build_order": 10,
+                    "aggregation_rules_json": '{"artifact_kind":"DIMENSION"}',
+                    "input_objects_json": json.dumps([pin]),
+                }]}
+            assert kwargs["processing_stage"] == "BRONZE_TO_SILVER"
+            return {"mappings": []}
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    plans = gold_gen._metadata_gold_plans({
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+        "gold_metadata_drafts": [{
+            "gold_ingestion_object_id": 301,
+            "gold_ingestion_object_config_version": 3,
+            "gold_ingestion_object_config_hash": "gold-object",
+            "silver_to_gold_mapping_version": 31,
+            "silver_to_gold_mapping_hash": "gold-map",
+            "target_table": "INSURANCE.GOLD.dim_claims",
+        }],
+    })
+
+    assert len(plans) == 1
+    assert plans[0]["inputs"] == [pin]
+
+
 def test_snowflake_metadata_fact_uses_exact_mapping_types_keys_and_write_mode() -> None:
     source = "ATHENA_DB.SILVER.silver_claims"
     plan = {
@@ -141,6 +270,55 @@ def test_snowflake_metadata_fact_uses_exact_mapping_types_keys_and_write_mode() 
     assert 'target."claimstatus" = source."claimstatus"' in sql
     assert 's0."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID' in sql
     assert " FLOAT" not in sql
+
+
+def test_snowflake_metadata_dbt_fact_preserves_multi_input_refs() -> None:
+    orders = "INSURANCE.SILVER.silver_orders"
+    customers = "INSURANCE.SILVER.silver_customers"
+    joins = json.dumps([{
+        "left_source_table": orders,
+        "right_source_table": customers,
+        "left_column": "customerid",
+        "right_column": "customerid",
+        "join_type": "INNER",
+    }])
+    plan = {
+        "object": {
+            "target_table": "INSURANCE.GOLD.fact_orders",
+            "write_mode": "MERGE",
+            "merge_keys_json": '["status"]',
+        },
+        "inputs": [{"object_name": orders}, {"object_name": customers}],
+        "bundle": {"mappings": [
+            {
+                "source_object_name": orders,
+                "source_field_path": "status",
+                "target_column_name": "status",
+                "target_data_type": "VARCHAR",
+                "transformation_rule": "GROUP_KEY",
+                "join_rules_json": joins,
+            },
+            {
+                "source_object_name": orders,
+                "source_field_path": "amount",
+                "target_column_name": "total_amount",
+                "target_data_type": "DECIMAL(38,10)",
+                "transformation_rule": "AGG_SUM",
+                "join_rules_json": joins,
+            },
+        ]},
+    }
+
+    sql = gold_gen._metadata_fact_code(
+        plan, target_warehouse="snowflake", dbt_compatible=True
+    )
+
+    assert "{{ ref('silver_orders') }}" in sql
+    assert "{{ ref('silver_customers') }}" in sql
+    assert 'SUM(s0."amount")' in sql
+    assert "_logical_work_id" not in sql
+    assert "CREATE TABLE" not in sql
+    assert "MERGE INTO" not in sql
 
 
 def test_databricks_metadata_fact_reports_observed_join_multiplier() -> None:

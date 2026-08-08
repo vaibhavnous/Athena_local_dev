@@ -1928,7 +1928,6 @@ def _generate_one_table(
             landing_table=snowflake_landing_table,
             cast_rules=cast_rules or {},
             table_metadata=table_metadata or {},
-            metadata_driven=metadata_driven,
         )
         validate_snowflake_bronze_dbt_model(
             code,

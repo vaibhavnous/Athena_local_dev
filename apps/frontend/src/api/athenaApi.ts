@@ -106,18 +106,20 @@ export interface MetadataSourceConnectionOption {
   config_version: number
   active: boolean
   design_time_fallback: boolean
+  source_profile?: string
 }
 
 export interface MetadataSourceSystemOption {
   source_system_id: string
   source_system_name: string
+  source_profile?: string
   connections: MetadataSourceConnectionOption[]
 }
 
 export const getMetadataSourceOptions = (targetWarehouse: string, projectId?: string) =>
   api.get('/metadata/source-options', {
     params: { target_warehouse: targetWarehouse, project_id: projectId || undefined },
-    timeout: READ_TIMEOUT,
+    timeout: 60000,
   }) as unknown as Promise<{
     target_warehouse: string
     target_environment: string
@@ -137,6 +139,7 @@ export const startRun = (payload: {
   target_environment?: string
   source_system_id?: string
   source_connection_id?: string
+  source_profile?: string
   execution_engine?: 'native' | 'dbt'
   dbt_deployment_mode?: 'generate_only' | 'generate_and_deploy'
   dbt_target_name?: string
@@ -210,6 +213,11 @@ export const submitComplianceReview = (
 ) => api.post(`/compliance-reviews/${runId}`, { findings, overall_comments }, { timeout: WRITE_TIMEOUT })
 
 export const getBronzeReview = (runId: string) => api.get(`/bronze-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
+
+export const getMetadataDdlReview = (runId: string) => api.get(`/metadata-ddl-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
+
+export const submitMetadataDdlReview = (runId: string) =>
+  api.post(`/metadata-ddl-reviews/${runId}`, { action: 'APPROVED' }, { timeout: WRITE_TIMEOUT })
 
 export const submitBronzeReview = (runId: string, action: 'APPROVED' | 'REJECTED' | 'REGENERATE', reviewArtifact?: Record<string, any>) =>
   api.post(`/bronze-reviews/${runId}`, { action, review_artifact: reviewArtifact }, { timeout: WRITE_TIMEOUT })

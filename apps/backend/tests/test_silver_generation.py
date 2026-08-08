@@ -310,7 +310,7 @@ def test_metadata_silver_inputs_reload_exact_target_resident_draft(monkeypatch):
             if kwargs["processing_stage"] == "BRONZE_TO_SILVER":
                 assert kwargs["mapping_version"] == 11
                 assert kwargs["expected_hash"] == "sha256:silver-mapping"
-                assert kwargs["require_active"] is False
+                assert kwargs["require_active"] is None
                 return {"mappings": mapping_rows}
             assert kwargs["ingestion_object_id"] == 101
             assert kwargs["mapping_version"] == 7

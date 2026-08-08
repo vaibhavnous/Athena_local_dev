@@ -1,4 +1,4 @@
-export type ReviewKey = 1 | 2 | 3 | 4 | 5 | 'silver_merge_key_review' | 'gold_review'
+export type ReviewKey = 1 | 2 | 3 | 4 | 5 | 'metadata_ddl_review' | 'silver_merge_key_review' | 'gold_review'
 
 const SEMANTIC_TYPES = new Set([
   'MEASURE', 'DIMENSION', 'ID', 'SURROGATE_KEY', 'DATE',
@@ -74,6 +74,7 @@ export function hasRenderableReviewData(review: any, reviewKey: ReviewKey, isFil
     )
   }
   if (reviewKey === 4) return Boolean((review?.bronze_review_artifact?.feeds || []).length)
+  if (reviewKey === 'metadata_ddl_review') return Boolean(review?.metadata_ddl_review?.script_body)
   if (reviewKey === 'silver_merge_key_review') {
     return Boolean((review?.silver_merge_key_review_artifact?.feeds || []).length)
   }
@@ -84,7 +85,7 @@ export function hasRenderableReviewData(review: any, reviewKey: ReviewKey, isFil
 
 export function activeReviewKey(run: any): ReviewKey | null {
   const namedReview = String(run?.next_review_key || '')
-  if (namedReview === 'silver_merge_key_review' || namedReview === 'gold_review') {
+  if (namedReview === 'metadata_ddl_review' || namedReview === 'silver_merge_key_review' || namedReview === 'gold_review') {
     return namedReview
   }
 
