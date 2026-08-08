@@ -922,6 +922,97 @@ def test_merge_key_approval_materializes_exact_bronze_to_silver_draft(monkeypatc
     assert silver["bronze_to_silver_mapping_hash"] == "sha256:silver-mapping"
 
 
+def test_snowflake_dbt_silver_uses_current_run_draft_not_active_databricks_metadata(monkeypatch):
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    captured = {}
+    draft = {
+        "ingestion_object_id": 101,
+        "source_system_id": 7,
+        "config_version": 3,
+        "config_hash": "sha256:snowflake-object",
+        "target_bronze_table": "INSURANCE.BRONZE.bronze_claims",
+        "active_flag": False,
+        "is_current": False,
+    }
+    bundle = {
+        "mapping_version": 19,
+        "mapping_hash": "sha256:snowflake-mapping",
+        "active_flag": False,
+        "mappings": [{
+            "target_column_name": "claimid",
+            "target_data_type": "NUMBER",
+            "is_nullable": False,
+            "ordinal_position": 1,
+        }],
+    }
+
+    class Repository:
+        def get_ingestion_objects(self, refs, *, require_active):
+            assert list(refs) == [{"ingestion_object_id": 101, "config_version": 3}]
+            assert require_active is False
+            return {(101, 3): draft}
+
+        def get_mapping_bundles(self, refs):
+            assert refs[0]["expected_target"] == "INSURANCE.BRONZE.bronze_claims"
+            assert refs[0]["require_active"] is None
+            return {(101, "SOURCE_TO_BRONZE", 19): bundle}
+
+        def get_active_ingestion_object(self, _object_id):
+            raise AssertionError("Snowflake dbt design must not read active Databricks metadata")
+
+        def upsert_bronze_to_silver_draft(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "ingestion_object": {
+                    "ingestion_object_id": 202,
+                    "config_version": 5,
+                    "config_hash": "sha256:silver-object",
+                },
+                "mapping_bundle": {
+                    "mapping_version": 29,
+                    "mapping_hash": "sha256:silver-mapping",
+                },
+            }
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    result = pipeline_runtime._materialize_bronze_to_silver_metadata(
+        {
+            "target_warehouse": "snowflake",
+            "execution_engine": "dbt",
+            "source_system_id": 7,
+            "bronze_generation_results": [{
+                "ingestion_object_id": 101,
+                "ingestion_object_config_version": 3,
+                "mapping_version": 19,
+                "mapping_hash": "sha256:snowflake-mapping",
+                "metadata_activation_status": "PENDING_FINAL_DBT_PACKAGE",
+                "target_table": "INSURANCE.BRONZE.bronze_claims",
+                "database_name": "ClaimsDB",
+                "schema_name": "dbo",
+                "table": "Claims",
+            }],
+        },
+        {"feeds": [{
+            "ingestion_object_id": 101,
+            "database_name": "ClaimsDB",
+            "schema_name": "dbo",
+            "table": "Claims",
+            "merge_keys": ["ClaimID"],
+        }]},
+    )
+
+    assert captured["source_object"] == draft
+    assert captured["source_mapping"] == bundle
+    assert captured["allow_inactive_source"] is True
+    assert result["bronze_generation_results"][0]["silver_ingestion_object_id"] == 202
+
+
 def test_metadata_merge_key_review_rejects_ambiguous_leaf_table(monkeypatch):
     from types import SimpleNamespace
     from services import metadata_selection
@@ -1095,15 +1186,16 @@ def test_gate5_metadata_rejects_edited_executable_code(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("filters", "aggregation", "expected_kinds", "rejection_code"),
+    ("filters", "aggregation", "facts_enabled", "expected_kinds", "rejection_code"),
     [
-        (["Consistent identifiers across systems"], "SUM", ["DIMENSION", "FACT"], None),
-        ([{"column": "claimstatus", "operator": "=", "value": "OPEN"}], "SUM", ["DIMENSION"], "UNSUPPORTED_FILTER"),
-        (["Consistent identifiers across systems"], "RATIO", ["DIMENSION"], "INVALID_AGGREGATION"),
+        (["Consistent identifiers across systems"], "SUM", False, ["DIMENSION"], "DATABRICKS_FACTS_DEFERRED"),
+        (["Consistent identifiers across systems"], "SUM", True, ["DIMENSION", "FACT"], None),
+        ([{"column": "claimstatus", "operator": "=", "value": "OPEN"}], "SUM", True, ["DIMENSION"], "UNSUPPORTED_FILTER"),
+        (["Consistent identifiers across systems"], "RATIO", True, ["DIMENSION"], "INVALID_AGGREGATION"),
     ],
 )
 def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(
-    monkeypatch, filters, aggregation, expected_kinds, rejection_code
+    monkeypatch, filters, aggregation, facts_enabled, expected_kinds, rejection_code
 ) -> None:
     from types import SimpleNamespace
     from services import metadata_selection
@@ -1111,6 +1203,7 @@ def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(
     captured = []
     monkeypatch.setenv("GOLD_CATALOG", "main")
     monkeypatch.setenv("GOLD_SCHEMA", "gold")
+    monkeypatch.setenv("ATHENA_DATABRICKS_GOLD_FACTS_ENABLED", str(facts_enabled))
     active = {
         "ingestion_object_id": 202,
         "source_system_id": 7,

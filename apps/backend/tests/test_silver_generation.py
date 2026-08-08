@@ -284,6 +284,16 @@ def test_metadata_silver_inputs_reload_exact_target_resident_draft(monkeypatch):
 
     class Repository:
         def get_ingestion_object(self, object_id, config_version):
+            if (object_id, config_version) == (101, 2):
+                return {
+                    "ingestion_object_id": 101,
+                    "config_version": 2,
+                    "config_hash": "sha256:bronze-object",
+                    "processing_stage": "SOURCE_TO_BRONZE",
+                    "target_bronze_table": "main.bronze.bronze_claims",
+                    "active_flag": False,
+                    "is_current": False,
+                }
             assert (object_id, config_version) == (202, 3)
             return {
                 "ingestion_object_id": 202,
@@ -297,15 +307,6 @@ def test_metadata_silver_inputs_reload_exact_target_resident_draft(monkeypatch):
                 "is_current": False,
             }
 
-        def get_active_ingestion_object(self, object_id):
-            assert object_id == 101
-            return {
-                "ingestion_object_id": 101,
-                "config_version": 2,
-                "config_hash": "sha256:bronze-object",
-                "target_bronze_table": "main.bronze.bronze_claims",
-            }
-
         def get_mapping_bundle(self, **kwargs):
             if kwargs["processing_stage"] == "BRONZE_TO_SILVER":
                 assert kwargs["mapping_version"] == 11
@@ -315,7 +316,7 @@ def test_metadata_silver_inputs_reload_exact_target_resident_draft(monkeypatch):
             assert kwargs["ingestion_object_id"] == 101
             assert kwargs["mapping_version"] == 7
             assert kwargs["expected_hash"] == "sha256:bronze-mapping"
-            assert kwargs["require_active"] is True
+            assert kwargs["require_active"] is None
             return {"mappings": []}
 
     monkeypatch.setattr(

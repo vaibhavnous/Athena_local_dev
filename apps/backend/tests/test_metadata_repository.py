@@ -603,6 +603,76 @@ def test_bronze_to_silver_draft_is_exact_inactive_and_idempotent() -> None:
     assert reused_active["mapping_bundle"]["active_flag"] is True
 
 
+def test_target_mapping_validates_design_pin_from_executable_without_copying_draft() -> None:
+    repository = StubMetadataRepository()
+    source_object, source_mapping = _active_bronze_contract(repository)
+    created = repository.upsert_bronze_to_silver_draft(
+        source_system_id=7,
+        source_object=source_object,
+        source_mapping=source_mapping,
+        target_silver_table="main.silver.silver_claims",
+        merge_keys=["claimid"],
+        columns=[{
+            "source_field_path": row["target_column_name"],
+            "source_data_type": row["target_data_type"],
+            "target_column_name": row["target_column_name"],
+            "target_data_type": row["target_data_type"],
+            "is_nullable": row["is_nullable"],
+            "ordinal_position": row["ordinal_position"],
+            "transformation_rule": "CAST",
+        } for row in source_mapping["mappings"]],
+    )
+    draft = created["ingestion_object"]
+    bundle = created["mapping_bundle"]
+    for row in repository.mappings:
+        if row["ingestion_object_id"] == draft["ingestion_object_id"]:
+            row.update({"active_flag": True, "is_current": True})
+    executable = {
+        **draft,
+        "config_version": int(draft["config_version"]) + 1,
+        "config_hash": "sha256:executable",
+        "active_flag": True,
+        "is_current": True,
+        "execution_spec_json": json.dumps({
+            "design_config_version": draft["config_version"],
+            "design_config_hash": draft["config_hash"],
+        }),
+    }
+    mapping_rows = [
+        dict(row) for row in repository.mappings
+        if row["ingestion_object_id"] == draft["ingestion_object_id"]
+    ]
+    repository.query = lambda sql, _parameters=None: mapping_rows if "cfg_mapping" in sql else []
+    repository.get_ingestion_objects = lambda _refs, **_kwargs: {}
+    repository.get_ingestion_object = lambda _object_id, _version: None
+    repository.get_active_ingestion_object = lambda _object_id: executable
+    repository.get_active_ingestion_objects = lambda _ids, **_kwargs: {
+        int(draft["ingestion_object_id"]): executable
+    }
+
+    persisted_single = repository.get_mapping_bundle(
+        ingestion_object_id=draft["ingestion_object_id"],
+        processing_stage="BRONZE_TO_SILVER",
+        mapping_version=bundle["mapping_version"],
+        expected_hash=bundle["mapping_hash"],
+        expected_target=draft["target_table"],
+        require_active=True,
+    )
+    persisted = repository.get_mapping_bundles([{
+        "ingestion_object_id": draft["ingestion_object_id"],
+        "processing_stage": "BRONZE_TO_SILVER",
+        "mapping_version": bundle["mapping_version"],
+        "expected_hash": bundle["mapping_hash"],
+        "expected_target": draft["target_table"],
+        "require_active": True,
+    }])
+
+    assert persisted_single["mapping_hash"] == bundle["mapping_hash"]
+    assert persisted[
+        (draft["ingestion_object_id"], "BRONZE_TO_SILVER", bundle["mapping_version"])
+    ]["mapping_hash"] == bundle["mapping_hash"]
+
+
 def test_bronze_to_silver_rejects_unknown_key_before_creating_transform() -> None:
     repository = StubMetadataRepository()
     source_object, source_mapping = _active_bronze_contract(repository)
@@ -1418,6 +1488,24 @@ def test_reviewed_artifact_creates_and_activates_a_new_executable_version(tmp_pa
     assert activated["mapping_bundle"]["active_flag"] is True
     assert json.loads(activated["ingestion_object"]["execution_spec_json"])["design_config_version"] == draft["config_version"]
 
+    same_content = tmp_path / "bronze" / "claims_from_later_run.py"
+    same_content.write_text("print('claims')\n", encoding="utf-8")
+    reused = repository.register_and_activate_source_to_bronze_artifact(
+        draft_config_version=int(draft["config_version"]),
+        ingestion_object_id=int(draft["ingestion_object_id"]),
+        mapping_version=int(bundle["mapping_version"]),
+        mapping_hash=str(bundle["mapping_hash"]),
+        execution_spec={
+            **activated["execution_spec"],
+            "artifact_uri": generated_artifact_uri(same_content),
+            "artifact_hash": file_sha256(same_content),
+            "deployment_id": "later-identical-design-run",
+        },
+    )
+
+    assert reused["ingestion_object"]["config_version"] == activated["ingestion_object"]["config_version"]
+    assert len(repository.objects) == 2  # one design draft and one executable version
+
     replacement = tmp_path / "bronze" / "claims_v2.py"
     replacement.write_text("print('claims v2')\n", encoding="utf-8")
     second_spec = {
@@ -1479,8 +1567,8 @@ def test_reviewed_artifacts_use_one_set_based_activation_bundle(monkeypatch) -> 
         }
 
     repository.get_mapping_bundles = bundles
-    repository.get_active_ingestion_objects = lambda object_ids: {
-        object_id: active_objects[object_id] for object_id in object_ids
+    repository.get_active_ingestion_objects = lambda object_ids, **_kwargs: {
+        object_id: active_objects[object_id] for object_id in object_ids if object_id in active_objects
     }
 
     def execute(sql, parameters=None):
@@ -1493,6 +1581,9 @@ def test_reviewed_artifacts_use_one_set_based_activation_bundle(monkeypatch) -> 
                     "ingestion_object_id": object_id,
                     "config_version": int(values[f"exec{index}_config_version"]),
                     "config_hash": str(values[f"exec{index}_config_hash"]),
+                    "execution_spec_json": str(values[f"exec{index}_execution_spec_json"]),
+                    "target_bronze_table": str(values[f"exec{index}_target_bronze_table"]),
+                    "write_mode": str(values[f"exec{index}_write_mode"]),
                     "active_flag": True,
                     "is_current": True,
                 }
@@ -1517,6 +1608,30 @@ def test_reviewed_artifacts_use_one_set_based_activation_bundle(monkeypatch) -> 
     assert len(statements) == 3
     assert "UNION ALL" in statements[0][0]
     assert all(item["ingestion_object"]["active_flag"] for item in activated)
+
+    rerun_artifacts = [
+        {
+            **artifact,
+            "execution_spec": {
+                **artifact["execution_spec"],
+                "artifact_uri": f"generated-code://later-run/{artifact['ingestion_object_id']}.py",
+                "deployment_id": "later-identical-design-run",
+            },
+        }
+        for artifact in artifacts
+    ]
+    reused = repository.register_and_activate_artifacts(
+        processing_stage="SOURCE_TO_BRONZE", artifacts=rerun_artifacts
+    )
+
+    executable_inserts = [
+        sql for sql, _ in statements
+        if "WHEN NOT MATCHED THEN INSERT" in sql and "cfg_ingestion_object" in sql
+    ]
+    assert len(executable_inserts) == 1
+    assert [item["ingestion_object"]["config_version"] for item in reused] == [
+        item["ingestion_object"]["config_version"] for item in activated
+    ]
 
 
 def test_metadata_selection_revalidates_pinned_connection_and_project_access(monkeypatch: pytest.MonkeyPatch) -> None:

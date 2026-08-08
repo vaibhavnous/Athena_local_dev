@@ -4660,6 +4660,18 @@ def _materialize_silver_to_gold_metadata(
             continue
         kpi_name = str(raw.get("kpi_name") or "KPI").strip()
         name = f"fact_{normalize_bronze_column_name(kpi_name)}"
+        # ponytail: keep Databricks Gold dimension-only until root-relative join
+        # cardinality is validated before facts are approved; Snowflake is unchanged.
+        if platform == "databricks" and str(
+            os.getenv("ATHENA_DATABRICKS_GOLD_FACTS_ENABLED", "false")
+        ).strip().lower() not in {"1", "true", "yes", "on"}:
+            reject(
+                "FACT",
+                name,
+                "DATABRICKS_FACTS_DEFERRED",
+                "Databricks Gold facts are deferred; dimension execution remains enabled.",
+            )
+            continue
         if str(raw.get("readiness") or "").upper() == "BLOCKED":
             reject("FACT", name, "INCOMPLETE_KPI_CONTRACT", "The approved KPI contract is marked BLOCKED.")
             continue
@@ -5233,38 +5245,64 @@ def _materialize_bronze_to_silver_metadata(
     results = []
     bundles = []
     objects = []
+    dbt_codegen = snowflake_dbt_enabled(state)
+    pending_dbt = [
+        item for item in bronze_results
+        if item.get("metadata_activation_status") == "PENDING_FINAL_DBT_PACKAGE"
+    ]
+    if pending_dbt and (not dbt_codegen or len(pending_dbt) != len(bronze_results)):
+        raise RuntimeError("Snowflake dbt Bronze metadata cannot mix draft and active package inputs.")
+    using_dbt_drafts = bool(pending_dbt)
     bronze_ids = [int(item.get("ingestion_object_id") or 0) for item in bronze_results]
+    bronze_object_refs = [{
+        "ingestion_object_id": int(item["ingestion_object_id"]),
+        "config_version": int(item["ingestion_object_config_version"]),
+    } for item in bronze_results] if using_dbt_drafts else []
+    load_objects = getattr(selection.repository, "get_ingestion_objects", None)
+    reviewed_bronze_objects = (
+        load_objects(bronze_object_refs, require_active=False)
+        if using_dbt_drafts and callable(load_objects)
+        else {}
+    )
     load_active = getattr(selection.repository, "get_active_ingestion_objects", None)
-    active_bronze = load_active(bronze_ids) if callable(load_active) else {}
+    active_bronze = load_active(bronze_ids) if not using_dbt_drafts and callable(load_active) else {}
     bronze_bundle_refs = []
     for bronze in bronze_results:
         object_id = int(bronze.get("ingestion_object_id") or 0)
-        active = active_bronze.get(object_id) or selection.repository.get_active_ingestion_object(object_id)
-        if not active:
-            raise ValueError(f"Active Bronze ingestion object not found: {object_id}")
+        source_object = (
+            reviewed_bronze_objects.get((object_id, int(bronze["ingestion_object_config_version"])))
+            if using_dbt_drafts
+            else active_bronze.get(object_id) or selection.repository.get_active_ingestion_object(object_id)
+        )
+        if not source_object:
+            raise ValueError(f"Reviewed Bronze ingestion object not found: {object_id}")
         bronze_bundle_refs.append({
             "ingestion_object_id": object_id,
             "processing_stage": "SOURCE_TO_BRONZE",
             "mapping_version": int(bronze["mapping_version"]),
             "expected_hash": str(bronze["mapping_hash"]),
-            "expected_target": str(active["target_bronze_table"]),
-            "require_active": True,
+            "expected_target": str(bronze.get("target_table") or source_object["target_bronze_table"]),
+            "require_active": None if using_dbt_drafts else True,
         })
     load_bundles = getattr(selection.repository, "get_mapping_bundles", None)
     active_source_bundles = load_bundles(bronze_bundle_refs) if callable(load_bundles) else {}
     for bronze, feed in reviewed_bronze:
         object_id = int(bronze.get("ingestion_object_id") or 0)
-        source_object = active_bronze.get(object_id) or selection.repository.get_active_ingestion_object(object_id)
+        source_object = (
+            reviewed_bronze_objects.get((object_id, int(bronze["ingestion_object_config_version"])))
+            if using_dbt_drafts
+            else active_bronze.get(object_id) or selection.repository.get_active_ingestion_object(object_id)
+        )
         if not source_object:
-            raise ValueError(f"Active Bronze ingestion object not found: {object_id}")
+            raise ValueError(f"Reviewed Bronze ingestion object not found: {object_id}")
         mapping_version = int(bronze["mapping_version"])
         source_mapping = active_source_bundles.get((object_id, "SOURCE_TO_BRONZE", mapping_version)) or selection.repository.get_mapping_bundle(
             ingestion_object_id=object_id,
             processing_stage="SOURCE_TO_BRONZE",
             mapping_version=mapping_version,
             expected_hash=str(bronze["mapping_hash"]),
-            expected_target=str(source_object["target_bronze_table"]),
-            require_active=True,
+            expected_target=str(bronze.get("target_table") or source_object["target_bronze_table"]),
+            require_active=None if using_dbt_drafts else True,
         )
         table_name = str(bronze.get("table") or "")
         merge_keys = [
@@ -5297,6 +5335,7 @@ def _materialize_bronze_to_silver_metadata(
             target_silver_table=target_table,
             merge_keys=merge_keys,
             columns=columns,
+            allow_inactive_source=using_dbt_drafts,
         )
         transformation = created["ingestion_object"]
         bundle = created["mapping_bundle"]
@@ -5649,25 +5688,6 @@ def _execute_metadata_setup(state: Dict[str, Any]) -> Dict[str, Any]:
     if not object_ids:
         raise RuntimeError("Metadata setup found no approved active ingestion objects.")
     active_objects = list(design.repository.get_active_ingestion_objects(object_ids).values())
-    draft_references = []
-    for obj in active_objects:
-        try:
-            design_version = int(json.loads(str(obj.get("execution_spec_json") or "{}"))["design_config_version"])
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise RuntimeError("An active execution specification is missing its pinned design version.") from exc
-        draft_references.append({
-            "ingestion_object_id": int(obj["ingestion_object_id"]),
-            "config_version": design_version,
-        })
-    pinned_drafts = design.repository.get_ingestion_objects(
-        draft_references, require_active=False
-    )
-    # Runtime mappings pin the design row; execution pins the active artifact row.
-    objects_by_version = {
-        (int(obj["ingestion_object_id"]), int(obj["config_version"])): obj
-        for obj in [*active_objects, *pinned_drafts.values()]
-    }
-    objects = list(objects_by_version.values())
     id_parameters = {f"object_id_{index}": object_id for index, object_id in enumerate(object_ids)}
     mappings = design.repository.query(
         f"SELECT * FROM {design.repository.table('cfg_mapping')} "
@@ -5688,7 +5708,7 @@ def _execute_metadata_setup(state: Dict[str, Any]) -> Dict[str, Any]:
             lambda payload: validate_deployment_database_binding(payload, target_platform=platform),
         )
         repository.deploy_configuration_snapshot(
-            ingestion_objects=objects,
+            ingestion_objects=active_objects,
             mappings=mappings,
         )
 

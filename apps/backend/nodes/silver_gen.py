@@ -95,20 +95,25 @@ def _metadata_tables_for_silver(
             raise RuntimeError("Bronze-to-Silver requires exactly one pinned Bronze input.")
         upstream_pin = input_pin[0]
         upstream_id = int(upstream_pin.get("ingestion_object_id") or 0)
-        upstream = selection.repository.get_active_ingestion_object(upstream_id)
+        upstream = selection.repository.get_ingestion_object(
+            upstream_id, int(upstream_pin.get("config_version") or 0)
+        )
         if (
             not upstream
             or int(upstream.get("config_version") or 0) != int(upstream_pin.get("config_version") or 0)
             or str(upstream.get("config_hash") or "") != str(upstream_pin.get("config_hash") or "")
+            or str(upstream.get("processing_stage") or "").upper() != "SOURCE_TO_BRONZE"
+            or str(upstream.get("target_bronze_table") or "").casefold()
+            != str(rows[0].get("source_object_name") or "").casefold()
         ):
-            raise RuntimeError("The active Bronze dependency changed after Silver approval.")
+            raise RuntimeError("The pinned Bronze dependency changed after Silver approval.")
         selection.repository.get_mapping_bundle(
             ingestion_object_id=upstream_id,
             processing_stage="SOURCE_TO_BRONZE",
             mapping_version=int(upstream_pin.get("mapping_version") or 0),
             expected_hash=str(upstream_pin.get("mapping_hash") or ""),
             expected_target=str(upstream.get("target_bronze_table") or ""),
-            require_active=True,
+            require_active=None,
         )
         merge_keys = [str(row.get("target_column_name") or "") for row in rows if bool(row.get("is_primary_key"))]
         if not merge_keys or merge_keys != json.loads(str(transformation.get("merge_keys_json") or "[]")):

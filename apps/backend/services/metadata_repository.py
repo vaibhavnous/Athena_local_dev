@@ -30,6 +30,7 @@ from utilis.logger import redact_sensitive, redact_sensitive_text
 
 
 _PARAMETER = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
+_RUN_SCOPED_EXECUTION_FIELDS = {"artifact_uri", "deployment_id", "design_config_version"}
 
 
 def _as_bool(value: Any) -> bool:
@@ -121,6 +122,78 @@ def _validate_snowflake_registered_artifact(
         )
     else:
         _validate_snowflake_transformation_contract(sql, obj)
+
+
+def _functional_execution_hash(
+    *, base_config_hash: str, spec: Mapping[str, Any], target_table: str, write_mode: str
+) -> str:
+    """Identify executable behavior without treating a design run as configuration."""
+    functional_spec = {
+        key: value for key, value in spec.items() if key not in _RUN_SCOPED_EXECUTION_FIELDS
+    }
+    return canonical_json_hash(
+        {
+            "base_config_hash": str(base_config_hash or ""),
+            "execution_spec": functional_spec,
+            "target_table": str(target_table or ""),
+            "write_mode": str(write_mode or ""),
+        }
+    )
+
+
+def _reusable_execution_spec(
+    active: Optional[Mapping[str, Any]],
+    *,
+    draft: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    target_table: str,
+    platform: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the existing durable artifact when the executable contract is unchanged."""
+    if not active or not _as_bool(active.get("active_flag")) or not _as_bool(active.get("is_current")):
+        return None
+    try:
+        existing_spec = json.loads(str(active.get("execution_spec_json") or ""))
+    except (TypeError, json.JSONDecodeError):
+        return None
+    current_hash = _functional_execution_hash(
+        base_config_hash=str(draft.get("config_hash") or ""),
+        spec=spec,
+        target_table=target_table,
+        write_mode=str(draft.get("write_mode") or ""),
+    )
+    existing_hash = _functional_execution_hash(
+        base_config_hash=str(existing_spec.get("design_config_hash") or ""),
+        spec=existing_spec,
+        target_table=str(active.get("target_table") or active.get("target_bronze_table") or ""),
+        write_mode=str(active.get("write_mode") or ""),
+    )
+    if current_hash != existing_hash:
+        return None
+    try:
+        from utilis.generated_code_paths import verified_execution_artifact
+
+        verified_execution_artifact(existing_spec, platform=platform)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return existing_spec
+
+
+def _design_contract_from_executable(
+    active: Optional[Mapping[str, Any]], *, design_version: int
+) -> Optional[Dict[str, Any]]:
+    """Expose an executable's signed design pin to mapping validation."""
+    try:
+        execution_spec = json.loads(str((active or {}).get("execution_spec_json") or ""))
+        pinned_version = int(execution_spec.get("design_config_version") or 0)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if pinned_version != design_version or not execution_spec.get("design_config_hash"):
+        return None
+    design = dict(active or {})
+    design["config_version"] = design_version
+    design["config_hash"] = str(execution_spec["design_config_hash"])
+    return design
 
 
 class MetadataRepository(ABC):
@@ -465,7 +538,11 @@ class MetadataRepository(ABC):
         return rows[0] if rows else None
 
     def get_ingestion_objects(
-        self, references: Iterable[Mapping[str, Any]], *, require_active: Optional[bool] = None
+        self,
+        references: Iterable[Mapping[str, Any]],
+        *,
+        require_active: Optional[bool] = None,
+        require_all: bool = True,
     ) -> Dict[tuple[int, int], Dict[str, Any]]:
         keys = [
             {
@@ -494,12 +571,12 @@ class MetadataRepository(ABC):
             if key in result:
                 raise RuntimeError("Duplicate ingestion-object versions were found.")
             result[key] = row
-        if set(result) != expected:
+        if require_all and set(result) != expected:
             raise ValueError("One or more exact ingestion-object versions were not found.")
         return result
 
     def get_active_ingestion_objects(
-        self, ingestion_object_ids: Iterable[int]
+        self, ingestion_object_ids: Iterable[int], *, require_all: bool = True
     ) -> Dict[int, Dict[str, Any]]:
         object_ids = [int(value) for value in ingestion_object_ids]
         if not object_ids:
@@ -520,7 +597,7 @@ class MetadataRepository(ABC):
             if object_id in result:
                 raise RuntimeError("Multiple active/current ingestion-object versions were found.")
             result[object_id] = row
-        if set(result) != set(object_ids):
+        if require_all and set(result) != set(object_ids):
             raise ValueError("One or more active ingestion objects were not found.")
         return result
 
@@ -1146,6 +1223,11 @@ class MetadataRepository(ABC):
                 transformation = (transformations or {}).get((int(ingestion_object_id), config_version))
                 if transformation is None:
                     transformation = self.get_ingestion_object(ingestion_object_id, config_version)
+                if transformation is None:
+                    transformation = _design_contract_from_executable(
+                        self.get_active_ingestion_object(ingestion_object_id),
+                        design_version=config_version,
+                    )
                 input_objects = json.loads(str(rows[0].get("input_objects_json") or "[]"))
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise RuntimeError("The Bronze-to-Silver mapping bundle has invalid version pins.") from exc
@@ -1193,6 +1275,11 @@ class MetadataRepository(ABC):
                 transformation = (transformations or {}).get((int(ingestion_object_id), config_version))
                 if transformation is None:
                     transformation = self.get_ingestion_object(ingestion_object_id, config_version)
+                if transformation is None:
+                    transformation = _design_contract_from_executable(
+                        self.get_active_ingestion_object(ingestion_object_id),
+                        design_version=config_version,
+                    )
                 input_objects = json.loads(str(rows[0].get("input_objects_json") or "[]"))
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise RuntimeError("The Silver-to-Gold mapping bundle has invalid version pins.") from exc
@@ -1313,11 +1400,26 @@ class MetadataRepository(ABC):
             (item["ingestion_object_id"], item["config_version"]): item
             for item in transformation_refs
         }
-        transformations = (
-            self.get_ingestion_objects(unique_transformation_refs.values())
-            if unique_transformation_refs
-            else {}
-        )
+        transformations = {}
+        if unique_transformation_refs:
+            transformations = self.get_ingestion_objects(
+                unique_transformation_refs.values(), require_all=False
+            )
+            missing = set(unique_transformation_refs) - set(transformations)
+            if missing:
+                active_objects = self.get_active_ingestion_objects(
+                    {object_id for object_id, _ in missing}, require_all=False
+                )
+                for object_id, design_version in missing:
+                    # ponytail: target metadata stores the executable row only; its signed
+                    # design pin is sufficient to validate the immutable mapping contract.
+                    transformation = _design_contract_from_executable(
+                        active_objects.get(object_id), design_version=design_version
+                    )
+                    if transformation:
+                        transformations[(object_id, design_version)] = transformation
+            if set(transformations) != set(unique_transformation_refs):
+                raise ValueError("One or more pinned transformation objects were not found.")
         result: Dict[tuple[int, str, int], Dict[str, Any]] = {}
         for item in requested:
             key = (
@@ -1346,11 +1448,25 @@ class MetadataRepository(ABC):
         target_silver_table: str,
         merge_keys: Iterable[str],
         columns: Iterable[Mapping[str, Any]],
+        allow_inactive_source: bool = False,
     ) -> Dict[str, Any]:
         source_object_id = int(source_object.get("ingestion_object_id") or 0)
-        persisted_source = self.get_active_ingestion_object(source_object_id)
-        if not persisted_source:
-            raise ValueError("Bronze-to-Silver requires the active Bronze ingestion object.")
+        persisted_source = (
+            self.get_ingestion_object(source_object_id, int(source_object.get("config_version") or 0))
+            if allow_inactive_source
+            else self.get_active_ingestion_object(source_object_id)
+        )
+        if (
+            not persisted_source
+            or int(persisted_source.get("config_version") or 0)
+            != int(source_object.get("config_version") or 0)
+            or str(persisted_source.get("config_hash") or "")
+            != str(source_object.get("config_hash") or "")
+            or _as_bool(persisted_source.get("active_flag")) == bool(allow_inactive_source)
+            or _as_bool(persisted_source.get("is_current")) == bool(allow_inactive_source)
+        ):
+            lifecycle = "inactive reviewed" if allow_inactive_source else "active"
+            raise ValueError(f"Bronze-to-Silver requires the exact {lifecycle} Bronze ingestion object.")
         source_target = str(persisted_source.get("target_bronze_table") or "").strip()
         target_table = str(target_silver_table or "").strip()
         keys = [normalize_bronze_column_name(key) for key in merge_keys if str(key or "").strip()]
@@ -1366,7 +1482,7 @@ class MetadataRepository(ABC):
             mapping_version=int(source_mapping.get("mapping_version") or 0),
             expected_hash=str(source_mapping.get("mapping_hash") or ""),
             expected_target=source_target,
-            require_active=True,
+            require_active=None if allow_inactive_source else True,
         )
         target_parts = target_table.split(".")
         if len(target_parts) not in {2, 3}:
@@ -2040,16 +2156,32 @@ class MetadataRepository(ABC):
             "mapping_hash": str(mapping_hash),
             "processing_stage": processing_stage,
         }
-        execution_spec_json = json.dumps(spec, sort_keys=True, separators=(",", ":"))
-        config_hash = canonical_json_hash(
-            {
-                "base_config_hash": str(draft.get("config_hash") or ""),
-                "execution_spec": spec,
-                "target_table": target_table,
-                "write_mode": str(draft.get("write_mode") or ""),
-            }
+        current_active = self.get_active_ingestion_object(ingestion_object_id)
+        reusable_spec = _reusable_execution_spec(
+            current_active,
+            draft=draft,
+            spec=spec,
+            target_table=target_table,
+            platform=self.context.platform,
         )
-        executable_version = ((int(config_hash.removeprefix("sha256:")[:8], 16) & ((1 << 29) - 1)) * 2) + 2
+        if reusable_spec:
+            executable = current_active
+            if not executable:
+                raise RuntimeError("Reusable executable disappeared during activation.")
+            spec = reusable_spec
+            config_hash = str(executable.get("config_hash") or "")
+            executable_version = int(executable.get("config_version") or 0)
+        else:
+            config_hash = canonical_json_hash(
+                {
+                    "base_config_hash": str(draft.get("config_hash") or ""),
+                    "execution_spec": spec,
+                    "target_table": target_table,
+                    "write_mode": str(draft.get("write_mode") or ""),
+                }
+            )
+            executable_version = ((int(config_hash.removeprefix("sha256:")[:8], 16) & ((1 << 29) - 1)) * 2) + 2
+        execution_spec_json = json.dumps(spec, sort_keys=True, separators=(",", ":"))
         copy_fields = (
             "source_system_id", "connection_id", "object_kind", "ingestion_type",
             "processing_stage", "source_layer", "target_layer", "object_name", "object_type",
@@ -2074,20 +2206,21 @@ class MetadataRepository(ABC):
             "active_flag": False,
         })
         names = tuple(values)
-        self.execute(
-            f"""
-            MERGE INTO {self.table('cfg_ingestion_object')} AS target
-            USING (SELECT {', '.join(':' + name + ' AS ' + name for name in names)}) AS source
-            ON target.ingestion_object_id = source.ingestion_object_id
-               AND target.config_version = source.config_version
-            WHEN NOT MATCHED THEN INSERT (
-                {', '.join(names)}, created_at, updated_at
-            ) VALUES (
-                {', '.join('source.' + name for name in names)}, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
+        if not reusable_spec:
+            self.execute(
+                f"""
+                MERGE INTO {self.table('cfg_ingestion_object')} AS target
+                USING (SELECT {', '.join(':' + name + ' AS ' + name for name in names)}) AS source
+                ON target.ingestion_object_id = source.ingestion_object_id
+                   AND target.config_version = source.config_version
+                WHEN NOT MATCHED THEN INSERT (
+                    {', '.join(names)}, created_at, updated_at
+                ) VALUES (
+                    {', '.join('source.' + name for name in names)}, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
+                )
+                """,
+                values,
             )
-            """,
-            values,
-        )
         executable = self.get_ingestion_object(ingestion_object_id, executable_version)
         if not executable or str(executable.get("config_hash") or "") != config_hash:
             raise RuntimeError("Executable ingestion-object registration postcondition failed.")
@@ -2178,6 +2311,7 @@ class MetadataRepository(ABC):
                 "require_active": None,
             })
         bundles = self.get_mapping_bundles(mapping_refs)
+        existing_active = self.get_active_ingestion_objects(object_ids, require_all=False)
 
         copy_fields = (
             "source_system_id", "connection_id", "object_kind", "ingestion_type",
@@ -2223,23 +2357,36 @@ class MetadataRepository(ABC):
                 "mapping_hash": mapping_hash,
                 "processing_stage": stage,
             }
-            config_hash = canonical_json_hash({
-                "base_config_hash": str(draft.get("config_hash") or ""),
-                "execution_spec": spec,
-                "target_table": target_table,
-                "write_mode": str(draft.get("write_mode") or ""),
-            })
-            executable_version = ((int(config_hash.removeprefix("sha256:")[:8], 16) & ((1 << 29) - 1)) * 2) + 2
-            row = {"ingestion_object_id": object_id}
-            row.update({name: draft.get(name) for name in copy_fields})
-            row.update({
-                "execution_spec_json": json.dumps(spec, sort_keys=True, separators=(",", ":")),
-                "config_hash": config_hash,
-                "config_version": executable_version,
-                "is_current": False,
-                "active_flag": False,
-            })
-            executable_rows.append(row)
+            reusable_spec = _reusable_execution_spec(
+                existing_active.get(object_id),
+                draft=draft,
+                spec=spec,
+                target_table=target_table,
+                platform=self.context.platform,
+            )
+            if reusable_spec:
+                existing = existing_active[object_id]
+                spec = reusable_spec
+                config_hash = str(existing.get("config_hash") or "")
+                executable_version = int(existing.get("config_version") or 0)
+            else:
+                config_hash = canonical_json_hash({
+                    "base_config_hash": str(draft.get("config_hash") or ""),
+                    "execution_spec": spec,
+                    "target_table": target_table,
+                    "write_mode": str(draft.get("write_mode") or ""),
+                })
+                executable_version = ((int(config_hash.removeprefix("sha256:")[:8], 16) & ((1 << 29) - 1)) * 2) + 2
+                row = {"ingestion_object_id": object_id}
+                row.update({name: draft.get(name) for name in copy_fields})
+                row.update({
+                    "execution_spec_json": json.dumps(spec, sort_keys=True, separators=(",", ":")),
+                    "config_hash": config_hash,
+                    "config_version": executable_version,
+                    "is_current": False,
+                    "active_flag": False,
+                })
+                executable_rows.append(row)
             prepared.append({
                 "ingestion_object_id": object_id,
                 "mapping_version": mapping_version,
@@ -2251,16 +2398,17 @@ class MetadataRepository(ABC):
                 "bundle": bundle,
             })
 
-        names, source, parameters = self._source_rows(executable_rows, prefix="exec")
-        self.execute(
-            f"MERGE INTO {self.table('cfg_ingestion_object')} AS target USING ({source}) AS source "
-            "ON target.ingestion_object_id = source.ingestion_object_id "
-            "AND target.config_version = source.config_version "
-            f"WHEN NOT MATCHED THEN INSERT ({', '.join(names)}, created_at, updated_at) VALUES ("
-            + ", ".join("source." + name for name in names)
-            + ", CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())",
-            parameters,
-        )
+        if executable_rows:
+            names, source, parameters = self._source_rows(executable_rows, prefix="exec")
+            self.execute(
+                f"MERGE INTO {self.table('cfg_ingestion_object')} AS target USING ({source}) AS source "
+                "ON target.ingestion_object_id = source.ingestion_object_id "
+                "AND target.config_version = source.config_version "
+                f"WHEN NOT MATCHED THEN INSERT ({', '.join(names)}, created_at, updated_at) VALUES ("
+                + ", ".join("source." + name for name in names)
+                + ", CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())",
+                parameters,
+            )
 
         activation_rows = [
             {
