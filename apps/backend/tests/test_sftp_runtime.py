@@ -271,6 +271,26 @@ def test_get_sftp_run_context_handles_script_loader_failure(monkeypatch):
     assert context["gold"] == {"generated_at": None, "scripts": []}
 
 
+def test_databricks_gold_warning_is_terminal_for_file_flow():
+    status = sftp_runtime._compute_status(
+        checkpoint={
+            "status": "PIPELINE_COMPLETED",
+            "target_warehouse": "databricks",
+            "databricks_gold_execution_status": "COMPLETED_WITH_WARNINGS",
+        },
+        next_gate=None,
+        gate5_decision="APPROVED",
+        gold_generation_completed=True,
+        silver_generation_completed=True,
+        gate1_decision="APPROVED",
+        gate2_decision="APPROVED",
+        source_ingestion_completed=True,
+        feed_review_ready=True,
+    )
+
+    assert status == "PIPELINE_COMPLETED"
+
+
 def test_generation_flags_treat_checkpoint_script_results_as_completed():
     flags = sftp_runtime._compute_generation_flags(
         [],

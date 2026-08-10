@@ -145,6 +145,7 @@ test('groups marked database runs into generation and execution phases', () => {
   ])
   expect(phases.find((phase) => phase.id === 'phase-3')?.steps.map((step) => step.key)).toEqual([
     'metadata_ddl',
+    'metadata_ddl_review',
     'bronze',
     'gate4',
     'silver_merge_key_resolution',

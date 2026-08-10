@@ -43,7 +43,11 @@ ABORTED_RUNS: set[str] = set()
 SCRIPT_BUNDLE_CACHE_LOCK = threading.Lock()
 SCRIPT_BUNDLE_CACHE: Dict[str, Dict[str, Any]] = {}
 ACTIVE_CHECKPOINT_STATUSES = {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
-SNOWFLAKE_COMPLETED_EXECUTION_STATUSES = {"COMPLETED", "SKIPPED_DBT_CODEGEN_ONLY"}
+SNOWFLAKE_COMPLETED_EXECUTION_STATUSES = {
+    "COMPLETED",
+    "COMPLETED_WITH_WARNINGS",
+    "SKIPPED_DBT_CODEGEN_ONLY",
+}
 COMPLETED_EXECUTION_STATUSES = {"COMPLETED", "COMPLETED_WITH_WARNINGS", "SKIPPED", "HANDOFF_ONLY"}
 GENERATION_ARTIFACT_TYPES = {
     "bronze": {"BRONZE_GENERATION", "BRONZE_SCRIPTS", "SFTP_BRONZE_GENERATION"},
@@ -56,6 +60,13 @@ LEGACY_DATABASE_GENERATION_FIRST_FLOW_VERSION = "generation_first_v1"
 
 def _status_completed(value: Any) -> bool:
     return str(value or "").upper() in COMPLETED_EXECUTION_STATUSES
+
+
+def _gold_partial_success_ratio() -> float:
+    try:
+        return min(1.0, max(0.5, float(os.getenv("ATHENA_GOLD_MIN_SUCCESS_RATIO", "0.9"))))
+    except ValueError:
+        return 0.9
 
 
 def generation_first_database_flow(state: Dict[str, Any]) -> bool:
@@ -2739,16 +2750,16 @@ def build_pipeline_steps(
                 "key": "gold_runtime_validation",
                 "label": "Gold Runtime Validation",
                 "complete": checkpoint.get("gold_runtime_validation_status") == "COMPLETED"
-                or checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
-                or checkpoint.get("databricks_gold_execution_status") == "COMPLETED",
+                or _status_completed(checkpoint.get("snowflake_gold_execution_status"))
+                or _status_completed(checkpoint.get("databricks_gold_execution_status")),
                 "detail": "Target execution completion validated; full Gold DQ remains a future runtime step",
             },
             {
                 "key": "final_publish",
                 "label": "Final Publish (Target Gate 5)",
                 "complete": checkpoint.get("final_publish_status") == "COMPLETED"
-                or checkpoint.get("snowflake_gold_execution_status") == "COMPLETED"
-                or checkpoint.get("databricks_gold_execution_status") == "COMPLETED",
+                or _status_completed(checkpoint.get("snowflake_gold_execution_status"))
+                or _status_completed(checkpoint.get("databricks_gold_execution_status")),
                 "detail": "Reviewed Gold outputs reached the selected target",
             },
             {
@@ -3122,6 +3133,14 @@ def build_pipeline_steps(
                 first_incomplete_seen = True
             else:
                 step["state"] = "PENDING"
+
+    if external_message and str(external_execution.get("layer") or "").lower() == "gold":
+        gold_execution_step = next(
+            (step for step in steps if step.get("key") == "gold_code_execution"),
+            None,
+        )
+        if gold_execution_step:
+            gold_execution_step["detail"] = external_message
 
     # ponytail: downstream progress is not proof that an execution ran; only
     # executor-owned status (or a real external handoff result) can complete it.
@@ -4436,10 +4455,44 @@ def _filter_gold_contract_by_silver_results(contract: Dict[str, Any], silver_res
             return {**contract, "kpi_mappings": [], "warnings": warnings}
         return contract
 
+    silver_targets = {
+        str(item.get("table") or item.get("table_name") or "").split(".")[-1].casefold().removeprefix("silver_"):
+        str(item.get("target_table") or item.get("silver_table") or "").strip().casefold()
+        for item in silver_results
+        if str(item.get("target_table") or item.get("silver_table") or "").strip()
+    }
+
+    def mapping_sources(mapping: Dict[str, Any]) -> set[str]:
+        sources = {str(mapping.get("source_silver_table") or "").strip().casefold()}
+        for dimension in mapping.get("grouping_dimensions") or []:
+            if not isinstance(dimension, dict):
+                continue
+            sources.add(
+                str(dimension.get("source_silver_table") or silver_targets.get(
+                    str(dimension.get("table") or "").split(".")[-1].casefold().removeprefix("silver_"), ""
+                )).strip().casefold()
+            )
+        time_column = (mapping.get("time") or {}).get("column")
+        if isinstance(time_column, dict):
+            sources.add(str(silver_targets.get(
+                str(time_column.get("table") or "").split(".")[-1].casefold().removeprefix("silver_"), ""
+            )).strip().casefold())
+        for join in mapping.get("join_paths") or []:
+            if not isinstance(join, dict):
+                continue
+            for side in ("left", "right"):
+                sources.add(str(join.get(f"{side}_source_table") or silver_targets.get(
+                    str(join.get(f"{side}_table") or "").split(".")[-1].casefold().removeprefix("silver_"), ""
+                )).strip().casefold())
+        sources.discard("")
+        return sources
+
     mappings = [
         mapping
         for mapping in contract.get("kpi_mappings") or []
-        if str(mapping.get("source_silver_table") or "").strip().casefold() in allowed_sources
+        if isinstance(mapping, dict)
+        and mapping_sources(mapping)
+        and mapping_sources(mapping).issubset(allowed_sources)
     ]
     dropped = len(contract.get("kpi_mappings") or []) - len(mappings)
     if dropped:
@@ -4564,6 +4617,7 @@ def _materialize_silver_to_gold_metadata(
 
     contract = dict(state.get("gold_generation_contract") or {})
     rejections: List[Dict[str, Any]] = []
+    validation_warnings: List[Dict[str, Any]] = []
     drafts: List[Dict[str, Any]] = []
     objects: List[Dict[str, Any]] = []
     bundles: List[Dict[str, Any]] = []
@@ -4579,18 +4633,18 @@ def _materialize_silver_to_gold_metadata(
     def source_column(item: Dict[str, Any], column_name: Any) -> Optional[Dict[str, Any]]:
         return item["columns"].get(normalize_bronze_column_name(column_name).casefold())
 
-    def compatible_join_types(left: Any, right: Any) -> bool:
-        def family(value: Any) -> str:
-            base = re.split(r"[<(]", str(value or "").upper(), 1)[0].strip()
-            if any(token in base for token in ("INT", "DECIMAL", "NUMERIC", "NUMBER", "FLOAT", "DOUBLE", "REAL")):
-                return "NUMERIC"
-            if any(token in base for token in ("CHAR", "STRING", "TEXT", "VARCHAR")):
-                return "STRING"
-            if any(token in base for token in ("DATE", "TIME")):
-                return "TEMPORAL"
-            return base
+    def type_family(value: Any) -> str:
+        base = re.split(r"[<(]", str(value or "").upper(), maxsplit=1)[0].strip()
+        if any(token in base for token in ("INT", "DECIMAL", "NUMERIC", "NUMBER", "FLOAT", "DOUBLE", "REAL")):
+            return "NUMERIC"
+        if any(token in base for token in ("CHAR", "STRING", "TEXT", "VARCHAR")):
+            return "STRING"
+        if any(token in base for token in ("DATE", "TIME")):
+            return "TEMPORAL"
+        return base
 
-        return bool(family(left)) and family(left) == family(right)
+    def compatible_join_types(left: Any, right: Any) -> bool:
+        return bool(type_family(left)) and type_family(left) == type_family(right)
 
     for raw in contract.get("dimension_mappings") or []:
         if not isinstance(raw, dict):
@@ -4610,9 +4664,13 @@ def _materialize_silver_to_gold_metadata(
         for ordinal, column_name in enumerate(requested, 1):
             row = source_column(item, column_name)
             if not row:
-                reject("DIMENSION", name, "MISSING_SOURCE_FIELD", f"{logical}.{column_name} is not in the active Silver mapping.")
-                mapped = []
-                break
+                validation_warnings.append({
+                    "object_kind": "DIMENSION",
+                    "name": name,
+                    "code": "DROPPED_OPTIONAL_FIELD",
+                    "detail": f"{logical}.{column_name} is not in the active Silver mapping.",
+                })
+                continue
             target_column = normalize_bronze_column_name(row["target_column_name"])
             mapped.append({
                 "source_object_name": item["target"],
@@ -4656,29 +4714,84 @@ def _materialize_silver_to_gold_metadata(
         objects.append(created["ingestion_object"])
         bundles.append(created["mapping_bundle"])
 
+    for raw in contract.get("factless_mappings") or []:
+        if not isinstance(raw, dict):
+            continue
+        logical = str(raw.get("logical_table") or "").strip()
+        name = f"fact_{normalize_bronze_column_name(logical)}_coverage"
+        item = source(logical)
+        if not item:
+            reject("FACT", name, "MISSING_SILVER_INPUT", f"No approved Silver object exists for {logical}.")
+            continue
+        key_rows = [row for row in item["bundle"]["mappings"] if bool(row.get("is_primary_key"))]
+        if not key_rows:
+            reject("FACT", name, "MISSING_BUSINESS_KEY", f"No reviewed business grain exists for {logical}.")
+            continue
+        mapped = [{
+            "source_object_name": item["target"],
+            "source_field_path": str(row["target_column_name"]),
+            "source_data_type": str(row["target_data_type"]),
+            "target_column_name": normalize_bronze_column_name(row["target_column_name"]),
+            "target_data_type": str(row["target_data_type"]),
+            "is_nullable": False,
+            "is_primary_key": True,
+            "ordinal_position": ordinal,
+            "transformation_rule": "GROUP_KEY",
+        } for ordinal, row in enumerate(key_rows, 1)]
+        keys = [str(row["target_column_name"]) for row in mapped]
+        target = f"{target_prefix}.{name}"
+        if target.casefold() in used_targets:
+            reject("FACT", name, "DUPLICATE_GOLD_TARGET", f"More than one Gold object resolves to {target}.")
+            continue
+        definition = {
+            "artifact_kind": "FACT",
+            "fact_type": "FACTLESS_ENTITY_COVERAGE",
+            "logical_table": logical,
+            "grain_columns": keys,
+        }
+        created = selection.repository.upsert_silver_to_gold_draft(
+            source_system_id=int(item["object"]["source_system_id"]),
+            target_gold_table=target,
+            inputs=[item["input"]],
+            columns=mapped,
+            merge_keys=keys,
+            join_rules=[],
+            definition=definition,
+            build_order=20,
+            write_mode="MERGE",
+            validation_policy={
+                "fail_on_missing_input": True,
+                "fail_on_null_key": True,
+                "fail_on_duplicate_key": True,
+                "fail_on_schema_mismatch": True,
+            },
+            allow_inactive_inputs=using_dbt_drafts,
+        )
+        used_targets.add(target.casefold())
+        drafts.append({
+            "artifact_kind": "FACT",
+            "fact_type": "FACTLESS_ENTITY_COVERAGE",
+            "name": name,
+            "gold_ingestion_object_id": int(created["ingestion_object"]["ingestion_object_id"]),
+            "gold_ingestion_object_config_version": int(created["ingestion_object"]["config_version"]),
+            "gold_ingestion_object_config_hash": str(created["ingestion_object"]["config_hash"]),
+            "silver_to_gold_mapping_version": int(created["mapping_bundle"]["mapping_version"]),
+            "silver_to_gold_mapping_hash": str(created["mapping_bundle"]["mapping_hash"]),
+            "target_table": target,
+        })
+        objects.append(created["ingestion_object"])
+        bundles.append(created["mapping_bundle"])
+
     for raw in contract.get("kpi_mappings") or []:
         if not isinstance(raw, dict):
             continue
         kpi_name = str(raw.get("kpi_name") or "KPI").strip()
         name = f"fact_{normalize_bronze_column_name(kpi_name)}"
-        # ponytail: keep Databricks Gold dimension-only until root-relative join
-        # cardinality is validated before facts are approved; Snowflake is unchanged.
-        if platform == "databricks" and str(
-            os.getenv("ATHENA_DATABRICKS_GOLD_FACTS_ENABLED", "false")
-        ).strip().lower() not in {"1", "true", "yes", "on"}:
-            reject(
-                "FACT",
-                name,
-                "DATABRICKS_FACTS_DEFERRED",
-                "Databricks Gold facts are deferred; dimension execution remains enabled.",
-            )
-            continue
         if str(raw.get("readiness") or "").upper() == "BLOCKED":
             reject("FACT", name, "INCOMPLETE_KPI_CONTRACT", "The approved KPI contract is marked BLOCKED.")
             continue
         filters = list(raw.get("filters") or [])
-        executable_filters = [item for item in filters if not isinstance(item, str)]
-        if executable_filters:
+        if filters:
             reject("FACT", name, "UNSUPPORTED_FILTER", "Executable Gold filters require a validated structured expression contract.")
             continue
         measure = dict(raw.get("measure") or {})
@@ -4703,9 +4816,6 @@ def _materialize_silver_to_gold_metadata(
             for item in [measure_input, *[value for value in resolved_inputs if value is not None]]
         }
         inputs = list(inputs_by_id.values())
-        if len(inputs) > 1 and platform == "snowflake":
-            reject("FACT", name, "UNSUPPORTED_MULTI_INPUT_SNOWFLAKE", "The current Snowflake Gold generator has no validated multi-input JOIN implementation.")
-            continue
         if len(inputs) > 1 and len(joins) < len(inputs) - 1:
             reject("FACT", name, "DISCONNECTED_JOIN_GRAPH", "Certified joins do not connect every required Silver input.")
             continue
@@ -4742,6 +4852,28 @@ def _materialize_silver_to_gold_metadata(
                 "cardinality": join.get("cardinality"),
                 "certified": True,
             })
+        if not join_valid:
+            continue
+        ordered_sources = {measure_input["target"].casefold()}
+        pending_rules = list(join_rules)
+        while pending_rules:
+            progressed = False
+            for rule in list(pending_rules):
+                left = str(rule["left_source_table"]).casefold()
+                right = str(rule["right_source_table"]).casefold()
+                join_type = str(rule.get("join_type") or "INNER").upper()
+                if left in ordered_sources and right not in ordered_sources:
+                    ordered_sources.add(right)
+                elif join_type == "INNER" and right in ordered_sources and left not in ordered_sources:
+                    ordered_sources.add(left)
+                else:
+                    continue
+                pending_rules.remove(rule)
+                progressed = True
+            if not progressed:
+                reject("FACT", name, "INVALID_JOIN_GRAPH", "Certified joins cannot be ordered safely from the KPI measure input.")
+                join_valid = False
+                break
         if not join_valid:
             continue
         required_nodes = {item["target"].casefold() for item in inputs}
@@ -4802,7 +4934,11 @@ def _materialize_silver_to_gold_metadata(
             if grain not in {"DAY", "WEEK", "MONTH", "QUARTER", "YEAR"}:
                 reject("FACT", name, "INVALID_GRAIN", f"Unsupported Gold time grain: {grain}.")
                 continue
-            if not time_input or not add_output(time_input, time_column.get("column"), "period_start", f"DATE_TRUNC_{grain}", "TIMESTAMP"):
+            time_row = source_column(time_input, time_column.get("column")) if time_input else None
+            if not time_row or type_family(time_row.get("target_data_type")) != "TEMPORAL":
+                reject("FACT", name, "INVALID_GRAIN", "The Gold time grain requires a temporal Silver column.")
+                continue
+            if not add_output(time_input, time_column.get("column"), "period_start", f"DATE_TRUNC_{grain}", "TIMESTAMP"):
                 reject("FACT", name, "INVALID_GRAIN", "The Gold time grain column is not present in active Silver metadata.")
                 continue
             keys.append("period_start")
@@ -4816,13 +4952,27 @@ def _materialize_silver_to_gold_metadata(
             continue
         if aggregation == "COUNT" and not measure_row:
             measure_row = next(iter(measure_input["columns"].values()), None)
+        measure_family = type_family((measure_row or {}).get("target_data_type"))
+        if aggregation in {"SUM", "AVG"} and measure_family != "NUMERIC":
+            reject("FACT", name, "INVALID_AGGREGATION", f"{aggregation} requires a numeric Silver measure.")
+            continue
+        if aggregation in {"MIN", "MAX"} and measure_family not in {"NUMERIC", "STRING", "TEMPORAL"}:
+            reject("FACT", name, "INVALID_AGGREGATION", f"{aggregation} requires a comparable Silver measure.")
+            continue
+        target_measure_type = (
+            "BIGINT"
+            if aggregation == "COUNT"
+            else str(measure_row.get("target_data_type") or "")
+            if aggregation in {"MIN", "MAX"}
+            else "DECIMAL(38,10)"
+        )
         value_name = f"{normalize_bronze_column_name(kpi_name)}_value"
         if not measure_row or not add_output(
             measure_input,
             measure_row["target_column_name"],
             value_name,
             f"AGG_{aggregation}",
-            "BIGINT" if aggregation == "COUNT" else "DECIMAL(38,10)",
+            target_measure_type,
         ):
             reject("FACT", name, "INVALID_AGGREGATION", "The KPI aggregation could not be represented by the approved mapping.")
             continue
@@ -4862,15 +5012,28 @@ def _materialize_silver_to_gold_metadata(
         objects.append(created["ingestion_object"])
         bundles.append(created["mapping_bundle"])
 
-    if not drafts:
-        details = "; ".join(f"{item['code']}: {item['name']}" for item in rejections) or "no Gold objects were proposed"
-        raise ValueError(f"No computable Gold metadata objects remain after validation ({details}).")
+    materialization_status = "READY" if drafts else "SKIPPED_NOT_COMPUTABLE"
+    if rejections:
+        logger.warning(
+            "Gold metadata validation rejected %d object(s); %d executable object(s) remain: %s",
+            len(rejections),
+            len(drafts),
+            json.dumps(rejections, default=str),
+        )
+    if validation_warnings:
+        logger.warning(
+            "Gold metadata validation retained executable objects with %d warning(s): %s",
+            len(validation_warnings),
+            json.dumps(validation_warnings, default=str),
+        )
     return {
         **state,
         "gold_metadata_drafts": drafts,
         "gold_transformation_objects": objects,
         "silver_to_gold_mapping_bundles": bundles,
         "gold_metadata_rejections": rejections,
+        "gold_metadata_warnings": validation_warnings,
+        "gold_metadata_materialization_status": materialization_status,
         "gold_catalog": gold_catalog,
         "gold_schema": f"{gold_catalog}.{gold_schema}" if platform == "databricks" else gold_schema,
     }
@@ -5562,6 +5725,7 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
             "review_artifact": final_state["silver_review_artifact"],
             "gold_metadata_drafts": final_state.get("gold_metadata_drafts") or [],
             "gold_metadata_rejections": final_state.get("gold_metadata_rejections") or [],
+            "gold_metadata_warnings": final_state.get("gold_metadata_warnings") or [],
         },
         schema_version="GATE5_v1",
         prompt_version="UI_REVIEWER_v1",
@@ -6001,16 +6165,85 @@ def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, 
         item for item in queue_items
         if str(item.get("queue_status") or "").upper() not in {"SUCCESS", "FAILED"}
     ]
-    missing = expected_object_ids - successful_object_ids
-    if failed:
+    gold_results = [
+        item
+        for item in state.get("gold_generation_results") or []
+        if isinstance(item, dict)
+        and item.get("metadata_activation_status") == "ACTIVE"
+        and int(item.get("gold_ingestion_object_id") or 0) > 0
+    ]
+    gold_by_id = {
+        int(item["gold_ingestion_object_id"]): item
+        for item in gold_results
+    }
+    gold_object_ids = set(gold_by_id)
+    failed_ids = {int(item.get("ingestion_object_id") or 0) for item in failed}
+    failed_gold_ids = failed_ids & gold_object_ids
+    failed_non_gold = [
+        item for item in failed
+        if int(item.get("ingestion_object_id") or 0) not in gold_object_ids
+    ]
+    missing = expected_object_ids - successful_object_ids - failed_gold_ids
+    if failed_non_gold:
         raise RuntimeError(
             "Metadata target execution failed for queue item(s): "
-            + ", ".join(str(item.get("queue_id")) for item in failed)
+            + ", ".join(str(item.get("queue_id")) for item in failed_non_gold)
         )
     if incomplete or missing:
         raise RuntimeError(
             "Metadata target execution did not reach a terminal success state for every active artifact."
         )
+
+    successful_gold_ids = gold_object_ids & successful_object_ids
+    planned_fact_ids = {
+        object_id for object_id, item in gold_by_id.items()
+        if str(item.get("artifact_kind") or "FACT").upper() == "FACT"
+    }
+    planned_dimension_ids = gold_object_ids - planned_fact_ids
+    gold_success_ratio = (
+        len(successful_gold_ids) / len(gold_object_ids)
+        if gold_object_ids
+        else 1.0
+    )
+    gold_completed_with_warnings = bool(failed_gold_ids)
+    if gold_completed_with_warnings and (
+        not successful_gold_ids or gold_success_ratio < _gold_partial_success_ratio()
+        or (planned_fact_ids and not (planned_fact_ids & successful_gold_ids))
+        or (planned_dimension_ids and not (planned_dimension_ids & successful_gold_ids))
+    ):
+        failed_queue_ids = [
+            str(item.get("queue_id"))
+            for item in failed
+            if int(item.get("ingestion_object_id") or 0) in failed_gold_ids
+        ]
+        raise RuntimeError(
+            "Gold metadata execution did not meet the approved success-coverage threshold; failed queue item(s): "
+            + ", ".join(failed_queue_ids)
+        )
+
+    def count_gold(kind: str, object_ids: set[int]) -> int:
+        return sum(
+            1
+            for object_id in object_ids
+            if str(gold_by_id[object_id].get("artifact_kind") or "FACT").upper() == kind
+        )
+
+    gold_summary = {
+        "status": "COMPLETED_WITH_WARNINGS" if gold_completed_with_warnings else "COMPLETED",
+        "planned_count": len(gold_object_ids),
+        "successful_count": len(successful_gold_ids),
+        "failed_count": len(failed_gold_ids),
+        "successful_fact_count": count_gold("FACT", successful_gold_ids),
+        "successful_dimension_count": count_gold("DIMENSION", successful_gold_ids),
+        "failed_object_ids": sorted(failed_gold_ids),
+        "success_ratio": round(gold_success_ratio, 4),
+    }
+    gold_message = (
+        f"Gold completed with warnings: {len(successful_gold_ids)}/{len(gold_object_ids)} tables succeeded; "
+        f"{len(failed_gold_ids)} table(s) remain failed for retry."
+        if gold_completed_with_warnings
+        else f"Gold target execution completed: {len(successful_gold_ids)}/{len(gold_object_ids)} tables succeeded."
+    )
 
     final_state = {
         **progress_state,
@@ -6025,8 +6258,19 @@ def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, 
         "metadata_runtime_results": completed,
         f"{target}_bronze_execution_status": "COMPLETED",
         f"{target}_silver_execution_status": "COMPLETED",
-        f"{target}_gold_execution_status": "COMPLETED",
-        "resume_message": "Bronze, Silver, and Gold metadata target execution completed.",
+        f"{target}_gold_execution_status": gold_summary["status"],
+        "gold_execution_summary": gold_summary,
+        "external_execution": {
+            "platform": target,
+            "layer": "gold",
+            "stage_key": "gold_code_execution",
+            "status": gold_summary["status"],
+            "total_count": len(gold_object_ids),
+            "completed_count": len(successful_gold_ids),
+            "failed_count": len(failed_gold_ids),
+            "message": gold_message,
+        },
+        "resume_message": gold_message,
     }
     save_checkpoint_state_timed(
         str(state.get("run_id") or ""),
@@ -6038,9 +6282,13 @@ def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, 
 
 def _native_execution_completed(state: Dict[str, Any], target_warehouse: str, layer: str) -> bool:
     status = state.get(f"{target_warehouse}_{layer}_execution_status")
-    if target_warehouse == "databricks":
-        return _status_completed(status)
-    return str(status or "").upper() == "COMPLETED"
+    if target_warehouse == "snowflake":
+        return (
+            str(status or "").upper() in SNOWFLAKE_COMPLETED_EXECUTION_STATUSES
+            if layer == "gold"
+            else str(status or "").upper() == "COMPLETED"
+        )
+    return _status_completed(status)
 
 
 def _database_native_execution_validation_errors(state: Dict[str, Any]) -> List[str]:
@@ -6423,8 +6671,25 @@ def _finish_snowflake_dbt_control_attempt(
     run = control["run"]
     worker_id = control["worker_id"]
     receipt = state.get("snowflake_dbt_execution") or {}
-    if str(receipt.get("status") or "").upper() != "COMPLETED":
+    receipt_status = str(receipt.get("status") or "").upper()
+    if receipt_status not in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}:
         raise RuntimeError("Snowflake dbt did not produce a completed execution receipt.")
+    gold_summary = receipt.get("gold_execution_summary") or {}
+    for failed_model in gold_summary.get("results") or []:
+        if not isinstance(failed_model, dict) or failed_model.get("status") != "FAILED":
+            continue
+        repository.record_run_error(
+            run=run,
+            error_stage="WRITE",
+            error=RuntimeError(str(failed_model.get("error") or "Gold dbt model failed.")),
+            retryable=False,
+            detail={
+                "execution_unit": "SNOWFLAKE_DBT_MODEL",
+                "model_name": failed_model.get("model_name"),
+                "partial_success": True,
+            },
+            worker_id=worker_id,
+        )
     package_hash = str(state.get("snowflake_dbt_artifact_set_hash") or "")
     repository.update_run_phase(
         str(run["run_id"]),
@@ -6433,13 +6698,14 @@ def _finish_snowflake_dbt_control_attempt(
         worker_id=worker_id,
         target_write_id=f"dbt:{package_hash}",
         target_commit_status="COMMITTED",
-        validation_status="PASSED",
+        validation_status=("PASSED_WITH_WARNINGS" if receipt_status == "COMPLETED_WITH_WARNINGS" else "PASSED"),
         validation_summary_json=json.dumps(
             {
                 "execution_unit": "SNOWFLAKE_DBT_PROJECT",
                 "package_hash": package_hash,
-                "receipt_status": "COMPLETED",
+                "receipt_status": receipt_status,
                 "model_count": state.get("snowflake_dbt_model_count"),
+                "gold_execution_summary": gold_summary,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -6731,6 +6997,11 @@ def execute_generation_first_snowflake_dbt(
             )
         deployed_state = execute_finalized_snowflake_dbt_project(working_state)
         _finish_snowflake_dbt_control_attempt(control, deployed_state)
+        gold_execution_status = str(
+            deployed_state.get("snowflake_gold_execution_status") or "COMPLETED"
+        ).upper()
+        gold_execution_summary = deployed_state.get("snowflake_dbt_execution_summary") or {}
+        gold_execution_message = str(gold_execution_summary.get("message") or "").strip()
         working_state = {
             **working_state,
             **deployed_state,
@@ -6744,8 +7015,16 @@ def execute_generation_first_snowflake_dbt(
             "next_stage_key": None,
             "next_stage_label": None,
             "stage_confirmation": None,
-            "snowflake_gold_execution_status": "COMPLETED",
-            "gold_runtime_validation_status": "COMPLETED",
+            "snowflake_gold_execution_status": gold_execution_status,
+            "gold_runtime_validation_status": gold_execution_status,
+            "external_execution": {
+                "status": gold_execution_status,
+                "layer": "gold",
+                "total_count": gold_execution_summary.get("planned_count"),
+                "completed_count": gold_execution_summary.get("completed_count"),
+                "failed_count": gold_execution_summary.get("failed_count"),
+                "message": gold_execution_message,
+            },
             "report_generation_enabled": True,
             "report_generation_status": "RUNNING",
             "resume_message": "Deployment completed. Generating the pipeline run report.",
@@ -6782,7 +7061,11 @@ def execute_generation_first_snowflake_dbt(
                 "last_completed_stage_label": "Report Generation",
                 "report_generation_status": report_status,
                 "run_report": run_report,
-                "resume_message": "Snowflake dbt deployment, build, and run report completed.",
+                "resume_message": (
+                    f"{gold_execution_message} Run report completed."
+                    if gold_execution_message
+                    else "Snowflake dbt deployment, build, and run report completed."
+                ),
             }
         )
         save_checkpoint_state_timed(run_id, working_state, context="report_generation:complete")

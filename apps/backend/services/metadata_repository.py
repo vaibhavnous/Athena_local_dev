@@ -1832,6 +1832,10 @@ class MetadataRepository(ABC):
         artifact_kind = str(definition.get("artifact_kind") or definition.get("object_type") or "").upper()
         if artifact_kind and artifact_kind not in {"FACT", "DIMENSION"}:
             raise ValueError("Gold definition artifact_kind must be FACT or DIMENSION.")
+        fact_type = str(definition.get("fact_type") or "").upper()
+        factless = artifact_kind == "FACT" and fact_type == "FACTLESS_ENTITY_COVERAGE"
+        if fact_type and fact_type not in {"AGGREGATE", "FACTLESS_ENTITY_COVERAGE"}:
+            raise ValueError("Gold definition fact_type is unsupported.")
         aggregation_rules_json = json.dumps(dict(definition), sort_keys=True, separators=(",", ":"))
         normalized_columns = sorted(
             [{
@@ -1869,16 +1873,29 @@ class MetadataRepository(ABC):
         aggregate_count = sum(
             1 for column in normalized_columns if column["transformation_rule"].startswith("AGG_")
         )
-        if (artifact_kind == "FACT" and aggregate_count != 1) or (
+        if (artifact_kind == "FACT" and aggregate_count != (0 if factless else 1)) or (
             artifact_kind == "DIMENSION" and aggregate_count
         ):
-            raise ValueError("Gold FACT mappings require exactly one aggregate; DIMENSION mappings allow none.")
+            raise ValueError(
+                "Gold aggregate FACT mappings require exactly one aggregate; "
+                "FACTLESS and DIMENSION mappings allow none."
+            )
         keys = [normalize_bronze_column_name(key) for key in merge_keys if str(key or "").strip()]
         mode = str(write_mode or "MERGE").strip().upper()
         if mode not in {"MERGE", "SNAPSHOT_REPLACE"}:
             raise ValueError("Gold write mode must be MERGE or SNAPSHOT_REPLACE.")
         if len(keys) != len(set(keys)) or (mode == "MERGE" and not keys):
             raise ValueError("Gold MERGE keys must be non-empty and unique.")
+        if factless and (
+            len(input_pins) != 1
+            or joins
+            or mode != "MERGE"
+            or set(targets) != {key.casefold() for key in keys}
+            or any(column["transformation_rule"] not in {"IDENTITY", "GROUP_KEY"} for column in normalized_columns)
+        ):
+            raise ValueError(
+                "Gold factless facts require one Silver input, key-only mappings, no joins, and idempotent MERGE."
+            )
         for column in normalized_columns:
             if column["target_column_name"] in keys:
                 column.update({"is_primary_key": True, "is_nullable": False})

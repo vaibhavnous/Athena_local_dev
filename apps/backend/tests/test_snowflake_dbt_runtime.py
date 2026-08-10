@@ -393,10 +393,12 @@ def test_snowflake_dbt_deploys_then_builds_inside_snowflake(monkeypatch):
         }
     )
 
-    assert ["deploy" in command for command in commands] == [True, False]
-    assert ["execute" in command for command in commands] == [False, True]
+    assert ["deploy" in command for command in commands] == [True, False, False]
+    assert ["execute" in command for command in commands] == [False, True, True]
     assert "--no-force" in commands[0]
-    assert "--fail-fast" in commands[1]
+    assert commands[1][-2:] == ["--exclude", "path:models/gold"]
+    assert commands[2][-2:] == ["--select", "publish_fact_claims"]
+    assert all("--fail-fast" not in command for command in commands)
     assert state["snowflake_dbt_status"] == "EXECUTED"
     assert state["snowflake_dbt_deploy_status"] == "COMPLETED"
     assert state["snowflake_dbt_validation_status"] == "DBT_VALIDATED"
@@ -404,6 +406,79 @@ def test_snowflake_dbt_deploys_then_builds_inside_snowflake(monkeypatch):
     assert state["snowflake_dbt_project_fqn"] == (
         f"{dbt_snowflake_runtime._native_project_database()}.PUBLIC.ATHENA_RUN_RUN_2"
     )
+
+
+def test_snowflake_dbt_reports_nine_of_ten_gold_models_as_completed_with_warnings(monkeypatch):
+    workdir = _workdir("snowflake_dbt_partial")
+    monkeypatch.setattr(
+        dbt_snowflake_runtime,
+        "generated_run_dir",
+        lambda target, run_id, *parts: workdir.joinpath(target, str(run_id), *parts),
+    )
+    monkeypatch.setattr(dbt_snowflake_runtime, "_write_ai_store_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dbt_snowflake_runtime.shutil, "which", lambda command: "dbt")
+    _enable_fake_snowflake_credentials(monkeypatch)
+
+    def fake_run(command, **_kwargs):
+        failed = "--select" in command and command[command.index("--select") + 1] == "publish_gold_9"
+        return SimpleNamespace(
+            returncode=2 if failed else 0,
+            stdout="",
+            stderr="publish_gold_9 model failed" if failed else "ok",
+        )
+
+    monkeypatch.setattr(dbt_snowflake_runtime.subprocess, "run", fake_run)
+    result = dbt_snowflake_runtime.run_snowflake_dbt(
+        {
+            "run_id": "run-partial-dbt",
+            "target_warehouse": "snowflake",
+            "execution_engine": "dbt",
+            "dbt_deployment_mode": "generate_and_deploy",
+            "gold_generation_results": [
+                {"status": "APPROVED", "target_table": f"ATHENA_DB.GOLD.gold_{index}"}
+                for index in range(10)
+            ],
+        }
+    )
+
+    assert result["snowflake_gold_execution_status"] == "COMPLETED_WITH_WARNINGS"
+    assert result["snowflake_dbt_execution"]["status"] == "COMPLETED_WITH_WARNINGS"
+    assert result["snowflake_dbt_execution_summary"]["completed_count"] == 9
+    assert result["snowflake_dbt_execution_summary"]["failed_count"] == 1
+
+
+def test_snowflake_dbt_does_not_downgrade_infrastructure_failure_to_model_warning(monkeypatch):
+    workdir = _workdir("snowflake_dbt_infrastructure_failure")
+    monkeypatch.setattr(
+        dbt_snowflake_runtime,
+        "generated_run_dir",
+        lambda target, run_id, *parts: workdir.joinpath(target, str(run_id), *parts),
+    )
+    monkeypatch.setattr(dbt_snowflake_runtime, "_write_ai_store_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dbt_snowflake_runtime.shutil, "which", lambda command: "dbt")
+    _enable_fake_snowflake_credentials(monkeypatch)
+
+    def fake_run(command, **_kwargs):
+        failed = "--select" in command
+        return SimpleNamespace(
+            returncode=2 if failed else 0,
+            stdout="",
+            stderr="Authentication failed" if failed else "ok",
+        )
+
+    monkeypatch.setattr(dbt_snowflake_runtime.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="Authentication failed"):
+        dbt_snowflake_runtime.run_snowflake_dbt(
+            {
+                "run_id": "run-infrastructure-failure",
+                "target_warehouse": "snowflake",
+                "execution_engine": "dbt",
+                "dbt_deployment_mode": "generate_and_deploy",
+                "gold_generation_results": [
+                    {"status": "APPROVED", "target_table": "ANALYTICS.GOLD.fact_events"}
+                ],
+            }
+        )
 
 
 def test_snowflake_dbt_failed_receipt_blocks_automatic_retry(monkeypatch):
@@ -751,6 +826,47 @@ def test_generation_first_dbt_gate_lands_sources_then_executes_frozen_project(mo
     assert result["run_report"]["outcome"] == "SUCCESS"
     assert [state["background_stage"] for state in saved_states[-2:]] == ["report_generation", None]
     assert saved_states[-1]["background_stage"] is None
+
+
+def test_generation_first_dbt_preserves_gold_partial_success_summary(monkeypatch):
+    state = {
+        **_generation_first_dbt_state(),
+        "execution_ready": True,
+        "snowflake_bronze_source_load_status": "COMPLETED",
+        "snowflake_dbt_validation_status": "STATIC_VALIDATED",
+        "snowflake_dbt_artifact_path": "generated/dbt/run-generation-first-dbt",
+        "snowflake_dbt_artifact_set_hash": "reviewed-hash",
+    }
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "execute_finalized_snowflake_dbt_project",
+        lambda current: {
+            **current,
+            "snowflake_dbt_status": "EXECUTED",
+            "snowflake_gold_execution_status": "COMPLETED_WITH_WARNINGS",
+            "snowflake_dbt_execution_summary": {
+                "planned_count": 10,
+                "completed_count": 9,
+                "failed_count": 1,
+                "message": "Gold completed with warnings: 9/10 tables succeeded.",
+            },
+        },
+    )
+    monkeypatch.setattr(pipeline_runtime, "load_checkpoint_state", lambda _run_id: {})
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+
+    result = pipeline_runtime.execute_generation_first_snowflake_dbt(state["run_id"], state=state)
+
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert result["snowflake_gold_execution_status"] == "COMPLETED_WITH_WARNINGS"
+    assert result["external_execution"] == {
+        "status": "COMPLETED_WITH_WARNINGS",
+        "layer": "gold",
+        "total_count": 10,
+        "completed_count": 9,
+        "failed_count": 1,
+        "message": "Gold completed with warnings: 9/10 tables succeeded.",
+    }
 
 
 def test_generation_first_dbt_retry_reuses_completed_source_landing(monkeypatch):

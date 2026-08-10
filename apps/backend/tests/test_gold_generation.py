@@ -269,7 +269,89 @@ def test_snowflake_metadata_fact_uses_exact_mapping_types_keys_and_write_mode() 
     assert 'SUM(s0."claimamount")' in sql
     assert 'target."claimstatus" = source."claimstatus"' in sql
     assert 's0."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID' in sql
+    assert 'FROM "ATHENA_DB"."SILVER"."silver_claims" AS s0' in sql
+    assert 'MERGE INTO "ATHENA_DB"."GOLD"."fact_claims" AS target' in sql
     assert " FLOAT" not in sql
+
+
+@pytest.mark.parametrize("dbt_compatible", [False, True])
+def test_snowflake_metadata_global_count_fact_uses_snapshot_and_count_star(dbt_compatible) -> None:
+    source = "ANALYTICS.SILVER.silver_events"
+    plan = {
+        "object": {
+            "target_table": "ANALYTICS.GOLD.fact_event_count",
+            "write_mode": "SNAPSHOT_REPLACE",
+            "merge_keys_json": "[]",
+        },
+        "inputs": [{"object_name": source}],
+        "bundle": {"mappings": [{
+            "source_object_name": source,
+            "source_field_path": "event_id",
+            "target_column_name": "event_count_value",
+            "target_data_type": "BIGINT",
+            "transformation_rule": "AGG_COUNT",
+            "join_rules_json": "[]",
+        }]},
+    }
+
+    sql = gold_gen._metadata_fact_code(
+        plan, target_warehouse="snowflake", dbt_compatible=dbt_compatible
+    )
+
+    assert "COUNT(*)" in sql
+    assert "COUNT(s0" not in sql
+    if dbt_compatible:
+        assert 'materialized="table"' in sql
+        assert "unique_key=" not in sql
+        assert "incremental_strategy=" not in sql
+    else:
+        assert 'CREATE OR REPLACE TABLE "ANALYTICS"."GOLD"."fact_event_count" AS' in sql
+        assert "MERGE INTO" not in sql
+
+
+@pytest.mark.parametrize(
+    ("warehouse", "dbt_compatible"),
+    [("databricks", False), ("snowflake", False), ("snowflake", True)],
+)
+def test_metadata_factless_fact_uses_exact_keys_and_idempotent_merge(
+    warehouse, dbt_compatible
+) -> None:
+    source = "ANALYTICS.SILVER.silver_events"
+    plan = {
+        "definition": {"artifact_kind": "FACT", "fact_type": "FACTLESS_ENTITY_COVERAGE"},
+        "object": {
+            "target_table": "ANALYTICS.GOLD.fact_events_coverage",
+            "write_mode": "MERGE",
+            "merge_keys_json": '["event_id"]',
+            "validation_policy_json": '{}',
+        },
+        "inputs": [{"object_name": source}],
+        "bundle": {"mappings": [{
+            "source_object_name": source,
+            "source_field_path": "event_id",
+            "target_column_name": "event_id",
+            "target_data_type": "BIGINT",
+            "transformation_rule": "GROUP_KEY",
+            "join_rules_json": "[]",
+        }]},
+    }
+
+    code = gold_gen._metadata_fact_code(
+        plan, target_warehouse=warehouse, dbt_compatible=dbt_compatible
+    )
+
+    assert "SELECT DISTINCT" in code
+    assert "AGG_" not in code
+    if warehouse == "databricks":
+        assert "DeltaTable.forName" in code
+        assert "KEYS = ['event_id']" in code
+    elif dbt_compatible:
+        assert 'materialized="incremental"' in code
+        assert 'unique_key="event_id"' in code
+        assert "{{ ref('silver_events') }}" in code
+    else:
+        assert 'MERGE INTO "ANALYTICS"."GOLD"."fact_events_coverage"' in code
+        assert 'target."event_id" = source."event_id"' in code
 
 
 def test_snowflake_metadata_dbt_fact_preserves_multi_input_refs() -> None:
@@ -287,6 +369,9 @@ def test_snowflake_metadata_dbt_fact_preserves_multi_input_refs() -> None:
             "target_table": "INSURANCE.GOLD.fact_orders",
             "write_mode": "MERGE",
             "merge_keys_json": '["status"]',
+            "validation_policy_json": json.dumps({
+                "rules": [{"rule_type": "MAX_JOIN_MULTIPLIER", "threshold_value": 1.05}]
+            }),
         },
         "inputs": [{"object_name": orders}, {"object_name": customers}],
         "bundle": {"mappings": [
@@ -319,6 +404,60 @@ def test_snowflake_metadata_dbt_fact_preserves_multi_input_refs() -> None:
     assert "_logical_work_id" not in sql
     assert "CREATE TABLE" not in sql
     assert "MERGE INTO" not in sql
+    assert 'materialized="incremental"' in sql
+    assert 'unique_key="status"' in sql
+    assert '\\"status\\"' not in sql
+    assert "__athena_join_guard" in sql
+    assert "ATHENA_JOIN_MULTIPLIER_VALIDATION_FAILED" in sql
+    assert "joined_count / root_count <= 1.05" in sql
+
+
+def test_snowflake_metadata_native_fact_preserves_multi_input_qualified_joins() -> None:
+    orders = "INSURANCE.SILVER.silver_orders"
+    customers = "INSURANCE.SILVER.silver_customers"
+    joins = json.dumps([{
+        "left_source_table": orders,
+        "right_source_table": customers,
+        "left_column": "customerid",
+        "right_column": "customerid",
+        "join_type": "INNER",
+    }])
+    plan = {
+        "object": {
+            "target_table": "INSURANCE.GOLD.fact_orders",
+            "write_mode": "MERGE",
+            "merge_keys_json": '["status"]',
+        },
+        "inputs": [{"object_name": orders}, {"object_name": customers}],
+        "bundle": {"mappings": [
+            {
+                "source_object_name": customers,
+                "source_field_path": "status",
+                "target_column_name": "status",
+                "target_data_type": "VARCHAR",
+                "transformation_rule": "GROUP_KEY",
+                "join_rules_json": joins,
+            },
+            {
+                "source_object_name": orders,
+                "source_field_path": "amount",
+                "target_column_name": "total_amount",
+                "target_data_type": "DECIMAL(38,10)",
+                "transformation_rule": "AGG_SUM",
+                "join_rules_json": joins,
+            },
+        ]},
+    }
+
+    sql = gold_gen._metadata_fact_code(plan, target_warehouse="snowflake")
+
+    assert 'FROM "INSURANCE"."SILVER"."silver_orders" AS s0' in sql
+    assert 'INNER JOIN "INSURANCE"."SILVER"."silver_customers" AS s1' in sql
+    assert 's0."customerid" = s1."customerid"' in sql
+    assert 's0."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID' in sql
+    assert 's1."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID' in sql
+    assert 'MERGE INTO "INSURANCE"."GOLD"."fact_orders" AS target' in sql
+    assert "<function" not in sql
 
 
 def test_databricks_metadata_fact_reports_observed_join_multiplier() -> None:
@@ -468,6 +607,34 @@ def test_snowflake_gold_returns_observed_join_multiplier_validation() -> None:
         "threshold_value": 1.2,
         "status": "PASSED",
     }]
+
+    class InflatedCursor(Cursor):
+        def fetchone(self):
+            if " JOIN " in self.sql:
+                return (200,)
+            return (100,)
+
+    class InflatedConnection:
+        def cursor(self):
+            return InflatedCursor()
+
+    with pytest.raises(RuntimeError, match="pre-write validation failed"):
+        snowflake_gold_runtime._prewrite_validation_results(
+            {
+                "approved_source_tables": [orders, customers],
+                "mapping_contract": [
+                    {
+                        "source_object_name": orders,
+                        "transformation_rule": "AGG_SUM",
+                        "join_rules_json": join_rules,
+                    }
+                ],
+                "validation_policy": {
+                    "rules": [{"rule_type": "MAX_JOIN_MULTIPLIER", "threshold_value": 1.2}]
+                },
+            },
+            InflatedConnection(),
+        )
 
 
 def test_snowflake_gold_returns_observed_key_validation() -> None:
@@ -706,8 +873,31 @@ def test_snowflake_gold_generation_uses_silver_canonical_column_names():
     assert 'TRY_TO_DECIMAL(TO_VARCHAR("RERERENCE_ID"))' not in sql
 
 
-def test_gold_mapping_source_table_guard_caps_ranks_and_drops_bad_joins(monkeypatch):
-    monkeypatch.setenv("ATHENA_GOLD_MAX_SOURCE_TABLES", "3")
+def test_snowflake_gold_upsert_identity_excludes_the_measure_value():
+    sql = gold_gen.generate_snowflake_gold_script(
+        mapping={
+            "kpi_name": "Order Value",
+            "source_silver_table": "ANALYTICS.SILVER.silver_orders",
+            "measure": {"table": "orders", "column": "amount", "aggregation": "SUM"},
+            "grouping_dimensions": [
+                {"table": "orders", "column": "status", "semantic_type": "DIMENSION"}
+            ],
+            "time": {},
+            "filters": [],
+            "join_paths": [],
+            "readiness": "READY",
+        },
+        run_id="run-stable-grain",
+        gold_catalog="ANALYTICS",
+        gold_schema="GOLD",
+    )
+
+    upsert_line = next(line for line in sql.splitlines() if "MD5(CONCAT_WS" in line)
+    assert '"status"' in upsert_line
+    assert '"order_value_value"' not in upsert_line
+
+
+def test_gold_mapping_source_table_guard_retains_all_certified_connected_inputs():
     mapping = {
         "kpi_name": "Total Claims",
         "source_silver_table": "ATHENA_DB.SILVER.silver_claim_information",
@@ -749,7 +939,7 @@ def test_gold_mapping_source_table_guard_caps_ranks_and_drops_bad_joins(monkeypa
 
     sanitized, guard = gold_gen._sanitize_gold_mapping(mapping)
 
-    assert guard["max_source_tables"] == 3
+    assert guard["max_source_tables"] is None
     assert guard["kept_source_tables"] == ["claim_information", "policy_transactions", "measures"]
     assert guard["dropped_source_tables"] == ["claim_payment_expenses"]
     assert guard["dropped_malformed_join_paths"] == 1
@@ -759,7 +949,6 @@ def test_gold_mapping_source_table_guard_caps_ranks_and_drops_bad_joins(monkeypa
 
 
 def test_databricks_gold_script_uses_sanitized_join_paths(monkeypatch):
-    monkeypatch.setenv("ATHENA_GOLD_MAX_SOURCE_TABLES", "3")
     monkeypatch.setattr(gold_gen, "ai_store_db_writer", lambda **_: None)
     workdir = Path.cwd() / ".tmp-tests" / f"gold_guard_{uuid.uuid4().hex}"
     workdir.mkdir(parents=True, exist_ok=True)
@@ -842,7 +1031,9 @@ def test_databricks_gold_script_uses_sanitized_join_paths(monkeypatch):
     assert "'right_table': 'claim_payment_expenses'" not in body
 
 
-def test_gold_contract_includes_dimensions_from_certified_join_tables():
+def test_gold_contract_includes_dimensions_from_certified_join_tables(monkeypatch):
+    for key in silver_gen.KIMBALL_LLM_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
     results = [
         {
             "table": "claim_information",
@@ -859,10 +1050,12 @@ def test_gold_contract_includes_dimensions_from_certified_join_tables():
     ]
     enriched_metadata = {
         "columns": [
-            {"table_name": "claim_information", "column_name": "claim_amount", "semantic_type": "MEASURE", "is_measure": True},
-            {"table_name": "claim_information", "column_name": "claim_status", "semantic_type": "DIMENSION"},
-            {"table_name": "policy_transactions", "column_name": "policy_state", "semantic_type": "DIMENSION"},
-            {"table_name": "claim_information", "column_name": "claim_open_date", "semantic_type": "DATE"},
+            {"table_name": "claim_information", "column_name": "claim_amount", "data_type": "decimal(18,2)", "semantic_type": "MEASURE", "is_measure": True},
+            {"table_name": "claim_information", "column_name": "claim_status", "data_type": "varchar", "semantic_type": "DIMENSION"},
+            {"table_name": "policy_transactions", "column_name": "policy_state", "data_type": "varchar", "semantic_type": "DIMENSION"},
+            {"table_name": "claim_information", "column_name": "claim_open_date", "data_type": "date", "semantic_type": "DATE"},
+            {"table_name": "claim_information", "column_name": "policy_id", "data_type": "bigint", "semantic_type": "ID"},
+            {"table_name": "policy_transactions", "column_name": "policy_id", "data_type": "bigint", "semantic_type": "ID"},
         ],
         "certified_joins": [
             {
@@ -917,9 +1110,11 @@ def test_dimension_script_reads_joined_dimension_table():
 
 def test_kimball_plan_validation_accepts_certified_model_and_rejects_unknown_join():
     columns = [
-        {"table_name": "claims", "column_name": "claim_amount", "semantic_type": "MEASURE", "is_measure": True},
-        {"table_name": "claims", "column_name": "claim_status", "semantic_type": "DIMENSION"},
-        {"table_name": "claims", "column_name": "claim_date", "semantic_type": "DATE"},
+        {"table_name": "claims", "column_name": "claim_amount", "data_type": "decimal(18,2)", "semantic_type": "MEASURE", "is_measure": True},
+        {"table_name": "claims", "column_name": "claim_status", "data_type": "varchar", "semantic_type": "DIMENSION"},
+        {"table_name": "claims", "column_name": "claim_date", "data_type": "date", "semantic_type": "DATE"},
+        {"table_name": "claims", "column_name": "policy_id", "data_type": "bigint", "semantic_type": "ID"},
+        {"table_name": "policies", "column_name": "policy_id", "data_type": "bigint", "semantic_type": "ID"},
     ]
     joins = [{
         "left_table": "claims", "left_column": "policy_id",
@@ -944,9 +1139,11 @@ def test_kimball_plan_validation_accepts_certified_model_and_rejects_unknown_joi
 
 def test_kimball_plan_resolves_candidate_ids_reversed_join_and_fact_grain():
     columns = [
-        {"table_name": "claims", "column_name": "claim_amount", "semantic_type": "MEASURE", "is_measure": True},
-        {"table_name": "claims", "column_name": "claim_status", "semantic_type": "DIMENSION"},
-        {"table_name": "claims", "column_name": "claim_date", "semantic_type": "DATE"},
+        {"table_name": "claims", "column_name": "claim_amount", "data_type": "decimal(18,2)", "semantic_type": "MEASURE", "is_measure": True},
+        {"table_name": "claims", "column_name": "claim_status", "data_type": "varchar", "semantic_type": "DIMENSION"},
+        {"table_name": "claims", "column_name": "claim_date", "data_type": "date", "semantic_type": "DATE"},
+        {"table_name": "claims", "column_name": "policy_id", "data_type": "bigint", "semantic_type": "ID"},
+        {"table_name": "policies", "column_name": "policy_id", "data_type": "bigint", "semantic_type": "ID"},
     ]
     joins = [{
         "left_table": "claims", "left_column": "policy_id",
@@ -978,8 +1175,8 @@ def test_kimball_plan_resolves_candidate_ids_reversed_join_and_fact_grain():
 
 def test_kimball_plan_rejects_invalid_fact_grain():
     columns = [
-        {"table_name": "claims", "column_name": "claim_amount", "semantic_type": "MEASURE"},
-        {"table_name": "claims", "column_name": "claim_status", "semantic_type": "DIMENSION"},
+        {"table_name": "claims", "column_name": "claim_amount", "data_type": "decimal(18,2)", "semantic_type": "MEASURE"},
+        {"table_name": "claims", "column_name": "claim_status", "data_type": "varchar", "semantic_type": "DIMENSION"},
     ]
     plan = {
         "measure": {"table": "claims", "column": "claim_amount", "aggregation": "SUM"},
@@ -989,6 +1186,73 @@ def test_kimball_plan_rejects_invalid_fact_grain():
 
     with pytest.raises(ValueError, match="invalid fact grain"):
         silver_gen._validate_kimball_plan(plan, columns=columns, certified_joins=[])
+
+
+def test_kimball_plan_rejects_incompatible_measure_and_join_types():
+    columns = [
+        {"table_name": "claims", "column_name": "claim_status", "data_type": "varchar", "semantic_type": "MEASURE"},
+        {"table_name": "claims", "column_name": "policy_id", "data_type": "bigint", "semantic_type": "ID"},
+        {"table_name": "policies", "column_name": "policy_id", "data_type": "varchar", "semantic_type": "ID"},
+    ]
+    join = {
+        "left_table": "claims", "left_column": "policy_id",
+        "right_table": "policies", "right_column": "policy_id", "certified": True,
+    }
+
+    with pytest.raises(ValueError, match="non-numeric measure"):
+        silver_gen._validate_kimball_plan(
+            {
+                "measure": {"table": "claims", "column": "claim_status", "aggregation": "SUM"},
+                "dimensions": [], "join_paths": [], "fact_grain": [],
+            },
+            columns=columns,
+            certified_joins=[join],
+        )
+
+    with pytest.raises(ValueError, match="incompatible key datatypes"):
+        silver_gen._validate_kimball_plan(
+            {
+                "measure": {"table": "claims", "column": "claim_status", "aggregation": "COUNT"},
+                "dimensions": [], "join_paths": [join], "fact_grain": [],
+            },
+            columns=columns,
+            certified_joins=[join],
+        )
+
+
+def test_guarded_kimball_failure_is_not_replaced_by_fallback(monkeypatch):
+    monkeypatch.setenv("ATHENA_GOLD_KIMBALL_PLAN_USE_LLM", "true")
+    monkeypatch.setattr(
+        silver_gen,
+        "_llm_kimball_plan",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("invalid candidate")),
+    )
+    contract = silver_gen._build_gold_generation_contract(
+        state={"run_id": "run-no-fallback", "certified_kpis": [{"kpi_name": "Total Claim Amount"}]},
+        results=[{
+            "table": "claims", "source_table": "bronze.claims",
+            "target_table": "silver.silver_claims", "column_count": 2,
+            "merge_keys": ["claim_id"],
+        }],
+        enriched_metadata={"columns": [
+            {"table_name": "claims", "column_name": "claim_amount", "data_type": "decimal(18,2)", "semantic_type": "MEASURE", "is_measure": True},
+            {"table_name": "claims", "column_name": "claim_status", "data_type": "varchar", "semantic_type": "DIMENSION"},
+        ]},
+        generated_at="2026-08-10T00:00:00Z",
+    )
+
+    assert contract["kpi_mappings"][0]["readiness"] == "BLOCKED"
+    assert contract["kpi_mappings"][0]["kimball_plan_source"] == "LLM_REJECTED"
+    assert contract["dimension_mappings"][0]["logical_table"] == "claims"
+    assert contract["factless_mappings"] == [{
+        "fact_type": "FACTLESS_ENTITY_COVERAGE",
+        "logical_table": "claims",
+        "source_silver_table": "silver.silver_claims",
+        "grain_columns": ["claim_id"],
+        "readiness": "PENDING_EXACT_KEY_VALIDATION",
+    }]
+    assert contract["status"] == "READY_WITH_WARNINGS"
+    assert "invalid candidate" in contract["kpi_mappings"][0]["mapping_validation_error"]
 
 
 def test_dimension_specs_use_source_table_grain_for_one_wide_source_table():
@@ -1072,8 +1336,7 @@ def test_source_table_grain_skips_duplicate_deleted_auxiliary_tables():
     assert [item["logical_table"] for item in specs] == ["policy_transactions"]
 
 
-def test_gold_contract_caps_dimensions_and_drops_unavailable_silver_joins(monkeypatch):
-    monkeypatch.setenv("ATHENA_GOLD_MAX_DIMENSION_TABLES", "2")
+def test_gold_contract_retains_all_available_dimensions_and_drops_unavailable_silver_joins():
     mapping = {
         "kpi_name": "Total Claims",
         "source_silver_table": "silver.silver_claims",
@@ -1103,8 +1366,8 @@ def test_gold_contract_caps_dimensions_and_drops_unavailable_silver_joins(monkey
     )
 
     assert constrained["measure"]["column"] == "claimamount"
-    assert len(constrained["selected_dimension_tables"]) == 2
-    assert len({item["table"] for item in constrained["grouping_dimensions"]}) <= 2
+    assert constrained["selected_dimension_tables"] == ["agents", "claims", "policies"]
+    assert {item["table"] for item in constrained["grouping_dimensions"]} == {"agents", "claims", "policies"}
     assert all("missing" not in (join["left_table"], join["right_table"]) for join in constrained["join_paths"])
     assert all(join["left_source_table"].startswith("silver.silver_") for join in constrained["join_paths"])
     assert any("no Silver target exists" in warning for warning in warnings)

@@ -338,6 +338,92 @@ def test_snowflake_gold_runtime_executes_generated_scripts(monkeypatch):
     assert fake_conn.closed is True
 
 
+def test_snowflake_gold_runtime_one_of_ten_failure_completes_with_warning(monkeypatch):
+    class FakeSnowflakeConnection:
+        def close(self):
+            pass
+
+    scripts = [
+        {
+            "kpi_name": f"KPI {index}",
+            "target_table": f"ATHENA_DB.GOLD.fact_{index}",
+            "script_path": f"gold_{index}.sql",
+        }
+        for index in range(1, 11)
+    ]
+
+    def execute(script, _connection):
+        if script["target_table"].endswith("_10"):
+            raise ValueError("invalid target expression")
+        return {**script, "status": "COMPLETED", "statement_count": 1}
+
+    monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_GOLD", "true")
+    monkeypatch.setattr(snowflake_gold_runtime, "_snowflake_connect", FakeSnowflakeConnection)
+    monkeypatch.setattr(snowflake_gold_runtime, "configure_snowflake_runtime_session", lambda *_: None)
+    monkeypatch.setattr(snowflake_gold_runtime, "reconcile_snowflake_resumed_attempt", lambda *_: None)
+    monkeypatch.setattr(snowflake_gold_runtime, "validate_snowflake_gold_script", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(snowflake_gold_runtime, "validate_snowflake_dimension_script", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(snowflake_gold_runtime, "execute_snowflake_gold_sql", execute)
+    monkeypatch.setattr(
+        snowflake_gold_runtime,
+        "save_external_execution_progress",
+        lambda state, **_kwargs: state,
+    )
+
+    result = snowflake_gold_runtime.run_snowflake_gold_scripts(
+        {"run_id": "partial-gold", "target_warehouse": "snowflake", "gold_generation_results": scripts}
+    )
+
+    assert result["snowflake_gold_execution_status"] == "COMPLETED_WITH_WARNINGS"
+    assert len(result["snowflake_gold_execution_results"]) == 10
+    assert [item["target_table"] for item in result["snowflake_gold_execution_failures"]] == [
+        "ATHENA_DB.GOLD.fact_10"
+    ]
+
+
+def test_snowflake_gold_runtime_persists_failed_progress_below_threshold(monkeypatch):
+    class FakeSnowflakeConnection:
+        def close(self):
+            pass
+
+    progress = []
+    scripts = [
+        {"kpi_name": f"KPI {index}", "target_table": f"ANALYTICS.GOLD.fact_{index}", "script_path": f"gold_{index}.sql"}
+        for index in range(2)
+    ]
+
+    monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_GOLD", "true")
+    monkeypatch.setattr(snowflake_gold_runtime, "_snowflake_connect", FakeSnowflakeConnection)
+    monkeypatch.setattr(snowflake_gold_runtime, "configure_snowflake_runtime_session", lambda *_: None)
+    monkeypatch.setattr(snowflake_gold_runtime, "reconcile_snowflake_resumed_attempt", lambda *_: None)
+    monkeypatch.setattr(snowflake_gold_runtime, "validate_snowflake_gold_script", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(snowflake_gold_runtime, "validate_snowflake_dimension_script", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        snowflake_gold_runtime,
+        "execute_snowflake_gold_sql",
+        lambda script, _connection: (
+            (_ for _ in ()).throw(ValueError("invalid model"))
+            if script["target_table"].endswith("_1")
+            else {**script, "status": "COMPLETED"}
+        ),
+    )
+    monkeypatch.setattr(
+        snowflake_gold_runtime,
+        "save_external_execution_progress",
+        lambda state, **kwargs: progress.append((state, kwargs)) or state,
+    )
+
+    with pytest.raises(RuntimeError, match="completed only 1/2"):
+        snowflake_gold_runtime.run_snowflake_gold_scripts(
+            {"run_id": "failed-gold", "target_warehouse": "snowflake", "gold_generation_results": scripts}
+        )
+
+    failed_state, failed_progress = progress[-1]
+    assert failed_progress["status"] == "FAILED"
+    assert failed_progress["completed_count"] == 1
+    assert len(failed_state["snowflake_gold_execution_failures"]) == 1
+
+
 def test_snowflake_gold_runtime_uses_persisted_dimension_body_when_file_is_unavailable():
     assert snowflake_gold_runtime.validate_snowflake_dimension_script(
         {

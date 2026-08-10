@@ -29,7 +29,6 @@ from utilis.logger import logger
 SILVER_MAX_WORKERS = int(os.environ.get("SILVER_MAX_WORKERS", "4"))
 SILVER_LLM_ENV_KEYS = ("ATHENA_SILVER_USE_LLM", "USE_LLM")
 KIMBALL_LLM_ENV_KEYS = ("ATHENA_GOLD_KIMBALL_PLAN_USE_LLM", "ATHENA_GOLD_USE_LLM", "USE_LLM")
-DEFAULT_MAX_GOLD_DIMENSION_TABLES = 2
 
 
 class SilverTableRef(TypedDict):
@@ -1924,11 +1923,12 @@ def _write_silver_ui(
 
 
 def _tokens(value: str) -> set[str]:
-    return {
+    tokens = {
         token
         for token in re.split(r"[^a-z0-9]+", str(value or "").lower())
         if len(token) > 2
     }
+    return tokens | {token[:-1] for token in tokens if len(token) > 3 and token.endswith("s")}
 
 
 def _column_tokens(column: Dict[str, Any]) -> set[str]:
@@ -1982,12 +1982,6 @@ def _score_column_for_kpi(kpi: Dict[str, Any], column: Dict[str, Any]) -> int:
     compact_name = re.sub(r"[^a-z0-9]+", "", column_name)
     kpi_tokens = _tokens(kpi_text)
     score += sum(6 for token in kpi_tokens if token in compact_name)
-    monetary_intent = {"amount", "premium", "insured", "estimate", "cost", "expense", "payment", "paid"}
-    monetary_columns = ("amount", "premium", "insured", "estimate", "cost", "expense", "paid", "gross")
-    if kpi_tokens & monetary_intent:
-        score += 25 if any(token in compact_name for token in monetary_columns) else -25
-    if any(token in compact_name for token in ("updatenum", "rownumber", "sequence", "version")):
-        score -= 50
     return score
 
 
@@ -2000,7 +1994,12 @@ def _best_measure_for_kpi(kpi: Dict[str, Any], columns: List[Dict[str, Any]]) ->
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda column: _score_column_for_kpi(kpi, column))
+    selected = max(candidates, key=lambda column: _score_column_for_kpi(kpi, column))
+    try:
+        minimum_score = int(os.getenv("ATHENA_GOLD_MIN_MEASURE_MATCH_SCORE", "10"))
+    except ValueError:
+        minimum_score = 10
+    return selected if _score_column_for_kpi(kpi, selected) >= minimum_score else None
 
 
 def _dimension_scope_tables(joins: List[Dict[str, Any]], measure_table: str | None) -> set[str]:
@@ -2044,13 +2043,6 @@ def _dimension_columns(
             }
         )
     return dimensions[:12]
-
-
-def _max_gold_dimension_tables() -> int:
-    try:
-        return max(0, int(os.getenv("ATHENA_GOLD_MAX_DIMENSION_TABLES", str(DEFAULT_MAX_GOLD_DIMENSION_TABLES))))
-    except ValueError:
-        return DEFAULT_MAX_GOLD_DIMENSION_TABLES
 
 
 def _canonical_gold_column(value: Any) -> str:
@@ -2121,10 +2113,7 @@ def _constrain_gold_mapping(
         })
 
     ranked_dimension_tables = sorted(table_scores, key=lambda table: (-table_scores[table], table))
-    kept_dimension_tables = set(ranked_dimension_tables[:_max_gold_dimension_tables()])
-    dropped_dimension_tables = [table for table in ranked_dimension_tables if table not in kept_dimension_tables]
-    if dropped_dimension_tables:
-        warnings.append(f"Gold dimension table cap applied; dropped {', '.join(dropped_dimension_tables)}.")
+    kept_dimension_tables = set(ranked_dimension_tables)
     dimensions = [
         item
         for item in dimensions
@@ -2163,7 +2152,6 @@ def _constrain_gold_mapping(
         "time": time_info,
         "join_paths": valid_joins,
         "fact_grain": list(dict.fromkeys(fact_grain)),
-        "dimension_table_limit": _max_gold_dimension_tables(),
         "selected_dimension_tables": sorted(kept_dimension_tables),
     }, warnings
 
@@ -2230,7 +2218,7 @@ def _silver_tables_by_name(results: List[Dict[str, object]]) -> Dict[str, str]:
 def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tables: Dict[str, str]) -> List[Dict[str, Any]]:
     grouped: Dict[str, Dict[str, Any]] = {}
     for mapping in kpi_mappings:
-        if not isinstance(mapping, dict):
+        if not isinstance(mapping, dict) or str(mapping.get("readiness") or "").upper() == "BLOCKED":
             continue
         kpi_name = str(mapping.get("kpi_name") or "")
         for dimension in mapping.get("grouping_dimensions") or []:
@@ -2258,6 +2246,81 @@ def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tab
     return sorted(grouped.values(), key=lambda item: str(item.get("logical_table") or ""))
 
 
+def _independent_gold_dimensions(
+    *,
+    columns: List[Dict[str, Any]],
+    results: List[Dict[str, object]],
+    silver_tables: Dict[str, str],
+    kpi_mappings: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Plan reusable dimensions from approved Silver structure, independently of KPI computability."""
+    grouped = {
+        str(item["logical_table"]).casefold(): dict(item)
+        for item in _dimension_mappings_from_kpis(kpi_mappings, silver_tables)
+    }
+    result_by_table = {
+        str(item.get("table") or item.get("table_name") or "").casefold(): item
+        for item in results
+        if isinstance(item, dict)
+    }
+    for column in columns:
+        if not isinstance(column, dict) or str(column.get("semantic_type") or "").upper() not in {
+            "DIMENSION", "DATE", "FLAG"
+        }:
+            continue
+        logical = str(column.get("table_name") or "").strip()
+        name = str(column.get("column_name") or "").strip()
+        if not logical or not name or logical.casefold() not in silver_tables:
+            continue
+        row = grouped.setdefault(
+            logical.casefold(),
+            {
+                "logical_table": logical,
+                "source_silver_table": silver_tables[logical.casefold()],
+                "columns": [],
+                "consumed_by_kpis": [],
+            },
+        )
+        if name not in row["columns"]:
+            row["columns"].append(name)
+
+    # Prefer reviewed key-backed entities with richer descriptive context. The
+    # materialization boundary still reloads and validates the exact active keys.
+    ranked = sorted(
+        grouped.values(),
+        key=lambda item: (
+            -int(bool((result_by_table.get(str(item["logical_table"]).casefold()) or {}).get("merge_keys"))),
+            -len(item.get("columns") or []),
+            str(item.get("logical_table") or ""),
+        ),
+    )
+    return ranked
+
+
+def _factless_gold_mappings(
+    *, results: List[Dict[str, object]], silver_tables: Dict[str, str]
+) -> List[Dict[str, Any]]:
+    """Plan one auditable entity-coverage fact per reviewed, key-backed Silver object."""
+    mappings: List[Dict[str, Any]] = []
+    for result in sorted(results, key=lambda item: str(item.get("table") or item.get("table_name") or "")):
+        if not isinstance(result, dict):
+            continue
+        logical = str(result.get("table") or result.get("table_name") or "").strip()
+        key_hints = list(dict.fromkeys(str(key).strip() for key in (
+            result.get("merge_keys") or result.get("primary_keys") or []
+        ) if str(key).strip()))
+        if not logical or logical.casefold() not in silver_tables:
+            continue
+        mappings.append({
+            "fact_type": "FACTLESS_ENTITY_COVERAGE",
+            "logical_table": logical,
+            "source_silver_table": silver_tables[logical.casefold()],
+            "grain_columns": key_hints,
+            "readiness": "PENDING_EXACT_KEY_VALIDATION",
+        })
+    return mappings
+
+
 def _extract_json_object(value: Any) -> Dict[str, Any]:
     text = str(value or "").strip()
     match = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
@@ -2279,6 +2342,12 @@ def _kimball_candidates(columns: List[Dict[str, Any]], certified_joins: List[Dic
             "table": str(column.get("table_name") or ""),
             "column": str(column.get("column_name") or ""),
             "semantic_type": str(column.get("semantic_type") or "").upper(),
+            "data_type": str(
+                column.get("target_data_type")
+                or column.get("source_data_type")
+                or column.get("data_type")
+                or ""
+            ),
         }
         if not candidate["table"] or not candidate["column"]:
             continue
@@ -2384,8 +2453,31 @@ def _validate_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]
     measure_meta = index.get((str(measure.get("table") or "").casefold(), str(measure.get("column") or "").casefold()))
     if not measure_meta or str(measure_meta.get("semantic_type") or "").upper() not in {"MEASURE", "FLAG"}:
         raise ValueError("Kimball plan selected an invalid measure")
-    if str(measure.get("aggregation") or "").upper() not in {"SUM", "AVG", "MIN", "MAX", "COUNT"}:
+    aggregation = str(measure.get("aggregation") or "").upper()
+    if aggregation not in {"SUM", "AVG", "MIN", "MAX", "COUNT"}:
         raise ValueError("Kimball plan selected an unsupported aggregation")
+
+    def type_family(column: Dict[str, Any] | None) -> str:
+        data_type = str(
+            (column or {}).get("target_data_type")
+            or (column or {}).get("source_data_type")
+            or (column or {}).get("data_type")
+            or ""
+        ).upper()
+        base = re.split(r"[<(]", data_type, maxsplit=1)[0].strip()
+        if any(token in base for token in ("INT", "DECIMAL", "NUMERIC", "NUMBER", "FLOAT", "DOUBLE", "REAL")):
+            return "NUMERIC"
+        if any(token in base for token in ("DATE", "TIME")):
+            return "TEMPORAL"
+        if any(token in base for token in ("CHAR", "STRING", "TEXT", "VARCHAR")):
+            return "STRING"
+        return base
+
+    measure_family = type_family(measure_meta)
+    if aggregation in {"SUM", "AVG"} and measure_family != "NUMERIC":
+        raise ValueError(f"Kimball plan selected {aggregation} for a non-numeric measure")
+    if aggregation in {"MIN", "MAX"} and measure_family not in {"NUMERIC", "TEMPORAL", "STRING"}:
+        raise ValueError(f"Kimball plan selected {aggregation} for a non-comparable measure")
     dimensions = plan.get("dimensions") or []
     if not isinstance(dimensions, list) or len(dimensions) > 12:
         raise ValueError("Kimball plan has an invalid dimension list")
@@ -2398,6 +2490,8 @@ def _validate_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]
         meta = index.get((str(time.get("table") or "").casefold(), str(time.get("column") or "").casefold()))
         if not meta or str(meta.get("semantic_type") or "").upper() not in {"DATE", "AUDIT_TIMESTAMP"}:
             raise ValueError("Kimball plan selected an invalid time column")
+        if type_family(meta) != "TEMPORAL":
+            raise ValueError("Kimball plan selected a non-temporal time column")
         if str(time.get("grain") or "").lower() not in {"day", "week", "month", "quarter", "year"}:
             raise ValueError("Kimball plan selected an invalid time grain")
     certified = {tuple(str(j.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column")) for j in certified_joins if isinstance(j, dict)}
@@ -2405,6 +2499,10 @@ def _validate_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]
         signature = tuple(str(join.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column"))
         if signature not in certified:
             raise ValueError("Kimball plan selected a non-certified join")
+        left_meta = index.get((signature[0], signature[1]))
+        right_meta = index.get((signature[2], signature[3]))
+        if not left_meta or not right_meta or type_family(left_meta) != type_family(right_meta):
+            raise ValueError("Kimball plan selected a join with missing or incompatible key datatypes")
     expected_grain = {str(item.get("column") or "") for item in dimensions}
     if time:
         expected_grain.add("period_start")
@@ -2482,13 +2580,23 @@ def _build_gold_generation_contract(
     else:
         joins = []
         fallback_joins = []
+    silver_tables = _silver_tables_by_name(results)
+    approved_silver_names = set(silver_tables)
+    columns = [
+        column
+        for column in columns
+        if isinstance(column, dict)
+        and str(column.get("table_name") or "").strip().casefold() in approved_silver_names
+    ]
     joins = [
         join
         for join in joins
-        if isinstance(join, dict) and join.get("certified") is True
+        if isinstance(join, dict)
+        and join.get("certified") is True
+        and str(join.get("left_table") or "").strip().casefold() in approved_silver_names
+        and str(join.get("right_table") or "").strip().casefold() in approved_silver_names
     ]
     certified_kpis = state.get("certified_kpis") or enriched_metadata.get("certified_kpis") or []
-    silver_tables = _silver_tables_by_name(results)
     warnings: List[str] = []
     kpi_mappings: List[Dict[str, Any]] = []
 
@@ -2539,7 +2647,8 @@ def _build_gold_generation_contract(
                     "grain": _time_grain(state),
                     "column": date_column,
                 },
-                "filters": list(state.get("req_constraints") or []),
+                # ponytail: BRD prose remains planning context until a validated filter DSL exists.
+                "filters": [],
                 "join_paths": join_paths,
                 "readiness": "BLOCKED" if not measure else "READY_WITH_WARNINGS" if join_paths else "READY",
             }
@@ -2559,20 +2668,40 @@ def _build_gold_generation_contract(
                     mapping = _apply_kimball_plan(mapping, plan)
                     mapping["kimball_plan_source"] = "LLM_RETRY_VALIDATED"
                 except Exception as retry_exc:
-                    mapping["kimball_plan_source"] = "DETERMINISTIC_FALLBACK"
-                    warnings.append(f"KPI '{kpi_name}' Kimball LLM plan rejected; deterministic plan retained: {retry_exc}")
-                    logger.warning("Kimball plan rejected for KPI %s; deterministic fallback retained: %s", kpi_name, retry_exc)
+                    mapping["kimball_plan_source"] = "LLM_REJECTED"
+                    mapping["readiness"] = "BLOCKED"
+                    mapping["formula"] = {
+                        **(mapping.get("formula") or {}),
+                        "status": "NEEDS_CERTIFICATION",
+                    }
+                    mapping["mapping_validation_error"] = str(retry_exc)
+                    warnings.append(
+                        f"KPI '{kpi_name}' is not computable because its guarded Kimball plan failed validation: {retry_exc}"
+                    )
+                    logger.warning("Kimball plan rejected for KPI %s after validation retry: %s", kpi_name, retry_exc)
         else:
             mapping["kimball_plan_source"] = "DETERMINISTIC"
         mapping, mapping_warnings = _constrain_gold_mapping(mapping, silver_tables)
         warnings.extend(f"KPI '{kpi_name}': {warning}" for warning in mapping_warnings)
         kpi_mappings.append(mapping)
 
+    dimension_mappings = _independent_gold_dimensions(
+        columns=columns,
+        results=results,
+        silver_tables=silver_tables,
+        kpi_mappings=kpi_mappings,
+    )
+    factless_mappings = _factless_gold_mappings(results=results, silver_tables=silver_tables)
     status = "READY"
     if warnings:
         status = "READY_WITH_WARNINGS"
-    if kpi_mappings and all(item["readiness"] == "BLOCKED" for item in kpi_mappings):
-        status = "FAILED"
+    if (
+        kpi_mappings
+        and all(item["readiness"] == "BLOCKED" for item in kpi_mappings)
+        and not dimension_mappings
+        and not factless_mappings
+    ):
+        status = "NOT_COMPUTABLE"
     if not kpi_mappings:
         status = "SKIPPED"
         warnings.append("No certified KPIs found for gold contract generation.")
@@ -2591,7 +2720,8 @@ def _build_gold_generation_contract(
             }
             for item in sorted(results, key=lambda row: str(row.get("table", "")))
         ],
-        "dimension_mappings": _dimension_mappings_from_kpis(kpi_mappings, silver_tables),
+        "dimension_mappings": dimension_mappings,
+        "factless_mappings": factless_mappings,
         "kpi_mappings": kpi_mappings,
         "kimball_plan_enabled": _llm_enabled_for_kimball_plan(),
         "available_joins": joins,

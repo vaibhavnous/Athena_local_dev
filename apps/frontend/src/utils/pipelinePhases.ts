@@ -4,6 +4,7 @@ type PipelineStep = {
   detail?: string
   state: string
   complete?: boolean
+  warning?: boolean
 }
 
 export function normalizeState(value: string | undefined) {
@@ -333,6 +334,7 @@ export function getPipelineSteps(run) {
       label: formatPipelineStepLabel(step.label, step.key),
       detail: step.detail || buildStepDetail(run, step.key, normalizeState(step.state), step.detail),
       state: normalizeState(step.state),
+      warning: String(step.state || '').toUpperCase() === 'COMPLETED_WITH_WARNINGS',
     })) as PipelineStep[]
     return resolvePipelineSteps(run, steps)
   }

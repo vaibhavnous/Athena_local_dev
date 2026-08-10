@@ -193,10 +193,10 @@ def _compute_status(
     target = str(checkpoint.get("target_warehouse") or "").strip().lower()
     target_gold_completed = (
         target == "databricks"
-        and str(checkpoint.get("databricks_gold_execution_status") or "").upper() == "COMPLETED"
+        and str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
     ) or (
         target == "snowflake"
-        and str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
+        and str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
     )
     if target_gold_completed:
         return "PIPELINE_COMPLETED"

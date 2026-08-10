@@ -877,6 +877,39 @@ def test_silver_to_gold_draft_pins_active_inputs_and_structured_rules() -> None:
     }
     assert rule_types == {"INPUTS_PRESENT", "TARGET_SCHEMA_MATCH", "KEYS_NOT_NULL", "KEYS_UNIQUE"}
 
+    factless = repository.upsert_silver_to_gold_draft(
+        source_system_id=7,
+        target_gold_table="main.gold.fact_claims_coverage",
+        inputs=[{
+            "ingestion_object_id": silver_id,
+            "config_version": silver["ingestion_object"]["config_version"],
+            "config_hash": silver["ingestion_object"]["config_hash"],
+            "mapping_version": silver["mapping_bundle"]["mapping_version"],
+            "mapping_hash": silver["mapping_bundle"]["mapping_hash"],
+        }],
+        columns=[{
+            "source_object_name": "main.silver.silver_claims",
+            "source_field_path": "claimid",
+            "source_data_type": "int",
+            "target_column_name": "claimid",
+            "target_data_type": "int",
+            "ordinal_position": 1,
+            "is_primary_key": True,
+            "transformation_rule": "GROUP_KEY",
+        }],
+        merge_keys=["claimid"],
+        join_rules=[],
+        definition={
+            "artifact_kind": "FACT",
+            "fact_type": "FACTLESS_ENTITY_COVERAGE",
+        },
+        build_order=20,
+        write_mode="MERGE",
+    )
+
+    assert factless["ingestion_object"]["target_gold_table"] == "main.gold.fact_claims_coverage"
+    assert factless["mapping_bundle"]["mappings"][0]["transformation_rule"] == "GROUP_KEY"
+
 
 def test_dbt_gold_draft_can_pin_inactive_silver_with_reused_active_mapping() -> None:
     repository = StubMetadataRepository()

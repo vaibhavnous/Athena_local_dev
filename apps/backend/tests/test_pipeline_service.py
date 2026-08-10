@@ -1186,16 +1186,17 @@ def test_gate5_metadata_rejects_edited_executable_code(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("filters", "aggregation", "facts_enabled", "expected_kinds", "rejection_code"),
+    ("filters", "aggregation", "measure_type", "expected_kinds", "rejection_code", "expected_fact_type"),
     [
-        (["Consistent identifiers across systems"], "SUM", False, ["DIMENSION"], "DATABRICKS_FACTS_DEFERRED"),
-        (["Consistent identifiers across systems"], "SUM", True, ["DIMENSION", "FACT"], None),
-        ([{"column": "claimstatus", "operator": "=", "value": "OPEN"}], "SUM", True, ["DIMENSION"], "UNSUPPORTED_FILTER"),
-        (["Consistent identifiers across systems"], "RATIO", True, ["DIMENSION"], "INVALID_AGGREGATION"),
+        ([], "SUM", "DECIMAL(18,2)", ["DIMENSION", "FACT"], None, "DECIMAL(38,10)"),
+        ([], "MIN", "STRING", ["DIMENSION", "FACT"], None, "STRING"),
+        (["Consistent identifiers across systems"], "SUM", "DECIMAL(18,2)", ["DIMENSION"], "UNSUPPORTED_FILTER", None),
+        ([{"column": "claimstatus", "operator": "=", "value": "OPEN"}], "SUM", "DECIMAL(18,2)", ["DIMENSION"], "UNSUPPORTED_FILTER", None),
+        ([], "RATIO", "DECIMAL(18,2)", ["DIMENSION"], "INVALID_AGGREGATION", None),
     ],
 )
 def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(
-    monkeypatch, filters, aggregation, facts_enabled, expected_kinds, rejection_code
+    monkeypatch, filters, aggregation, measure_type, expected_kinds, rejection_code, expected_fact_type
 ) -> None:
     from types import SimpleNamespace
     from services import metadata_selection
@@ -1203,7 +1204,6 @@ def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(
     captured = []
     monkeypatch.setenv("GOLD_CATALOG", "main")
     monkeypatch.setenv("GOLD_SCHEMA", "gold")
-    monkeypatch.setenv("ATHENA_DATABRICKS_GOLD_FACTS_ENABLED", str(facts_enabled))
     active = {
         "ingestion_object_id": 202,
         "source_system_id": 7,
@@ -1219,7 +1219,7 @@ def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(
         "mappings": [
             {"target_column_name": "claimid", "target_data_type": "BIGINT", "is_primary_key": True, "is_nullable": False},
             {"target_column_name": "claimstatus", "target_data_type": "STRING", "is_primary_key": False, "is_nullable": True},
-            {"target_column_name": "claimamount", "target_data_type": "DECIMAL(18,2)", "is_primary_key": False, "is_nullable": True},
+            {"target_column_name": "claimamount", "target_data_type": measure_type, "is_primary_key": False, "is_nullable": True},
         ],
     }
 
@@ -1287,12 +1287,17 @@ def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(
     assert captured[0]["merge_keys"] == ["claimid"]
     if "FACT" in expected_kinds:
         assert captured[1]["merge_keys"] == ["claimstatus"]
+        aggregate = next(
+            column for column in captured[1]["columns"]
+            if str(column.get("transformation_rule") or "").startswith("AGG_")
+        )
+        assert aggregate["target_data_type"] == expected_fact_type
     assert [item["code"] for item in result["gold_metadata_rejections"]] == (
         [rejection_code] if rejection_code else []
     )
 
 
-def test_gate5_rejects_unimplemented_snowflake_multi_input_gold_before_metadata_write(monkeypatch) -> None:
+def test_gate5_persists_validated_snowflake_multi_input_gold(monkeypatch) -> None:
     from types import SimpleNamespace
     from services import metadata_selection
 
@@ -1330,7 +1335,17 @@ def test_gate5_rejects_unimplemented_snowflake_multi_input_gold_before_metadata_
 
         def upsert_silver_to_gold_draft(self, **kwargs):
             captured.append(kwargs)
-            raise AssertionError("Unsupported Gold work must not create metadata rows")
+            return {
+                "ingestion_object": {
+                    "ingestion_object_id": 301,
+                    "config_version": 3,
+                    "config_hash": "sha256:gold-object",
+                },
+                "mapping_bundle": {
+                    "mapping_version": 31,
+                    "mapping_hash": "sha256:gold-mapping",
+                },
+            }
 
     monkeypatch.setattr(metadata_selection, "validated_metadata_selection", lambda _state: SimpleNamespace(repository=Repository()))
     state = {
@@ -1363,9 +1378,122 @@ def test_gate5_rejects_unimplemented_snowflake_multi_input_gold_before_metadata_
         },
     }
 
-    with pytest.raises(ValueError, match="UNSUPPORTED_MULTI_INPUT_SNOWFLAKE"):
-        pipeline_runtime._materialize_silver_to_gold_metadata(state)
-    assert captured == []
+    result = pipeline_runtime._materialize_silver_to_gold_metadata(state)
+
+    assert [item["artifact_kind"] for item in result["gold_metadata_drafts"]] == ["FACT"]
+    assert len(captured) == 1
+    assert len(captured[0]["inputs"]) == 2
+    assert captured[0]["join_rules"] == [{
+        "left_source_table": "ATHENA_DB.SILVER.silver_claims",
+        "left_column": "policyid",
+        "right_source_table": "ATHENA_DB.SILVER.silver_policy",
+        "right_column": "policyid",
+        "join_type": "INNER",
+        "cardinality": None,
+        "certified": True,
+    }]
+
+
+def test_gate5_materializes_factless_fact_and_logs_blocked_kpi(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    captured = []
+    active = {
+        "ingestion_object_id": 202,
+        "source_system_id": 7,
+        "config_version": 4,
+        "config_hash": "sha256:silver-object",
+    }
+    bundle = {
+        "mapping_version": 11,
+        "mapping_hash": "sha256:silver-mapping",
+        "mappings": [
+            {"target_column_name": "event_id", "target_data_type": "BIGINT", "is_primary_key": True},
+            {"target_column_name": "status", "target_data_type": "STRING", "is_primary_key": False},
+        ],
+    }
+
+    class Repository:
+        def get_mapping_bundle(self, **_kwargs):
+            return bundle
+
+        def get_active_ingestion_object(self, object_id):
+            return active if object_id == 202 else None
+
+        def upsert_silver_to_gold_draft(self, **kwargs):
+            captured.append(kwargs)
+            return {
+                "ingestion_object": {
+                    "ingestion_object_id": 301,
+                    "config_version": 3,
+                    "config_hash": "sha256:gold-object",
+                },
+                "mapping_bundle": {
+                    "mapping_version": 31,
+                    "mapping_hash": "sha256:gold-mapping",
+                },
+            }
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    result = pipeline_runtime._materialize_silver_to_gold_metadata({
+        "target_warehouse": "databricks",
+        "silver_generation_results": [{
+            "table": "events",
+            "target_table": "main.silver.silver_events",
+            "silver_ingestion_object_id": 202,
+            "bronze_to_silver_mapping_version": 11,
+            "bronze_to_silver_mapping_hash": "sha256:silver-mapping",
+            "metadata_activation_status": "ACTIVE",
+        }],
+        "gold_generation_contract": {
+            "dimension_mappings": [],
+            "factless_mappings": [{
+                "fact_type": "FACTLESS_ENTITY_COVERAGE",
+                "logical_table": "events",
+                "grain_columns": ["event_id"],
+            }],
+            "kpi_mappings": [{
+                "kpi_name": "Uncomputable Ratio",
+                "readiness": "BLOCKED",
+            }],
+        },
+    })
+
+    assert result["gold_metadata_materialization_status"] == "READY"
+    assert result["gold_metadata_drafts"][0]["fact_type"] == "FACTLESS_ENTITY_COVERAGE"
+    assert result["gold_metadata_rejections"][0]["code"] == "INCOMPLETE_KPI_CONTRACT"
+    assert captured[0]["merge_keys"] == ["event_id"]
+    assert captured[0]["columns"][0]["transformation_rule"] == "GROUP_KEY"
+    assert captured[0]["write_mode"] == "MERGE"
+
+
+def test_gate5_no_computable_gold_objects_is_nonfatal(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_selection
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=object()),
+    )
+    result = pipeline_runtime._materialize_silver_to_gold_metadata({
+        "target_warehouse": "databricks",
+        "silver_generation_results": [],
+        "gold_generation_contract": {
+            "dimension_mappings": [],
+            "factless_mappings": [],
+            "kpi_mappings": [{"kpi_name": "Unavailable KPI", "readiness": "BLOCKED"}],
+        },
+    })
+
+    assert result["gold_metadata_drafts"] == []
+    assert result["gold_metadata_materialization_status"] == "SKIPPED_NOT_COMPUTABLE"
+    assert result["gold_metadata_rejections"][0]["code"] == "INCOMPLETE_KPI_CONTRACT"
 
 
 def test_gold_review_hashes_and_activates_exact_transformation_artifact(monkeypatch) -> None:
@@ -1523,6 +1651,104 @@ def test_metadata_native_execution_is_drained_by_application_worker(monkeypatch)
     assert result["databricks_gold_execution_status"] == "COMPLETED"
     assert len(result["metadata_runtime_results"]) == 3
     assert all(call["logical_work_id"] == logical_work_id for call in calls)
+
+
+def test_metadata_native_gold_one_of_ten_failure_completes_with_warning(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from services import metadata_runtime_worker, metadata_selection
+
+    logical_work_id = "logical-partial-gold"
+    gold_ids = list(range(301, 311))
+    queue_rows = [
+        {"queue_id": 1, "ingestion_object_id": 101, "queue_status": "SUCCESS"},
+        {"queue_id": 2, "ingestion_object_id": 201, "queue_status": "SUCCESS"},
+        *[
+            {
+                "queue_id": object_id,
+                "ingestion_object_id": object_id,
+                "queue_status": "FAILED" if object_id == 310 else "SUCCESS",
+            }
+            for object_id in gold_ids
+        ],
+    ]
+    batch = {
+        "outcomes": [
+            {
+                "queue": row,
+                "run": {"run_id": f"runtime-{row['queue_id']}"},
+                "status": row["queue_status"],
+            }
+            for row in queue_rows
+        ],
+        "progress_state": {},
+    }
+    batches = [batch, None]
+
+    class Repository:
+        def queue_items_for_logical_work(self, value):
+            assert value == logical_work_id
+            return queue_rows
+
+    monkeypatch.setattr(
+        metadata_runtime_worker,
+        "process_metadata_work_batch",
+        lambda *_args, **_kwargs: batches.pop(0),
+    )
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_target_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state_timed", lambda *_args, **_kwargs: None)
+    state = {
+        "run_id": "design-partial-gold",
+        "target_warehouse": "databricks",
+        "metadata_runtime_queue": [{"logical_work_id": logical_work_id}],
+        "bronze_generation_results": [{"ingestion_object_id": 101, "metadata_activation_status": "ACTIVE"}],
+        "silver_generation_results": [{"silver_ingestion_object_id": 201, "metadata_activation_status": "ACTIVE"}],
+        "gold_generation_results": [
+            {
+                "gold_ingestion_object_id": object_id,
+                "artifact_kind": "DIMENSION" if object_id <= 304 else "FACT",
+                "metadata_activation_status": "ACTIVE",
+            }
+            for object_id in gold_ids
+        ],
+    }
+
+    result = pipeline_runtime._execute_queued_metadata_native_runtime(state)
+
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert result["databricks_gold_execution_status"] == "COMPLETED_WITH_WARNINGS"
+    assert result["gold_execution_summary"] == {
+        "status": "COMPLETED_WITH_WARNINGS",
+        "planned_count": 10,
+        "successful_count": 9,
+        "failed_count": 1,
+        "successful_fact_count": 5,
+        "successful_dimension_count": 4,
+        "failed_object_ids": [310],
+        "success_ratio": 0.9,
+    }
+    assert result["external_execution"]["message"].startswith(
+        "Gold completed with warnings: 9/10 tables succeeded"
+    )
+
+
+@pytest.mark.parametrize("layer", ["bronze", "silver"])
+@pytest.mark.parametrize("status", ["COMPLETED_WITH_WARNINGS", "SKIPPED", "HANDOFF_ONLY"])
+def test_snowflake_upstream_native_layers_require_strict_completion(layer, status):
+    assert pipeline_runtime._native_execution_completed(
+        {f"snowflake_{layer}_execution_status": status}, "snowflake", layer
+    ) is False
+
+
+def test_snowflake_gold_native_warning_is_complete():
+    assert pipeline_runtime._native_execution_completed(
+        {"snowflake_gold_execution_status": "COMPLETED_WITH_WARNINGS"},
+        "snowflake",
+        "gold",
+    ) is True
 
 
 def test_snowflake_native_execution_uses_bounded_parallel_workers(monkeypatch) -> None:

@@ -311,7 +311,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
             not generation_first
             and (
                 checkpoint.get("background_stage") == "gold_code_execution"
-                or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
+                or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED", "COMPLETED_WITH_WARNINGS"}
                 or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED", "COMPLETED_WITH_WARNINGS"}
             )
         )
@@ -378,7 +378,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
     if checkpoint.get("background_stage"):
         fallback_status = "RUNNING"
     elif gold_completed and (
-        str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
+        str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
         or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
     ):
         fallback_status = "SUCCESS"

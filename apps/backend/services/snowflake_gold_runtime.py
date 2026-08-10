@@ -373,7 +373,47 @@ def _gold_join_multiplier(script: Dict[str, Any], cursor: Any) -> float:
     return (joined_count / root_count) if root_count else (0.0 if joined_count == 0 else float("inf"))
 
 
-def _blocking_validation_results(script: Dict[str, Any], snowflake_conn: Any) -> List[Dict[str, Any]]:
+def _prewrite_validation_results(script: Dict[str, Any], snowflake_conn: Any) -> List[Dict[str, Any]]:
+    rules = (script.get("validation_policy") or {}).get("rules") or []
+    prewrite_rules = [
+        rule for rule in rules
+        if str(rule.get("rule_type") or rule.get("rule") or "").upper()
+        in {"INPUTS_PRESENT", "MAX_JOIN_MULTIPLIER"}
+    ]
+    if not prewrite_rules:
+        return []
+    cursor = snowflake_conn.cursor()
+    try:
+        results = []
+        for rule in prewrite_rules:
+            rule_type = str(rule.get("rule_type") or rule.get("rule") or "").upper()
+            threshold = rule.get("threshold_value", 0)
+            if rule_type == "INPUTS_PRESENT":
+                observed = 0
+                for source in script.get("approved_source_tables") or []:
+                    try:
+                        cursor.execute(f"SELECT 1 FROM {_qualified_name(str(source))} LIMIT 0")
+                    except Exception:
+                        observed += 1
+            else:
+                observed = _gold_join_multiplier(script, cursor)
+            result = {
+                "rule_type": rule_type,
+                "observed_value": observed,
+                "threshold_value": threshold,
+                "status": "PASSED" if float(observed) <= float(threshold) else "FAILED",
+            }
+            results.append(result)
+            if result["status"] != "PASSED":
+                raise RuntimeError(f"Snowflake Gold pre-write validation failed: {result}")
+        return results
+    finally:
+        cursor.close()
+
+
+def _blocking_validation_results(
+    script: Dict[str, Any], snowflake_conn: Any, *, skip_prewrite: bool = False
+) -> List[Dict[str, Any]]:
     rules = (script.get("validation_policy") or {}).get("rules") or []
     if not rules:
         return []
@@ -390,6 +430,8 @@ def _blocking_validation_results(script: Dict[str, Any], snowflake_conn: Any) ->
         results = []
         for rule in rules:
             rule_type = str(rule.get("rule_type") or rule.get("rule") or "").upper()
+            if skip_prewrite and rule_type in {"INPUTS_PRESENT", "MAX_JOIN_MULTIPLIER"}:
+                continue
             threshold = rule.get("threshold_value", 0)
             if rule_type == "TARGET_SCHEMA_MATCH":
                 observed = len(expected_columns - target_columns)
@@ -485,6 +527,7 @@ def _inject_gold_schema_evolution(sql: str) -> str:
 
 
 def execute_snowflake_gold_sql(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
+    prewrite_validation = _prewrite_validation_results(script, snowflake_conn)
     dimension_sql = validate_snowflake_dimension_script(script, catalog_connection=snowflake_conn)
     dimension_statement_count = 0
     if dimension_sql:
@@ -520,7 +563,10 @@ def execute_snowflake_gold_sql(script: Dict[str, Any], snowflake_conn: Any) -> D
     receipt = snowflake_target_commit_result(
         script,
         query_id,
-        validation_results=_blocking_validation_results(script, snowflake_conn),
+        validation_results=[
+            *prewrite_validation,
+            *_blocking_validation_results(script, snowflake_conn, skip_prewrite=True),
+        ],
     )
     if receipt:
         result["execution_result"] = receipt
@@ -585,7 +631,10 @@ def run_snowflake_gold_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
                 stage_key=stage_key,
                 status="RUNNING",
                 total_count=len(scripts),
-                completed_count=len(executed_scripts),
+                completed_count=sum(
+                    str(item.get("status") or "").upper() != "FAILED"
+                    for item in executed_scripts
+                ),
                 current_index=index,
                 current_name=table_name,
                 current_target=str(target_table or ""),
@@ -600,7 +649,19 @@ def run_snowflake_gold_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
                 extra=_log_context(run_id, table=table_name, step_name="gold_script_execute_start"),
             )
             started_at = time.monotonic()
-            execution_result = execute_snowflake_gold_sql(script, snowflake_conn)
+            try:
+                execution_result = execute_snowflake_gold_sql(script, snowflake_conn)
+            except Exception as exc:
+                if isinstance(exc, SnowflakeAmbiguousExecutionError) or is_snowflake_transient_error(exc):
+                    raise
+                execution_result = {
+                    "kpi_name": script.get("kpi_name"),
+                    "source_table": script.get("source_table"),
+                    "target_table": script.get("target_table"),
+                    "script_path": script.get("script_path"),
+                    "status": "FAILED",
+                    "error": str(exc),
+                }
             elapsed_seconds = round(time.monotonic() - started_at, 2)
             executed_scripts.append(execution_result)
             logger.info(
@@ -620,11 +681,14 @@ def run_snowflake_gold_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
                 stage_key=stage_key,
                 status="RUNNING",
                 total_count=len(scripts),
-                completed_count=len(executed_scripts),
+                completed_count=sum(
+                    str(item.get("status") or "").upper() != "FAILED"
+                    for item in executed_scripts
+                ),
                 current_index=index,
                 current_name=table_name,
                 current_target=str(execution_result.get("target_table") or target_table or ""),
-                message=f"Snowflake Gold execution progress: {len(executed_scripts)}/{len(scripts)} completed.",
+                message=f"Snowflake Gold execution progress: {index}/{len(scripts)} attempted.",
             )
     finally:
         snowflake_conn.close()
@@ -635,10 +699,56 @@ def run_snowflake_gold_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
         len(scripts),
         extra=_log_context(run_id, step_name="gold_execution_complete"),
     )
+    failed_scripts = [
+        item for item in executed_scripts
+        if str(item.get("status") or "").upper() == "FAILED"
+    ]
+    successful_count = len(executed_scripts) - len(failed_scripts)
+    success_ratio = successful_count / len(scripts) if scripts else 0.0
+    try:
+        minimum_ratio = min(
+            1.0,
+            max(0.5, float(os.getenv("ATHENA_GOLD_MIN_SUCCESS_RATIO", "0.9"))),
+        )
+    except ValueError:
+        minimum_ratio = 0.9
+    if failed_scripts and (not successful_count or success_ratio < minimum_ratio):
+        failed_targets = ", ".join(
+            str(item.get("target_table") or item.get("kpi_name") or "unknown")
+            for item in failed_scripts
+        )
+        failure_message = (
+            f"Snowflake Gold execution completed only {successful_count}/{len(scripts)} scripts; "
+            f"failed targets: {failed_targets}."
+        )
+        save_external_execution_progress(
+            {
+                **state,
+                "snowflake_gold_execution_status": "FAILED",
+                "snowflake_gold_execution_results": executed_scripts,
+                "snowflake_gold_execution_failures": failed_scripts,
+            },
+            run_id=run_id,
+            layer="gold",
+            stage_key="gold_code_execution",
+            status="FAILED",
+            total_count=len(scripts),
+            completed_count=successful_count,
+            message=failure_message,
+        )
+        raise RuntimeError(failure_message)
+    execution_status = "COMPLETED_WITH_WARNINGS" if failed_scripts else "COMPLETED"
+    message = (
+        f"Snowflake Gold completed with warnings: {successful_count}/{len(scripts)} tables succeeded; "
+        f"{len(failed_scripts)} table(s) remain failed for retry."
+        if failed_scripts
+        else f"Snowflake Gold execution completed: {successful_count}/{len(scripts)} scripts finished."
+    )
     final_state = {
         **state,
-        "snowflake_gold_execution_status": "COMPLETED",
+        "snowflake_gold_execution_status": execution_status,
         "snowflake_gold_execution_results": executed_scripts,
+        "snowflake_gold_execution_failures": failed_scripts,
         "snowflake_gold_executed_at": datetime.now(timezone.utc).isoformat(),
     }
     return save_external_execution_progress(
@@ -646,8 +756,8 @@ def run_snowflake_gold_scripts(state: Dict[str, Any]) -> Dict[str, Any]:
         run_id=run_id,
         layer="gold",
         stage_key=stage_key,
-        status="COMPLETED",
+        status=execution_status,
         total_count=len(scripts),
-        completed_count=len(executed_scripts),
-        message=f"Snowflake Gold execution completed: {len(executed_scripts)}/{len(scripts)} scripts finished.",
+        completed_count=successful_count,
+        message=message,
     )

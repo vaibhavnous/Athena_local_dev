@@ -1,5 +1,5 @@
 import React from 'react'
-import { act, render, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, waitFor } from '@testing-library/react'
 
 const mockUpdateRun = jest.fn()
 const mockSetActiveRun = jest.fn()
@@ -116,6 +116,38 @@ test('shows rotating markers for the active phase and stage', () => {
 
   expect(view.container.querySelectorAll('[data-running-indicator="rotation"]')).toHaveLength(1)
   view.unmount()
+})
+
+test('shows a completed Gold execution warning summary', () => {
+  ;(getRunStatus as jest.Mock).mockImplementation(() => new Promise(() => {}))
+  mockActiveRun = {
+    id: 'run-1',
+    run_id: 'run-1',
+    status: 'PIPELINE_COMPLETED',
+    source: 'database',
+    target_warehouse: 'databricks',
+    database_flow_version: 'generation_first_v1',
+    pipeline_steps: [
+      {
+        key: 'gold_code_execution',
+        label: 'Gold Target Execution',
+        state: 'COMPLETED_WITH_WARNINGS',
+        detail: 'Gold completed with warnings: 9/10 tables succeeded.',
+      },
+    ],
+  }
+
+  const view = render(<PipelineMonitor />)
+
+  fireEvent.click(view.getByText('Target Execution'))
+  expect(view.getByText('Gold completed with warnings: 9/10 tables succeeded.')).toBeInTheDocument()
+  view.unmount()
+  mockActiveRun = {
+    id: 'run-1',
+    run_id: 'run-1',
+    status: 'RUNNING',
+    stages: [{ key: 'discovery', name: 'Metadata Discovery', status: 'RUNNING' }],
+  }
 })
 
 test('recovers the pending review gate from HITL checkpoint logs', () => {

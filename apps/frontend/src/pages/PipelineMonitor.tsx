@@ -1080,6 +1080,7 @@ function StatusPill({ status, tone }) {
 
 function StepRow({ step, index = 0, isLast = false, onOpenReview, onOpenReport, onRerun, rerunning = false }) {
   const state = normalizeState(step.state)
+  const completedWithWarnings = Boolean(step.warning) || String(step.state || '').toUpperCase() === 'COMPLETED_WITH_WARNINGS'
   const complete = state === 'COMPLETED'
   const waiting = state === 'HITL_WAIT'
   const running = state === 'RUNNING'
@@ -1132,8 +1133,13 @@ function StepRow({ step, index = 0, isLast = false, onOpenReview, onOpenReport, 
         {!isLast && <div className={`mt-1 w-px flex-1 ${complete ? 'bg-emerald-500/30' : 'bg-[#253044]'}`} />}
       </div>
       <div className="ml-2 flex min-w-0 flex-1 items-start justify-between gap-2 pb-3 pt-0.5">
-        <div className={`min-w-0 truncate text-xs font-medium leading-tight ${complete || waiting || running ? 'text-[#d1d5db]' : 'text-[#6b7280]'}`}>
-          {step.label}
+        <div className="min-w-0 flex-1">
+          <div className={`truncate text-xs font-medium leading-tight ${complete || waiting || running ? 'text-[#d1d5db]' : 'text-[#6b7280]'}`}>
+            {step.label}
+          </div>
+          {completedWithWarnings && step.detail && (
+            <div className="mt-1 text-[10px] leading-tight text-amber-300">{step.detail}</div>
+          )}
         </div>
         {step.preparingReview && (
           <span className="shrink-0 text-[10px] font-medium text-[#3f82ff]">Loading…</span>
