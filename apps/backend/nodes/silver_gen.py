@@ -2141,7 +2141,11 @@ def _constrain_gold_mapping(
             time_info["column"] = None
             warnings.append(f"Dropped Gold time column from '{time_table}' because no Silver target exists.")
 
-    fact_grain = [str(item.get("column") or "") for item in dimensions if item.get("column")]
+    fact_grain = [
+        f"{_star_dimension_entity(item.get('column'), item.get('table'))}_key"
+        for item in dimensions
+        if item.get("column")
+    ]
     if time_info.get("column"):
         fact_grain.append("period_start")
     return {
@@ -2215,6 +2219,16 @@ def _silver_tables_by_name(results: List[Dict[str, object]]) -> Dict[str, str]:
     }
 
 
+def _star_dimension_entity(column: Any, table: Any = None) -> str:
+    text = _canonical_gold_column(column)
+    text = re.sub(r"_(name|desc|description|identifier)$", "", text)
+    if text.endswith("_id"):
+        text = text[:-3]
+    elif text.endswith("id") and len(text) > 4:
+        text = text[:-2]
+    return text or _canonical_gold_column(table) or "dimension"
+
+
 def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tables: Dict[str, str]) -> List[Dict[str, Any]]:
     grouped: Dict[str, Dict[str, Any]] = {}
     for mapping in kpi_mappings:
@@ -2230,20 +2244,25 @@ def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tab
             column = str(dimension.get("column") or "").strip()
             if not table or not column:
                 continue
+            entity = _star_dimension_entity(column, table)
             row = grouped.setdefault(
-                table.lower(),
+                f"{table.lower()}::{entity}",
                 {
                     "logical_table": table,
+                    "entity": entity,
                     "source_silver_table": silver_tables.get(table.lower()),
+                    "natural_key_columns": [],
                     "columns": [],
                     "consumed_by_kpis": [],
                 },
             )
+            if column not in row["natural_key_columns"]:
+                row["natural_key_columns"].append(column)
             if column not in row["columns"]:
                 row["columns"].append(column)
             if kpi_name and kpi_name not in row["consumed_by_kpis"]:
                 row["consumed_by_kpis"].append(kpi_name)
-    return sorted(grouped.values(), key=lambda item: str(item.get("logical_table") or ""))
+    return sorted(grouped.values(), key=lambda item: (str(item.get("logical_table") or ""), str(item.get("entity") or "")))
 
 
 def _independent_gold_dimensions(
@@ -2255,7 +2274,7 @@ def _independent_gold_dimensions(
 ) -> List[Dict[str, Any]]:
     """Plan reusable dimensions from approved Silver structure, independently of KPI computability."""
     grouped = {
-        str(item["logical_table"]).casefold(): dict(item)
+        f"{str(item['logical_table']).casefold()}::{str(item.get('entity') or '').casefold()}": dict(item)
         for item in _dimension_mappings_from_kpis(kpi_mappings, silver_tables)
     }
     result_by_table = {
@@ -2272,17 +2291,22 @@ def _independent_gold_dimensions(
         name = str(column.get("column_name") or "").strip()
         if not logical or not name or logical.casefold() not in silver_tables:
             continue
+        entity = _star_dimension_entity(name, logical)
         row = grouped.setdefault(
-            logical.casefold(),
+            f"{logical.casefold()}::{entity}",
             {
                 "logical_table": logical,
+                "entity": entity,
                 "source_silver_table": silver_tables[logical.casefold()],
+                "natural_key_columns": [name],
                 "columns": [],
                 "consumed_by_kpis": [],
             },
         )
         if name not in row["columns"]:
             row["columns"].append(name)
+        if not row.get("natural_key_columns"):
+            row["natural_key_columns"] = [name]
 
     # Prefer reviewed key-backed entities with richer descriptive context. The
     # materialization boundary still reloads and validates the exact active keys.

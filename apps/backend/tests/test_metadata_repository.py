@@ -833,11 +833,11 @@ def test_silver_to_gold_draft_pins_active_inputs_and_structured_rules() -> None:
                 "source_object_name": "main.silver.silver_claims",
                 "source_field_path": "claimid",
                 "source_data_type": "int",
-                "target_column_name": "claimid",
-                "target_data_type": "int",
+                "target_column_name": "claim_key",
+                "target_data_type": "STRING",
                 "ordinal_position": 1,
                 "is_primary_key": True,
-                "transformation_rule": "GROUP_KEY",
+                "transformation_rule": "DIMENSION_KEY",
             },
             {
                 "source_object_name": "main.silver.silver_claims",
@@ -849,7 +849,7 @@ def test_silver_to_gold_draft_pins_active_inputs_and_structured_rules() -> None:
                 "transformation_rule": "AGG_COUNT",
             },
         ],
-        merge_keys=["claimid"],
+        merge_keys=["claim_key"],
         join_rules=[],
         definition={
             "schema_version": "1.0",

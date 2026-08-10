@@ -1864,7 +1864,7 @@ class MetadataRepository(ABC):
                 available.get(column["source_field_path"].casefold(), "").casefold()
                 != column["source_data_type"].casefold()
                 or not (
-                    rule in {"IDENTITY", "GROUP_KEY"}
+                    rule in {"IDENTITY", "GROUP_KEY", "SURROGATE_KEY", "DIMENSION_KEY"}
                     or re.fullmatch(r"AGG_(SUM|AVG|MIN|MAX|COUNT)", rule)
                     or re.fullmatch(r"DATE_TRUNC_(DAY|WEEK|MONTH|QUARTER|YEAR)", rule)
                 )

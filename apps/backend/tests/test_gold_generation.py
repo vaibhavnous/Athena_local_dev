@@ -543,6 +543,79 @@ def test_databricks_metadata_dimension_creates_then_merges_idempotently() -> Non
     assert ".whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()" in code
 
 
+def test_databricks_metadata_star_keys_are_generated_from_approved_dimension_metadata() -> None:
+    source = "main.silver.claims"
+    dimension_code = gold_gen._metadata_dimension_code(
+        {
+            "object": {"target_table": "main.gold.dim_claimstatus"},
+            "definition": {
+                "artifact_kind": "DIMENSION",
+                "natural_key_columns": ["claimstatus"],
+                "dimension_key": "claimstatus_key",
+            },
+            "bundle": {"mappings": [
+                {
+                    "source_object_name": source,
+                    "source_field_path": "claimstatus",
+                    "source_data_type": "STRING",
+                    "target_column_name": "claimstatus_key",
+                    "target_data_type": "STRING",
+                    "is_primary_key": True,
+                    "transformation_rule": "SURROGATE_KEY",
+                },
+                {
+                    "source_object_name": source,
+                    "source_field_path": "claimstatus",
+                    "source_data_type": "STRING",
+                    "target_column_name": "claimstatus",
+                    "target_data_type": "STRING",
+                    "is_primary_key": False,
+                    "transformation_rule": "IDENTITY",
+                },
+            ]},
+        },
+        target_warehouse="databricks",
+    )
+    fact_code = gold_gen._metadata_fact_code(
+        {
+            "object": {
+                "target_table": "main.gold.fact_total_claims",
+                "write_mode": "MERGE",
+                "merge_keys_json": '["claimstatus_key"]',
+            },
+            "inputs": [{"object_name": source}],
+            "definition": {"artifact_kind": "FACT", "fact_type": "AGGREGATE"},
+            "bundle": {"mappings": [
+                {
+                    "source_object_name": source,
+                    "source_field_path": "claimstatus",
+                    "target_column_name": "claimstatus_key",
+                    "target_data_type": "STRING",
+                    "transformation_rule": "DIMENSION_KEY",
+                    "join_rules_json": "[]",
+                },
+                {
+                    "source_object_name": source,
+                    "source_field_path": "claimamount",
+                    "target_column_name": "total_claims_value",
+                    "target_data_type": "DECIMAL(38,10)",
+                    "transformation_rule": "AGG_SUM",
+                    "join_rules_json": "[]",
+                },
+            ]},
+        },
+        target_warehouse="databricks",
+    )
+
+    assert "CREATE SCHEMA IF NOT EXISTS {TARGET_SCHEMA}" in dimension_code
+    assert "NATURAL_KEY_COLUMNS = ['claimstatus']" in dimension_code
+    assert "claimstatus_key" in dimension_code
+    assert "sha2(concat_ws" in dimension_code
+    assert "SHA2(CONCAT_WS" in fact_code
+    assert "AS `claimstatus_key`" in fact_code
+    assert "AS `claimstatus`" not in fact_code
+
+
 def test_snowflake_gold_returns_observed_join_multiplier_validation() -> None:
     from services import snowflake_gold_runtime
 

@@ -2722,11 +2722,17 @@ def _metadata_dimension_code(
     plan: Dict[str, Any], *, target_warehouse: str, dbt_compatible: bool = False
 ) -> str:
     rows = plan["bundle"]["mappings"]
+    definition = plan.get("definition") or {}
     source_table = str(rows[0]["source_object_name"])
     target_table = str(plan["object"]["target_table"])
     keys = [str(row["target_column_name"]) for row in rows if bool(row.get("is_primary_key"))]
     if not keys:
         raise ValueError(f"Gold dimension {target_table} has no business key.")
+    natural_key_columns = [
+        str(column)
+        for column in definition.get("natural_key_columns") or []
+        if str(column).strip()
+    ]
     if target_warehouse == "snowflake":
         source_q = (
             dbt_snowflake_runtime.dbt_ref(source_table.split(".")[-1])
@@ -2740,11 +2746,20 @@ def _metadata_dimension_code(
             + (" NOT NULL" if str(row["target_column_name"]) in keys else "")
             for row in rows
         )
-        projections = ",\n        ".join(
-            f"src.{_snowflake_quote_identifier(str(row['source_field_path']))}::{str(row['target_data_type'])} "
-            f"AS {_snowflake_quote_identifier(str(row['target_column_name']))}"
-            for row in rows
-        )
+        def projection(row: Dict[str, Any]) -> str:
+            rule = str(row.get("transformation_rule") or "IDENTITY").upper()
+            if rule == "SURROGATE_KEY":
+                hash_columns = natural_key_columns or [str(row["source_field_path"])]
+                terms = ", ".join(
+                    f"COALESCE(CAST(src.{_snowflake_quote_identifier(column)} AS STRING), '__NULL__')"
+                    for column in hash_columns
+                )
+                expression = f"SHA2(CONCAT_WS('||', {terms}), 256)"
+            else:
+                expression = f"src.{_snowflake_quote_identifier(str(row['source_field_path']))}::{str(row['target_data_type'])}"
+            return f"{expression} AS {_snowflake_quote_identifier(str(row['target_column_name']))}"
+
+        projections = ",\n        ".join(projection(row) for row in rows)
         if dbt_compatible:
             return (
                 _metadata_snowflake_dbt_config(
@@ -2784,32 +2799,47 @@ VALUES ({source_columns});
     source_columns = [str(row["source_field_path"]) for row in rows]
     target_columns = [str(row["target_column_name"]) for row in rows]
     target_types = [str(row["target_data_type"]) for row in rows]
+    transformation_rules = [str(row.get("transformation_rule") or "IDENTITY").upper() for row in rows]
     return f'''"""AUTO-GENERATED METADATA-DRIVEN GOLD DIMENSION"""
 from delta.tables import DeltaTable
-from pyspark.sql.functions import col, lit
+from pyspark.sql.functions import coalesce, col, concat_ws, lit, sha2
 
 SOURCE_TABLE = {source_table!r}
 TARGET_TABLE = {target_table!r}
 SOURCE_COLUMNS = {source_columns!r}
 TARGET_COLUMNS = {target_columns!r}
 TARGET_TYPES = {target_types!r}
+TRANSFORMATION_RULES = {transformation_rules!r}
 KEYS = {keys!r}
+NATURAL_KEY_COLUMNS = {natural_key_columns!r}
 
 RUNTIME_CONTEXT = globals().get("ATHENA_RUNTIME_CONTEXT")
 if not isinstance(RUNTIME_CONTEXT, dict) or not RUNTIME_CONTEXT.get("logical_work_id"):
     raise RuntimeError("Metadata Gold execution requires logical-work runtime context")
 LOGICAL_WORK_ID = str(RUNTIME_CONTEXT["logical_work_id"])
+TARGET_SCHEMA = ".".join(TARGET_TABLE.split(".")[:-1])
+if TARGET_SCHEMA:
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {{TARGET_SCHEMA}}")
 source = spark.table(SOURCE_TABLE)
 if "_logical_work_id" not in source.columns:
     raise ValueError(f"Gold dimension source lacks _logical_work_id: {{SOURCE_TABLE}}")
 source = source.filter(col("_logical_work_id") == lit(LOGICAL_WORK_ID))
-missing = [name for name in SOURCE_COLUMNS if name not in source.columns]
+missing = [name for name in dict.fromkeys([*SOURCE_COLUMNS, *NATURAL_KEY_COLUMNS]) if name not in source.columns]
 if missing:
     raise ValueError(f"Gold dimension source is missing mapped columns: {{missing}}")
-mapped = source.select(*[
-    col(source_name).cast(target_type).alias(target_name)
-    for source_name, target_name, target_type in zip(SOURCE_COLUMNS, TARGET_COLUMNS, TARGET_TYPES)
-])
+if NATURAL_KEY_COLUMNS and source.filter(" OR ".join(f"`{{name}}` IS NULL" for name in NATURAL_KEY_COLUMNS)).limit(1).count():
+    raise ValueError("Gold dimension natural keys contain NULL values")
+
+def _hash_columns(columns):
+    return sha2(concat_ws("||", *[coalesce(col(name).cast("string"), lit("__NULL__")) for name in columns]), 256)
+
+mapped_columns = []
+for source_name, target_name, target_type, rule in zip(SOURCE_COLUMNS, TARGET_COLUMNS, TARGET_TYPES, TRANSFORMATION_RULES):
+    if rule == "SURROGATE_KEY":
+        mapped_columns.append(_hash_columns(NATURAL_KEY_COLUMNS or [source_name]).alias(target_name))
+    else:
+        mapped_columns.append(col(source_name).cast(target_type).alias(target_name))
+mapped = source.select(*mapped_columns).dropDuplicates()
 if mapped.filter(" OR ".join(f"`{{key}}` IS NULL" for key in KEYS)).limit(1).count():
     raise ValueError("Gold dimension business keys contain NULL values")
 if mapped.groupBy(*KEYS).count().filter("count > 1").limit(1).count():
@@ -2915,6 +2945,9 @@ def _metadata_fact_code(
     if visited != set(sources):
         raise ValueError("Gold fact join graph does not cover every pinned input.")
 
+    def hash_expression(field: str) -> str:
+        return f"SHA2(CONCAT_WS('||', COALESCE(CAST({field} AS STRING), '__NULL__')), 256)"
+
     projections: List[str] = []
     groups: List[str] = []
     for row in rows:
@@ -2929,6 +2962,10 @@ def _metadata_fact_code(
             grain = rule.removeprefix("DATE_TRUNC_")
             expression = f"DATE_TRUNC('{grain}', {field})"
             groups.append(expression)
+        elif rule in {"DIMENSION_KEY", "SURROGATE_KEY"}:
+            expression = hash_expression(field)
+            if not factless:
+                groups.append(expression)
         elif rule in {"IDENTITY", "GROUP_KEY"}:
             expression = field
             if not factless:
@@ -3023,6 +3060,9 @@ RUNTIME_CONTEXT = globals().get("ATHENA_RUNTIME_CONTEXT")
 if not isinstance(RUNTIME_CONTEXT, dict) or not RUNTIME_CONTEXT.get("logical_work_id"):
     raise RuntimeError("Metadata Gold execution requires logical-work runtime context")
 LOGICAL_WORK_ID = str(RUNTIME_CONTEXT["logical_work_id"])
+TARGET_SCHEMA = ".".join(TARGET_TABLE.split(".")[:-1])
+if TARGET_SCHEMA:
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {{TARGET_SCHEMA}}")
 QUERY = QUERY.replace("__ATHENA_LOGICAL_WORK_ID__", LOGICAL_WORK_ID.replace("'", "''"))
 JOINED_COUNT_QUERY = JOINED_COUNT_QUERY.replace("__ATHENA_LOGICAL_WORK_ID__", LOGICAL_WORK_ID.replace("'", "''"))
 ROOT_COUNT_QUERY = ROOT_COUNT_QUERY.replace("__ATHENA_LOGICAL_WORK_ID__", LOGICAL_WORK_ID.replace("'", "''"))
@@ -3070,6 +3110,9 @@ def _generate_metadata_gold(state: Stage01State, plans: List[Dict[str, Any]]) ->
     for plan in plans:
         reference = plan["reference"]
         definition = plan["definition"]
+        merge_keys = json.loads(str(plan["object"].get("merge_keys_json") or "[]"))
+        validation_policy = json.loads(str(plan["object"].get("validation_policy_json") or "{}"))
+        approved_source_tables = [str(pin["object_name"]) for pin in plan["inputs"]]
         kind = str(definition.get("artifact_kind") or reference.get("artifact_kind") or "").upper()
         if kind == "FACT":
             code = _metadata_fact_code(
@@ -3103,6 +3146,11 @@ def _generate_metadata_gold(state: Stage01State, plans: List[Dict[str, Any]]) ->
                 "dbt_alias": str(reference["target_table"]).split(".")[-1] if dbt_codegen else None,
                 "generation_mode": "METADATA_DBT_SQL" if dbt_codegen else "METADATA_DETERMINISTIC",
                 "validation_columns": [str(row["source_field_path"]) for row in plan["bundle"]["mappings"]],
+                "metadata_runtime": True,
+                "mapping_contract": [dict(row) for row in plan["bundle"]["mappings"]],
+                "merge_keys": merge_keys,
+                "validation_policy": validation_policy,
+                "approved_source_tables": approved_source_tables,
                 "source_table_guard": {"strict_metadata": True, "dropped_source_tables": [], "dropped_dimension_tables": []},
             }
         elif kind == "DIMENSION":
@@ -3138,6 +3186,11 @@ def _generate_metadata_gold(state: Stage01State, plans: List[Dict[str, Any]]) ->
                 "dbt_alias": str(reference["target_table"]).split(".")[-1] if dbt_codegen else None,
                 "generation_mode": "METADATA_DBT_SQL" if dbt_codegen else "METADATA_DETERMINISTIC",
                 "validation_columns": [str(row["source_field_path"]) for row in plan["bundle"]["mappings"]],
+                "metadata_runtime": True,
+                "mapping_contract": [dict(row) for row in plan["bundle"]["mappings"]],
+                "merge_keys": merge_keys,
+                "validation_policy": validation_policy,
+                "approved_source_tables": approved_source_tables,
                 "source_table_guard": {"strict_metadata": True, "dropped_source_tables": [], "dropped_dimension_tables": []},
             }
         else:

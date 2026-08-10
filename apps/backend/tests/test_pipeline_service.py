@@ -1281,12 +1281,14 @@ def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(
 
     assert [item["artifact_kind"] for item in result["gold_metadata_drafts"]] == expected_kinds
     assert [item["target_gold_table"] for item in captured] == [
-        "main.gold.dim_claims",
+        "main.gold.dim_claimstatus",
         *(["main.gold.fact_total_claims"] if "FACT" in expected_kinds else []),
     ]
-    assert captured[0]["merge_keys"] == ["claimid"]
+    assert captured[0]["merge_keys"] == ["claimstatus_key"]
+    assert captured[0]["columns"][0]["transformation_rule"] == "SURROGATE_KEY"
     if "FACT" in expected_kinds:
-        assert captured[1]["merge_keys"] == ["claimstatus"]
+        assert captured[1]["merge_keys"] == ["claimstatus_key"]
+        assert captured[1]["columns"][0]["transformation_rule"] == "DIMENSION_KEY"
         aggregate = next(
             column for column in captured[1]["columns"]
             if str(column.get("transformation_rule") or "").startswith("AGG_")
@@ -1380,10 +1382,17 @@ def test_gate5_persists_validated_snowflake_multi_input_gold(monkeypatch) -> Non
 
     result = pipeline_runtime._materialize_silver_to_gold_metadata(state)
 
-    assert [item["artifact_kind"] for item in result["gold_metadata_drafts"]] == ["FACT"]
-    assert len(captured) == 1
-    assert len(captured[0]["inputs"]) == 2
-    assert captured[0]["join_rules"] == [{
+    assert [item["artifact_kind"] for item in result["gold_metadata_drafts"]] == ["DIMENSION", "FACT"]
+    assert [item["target_gold_table"] for item in captured] == [
+        "INSURANCE.GOLD.dim_policy",
+        "INSURANCE.GOLD.fact_claims_by_policy",
+    ]
+    assert captured[0]["merge_keys"] == ["policy_key"]
+    assert captured[0]["columns"][0]["transformation_rule"] == "SURROGATE_KEY"
+    assert len(captured[1]["inputs"]) == 2
+    assert captured[1]["merge_keys"] == ["policy_key"]
+    assert captured[1]["columns"][0]["transformation_rule"] == "DIMENSION_KEY"
+    assert captured[1]["join_rules"] == [{
         "left_source_table": "ATHENA_DB.SILVER.silver_claims",
         "left_column": "policyid",
         "right_source_table": "ATHENA_DB.SILVER.silver_policy",

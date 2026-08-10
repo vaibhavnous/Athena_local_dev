@@ -4646,21 +4646,98 @@ def _materialize_silver_to_gold_metadata(
     def compatible_join_types(left: Any, right: Any) -> bool:
         return bool(type_family(left)) and type_family(left) == type_family(right)
 
-    for raw in contract.get("dimension_mappings") or []:
+    def star_dimension_entity(column: Any, table: Any = None) -> str:
+        text = normalize_bronze_column_name(column)
+        text = re.sub(r"_(name|desc|description|identifier)$", "", text)
+        if text.endswith("_id"):
+            text = text[:-3]
+        elif text.endswith("id") and len(text) > 4:
+            text = text[:-2]
+        return text or normalize_bronze_column_name(table) or "dimension"
+
+    def dimension_key(entity: Any) -> str:
+        return f"{normalize_bronze_column_name(entity)}_key"
+
+    dimension_contracts = [dict(raw) for raw in contract.get("dimension_mappings") or [] if isinstance(raw, dict)]
+    seen_dimension_contracts: set[tuple[str, str]] = set()
+    for raw in dimension_contracts:
+        logical = str(raw.get("logical_table") or "").strip()
+        natural_key_columns = [
+            normalize_bronze_column_name(column)
+            for column in (raw.get("natural_key_columns") or raw.get("grain_columns") or raw.get("columns") or [])
+            if str(column or "").strip()
+        ]
+        entity = normalize_bronze_column_name(
+            raw.get("entity") or star_dimension_entity(natural_key_columns[0] if natural_key_columns else logical, logical)
+        )
+        if logical and entity:
+            seen_dimension_contracts.add((logical.casefold(), entity.casefold()))
+    for mapping in contract.get("kpi_mappings") or []:
+        if not isinstance(mapping, dict) or str(mapping.get("readiness") or "").upper() == "BLOCKED":
+            continue
+        kpi_name = str(mapping.get("kpi_name") or "KPI").strip()
+        measure = mapping.get("measure") or {}
+        for dimension in mapping.get("grouping_dimensions") or []:
+            if not isinstance(dimension, dict) or str(dimension.get("semantic_type") or "").upper() == "DATE":
+                continue
+            logical = str(dimension.get("table") or measure.get("table") or "").strip()
+            column = normalize_bronze_column_name(dimension.get("column"))
+            entity = normalize_bronze_column_name(dimension.get("entity") or star_dimension_entity(column, logical))
+            if not logical or not column or (logical.casefold(), entity.casefold()) in seen_dimension_contracts:
+                continue
+            dimension_contracts.append({
+                "logical_table": logical,
+                "entity": entity,
+                "natural_key_columns": [column],
+                "columns": [column],
+                "consumed_by_kpis": [kpi_name] if kpi_name else [],
+            })
+            seen_dimension_contracts.add((logical.casefold(), entity.casefold()))
+
+    for raw in dimension_contracts:
         if not isinstance(raw, dict):
             continue
         logical = str(raw.get("logical_table") or "").strip()
-        name = f"dim_{normalize_bronze_column_name(logical)}"
+        natural_key_columns = [
+            normalize_bronze_column_name(column)
+            for column in (raw.get("natural_key_columns") or raw.get("grain_columns") or raw.get("columns") or [])
+            if str(column or "").strip()
+        ]
+        entity = normalize_bronze_column_name(
+            raw.get("entity") or star_dimension_entity(natural_key_columns[0] if natural_key_columns else logical, logical)
+        )
+        name = f"dim_{entity}"
         item = source(logical)
         if not item:
             reject("DIMENSION", name, "MISSING_SILVER_INPUT", f"No approved Silver object exists for {logical}.")
             continue
-        key_rows = [row for row in item["bundle"]["mappings"] if bool(row.get("is_primary_key"))]
-        if not key_rows:
+        if not natural_key_columns:
+            natural_key_columns = [
+                normalize_bronze_column_name(row["target_column_name"])
+                for row in item["bundle"]["mappings"]
+                if bool(row.get("is_primary_key"))
+            ]
+        if not natural_key_columns:
             reject("DIMENSION", name, "MISSING_BUSINESS_KEY", f"No reviewed business key exists for {logical}.")
             continue
-        requested = list(dict.fromkeys([*(raw.get("columns") or []), *[row["target_column_name"] for row in key_rows]]))
-        mapped = []
+        requested = list(dict.fromkeys([*natural_key_columns, *(raw.get("columns") or [])]))
+        key_rows = [source_column(item, column_name) for column_name in natural_key_columns]
+        if any(row is None for row in key_rows):
+            reject("DIMENSION", name, "MISSING_BUSINESS_KEY", f"Dimension natural key is not in the active Silver mapping for {logical}.")
+            continue
+        dim_key = dimension_key(entity)
+        first_key_row = key_rows[0]
+        mapped = [{
+            "source_object_name": item["target"],
+            "source_field_path": str(first_key_row["target_column_name"]),
+            "source_data_type": str(first_key_row["target_data_type"]),
+            "target_column_name": dim_key,
+            "target_data_type": "STRING",
+            "is_nullable": False,
+            "is_primary_key": True,
+            "ordinal_position": 1,
+            "transformation_rule": "SURROGATE_KEY",
+        }]
         for ordinal, column_name in enumerate(requested, 1):
             row = source_column(item, column_name)
             if not row:
@@ -4679,15 +4756,26 @@ def _materialize_silver_to_gold_metadata(
                 "target_column_name": target_column,
                 "target_data_type": str(row["target_data_type"]),
                 "is_nullable": bool(row.get("is_nullable", True)),
-                "is_primary_key": bool(row.get("is_primary_key")),
-                "ordinal_position": ordinal,
+                "is_primary_key": False,
+                "ordinal_position": ordinal + 1,
                 "transformation_rule": "IDENTITY",
             })
         if not mapped:
             continue
         target = f"{target_prefix}.{name}"
-        keys = [normalize_bronze_column_name(row["target_column_name"]) for row in key_rows]
-        definition = {"artifact_kind": "DIMENSION", "logical_table": logical, "columns": requested}
+        keys = [dim_key]
+        definition = {
+            "artifact_kind": "DIMENSION",
+            "star_schema_version": "1.0",
+            "logical_table": logical,
+            "entity": entity,
+            "dimension_key": dim_key,
+            "natural_key_columns": natural_key_columns,
+            "columns": requested,
+        }
+        if target.casefold() in used_targets:
+            reject("DIMENSION", name, "DUPLICATE_GOLD_TARGET", f"More than one Gold object resolves to {target}.")
+            continue
         created = selection.repository.upsert_silver_to_gold_draft(
             source_system_id=int(item["object"]["source_system_id"]),
             target_gold_table=target,
@@ -4894,6 +4982,7 @@ def _materialize_silver_to_gold_metadata(
             continue
         mapped: List[Dict[str, Any]] = []
         keys: List[str] = []
+        star_dimensions: List[Dict[str, Any]] = []
         seen_targets: set[str] = set()
 
         def add_output(input_item: Dict[str, Any], field: Any, target_field: Any, rule: str, target_type: Optional[str] = None) -> bool:
@@ -4920,12 +5009,24 @@ def _materialize_silver_to_gold_metadata(
             if not isinstance(dimension, dict):
                 continue
             input_item = source(dimension.get("table") or measure.get("table"))
-            target_name = normalize_bronze_column_name(dimension.get("column"))
-            if not input_item or not add_output(input_item, dimension.get("column"), target_name, "IDENTITY"):
+            dimension_column = normalize_bronze_column_name(dimension.get("column"))
+            entity = normalize_bronze_column_name(
+                dimension.get("entity") or star_dimension_entity(dimension_column, dimension.get("table") or measure.get("table"))
+            )
+            target_name = dimension_key(entity)
+            if not input_item or not add_output(input_item, dimension_column, target_name, "DIMENSION_KEY", "STRING"):
                 reject("FACT", name, "MISSING_SOURCE_FIELD", f"Gold dimension field {dimension.get('column')} is invalid or duplicated.")
                 invalid_field = True
                 break
             keys.append(target_name)
+            star_dimensions.append({
+                "entity": entity,
+                "dimension_table": f"{target_prefix}.dim_{entity}",
+                "dimension_key": target_name,
+                "source_table": input_item["target"],
+                "source_column": dimension_column,
+                "natural_key_columns": [dimension_column],
+            })
         if invalid_field:
             continue
         if isinstance(time_column, dict):
@@ -4987,11 +5088,20 @@ def _materialize_silver_to_gold_metadata(
             columns=mapped,
             merge_keys=keys,
             join_rules=join_rules,
-            definition={"artifact_kind": "FACT", "mapping": raw},
+            definition={
+                "artifact_kind": "FACT",
+                "fact_type": "AGGREGATE",
+                "star_schema_version": "1.0",
+                "mapping": raw,
+                "grain_columns": keys,
+                "star_dimensions": star_dimensions,
+            },
             build_order=20,
             write_mode="MERGE" if keys else "SNAPSHOT_REPLACE",
             validation_policy={
                 "fail_on_missing_input": True,
+                "fail_on_null_key": bool(keys),
+                "fail_on_duplicate_key": bool(keys),
                 "fail_on_join_multiplier": True,
                 "fail_on_schema_mismatch": True,
                 "max_join_multiplier": float(os.getenv("ATHENA_GOLD_MAX_JOIN_MULTIPLIER", "1.05")),
