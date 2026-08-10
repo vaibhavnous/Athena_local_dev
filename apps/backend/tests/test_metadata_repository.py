@@ -315,6 +315,7 @@ def test_target_repository_uses_server_authorized_namespace(monkeypatch: pytest.
     repository = metadata_repository_for_target(platform="databricks", environment="qa")
 
     assert repository.context.namespace == "athena_qa"
+    assert repository.context.schema == "metadata_schema"
     with pytest.raises(ValueError, match="not served"):
         metadata_repository_for_target(platform="databricks", environment="prod")
 

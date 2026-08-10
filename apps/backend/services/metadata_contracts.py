@@ -43,8 +43,9 @@ class TargetMetadataContext:
             ("schema", self.schema),
         ):
             validate_identifier(value, label=label)
-        if str(self.schema).strip().lower() != "metadata":
-            raise ValueError("The authoritative metadata schema name is 'metadata'.")
+        allowed_schemas = {"metadata", "metadata_schema"} if platform == "databricks" else {"metadata"}
+        if str(self.schema).strip().lower() not in allowed_schemas:
+            raise ValueError(f"Unsupported {platform} metadata schema: {self.schema!r}")
         object.__setattr__(self, "platform", platform)
 
 
@@ -508,7 +509,7 @@ def validate_snowflake_logical_work_filters(sql: str, expected_sources: Iterable
 def expected_columns(platform: str = "databricks") -> Dict[str, set[str]]:
     sql = ddl_path(platform).read_text(encoding="utf-8")
     pattern = re.compile(
-        r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+[^.]+\.(?:metadata|METADATA)\.([A-Za-z_]+)\s*\((.*?)\)\s*(?:USING\s+DELTA)?\s*;",
+        r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+[^.]+\.(?:metadata|metadata_schema)\.([A-Za-z_]+)\s*\((.*?)\)\s*(?:USING\s+DELTA)?\s*;",
         re.IGNORECASE | re.DOTALL,
     )
     tables: Dict[str, set[str]] = {}

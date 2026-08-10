@@ -25,7 +25,7 @@ approved metadata model.
 
 Replace `__TARGET_CATALOG__` in `databricks.sql` with an existing Unity Catalog
 catalog. Execute the rendered script through a SQL warehouse with permission to
-create the `metadata` schema and tables.
+create the `metadata_schema` schema and tables.
 
 Required bootstrap settings:
 

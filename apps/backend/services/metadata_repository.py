@@ -4695,5 +4695,5 @@ def metadata_repository_for_target(*, platform: str, environment: str) -> Metada
         platform=normalized,
         environment=environment,
         namespace=namespace,
-        schema="metadata",
+        schema="metadata_schema" if normalized == "databricks" else "metadata",
     )

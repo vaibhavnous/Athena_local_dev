@@ -495,11 +495,12 @@ def _run_database_metadata_ddl_stage(state: Dict[str, Any]) -> Dict[str, Any]:
     if not namespace:
         raise RuntimeError(f"{namespace_variable} is required for metadata DDL generation.")
 
+    metadata_schema = "metadata_schema" if platform == "databricks" else "metadata"
     context = TargetMetadataContext(
         platform=platform,
         environment=environment,
         namespace=namespace,
-        schema="metadata",
+        schema=metadata_schema,
     )
     output_dir = generated_run_dir(platform, state.get("run_id"), "metadata")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -513,7 +514,7 @@ def _run_database_metadata_ddl_stage(state: Dict[str, Any]) -> Dict[str, Any]:
         "platform": platform,
         "environment": environment,
         "namespace": namespace,
-        "schema": "metadata",
+        "schema": metadata_schema,
         "artifact_uri": generated_artifact_uri(artifact_path),
         "artifact_hash": file_sha256(artifact_path),
     }

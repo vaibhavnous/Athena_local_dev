@@ -1,7 +1,7 @@
 -- Replace __TARGET_CATALOG__ with a validated Unity Catalog catalog name.
-CREATE SCHEMA IF NOT EXISTS __TARGET_CATALOG__.metadata;
+CREATE SCHEMA IF NOT EXISTS __TARGET_CATALOG__.metadata_schema;
 
-CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.cfg_source_system (
+CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata_schema.cfg_source_system (
     source_system_id BIGINT,
     source_system_name STRING,
     business_domain STRING,
@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.cfg_source_system (
     updated_at TIMESTAMP
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.cfg_connection (
+CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata_schema.cfg_connection (
     connection_id BIGINT,
     source_system_id BIGINT,
     connection_name STRING,
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.cfg_connection (
     updated_at TIMESTAMP
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.cfg_ingestion_object (
+CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata_schema.cfg_ingestion_object (
     ingestion_object_id BIGINT,
     source_system_id BIGINT,
     connection_id BIGINT,
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.cfg_ingestion_object (
     updated_at TIMESTAMP
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.cfg_mapping (
+CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata_schema.cfg_mapping (
     mapping_id BIGINT,
     ingestion_object_id BIGINT,
     processing_stage STRING,
@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.cfg_mapping (
     updated_at TIMESTAMP
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.ctl_ingestion_queue (
+CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata_schema.ctl_ingestion_queue (
     queue_id BIGINT,
     ingestion_object_id BIGINT,
     trigger_type STRING,
@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.ctl_ingestion_queue (
     message STRING
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.ctl_run (
+CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata_schema.ctl_run (
     run_id STRING,
     queue_id BIGINT,
     attempt_number INT,
@@ -218,7 +218,7 @@ CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.ctl_run (
     created_at TIMESTAMP
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.ctl_error_log (
+CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata_schema.ctl_error_log (
     error_id STRING,
     run_id STRING,
     queue_id BIGINT,
@@ -237,7 +237,7 @@ CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.ctl_error_log (
     error_time TIMESTAMP
 ) USING DELTA;
 
-CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.ctl_watermark (
+CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata_schema.ctl_watermark (
     watermark_id BIGINT,
     ingestion_object_id BIGINT,
     watermark_type STRING,
@@ -256,4 +256,3 @@ CREATE TABLE IF NOT EXISTS __TARGET_CATALOG__.metadata.ctl_watermark (
     committed_at TIMESTAMP,
     updated_at TIMESTAMP
 ) USING DELTA;
-

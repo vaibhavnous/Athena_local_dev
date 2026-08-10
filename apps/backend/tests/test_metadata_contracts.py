@@ -105,8 +105,16 @@ def test_target_context_rejects_unsupported_or_unsafe_targets() -> None:
         TargetMetadataContext("fabric", "qa", "warehouse")
     with pytest.raises(ValueError, match="Invalid namespace"):
         TargetMetadataContext("databricks", "qa", "catalog; DROP TABLE x")
-    with pytest.raises(ValueError, match="authoritative metadata schema"):
+    with pytest.raises(ValueError, match="Unsupported databricks metadata schema"):
         TargetMetadataContext("databricks", "qa", "catalog", "custom")
+
+
+def test_render_databricks_ddl_uses_metadata_schema() -> None:
+    context = TargetMetadataContext("databricks", "qa", "workspace", "metadata_schema")
+    sql = render_ddl(context)
+
+    assert "workspace.metadata_schema.cfg_source_system" in sql
+    assert "workspace.metadata.cfg_source_system" not in sql
 
 
 def test_render_ddl_uses_validated_target_namespace() -> None:

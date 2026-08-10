@@ -45,7 +45,7 @@ def main() -> int:
             platform=args.platform,
             environment=args.environment,
             namespace=args.namespace,
-            schema="metadata",
+            schema="metadata_schema" if args.platform == "databricks" else "metadata",
         )
         if args.namespace
         else metadata_repository_for_target(platform=args.platform, environment=args.environment)
