@@ -130,6 +130,15 @@ def test_ui_status_prefers_background_stage_over_stale_stage_confirmation():
     assert run_ui_service.status_from_context(context) == "RUNNING"
 
 
+def test_ui_failed_stage_key_ignores_running_background_stage():
+    from api.services.ui.shared import failed_stage_key
+
+    assert failed_stage_key(
+        {"status": "RUNNING", "background_stage": "profiling"},
+        [{"key": "profiling", "state": "RUNNING"}],
+    ) is None
+
+
 def test_ui_status_uses_reconciled_context_over_stale_checkpoint_pause():
     context = {
         "checkpoint": {

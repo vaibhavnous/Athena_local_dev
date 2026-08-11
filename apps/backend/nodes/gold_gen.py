@@ -20,6 +20,7 @@ from services.metadata_contracts import CANONICAL_COLUMN_NAME_CORRECTIONS
 from utilis.db import ai_store_db_writer
 from utilis.domain_kb import KB_CONTENT_GOLD_RULE, get_domain_kb_config, load_domain_kb
 from utilis.generated_code_paths import generated_code_dir
+from utilis.json_files import write_json_file
 from utilis.logger import logger
 
 
@@ -2475,11 +2476,9 @@ def _write_bundle(
     }
     os.makedirs(_gold_output_dir_for(target_warehouse), exist_ok=True)
     path = _bundle_path(target_warehouse)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(bundle, f, indent=2)
+    write_json_file(path, bundle, indent=2)
     run_path = _run_bundle_path(contract.get("run_id"), target_warehouse)
-    with open(run_path, "w", encoding="utf-8") as f:
-        json.dump(bundle, f, indent=2)
+    write_json_file(run_path, bundle, indent=2)
     return path
 
 

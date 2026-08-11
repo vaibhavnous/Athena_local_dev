@@ -20,6 +20,7 @@ from services.metadata_contracts import bronze_target_data_type, normalize_bronz
 from state import Stage01State
 from utilis.db import build_source_jdbc_url
 from utilis.generated_code_paths import generated_code_dir
+from utilis.json_files import write_json_file
 from utilis.logger import logger
 
 
@@ -2252,10 +2253,8 @@ def bronze_code_generation_node(state: Stage01State) -> Stage01State:
         copy_security_control_module(output_dir)
     bundle_path = os.path.join(output_dir, f"{_run_slug(run_id)}_bronze_scripts.json")
     latest_bundle_path = os.path.join(output_dir, "bronze_scripts.json")
-    with open(bundle_path, "w", encoding="utf-8") as f:
-        json.dump(bundle, f, indent=2)
-    with open(latest_bundle_path, "w", encoding="utf-8") as f:
-        json.dump(bundle, f, indent=2)
+    write_json_file(bundle_path, bundle, indent=2)
+    write_json_file(latest_bundle_path, bundle, indent=2)
 
     readme_path = _write_bronze_readme(
         results=results,

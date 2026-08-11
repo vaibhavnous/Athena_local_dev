@@ -555,7 +555,7 @@ def ai_store_db_writer(
         payload.setdefault("storage_fingerprint", f"{base_fingerprint}:{artifact_type}")
         cost_usd = payload.get("cost_usd")
 
-        serialized_payload = json.dumps(payload)
+        serialized_payload = json.dumps(payload, default=str)
         cursor.execute(
             f"""
             MERGE [{schema}].[ai_store] WITH (HOLDLOCK) AS target

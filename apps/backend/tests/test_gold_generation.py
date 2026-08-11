@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,33 @@ def test_metadata_gold_generation_emits_one_artifact_per_fact_and_dimension(monk
     assert any("__ATHENA_LOGICAL_WORK_ID__" in code for code in generated_code)
     assert all('mode("errorifexists")' not in code for code in generated_code)
     assert all('limit(0).write.format("delta").mode("ignore")' in code for code in generated_code)
+
+
+def test_gold_bundle_writer_serializes_metadata_datetimes(monkeypatch):
+    workdir = Path.cwd() / ".tmp-tests" / f"gold_datetime_bundle_{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workdir)
+
+    created_at = datetime(2026, 8, 11, 6, 31, tzinfo=timezone.utc)
+    path = gold_gen._write_bundle(
+        generated_at="2026-08-11T06:31:54",
+        results=[
+            {
+                "kpi_name": "dim_claim",
+                "status": "APPROVED",
+                "script_path": str(workdir / "gold_dim_claim.py"),
+                "mapping_contract": [{"target_column_name": "claim_key", "created_at": created_at}],
+            }
+        ],
+        contract={"run_id": "run-datetime", "status": "READY"},
+        target_warehouse="databricks",
+    )
+
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    run_payload = json.loads((Path(path).parent / "run_datetime_gold_scripts.json").read_text(encoding="utf-8"))
+    assert payload["scripts"][0]["mapping_contract"][0]["created_at"] == str(created_at)
+    assert run_payload["scripts"][0]["mapping_contract"][0]["created_at"] == str(created_at)
+    assert not Path(f"{path}.tmp").exists()
 
 
 def test_metadata_gold_dbt_generation_uses_exact_plan_and_silver_ref(monkeypatch):

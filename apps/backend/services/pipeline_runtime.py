@@ -280,6 +280,12 @@ MINIMUM_RUNTIME_STAGE_KEYS = {
     "schema",
     "enrichment",
 }
+RESTART_SELF_HEALING_DATABASE_STAGES = {"discovery", "profiling", "enrichment"}
+RESTART_STAGE_ALIASES = {
+    "metadata_discovery": "discovery",
+    "column_profiling": "profiling",
+    "semantic_enrichment": "enrichment",
+}
 
 
 def is_run_aborted(run_id: str, state: Optional[Dict[str, Any]] = None) -> bool:
@@ -1581,14 +1587,56 @@ def save_checkpoint_state_timed(run_id: str, state: Dict[str, Any], *, context: 
     )
 
 
-def _interrupted_checkpoint_state(state: Dict[str, Any], reason: str) -> Dict[str, Any]:
-    failed_stage = (
+def _interrupted_stage_key(state: Dict[str, Any]) -> str:
+    return str(
         state.get("background_stage")
         or state.get("failed_background_stage")
         or state.get("last_failed_stage_key")
         or state.get("next_stage_key")
         or "pipeline"
-    )
+    ).strip()
+
+
+def _normalized_restart_stage_key(stage: Any) -> str:
+    normalized = str(stage or "").strip().lower()
+    return RESTART_STAGE_ALIASES.get(normalized, normalized)
+
+
+def _restart_recovery_stage_key(state: Dict[str, Any]) -> Optional[str]:
+    if str(state.get("source") or "database").strip().lower() != "database":
+        return None
+    stage = _normalized_restart_stage_key(_interrupted_stage_key(state))
+    if stage in RESTART_SELF_HEALING_DATABASE_STAGES:
+        return stage
+    return None
+
+
+def _restart_recovery_checkpoint_state(state: Dict[str, Any], reason: str, stage: str) -> Dict[str, Any]:
+    label = DATABASE_STAGE_LABELS.get(stage, stage).lower()
+    return {
+        **state,
+        "status": "RUNNING",
+        "background_stage": stage,
+        "failed_background_stage": None,
+        "last_failed_stage_key": None,
+        "error": None,
+        "error_type": None,
+        "error_message": None,
+        "resume_message": f"Backend restarted during {label}; resuming automatically from the saved checkpoint.",
+        "interrupted_by_backend_restart": True,
+        "interrupted_at": time.time(),
+        "backend_restart_recovery_stage": stage,
+        "backend_restart_recovery_reason": reason,
+        "backend_restart_recovery_at": time.time(),
+    }
+
+
+def _resume_database_stage_after_restart(run_id: str, stage: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    return continue_database_pipeline(run_id, start_stage_key=stage, state=state)
+
+
+def _interrupted_checkpoint_state(state: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    failed_stage = _interrupted_stage_key(state)
     return {
         **state,
         "status": "FAILED",
@@ -1626,7 +1674,8 @@ def mark_interrupted_background_runs_on_startup() -> int:
         conn.close()
 
     reason = "Backend process restarted while this run was active."
-    recovered = 0
+    failed_retryable = 0
+    auto_resumed = 0
     for run_id, state_json in rows:
         try:
             state = json.loads(state_json) if state_json else {}
@@ -1638,12 +1687,41 @@ def mark_interrupted_background_runs_on_startup() -> int:
         if status not in ACTIVE_CHECKPOINT_STATUSES and not state.get("background_stage"):
             continue
 
-        save_checkpoint_state(run_id, _interrupted_checkpoint_state({**state, "run_id": run_id}, reason))
-        recovered += 1
+        checkpoint = {**state, "run_id": run_id}
+        recovery_stage = _restart_recovery_stage_key(checkpoint)
+        if recovery_stage:
+            recovery_state = _restart_recovery_checkpoint_state(checkpoint, reason, recovery_stage)
+            try:
+                save_checkpoint_state(run_id, recovery_state)
+                submit_background(
+                    run_id,
+                    recovery_stage,
+                    _resume_database_stage_after_restart,
+                    run_id,
+                    recovery_stage,
+                    recovery_state,
+                    enforce_capacity=False,
+                )
+                auto_resumed += 1
+                continue
+            except Exception:
+                logger.exception(
+                    "Automatic restart recovery failed run_id=%s stage=%s",
+                    run_id,
+                    recovery_stage,
+                    extra={"run_id": run_id, "stage": recovery_stage},
+                )
 
-    if recovered:
-        logger.warning("Marked interrupted background runs as failed/retryable count=%s", recovered)
-    return recovered
+        save_checkpoint_state(run_id, _interrupted_checkpoint_state(checkpoint, reason))
+        failed_retryable += 1
+
+    if auto_resumed or failed_retryable:
+        logger.warning(
+            "Recovered interrupted background runs on startup auto_resumed=%s failed_retryable=%s",
+            auto_resumed,
+            failed_retryable,
+        )
+    return auto_resumed + failed_retryable
 
 
 def mark_run_processing(run_id: str, stage: str) -> None:
@@ -1691,7 +1769,7 @@ def ensure_background_capacity_locked() -> None:
     )
 
 
-def submit_background(run_id: str, stage: str, fn, *args) -> Future:
+def submit_background(run_id: str, stage: str, fn, *args, enforce_capacity: bool = True) -> Future:
     job_key = f"{run_id}:{stage}"
     with BACKGROUND_JOB_LOCK:
         if is_run_aborted(run_id):
@@ -1701,7 +1779,8 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
             logger.info("Background %s already running for run_id=%s", stage, run_id)
             return existing
 
-        ensure_background_capacity_locked()
+        if enforce_capacity:
+            ensure_background_capacity_locked()
         mark_run_processing(run_id, stage)
         future = BACKGROUND_EXECUTOR.submit(fn, *args)
         BACKGROUND_JOBS[job_key] = future

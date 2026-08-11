@@ -23,6 +23,7 @@ from services.metadata_contracts import CANONICAL_COLUMN_NAME_CORRECTIONS
 from state import Stage01State
 from utilis.db import ai_store_db_writer
 from utilis.generated_code_paths import generated_code_dir
+from utilis.json_files import write_json_file
 from utilis.logger import logger
 
 
@@ -2767,8 +2768,7 @@ def _build_gold_generation_contract(
 def _write_gold_contract(contract: Dict[str, Any]) -> str:
     os.makedirs(_gold_output_dir(), exist_ok=True)
     path = os.path.join(_gold_output_dir(), "gold_generation_contract.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(contract, f, indent=2)
+    write_json_file(path, contract, indent=2)
     return path
 
 
@@ -2889,10 +2889,8 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
     os.makedirs(output_dir, exist_ok=True)
     bundle_path = os.path.join(output_dir, f"{_run_slug(run_id)}_silver_scripts.json")
     latest_bundle_path = os.path.join(output_dir, "silver_scripts.json")
-    with open(bundle_path, "w", encoding="utf-8") as f:
-        json.dump(bundle, f, indent=2)
-    with open(latest_bundle_path, "w", encoding="utf-8") as f:
-        json.dump(bundle, f, indent=2)
+    write_json_file(bundle_path, bundle, indent=2)
+    write_json_file(latest_bundle_path, bundle, indent=2)
 
     dbt_schema_path: str | None = None
     if dbt_codegen:
