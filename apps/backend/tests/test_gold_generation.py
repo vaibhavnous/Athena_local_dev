@@ -547,18 +547,18 @@ def test_databricks_metadata_star_keys_are_generated_from_approved_dimension_met
     source = "main.silver.claims"
     dimension_code = gold_gen._metadata_dimension_code(
         {
-            "object": {"target_table": "main.gold.dim_claimstatus"},
+            "object": {"target_table": "main.gold.dim_claims"},
             "definition": {
                 "artifact_kind": "DIMENSION",
-                "natural_key_columns": ["claimstatus"],
-                "dimension_key": "claimstatus_key",
+                "natural_key_columns": ["claimid"],
+                "dimension_key": "claims_key",
             },
             "bundle": {"mappings": [
                 {
                     "source_object_name": source,
-                    "source_field_path": "claimstatus",
-                    "source_data_type": "STRING",
-                    "target_column_name": "claimstatus_key",
+                    "source_field_path": "claimid",
+                    "source_data_type": "BIGINT",
+                    "target_column_name": "claims_key",
                     "target_data_type": "STRING",
                     "is_primary_key": True,
                     "transformation_rule": "SURROGATE_KEY",
@@ -581,15 +581,15 @@ def test_databricks_metadata_star_keys_are_generated_from_approved_dimension_met
             "object": {
                 "target_table": "main.gold.fact_total_claims",
                 "write_mode": "MERGE",
-                "merge_keys_json": '["claimstatus_key"]',
+                "merge_keys_json": '["claims_key"]',
             },
             "inputs": [{"object_name": source}],
             "definition": {"artifact_kind": "FACT", "fact_type": "AGGREGATE"},
             "bundle": {"mappings": [
                 {
                     "source_object_name": source,
-                    "source_field_path": "claimstatus",
-                    "target_column_name": "claimstatus_key",
+                    "source_field_path": "claimid",
+                    "target_column_name": "claims_key",
                     "target_data_type": "STRING",
                     "transformation_rule": "DIMENSION_KEY",
                     "join_rules_json": "[]",
@@ -608,11 +608,11 @@ def test_databricks_metadata_star_keys_are_generated_from_approved_dimension_met
     )
 
     assert "CREATE SCHEMA IF NOT EXISTS {TARGET_SCHEMA}" in dimension_code
-    assert "NATURAL_KEY_COLUMNS = ['claimstatus']" in dimension_code
-    assert "claimstatus_key" in dimension_code
+    assert "NATURAL_KEY_COLUMNS = ['claimid']" in dimension_code
+    assert "claims_key" in dimension_code
     assert "sha2(concat_ws" in dimension_code
     assert "SHA2(CONCAT_WS" in fact_code
-    assert "AS `claimstatus_key`" in fact_code
+    assert "AS `claims_key`" in fact_code
     assert "AS `claimstatus`" not in fact_code
 
 

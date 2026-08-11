@@ -4696,6 +4696,11 @@ def _materialize_silver_to_gold_metadata(
         return bool(type_family(left)) and type_family(left) == type_family(right)
 
     def star_dimension_entity(column: Any, table: Any = None) -> str:
+        table_text = normalize_bronze_column_name(str(table or "").split(".")[-1].strip('"`[]'))
+        for prefix in ("silver_", "bronze_", "dim_"):
+            table_text = table_text.removeprefix(prefix)
+        if table_text:
+            return table_text
         text = normalize_bronze_column_name(column)
         text = re.sub(r"_(name|desc|description|identifier)$", "", text)
         if text.endswith("_id"):
@@ -4708,19 +4713,21 @@ def _materialize_silver_to_gold_metadata(
         return f"{normalize_bronze_column_name(entity)}_key"
 
     dimension_contracts = [dict(raw) for raw in contract.get("dimension_mappings") or [] if isinstance(raw, dict)]
-    seen_dimension_contracts: set[tuple[str, str]] = set()
+    dimension_contract_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
     for raw in dimension_contracts:
         logical = str(raw.get("logical_table") or "").strip()
         natural_key_columns = [
             normalize_bronze_column_name(column)
-            for column in (raw.get("natural_key_columns") or raw.get("grain_columns") or raw.get("columns") or [])
+            for column in (raw.get("natural_key_columns") or raw.get("grain_columns") or [])
             if str(column or "").strip()
         ]
         entity = normalize_bronze_column_name(
-            raw.get("entity") or star_dimension_entity(natural_key_columns[0] if natural_key_columns else logical, logical)
+            star_dimension_entity(raw.get("entity") or (natural_key_columns[0] if natural_key_columns else logical), logical)
         )
         if logical and entity:
-            seen_dimension_contracts.add((logical.casefold(), entity.casefold()))
+            raw["logical_table"] = logical
+            raw["entity"] = entity
+            dimension_contract_by_key[(logical.casefold(), entity.casefold())] = raw
     for mapping in contract.get("kpi_mappings") or []:
         if not isinstance(mapping, dict) or str(mapping.get("readiness") or "").upper() == "BLOCKED":
             continue
@@ -4731,17 +4738,32 @@ def _materialize_silver_to_gold_metadata(
                 continue
             logical = str(dimension.get("table") or measure.get("table") or "").strip()
             column = normalize_bronze_column_name(dimension.get("column"))
-            entity = normalize_bronze_column_name(dimension.get("entity") or star_dimension_entity(column, logical))
-            if not logical or not column or (logical.casefold(), entity.casefold()) in seen_dimension_contracts:
+            entity = normalize_bronze_column_name(star_dimension_entity(dimension.get("entity") or column, logical))
+            if not logical or not column:
                 continue
-            dimension_contracts.append({
+            key = (logical.casefold(), entity.casefold())
+            existing = dimension_contract_by_key.get(key)
+            if existing:
+                columns = [
+                    normalize_bronze_column_name(existing_column)
+                    for existing_column in existing.get("columns") or []
+                    if str(existing_column or "").strip()
+                ]
+                if column not in columns:
+                    existing["columns"] = [*columns, column]
+                consumed = list(existing.get("consumed_by_kpis") or [])
+                if kpi_name and kpi_name not in consumed:
+                    existing["consumed_by_kpis"] = [*consumed, kpi_name]
+                continue
+            contract_row = {
                 "logical_table": logical,
                 "entity": entity,
-                "natural_key_columns": [column],
+                "natural_key_columns": [],
                 "columns": [column],
                 "consumed_by_kpis": [kpi_name] if kpi_name else [],
-            })
-            seen_dimension_contracts.add((logical.casefold(), entity.casefold()))
+            }
+            dimension_contracts.append(contract_row)
+            dimension_contract_by_key[key] = contract_row
 
     for raw in dimension_contracts:
         if not isinstance(raw, dict):
@@ -4749,11 +4771,11 @@ def _materialize_silver_to_gold_metadata(
         logical = str(raw.get("logical_table") or "").strip()
         natural_key_columns = [
             normalize_bronze_column_name(column)
-            for column in (raw.get("natural_key_columns") or raw.get("grain_columns") or raw.get("columns") or [])
+            for column in (raw.get("natural_key_columns") or raw.get("grain_columns") or [])
             if str(column or "").strip()
         ]
         entity = normalize_bronze_column_name(
-            raw.get("entity") or star_dimension_entity(natural_key_columns[0] if natural_key_columns else logical, logical)
+            star_dimension_entity(raw.get("entity") or (natural_key_columns[0] if natural_key_columns else logical), logical)
         )
         name = f"dim_{entity}"
         item = source(logical)
@@ -5060,10 +5082,14 @@ def _materialize_silver_to_gold_metadata(
             input_item = source(dimension.get("table") or measure.get("table"))
             dimension_column = normalize_bronze_column_name(dimension.get("column"))
             entity = normalize_bronze_column_name(
-                dimension.get("entity") or star_dimension_entity(dimension_column, dimension.get("table") or measure.get("table"))
+                star_dimension_entity(dimension.get("entity") or dimension_column, dimension.get("table") or measure.get("table"))
             )
             target_name = dimension_key(entity)
-            if not input_item or not add_output(input_item, dimension_column, target_name, "DIMENSION_KEY", "STRING"):
+            if target_name.casefold() in seen_targets:
+                continue
+            key_rows = [row for row in input_item["bundle"]["mappings"] if bool(row.get("is_primary_key"))] if input_item else []
+            key_source_column = normalize_bronze_column_name(key_rows[0]["target_column_name"]) if key_rows else dimension_column
+            if not input_item or not add_output(input_item, key_source_column, target_name, "DIMENSION_KEY", "STRING"):
                 reject("FACT", name, "MISSING_SOURCE_FIELD", f"Gold dimension field {dimension.get('column')} is invalid or duplicated.")
                 invalid_field = True
                 break
@@ -5073,8 +5099,8 @@ def _materialize_silver_to_gold_metadata(
                 "dimension_table": f"{target_prefix}.dim_{entity}",
                 "dimension_key": target_name,
                 "source_table": input_item["target"],
-                "source_column": dimension_column,
-                "natural_key_columns": [dimension_column],
+                "source_column": key_source_column,
+                "natural_key_columns": [key_source_column],
             })
         if invalid_field:
             continue

@@ -1281,14 +1281,17 @@ def test_gate5_materializes_independent_gold_fact_and_dimension_drafts(
 
     assert [item["artifact_kind"] for item in result["gold_metadata_drafts"]] == expected_kinds
     assert [item["target_gold_table"] for item in captured] == [
-        "main.gold.dim_claimstatus",
+        "main.gold.dim_claims",
         *(["main.gold.fact_total_claims"] if "FACT" in expected_kinds else []),
     ]
-    assert captured[0]["merge_keys"] == ["claimstatus_key"]
+    assert captured[0]["merge_keys"] == ["claims_key"]
     assert captured[0]["columns"][0]["transformation_rule"] == "SURROGATE_KEY"
+    assert captured[0]["columns"][0]["source_field_path"] == "claimid"
+    assert {column["target_column_name"] for column in captured[0]["columns"][1:]} == {"claimid", "claimstatus"}
     if "FACT" in expected_kinds:
-        assert captured[1]["merge_keys"] == ["claimstatus_key"]
+        assert captured[1]["merge_keys"] == ["claims_key"]
         assert captured[1]["columns"][0]["transformation_rule"] == "DIMENSION_KEY"
+        assert captured[1]["columns"][0]["source_field_path"] == "claimid"
         aggregate = next(
             column for column in captured[1]["columns"]
             if str(column.get("transformation_rule") or "").startswith("AGG_")

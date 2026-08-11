@@ -2221,6 +2221,11 @@ def _silver_tables_by_name(results: List[Dict[str, object]]) -> Dict[str, str]:
 
 
 def _star_dimension_entity(column: Any, table: Any = None) -> str:
+    table_text = _canonical_gold_column(str(table or "").split(".")[-1].strip('"`[]'))
+    for prefix in ("silver_", "bronze_", "dim_"):
+        table_text = table_text.removeprefix(prefix)
+    if table_text:
+        return table_text
     text = _canonical_gold_column(column)
     text = re.sub(r"_(name|desc|description|identifier)$", "", text)
     if text.endswith("_id"):
@@ -2257,8 +2262,6 @@ def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tab
                     "consumed_by_kpis": [],
                 },
             )
-            if column not in row["natural_key_columns"]:
-                row["natural_key_columns"].append(column)
             if column not in row["columns"]:
                 row["columns"].append(column)
             if kpi_name and kpi_name not in row["consumed_by_kpis"]:
@@ -2299,15 +2302,13 @@ def _independent_gold_dimensions(
                 "logical_table": logical,
                 "entity": entity,
                 "source_silver_table": silver_tables[logical.casefold()],
-                "natural_key_columns": [name],
+                "natural_key_columns": [],
                 "columns": [],
                 "consumed_by_kpis": [],
             },
         )
         if name not in row["columns"]:
             row["columns"].append(name)
-        if not row.get("natural_key_columns"):
-            row["natural_key_columns"] = [name]
 
     # Prefer KPI-relevant, reviewed key-backed entities with richer descriptive
     # context. The materialization boundary still reloads and validates the keys.
