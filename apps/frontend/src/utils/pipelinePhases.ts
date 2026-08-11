@@ -73,8 +73,8 @@ export const PIPELINE_PHASE_TEMPLATES = {
     },
     {
       id: 'phase-4',
-      label: 'Target Execution',
-      keys: ['metadata_setup_execution', 'bronze_code_execution', 'silver_code_execution', 'gold_code_execution'],
+      label: 'Target Execution & Report Generation',
+      keys: ['metadata_setup_execution', 'bronze_code_execution', 'silver_code_execution', 'gold_code_execution', 'report_generation'],
     },
   ],
   databaseDbt: [
@@ -232,7 +232,20 @@ export function isGenerationFirstDatabaseRun(run) {
 function pipelineTemplatesForRun(run) {
   if (isFileSource(run)) return PIPELINE_PHASE_TEMPLATES.file
   if (!isGenerationFirstDatabaseRun(run)) return PIPELINE_PHASE_TEMPLATES.databaseDbt
-  if (!isSnowflakeDbtRun(run)) return PIPELINE_PHASE_TEMPLATES.database
+  if (!isSnowflakeDbtRun(run)) {
+    if (run?.report_generation_enabled || run?.report_generation_status || run?.run_report?.generated_at) {
+      return PIPELINE_PHASE_TEMPLATES.database
+    }
+    return PIPELINE_PHASE_TEMPLATES.database.map((phase) => (
+      phase.id === 'phase-4'
+        ? {
+            ...phase,
+            label: 'Target Execution',
+            keys: phase.keys.filter((key) => key !== 'report_generation'),
+          }
+        : phase
+    ))
+  }
   if (String(run?.dbt_deployment_mode || 'generate_only').toLowerCase() !== 'generate_and_deploy') {
     return PIPELINE_PHASE_TEMPLATES.databaseDbtGenerationFirst.slice(0, 3)
   }
@@ -831,7 +844,9 @@ function buildStepDetail(run, key, state, existingDetail) {
     case 'report_generation':
       if (state === 'COMPLETED') return 'The enterprise run report is ready to view.'
       if (state === 'RUNNING') return 'Assembling run artifacts, table metadata, KPIs, and governance outcomes.'
-      return 'Report generation starts automatically after deployment succeeds.'
+      return isSnowflakeDbtRun(run)
+        ? 'Report generation starts automatically after deployment succeeds.'
+        : 'Report generation starts automatically after Gold execution succeeds.'
     default:
       return existingDetail || ''
   }

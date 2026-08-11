@@ -3096,7 +3096,13 @@ def build_pipeline_steps(
                         f"Approved {layer.capitalize()} scripts execute after all code generation and reviews complete"
                     )
                 steps.append(execution_step)
-            if dbt_deploy and checkpoint.get("report_generation_enabled"):
+            if checkpoint.get("report_generation_enabled") and (
+                dbt_deploy
+                or (
+                    revised_metadata_database_flow(checkpoint)
+                    and generation_first_native_database_flow(checkpoint)
+                )
+            ):
                 steps.append(
                     {
                         "key": "report_generation",
@@ -3754,6 +3760,11 @@ def start_pipeline(
         and source_value == "database"
     ):
         initial_state["database_flow_version"] = DATABASE_GENERATION_FIRST_FLOW_VERSION
+    if (
+        revised_metadata_database_flow(initial_state)
+        and generation_first_native_database_flow(initial_state)
+    ):
+        initial_state["report_generation_enabled"] = True
 
     if source_value in file_sources:
         from services.sftp_runtime import start_sftp_pipeline
@@ -6296,7 +6307,11 @@ def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, 
 
     final_state = {
         **progress_state,
-        "status": "PIPELINE_COMPLETED",
+        "status": (
+            "RUNNING"
+            if revised_metadata_database_flow(progress_state)
+            else "PIPELINE_COMPLETED"
+        ),
         "execution_ready": False,
         "background_stage": None,
         "failed_background_stage": None,
@@ -6321,6 +6336,13 @@ def _execute_queued_metadata_native_runtime(state: Dict[str, Any]) -> Dict[str, 
         },
         "resume_message": gold_message,
     }
+    if revised_metadata_database_flow(final_state):
+        return _complete_run_with_report(
+            final_state,
+            running_message=f"{gold_message} Generating the pipeline run report.",
+            completed_message=f"{gold_message} Run report completed.",
+            context="metadata_runtime",
+        )
     save_checkpoint_state_timed(
         str(state.get("run_id") or ""),
         final_state,
@@ -6551,6 +6573,13 @@ def execute_database_native_layers(
             }
         )
         save_checkpoint_state_timed(run_id, working_state, context=f"{stage_key}:complete")
+        if not next_stage and revised_metadata_database_flow(working_state):
+            return _complete_run_with_report(
+                working_state,
+                running_message="Gold target execution completed. Generating the pipeline run report.",
+                completed_message="Bronze, Silver, and Gold target execution and run report completed.",
+                context="native_execution",
+            )
 
     return working_state
 
@@ -6887,6 +6916,28 @@ def build_run_report(state: Dict[str, Any]) -> Dict[str, Any]:
     source_database = state.get("database_name") or (
         source_databases[0] if isinstance(source_databases, list) and source_databases else source_databases
     )
+    target = str(state.get("target_warehouse") or "snowflake").lower()
+    execution_engine = str(state.get("execution_engine") or "native").lower()
+    is_dbt = execution_engine == "dbt"
+    execution_summary = (
+        {
+            "kind": "deployment",
+            "status": state.get("snowflake_dbt_deploy_status") or state.get("snowflake_dbt_status") or "COMPLETED",
+            "validation_status": state.get("snowflake_dbt_validation_status"),
+            "artifact_set_hash": state.get("snowflake_dbt_artifact_set_hash"),
+            "completion_mode": state.get("completion_mode") or "dbt_executed",
+        }
+        if is_dbt
+        else {
+            "kind": "execution",
+            "status": state.get(f"{target}_gold_execution_status") or "COMPLETED",
+            "validation_status": state.get("gold_runtime_validation_status"),
+            "completion_mode": "native_execution",
+            "bronze_status": state.get(f"{target}_bronze_execution_status"),
+            "silver_status": state.get(f"{target}_silver_execution_status"),
+            "gold_status": state.get(f"{target}_gold_execution_status"),
+        }
+    )
     return {
         "version": 1,
         "generated_at": generated_at,
@@ -6897,9 +6948,13 @@ def build_run_report(state: Dict[str, Any]) -> Dict[str, Any]:
             "name": state.get("project_name") or state.get("brd_filename") or state.get("run_id"),
             "source": state.get("source") or "database",
             "source_database": source_database,
-            "target": state.get("target_warehouse") or "snowflake",
-            "execution_engine": state.get("execution_engine") or "dbt",
-            "deployment_mode": state.get("dbt_deployment_mode") or "generate_and_deploy",
+            "target": target,
+            "execution_engine": execution_engine,
+            "deployment_mode": (
+                state.get("dbt_deployment_mode") or "generate_and_deploy"
+                if is_dbt
+                else "native_execution"
+            ),
             "started_at": state.get("started_at"),
             "completed_at": generated_at,
         },
@@ -6936,13 +6991,82 @@ def build_run_report(state: Dict[str, Any]) -> Dict[str, Any]:
             "silver": str(state.get("silver_review_decision") or (state.get("gate5") or {}).get("decision") or "APPROVED"),
             "gold": str(state.get("gold_review_decision") or "APPROVED"),
         },
-        "deployment": {
-            "status": state.get("snowflake_dbt_deploy_status") or state.get("snowflake_dbt_status") or "COMPLETED",
-            "validation_status": state.get("snowflake_dbt_validation_status"),
-            "artifact_set_hash": state.get("snowflake_dbt_artifact_set_hash"),
-            "completion_mode": state.get("completion_mode") or "dbt_executed",
-        },
+        "deployment": execution_summary,
     }
+
+
+def _complete_run_with_report(
+    state: Dict[str, Any],
+    *,
+    running_message: str,
+    completed_message: str,
+    context: str,
+) -> Dict[str, Any]:
+    """Finalize a successful generation-first run with its persisted report."""
+    run_id = str(state.get("run_id") or "")
+    working_state = {
+        **state,
+        "status": "RUNNING",
+        "execution_ready": False,
+        "background_stage": "report_generation",
+        "failed_background_stage": None,
+        "next_stage_key": None,
+        "next_stage_label": None,
+        "stage_confirmation": None,
+        "report_generation_enabled": True,
+        "report_generation_status": "RUNNING",
+        "resume_message": running_message,
+    }
+    save_checkpoint_state_timed(
+        run_id,
+        working_state,
+        context=f"{context}:report_generation:running",
+    )
+    try:
+        run_report = build_run_report(working_state)
+        report_status = "COMPLETED"
+    except Exception:
+        logger.exception(
+            "Run report generation failed after successful target execution",
+            extra={"run_id": run_id, "stage": "report_generation"},
+        )
+        run_report = {
+            "version": 1,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "title": "Pipeline Run Report",
+            "outcome": "SUCCESS",
+            "warning": "Detailed report sections could not be assembled.",
+            "run": {
+                "id": run_id,
+                "target": state.get("target_warehouse"),
+                "execution_engine": state.get("execution_engine"),
+            },
+            "metrics": {},
+            "artifacts": [],
+            "tables": [],
+            "kpis": [],
+            "reviews": {},
+            "deployment": {"status": "COMPLETED"},
+        }
+        report_status = "COMPLETED_WITH_WARNINGS"
+
+    working_state.update(
+        {
+            "status": "PIPELINE_COMPLETED",
+            "background_stage": None,
+            "last_completed_stage_key": "report_generation",
+            "last_completed_stage_label": "Report Generation",
+            "report_generation_status": report_status,
+            "run_report": run_report,
+            "resume_message": completed_message,
+        }
+    )
+    save_checkpoint_state_timed(
+        run_id,
+        working_state,
+        context="report_generation:complete",
+    )
+    return working_state
 
 
 def execute_generation_first_snowflake_dbt(
@@ -7055,9 +7179,7 @@ def execute_generation_first_snowflake_dbt(
             **working_state,
             **deployed_state,
             "run_id": run_id,
-            "status": "RUNNING",
             "execution_ready": False,
-            "background_stage": "report_generation",
             "failed_background_stage": None,
             "last_completed_stage_key": stage_key,
             "last_completed_stage_label": "Code Execution",
@@ -7074,51 +7196,17 @@ def execute_generation_first_snowflake_dbt(
                 "failed_count": gold_execution_summary.get("failed_count"),
                 "message": gold_execution_message,
             },
-            "report_generation_enabled": True,
-            "report_generation_status": "RUNNING",
-            "resume_message": "Deployment completed. Generating the pipeline run report.",
         }
-        save_checkpoint_state_timed(run_id, working_state, context="snowflake_dbt_deployment:complete")
-        try:
-            run_report = build_run_report(working_state)
-            report_status = "COMPLETED"
-        except Exception:
-            logger.exception(
-                "Run report generation failed after successful Snowflake dbt deployment",
-                extra={"run_id": run_id, "stage": "report_generation"},
-            )
-            run_report = {
-                "version": 1,
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "title": "Pipeline Run Report",
-                "outcome": "SUCCESS",
-                "warning": "Detailed report sections could not be assembled.",
-                "run": {"id": run_id, "target": "snowflake", "execution_engine": "dbt"},
-                "metrics": {},
-                "artifacts": [],
-                "tables": [],
-                "kpis": [],
-                "reviews": {},
-                "deployment": {"status": "COMPLETED"},
-            }
-            report_status = "COMPLETED_WITH_WARNINGS"
-        working_state.update(
-            {
-                "status": "PIPELINE_COMPLETED",
-                "background_stage": None,
-                "last_completed_stage_key": "report_generation",
-                "last_completed_stage_label": "Report Generation",
-                "report_generation_status": report_status,
-                "run_report": run_report,
-                "resume_message": (
-                    f"{gold_execution_message} Run report completed."
-                    if gold_execution_message
-                    else "Snowflake dbt deployment, build, and run report completed."
-                ),
-            }
+        return _complete_run_with_report(
+            working_state,
+            running_message="Deployment completed. Generating the pipeline run report.",
+            completed_message=(
+                f"{gold_execution_message} Run report completed."
+                if gold_execution_message
+                else "Snowflake dbt deployment, build, and run report completed."
+            ),
+            context="snowflake_dbt_deployment",
         )
-        save_checkpoint_state_timed(run_id, working_state, context="report_generation:complete")
-        return working_state
     except Exception as exc:
         try:
             _fail_snowflake_dbt_control_attempt(control, exc)

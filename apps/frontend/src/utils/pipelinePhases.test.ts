@@ -172,6 +172,41 @@ test('recognizes the revised generation-first database flow version', () => {
   })).toBe(true)
 })
 
+test.each(['databricks', 'snowflake'])('adds report generation after native %s Gold execution', (target) => {
+  const run = {
+    source: 'database',
+    target_warehouse: target,
+    execution_engine: 'native',
+    database_flow_version: 'generation_first_v2',
+    report_generation_enabled: true,
+    report_generation_status: 'RUNNING',
+    status: 'RUNNING',
+    background_stage: 'report_generation',
+    pipeline_steps: [
+      { key: 'metadata_setup_execution', state: 'COMPLETED' },
+      { key: 'bronze_code_execution', state: 'COMPLETED' },
+      { key: 'silver_code_execution', state: 'COMPLETED' },
+      { key: 'gold_code_execution', state: 'COMPLETED' },
+      { key: 'report_generation', state: 'RUNNING' },
+    ],
+  }
+
+  const execution = getPhaseGroups(run, getPipelineSteps(run)).find((phase) => phase.id === 'phase-4')
+
+  expect(execution?.label).toBe('Target Execution & Report Generation')
+  expect(execution?.steps.map((step) => step.key)).toEqual([
+    'metadata_setup_execution',
+    'bronze_code_execution',
+    'silver_code_execution',
+    'gold_code_execution',
+    'report_generation',
+  ])
+  expect(execution?.steps.at(-1)).toMatchObject({
+    key: 'report_generation',
+    state: 'RUNNING',
+  })
+})
+
 test('does not infer missing generation stages from legacy Bronze execution progress', () => {
   const run = {
     source: 'database',

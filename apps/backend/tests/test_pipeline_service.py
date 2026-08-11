@@ -349,6 +349,64 @@ def test_generation_first_snowflake_native_uses_same_execution_order(monkeypatch
     assert result["status"] == "PIPELINE_COMPLETED"
 
 
+@pytest.mark.parametrize("target", ["databricks", "snowflake"])
+def test_revised_native_flow_generates_report_after_gold_execution(monkeypatch, target):
+    from services import (
+        databricks_runtime,
+        snowflake_bronze_runtime,
+        snowflake_gold_runtime,
+        snowflake_silver_runtime,
+    )
+
+    state = {
+        **_generation_first_state(target),
+        "database_flow_version": "generation_first_v2",
+        "execution_ready": True,
+        "report_generation_enabled": True,
+    }
+    saved = []
+
+    def runner(layer):
+        return lambda checkpoint, **_kwargs: {
+            **checkpoint,
+            f"{target}_{layer}_execution_status": "COMPLETED",
+        }
+
+    if target == "databricks":
+        monkeypatch.setattr(databricks_runtime, "run_databricks_bronze_scripts", runner("bronze"))
+        monkeypatch.setattr(databricks_runtime, "run_databricks_silver_scripts", runner("silver"))
+        monkeypatch.setattr(databricks_runtime, "run_databricks_gold_scripts", runner("gold"))
+    else:
+        monkeypatch.setattr(snowflake_bronze_runtime, "run_snowflake_bronze_scripts", runner("bronze"))
+        monkeypatch.setattr(snowflake_silver_runtime, "run_snowflake_silver_scripts", runner("silver"))
+        monkeypatch.setattr(snowflake_gold_runtime, "run_snowflake_gold_scripts", runner("gold"))
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state_timed",
+        lambda _run_id, checkpoint, **_kwargs: saved.append(dict(checkpoint)),
+    )
+
+    result = pipeline_runtime.execute_database_native_layers(state["run_id"], state=state)
+
+    assert result["status"] == "PIPELINE_COMPLETED"
+    assert result["last_completed_stage_key"] == "report_generation"
+    assert result["report_generation_status"] == "COMPLETED"
+    assert result["run_report"]["run"]["execution_engine"] == "native"
+    assert result["run_report"]["deployment"] == {
+        "kind": "execution",
+        "status": "COMPLETED",
+        "validation_status": "COMPLETED",
+        "completion_mode": "native_execution",
+        "bronze_status": "COMPLETED",
+        "silver_status": "COMPLETED",
+        "gold_status": "COMPLETED",
+    }
+    assert [checkpoint["background_stage"] for checkpoint in saved[-2:]] == [
+        "report_generation",
+        None,
+    ]
+
+
 def test_generation_first_execution_is_fail_fast(monkeypatch):
     from services import databricks_runtime
 

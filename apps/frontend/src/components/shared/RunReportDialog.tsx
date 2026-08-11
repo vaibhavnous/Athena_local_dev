@@ -46,6 +46,20 @@ export default function RunReportDialog({ isOpen, onClose, report }) {
   const kpis = Array.isArray(report.kpis) ? report.kpis : []
   const reviews = Object.entries(report.reviews || {})
   const deployment = report.deployment || {}
+  const nativeExecution = String(run.execution_engine || '').toLowerCase() === 'native'
+  const assuranceRows = nativeExecution
+    ? [
+        ['Bronze', deployment.bronze_status],
+        ['Silver', deployment.silver_status],
+        ['Gold', deployment.gold_status || deployment.status],
+        ['Completion mode', deployment.completion_mode],
+      ]
+    : [
+        ['Deployment', deployment.status],
+        ['Validation', deployment.validation_status],
+        ['Completion mode', deployment.completion_mode],
+        ['Artifact set', deployment.artifact_set_hash],
+      ]
   const summaryCards = [
     { label: 'Tables', value: metrics.tables ?? tables.length, icon: Table2, tone: 'text-cyan-300 bg-cyan-400/10 border-cyan-400/20' },
     { label: 'Columns', value: metrics.columns ?? 0, icon: Columns3, tone: 'text-violet-300 bg-violet-400/10 border-violet-400/20' },
@@ -148,7 +162,7 @@ export default function RunReportDialog({ isOpen, onClose, report }) {
                         ['Source', `${displayValue(run.source, 'database')} · ${displayValue(run.source_database)}`],
                         ['Target', displayValue(run.target, 'snowflake')],
                         ['Engine', displayValue(run.execution_engine, 'dbt')],
-                        ['Mode', displayValue(run.deployment_mode, 'generate_and_deploy').replaceAll('_', ' ')],
+                        ['Mode', displayValue(run.deployment_mode, nativeExecution ? 'native_execution' : 'generate_and_deploy').replaceAll('_', ' ')],
                         ['Started', displayDate(run.started_at)],
                         ['Completed', displayDate(run.completed_at)],
                       ].map(([label, value]) => (
@@ -162,15 +176,10 @@ export default function RunReportDialog({ isOpen, onClose, report }) {
                   <div className="rounded-xl border border-[#22314a] bg-[#0f1929] p-4">
                     <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-white">
                       <Target size={15} className="text-emerald-300" />
-                      Deployment assurance
+                      {nativeExecution ? 'Execution assurance' : 'Deployment assurance'}
                     </div>
                     <div className="grid grid-cols-2 gap-x-5 gap-y-3 text-xs">
-                      {[
-                        ['Deployment', deployment.status],
-                        ['Validation', deployment.validation_status],
-                        ['Completion mode', deployment.completion_mode],
-                        ['Artifact set', deployment.artifact_set_hash],
-                      ].map(([label, value]) => (
+                      {assuranceRows.map(([label, value]) => (
                         <div key={label}>
                           <div className="text-[10px] uppercase tracking-[0.1em] text-[#7184a3]">{label}</div>
                           <div className="mt-1 break-all font-mono text-[#d8e0ed]">{displayValue(value)}</div>
