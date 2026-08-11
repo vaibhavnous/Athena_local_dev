@@ -936,18 +936,20 @@ def test_runs_uses_fast_checkpoint_summary_by_default(monkeypatch):
         lambda limit: [{"run_id": "run-fast", "last_activity": "2026-06-30T00:00:00Z"}],
     )
     monkeypatch.setattr(
-        "services.pipeline_runtime.load_checkpoint_state",
-        lambda run_id: {
-            "run_id": run_id,
-            "brd_filename": "fast-summary.docx",
-            "source": "database",
-            "status": "RUNNING",
-            "next_gate": 2,
-            "resume_message": "Table Review is pending.",
-            "execution_ready": False,
-            "awaiting_stage_confirmation": False,
-            "next_stage_key": None,
-            "next_stage_label": None,
+        "services.pipeline_runtime.load_checkpoint_fields_many",
+        lambda run_ids, *fields: {
+            "run-fast": {
+                "run_id": "run-fast",
+                "brd_filename": "fast-summary.docx",
+                "source": "database",
+                "status": "RUNNING",
+                "next_gate": 2,
+                "resume_message": "Table Review is pending.",
+                "execution_ready": False,
+                "awaiting_stage_confirmation": False,
+                "next_stage_key": None,
+                "next_stage_label": None,
+            },
         },
     )
 

@@ -42,6 +42,18 @@ function formatStageLabel(stage?: string | null) {
   return normalized
 }
 
+export function displayStageForLog(log: Pick<PipelineLog, 'stage' | 'message'>) {
+  const contextStage = /\bcontext=([a-z0-9_]+)(?::[a-z0-9_]+)?/i.exec(String(log.message || ''))?.[1]?.toLowerCase()
+  if (contextStage) {
+    for (const layer of ['bronze', 'silver', 'gold']) {
+      if (contextStage === layer || contextStage.startsWith(`${layer}_`)) return layer
+    }
+    if (contextStage === 'gate4') return 'bronze'
+    if (contextStage === 'gate5') return 'silver'
+  }
+  return log.stage || ''
+}
+
 function formatLogTime(value?: string | null, mode: 'time' | 'dateTime' = 'time') {
   if (!value) return '-'
   const date = new Date(value)
@@ -83,17 +95,18 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
   }, [logs, discoveredRunId])
 
   // Derived data
-  const stageSet = new Set(logs.map((l) => formatStageLabel(l.stage)).filter(Boolean))
+  const stageSet = new Set(logs.map((log) => formatStageLabel(displayStageForLog(log))).filter(Boolean))
   const uniqueStages = ['ALL', ...Array.from(stageSet as Set<string>)]
 
   const filteredLogs = logs.filter((log) => {
     if (filterLevel !== 'ALL' && normalizeLevel(log.log_level) !== filterLevel) return false
-    if (filterStage !== 'ALL' && formatStageLabel(log.stage) !== filterStage) return false
+    const displayStage = displayStageForLog(log)
+    if (filterStage !== 'ALL' && formatStageLabel(displayStage) !== filterStage) return false
     if (
       searchQuery &&
       !log.message?.toLowerCase().includes(searchQuery.toLowerCase()) &&
       !log.step_name?.toLowerCase().includes(searchQuery.toLowerCase()) &&
-      !formatStageLabel(log.stage).toLowerCase().includes(searchQuery.toLowerCase())
+      !formatStageLabel(displayStage).toLowerCase().includes(searchQuery.toLowerCase())
     ) {
       return false
     }
@@ -258,7 +271,7 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
                           <span className={`min-w-[54px] flex-shrink-0 rounded px-2 py-0.5 text-center font-sans text-xs font-semibold ${levelBadgeClass(log.log_level)}`}>
                             {normalizeLevel(log.log_level)}
                           </span>
-                          {log.stage && <span className="min-w-[82px] flex-shrink-0 text-gray-300">{log.stage}</span>}
+                          {displayStageForLog(log) && <span className="min-w-[82px] flex-shrink-0 text-gray-300">{displayStageForLog(log)}</span>}
                           <span className="flex-shrink-0 text-gray-500">-</span>
                           <span className="text-gray-300">{log.message || '-'}</span>
                         </div>
@@ -313,9 +326,9 @@ export default function PipelineLogsPanel({ runId, isActive = true, onLogsUpdate
                   </span>
                 </DetailRow>
 
-                {selectedLog.stage && (
+                {displayStageForLog(selectedLog) && (
                   <DetailRow label="Stage">
-                    <span className="text-sm text-gray-200">{formatStageLabel(selectedLog.stage)}</span>
+                    <span className="text-sm text-gray-200">{formatStageLabel(displayStageForLog(selectedLog))}</span>
                   </DetailRow>
                 )}
 

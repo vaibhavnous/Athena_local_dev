@@ -438,7 +438,16 @@ def submit_silver_merge_key_reviews(
     from services.pipeline_runtime import submit_background, submit_silver_merge_key_review
 
     _checkpoint_for_user(run_id, user)
-    logger.info("Submitting Silver merge-key review", extra={"run_id": run_id, "action": payload.action})
+    logger.info(
+        "Submitting Silver merge-key review",
+        extra={
+            "run_id": run_id,
+            "action": payload.action,
+            "node": "silver",
+            "stage": "silver",
+            "step_name": "silver_merge_key_review_submit",
+        },
+    )
     stage = "silver" if str(payload.action).upper() == "APPROVED" else "silver_merge_key_review"
     review_artifact = _review_artifact_for_user(payload.review_artifact, user)
     submit_background(run_id, stage, submit_silver_merge_key_review, run_id, payload.action, review_artifact)

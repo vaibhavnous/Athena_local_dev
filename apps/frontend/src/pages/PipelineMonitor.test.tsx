@@ -105,7 +105,7 @@ test('shows a review gate as loading while its content is prepared', () => {
   })
 })
 
-test('shows the next pending stage as starting while an active run awaits backend progress', () => {
+test('marks the next pending stage as active while awaiting backend progress', () => {
   const phases = markNextPendingStage([
     {
       id: 'phase-1',

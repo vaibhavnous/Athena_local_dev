@@ -703,28 +703,32 @@ def load_checkpoint_fields_many(run_ids: List[str], *fields: str) -> Dict[str, D
     if not normalized_run_ids or not safe_fields:
         return {}
 
-    select_list = ", ".join(
-        f"JSON_VALUE(full_state_json, '$.{field}') AS [{field}]"
+    select_list = ", ".join(f"parsed.[{field}]" for field in safe_fields)
+    json_schema = ", ".join(
+        f"[{field}] NVARCHAR(MAX) '$.{field}'"
         for field in safe_fields
     )
-    placeholders = ", ".join("?" for _ in normalized_run_ids)
+    requested_rows = ", ".join("(?)" for _ in normalized_run_ids)
 
     conn = get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(
             f"""
-            WITH latest_checkpoints AS (
-                SELECT
-                    run_id,
-                    full_state_json,
-                    ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY checkpoint_at DESC) AS row_number
-                FROM [{_pipeline_schema()}].[kpi_checkpoints]
-                WHERE run_id IN ({placeholders})
+            WITH requested_runs(run_id) AS (
+                SELECT requested.run_id
+                FROM (VALUES {requested_rows}) AS requested(run_id)
             )
-            SELECT run_id, {select_list}
-            FROM latest_checkpoints
-            WHERE row_number = 1
+            SELECT requested_runs.run_id, {select_list}
+            FROM requested_runs
+            CROSS APPLY (
+                SELECT TOP 1 cp.full_state_json
+                FROM [{_pipeline_schema()}].[kpi_checkpoints] AS cp WITH (READUNCOMMITTED)
+                WHERE cp.run_id = requested_runs.run_id
+                ORDER BY cp.checkpoint_at DESC
+            ) AS latest
+            OUTER APPLY OPENJSON(latest.full_state_json)
+            WITH ({json_schema}) AS parsed
             """,
             tuple(normalized_run_ids),
         )
@@ -817,8 +821,29 @@ def _checkpoint_slow_seconds() -> float:
         return 2.0
 
 
+def _checkpoint_log_stage(context: str, state: Dict[str, Any]) -> str:
+    """Return the stage that caused this checkpoint, not a stale state frontier."""
+    context_stage = str(context or "").partition(":")[0].strip().lower()
+    if context_stage:
+        for layer in ("bronze", "silver", "gold"):
+            if context_stage == layer or context_stage.startswith(f"{layer}_"):
+                return layer
+        if context_stage == "gate4":
+            return "bronze"
+        if context_stage == "gate5":
+            return "silver"
+        return context_stage
+
+    return str(
+        state.get("background_stage")
+        or state.get("failed_background_stage")
+        or state.get("last_completed_stage_key")
+        or "checkpoint"
+    )
+
+
 def save_checkpoint_state_timed(run_id: str, state: Dict[str, Any], *, context: str) -> None:
-    stage = state.get("background_stage") or state.get("failed_background_stage") or state.get("last_completed_stage_key")
+    stage = _checkpoint_log_stage(context, state)
     logger.info(
         "Saving checkpoint context=%s status=%s background_stage=%s",
         context,

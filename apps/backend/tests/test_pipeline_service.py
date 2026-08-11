@@ -689,6 +689,22 @@ def test_visible_stage_checkpoints_completion_before_wait(monkeypatch):
     assert result["requirement_status"] == "COMPLETED"
 
 
+def test_checkpoint_log_stage_prefers_current_context_over_stale_completed_stage():
+    state = {
+        "background_stage": None,
+        "last_completed_stage_key": "bronze",
+        "status": "HITL_WAIT",
+    }
+
+    assert pipeline_runtime._checkpoint_log_stage(
+        "silver_merge_key_review:background_complete",
+        state,
+    ) == "silver"
+    assert pipeline_runtime._checkpoint_log_stage("silver:processing", state) == "silver"
+    assert pipeline_runtime._checkpoint_log_stage("gate4:complete", state) == "bronze"
+    assert pipeline_runtime._checkpoint_log_stage("gate5:complete", state) == "silver"
+
+
 def test_visible_stage_uses_file_source_labels(monkeypatch):
     from services import pipeline_runtime
 
@@ -740,7 +756,7 @@ def test_load_checkpoint_fields_uses_json_value_projection(monkeypatch):
     assert recorded["closed"] is True
 
 
-def test_load_checkpoint_fields_many_uses_one_ranked_query(monkeypatch):
+def test_load_checkpoint_fields_many_uses_direct_nonblocking_latest_query(monkeypatch):
     from services import pipeline_runtime
 
     recorded = {}
@@ -775,7 +791,9 @@ def test_load_checkpoint_fields_many_uses_one_ranked_query(monkeypatch):
         "run-1": {"status": "RUNNING", "background_stage": "bronze"},
         "run-2": {"status": "HITL_WAIT"},
     }
-    assert "ROW_NUMBER() OVER (PARTITION BY run_id" in recorded["query"]
+    assert "SELECT TOP 1 cp.full_state_json" in recorded["query"]
+    assert "WITH (READUNCOMMITTED)" in recorded["query"]
+    assert "OPENJSON(latest.full_state_json)" in recorded["query"]
     assert recorded["params"] == ("run-1", "run-2")
     assert recorded["closed"] is True
 

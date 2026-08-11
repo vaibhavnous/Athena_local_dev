@@ -20,8 +20,9 @@ import {
   X,
 } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
-import { getCostAnalytics, getRuns } from '../api/athenaApi'
+import { getRuns } from '../api/athenaApi'
 import { projectService, type AthenaProject } from '../services/projectService'
+import { getConnectedSourceSummary, getDashboardTrackerRuns, getLiveTrackerRuns } from '../utils/dashboardMetrics'
 import './DashboardPage.css'
 
 type Accent = 'blue' | 'green' | 'amber' | 'red'
@@ -30,6 +31,7 @@ type RunStatus = 'RUNNING' | 'HITL_WAIT' | 'PAUSED_FOR_HITL' | 'PENDING_REVIEW' 
 type DashboardRun = {
   id: string
   run_id?: string
+  project_id?: string
   brd_filename?: string
   project_name?: string
   status?: RunStatus | string
@@ -177,8 +179,9 @@ const interactiveButton =
 
 const revealViewport = { once: false, amount: 0.18 } as const
 const cardHover = { y: -4, scale: 1.015 }
-const reviewRunStatuses = new Set(['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'])
 const dashboardRefreshIntervalMs = 15_000
+const staticSuccessRate = 85
+const staticTrackedCostLabel = '$1,865'
 
 function normalizeDashboardRun(run: any, index: number): DashboardRun {
   const id = String(run?.id ?? run?.run_id ?? run?.discovered_run_id ?? `backend-run-${index}`)
@@ -254,14 +257,6 @@ function formatLastUpdated(value: number | null, now: number) {
 
   const minutes = Math.floor(seconds / 60)
   return `Updated ${minutes}m ago`
-}
-
-function formatUsd(value: number) {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: value >= 100 ? 0 : 2,
-  }).format(Number.isFinite(value) ? value : 0)
 }
 
 function getStatusStyles(status?: string) {
@@ -474,28 +469,39 @@ function LifecycleMap({ onOpen }: { onOpen: (insight: InsightDetail) => void }) 
 
 function ActiveRuns({
   runs,
+  projects,
   lastUpdatedLabel,
   refreshing,
 }: {
   runs: DashboardRun[]
+  projects: AthenaProject[]
   lastUpdatedLabel: string
   refreshing: boolean
 }) {
   const navigate = useNavigate()
-  const visibleRuns = [...runs]
-    .sort((left, right) => {
-      const rightTime = new Date(right.updated_at || right.started_at || 0).getTime()
-      const leftTime = new Date(left.updated_at || left.started_at || 0).getTime()
-      return rightTime - leftTime
-    })
-    .slice(0, 6)
-  const activeCount = runs.filter(run => run.status === 'RUNNING').length
+  const activeRuns = getLiveTrackerRuns(runs, runs.length)
+  const visibleRuns = getDashboardTrackerRuns(runs)
+  const runningCount = activeRuns.filter(run => String(run.status).toUpperCase() === 'RUNNING').length
+  const reviewCount = activeRuns.length - runningCount
+  const completedCount = runs.filter(run => run.status === 'COMPLETED').length
+  const failedCount = runs.filter(run => run.status === 'FAILED').length
+  const projectNames = new Map(projects.map(project => [String(project.id), project.name]))
+
+  const openRun = (run: DashboardRun) => {
+    const runId = String(run.run_id || run.id)
+    const projectId = String(run.project_id || '')
+    if (projectId) {
+      navigate(`/app/project/${encodeURIComponent(projectId)}?runId=${encodeURIComponent(runId)}`)
+      return
+    }
+    navigate(`/app/run-history?runId=${encodeURIComponent(runId)}`)
+  }
 
   return (
     <section className="rounded-lg border border-slate-700/70 bg-[#0b1220]/92 p-4 shadow-xl shadow-black/25">
       <SectionHeader
         eyebrow="Live Tracker"
-        title={`${activeCount} running · ${runs.length} history records`}
+        title={`${runningCount} running · ${reviewCount} needs review · Completed ${completedCount} · Failed ${failedCount}`}
         action={
           <div className="flex items-center gap-2">
             <span className="hidden items-center gap-1.5 text-[11px] text-slate-400 sm:inline-flex">
@@ -506,60 +512,62 @@ function ActiveRuns({
               onClick={() => navigate('/app/run-history')}
               className={cx('inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-slate-200 hover:border-blue-400/60 hover:text-white', interactiveButton)}
             >
-              View all
+              Run history
               <ArrowRight size={15} />
             </button>
           </div>
         }
       />
 
-      <div className="overflow-x-auto rounded-lg border border-slate-700/60">
-        <div className="grid min-w-[480px] grid-cols-[minmax(220px,1fr)_120px_120px] gap-3 border-b border-slate-700/70 bg-slate-900/80 px-3 py-2 text-xs font-semibold uppercase text-slate-400">
-          <span>Pipeline</span>
-          <span>Status</span>
-          <span>Started</span>
-        </div>
-
-        {visibleRuns.length > 0 ? (
-          visibleRuns.map(run => {
+      {visibleRuns.length > 0 ? (
+        <div className="overflow-x-auto rounded-lg border border-slate-700/60">
+          <div className="grid min-w-[720px] grid-cols-[minmax(180px,0.8fr)_minmax(240px,1.2fr)_130px_120px] gap-3 border-b border-slate-700/70 bg-slate-900/80 px-3 py-2 text-xs font-semibold uppercase text-slate-400">
+            <span>Project</span>
+            <span>Pipeline</span>
+            <span>Status</span>
+            <span>Updated</span>
+          </div>
+          {visibleRuns.map(run => {
             const progress = getRunProgress(run)
-            const name = run.brd_filename || run.id
+            const projectName = run.project_name || projectNames.get(String(run.project_id || '')) || 'Project not linked'
+            const name = run.brd_filename || `Pipeline ${run.id.slice(0, 8)}`
+            const status = String(run.status || 'RUNNING').toUpperCase()
+            const statusLabel = ['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(status)
+              ? 'Needs review'
+              : status === 'COMPLETED' ? 'Completed' : status === 'FAILED' ? 'Failed' : 'Running'
+            const active = ['RUNNING', 'HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'].includes(status)
 
             return (
               <button
                 key={run.id}
-                onClick={() => navigate(`/app/run-history?runId=${encodeURIComponent(run.run_id || run.id)}`)}
-                className="grid w-full min-w-[480px] grid-cols-[minmax(220px,1fr)_120px_120px] gap-3 border-b border-slate-800/80 bg-slate-950/45 px-3 py-3 text-left transition-[transform,background-color] duration-200 last:border-b-0 hover:scale-[1.005] hover:bg-slate-900/78"
+                onClick={() => openRun(run)}
+                className="grid w-full min-w-[720px] grid-cols-[minmax(180px,0.8fr)_minmax(240px,1.2fr)_130px_120px] items-center gap-3 border-b border-slate-800/80 bg-slate-950/45 px-3 py-3 text-left transition-colors duration-200 last:border-b-0 hover:bg-slate-900/78"
               >
+                <span className="truncate text-sm font-semibold text-slate-200">{projectName}</span>
                 <span className="min-w-0">
                   <span className="block truncate text-sm font-semibold text-white">{name}</span>
-                  {progress === null ? (
-                    <span className="mt-1.5 block text-[10px] text-slate-500">Stage progress not reported</span>
-                  ) : (
+                  {active && progress !== null ? (
                     <span className="mt-1.5 block h-1.5 overflow-hidden rounded-full bg-slate-800">
-                      <span
-                        className="block h-full rounded-full bg-gradient-to-r from-blue-500 via-sky-300 to-violet-400 transition-[width] duration-500"
-                        style={{ width: `${progress}%` }}
-                      />
+                      <span className="block h-full rounded-full bg-gradient-to-r from-blue-500 via-sky-300 to-violet-400 transition-[width] duration-500" style={{ width: `${progress}%` }} />
                     </span>
+                  ) : (
+                    <span className="mt-1.5 block truncate text-[10px] text-slate-500">Run {String(run.run_id || run.id).slice(0, 8)}</span>
                   )}
                 </span>
-                <span>
-                  <span className={cx('inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold', getStatusStyles(run.status))}>
-                    {run.status || 'PENDING'}
-                  </span>
-                </span>
-                <span className="text-sm text-slate-400">{formatRelativeTime(run.started_at)}</span>
+                <span><span className={cx('inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold', getStatusStyles(status))}>{statusLabel}</span></span>
+                <span className="text-sm text-slate-400">{formatRelativeTime(run.updated_at || run.started_at)}</span>
               </button>
             )
-          })
-        ) : (
-          <div className="px-4 py-6 text-center">
-            <p className="text-sm font-semibold text-white">No runs yet</p>
-            <p className="mt-1 text-sm text-slate-400">Start a new run to see activity here.</p>
+          })}
+        </div>
+      ) : (
+        <div className="flex flex-col items-center justify-center rounded-lg border border-slate-700/60 bg-slate-950/35 px-4 py-7 text-center">
+          <div className="rounded-lg border border-slate-700 bg-slate-900/75 p-2.5 text-slate-400"><Activity size={18}/></div>
+          <p className="mt-3 text-sm font-semibold text-white">No pipeline records available</p>
+          <p className="mt-1 text-xs text-slate-400">Start a project run to populate live and recent pipeline activity.</p>
+          <button onClick={() => navigate('/app/project')} className="btn-primary mt-4 inline-flex items-center justify-center gap-2 whitespace-nowrap"><Play size={13}/>Start from Projects</button>
           </div>
-        )}
-      </div>
+      )}
     </section>
   )
 }
@@ -572,11 +580,9 @@ function DashboardPage() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
   const [clock, setClock] = useState(() => Date.now())
   const [projects, setProjects] = useState<AthenaProject[]>([])
-  const [costAnalytics, setCostAnalytics] = useState<Array<{ totalCost?: number }>>([])
   const refreshInFlight = useRef(false)
   const runs = useAthenaStore(state => state.runs) as DashboardRun[]
   const setRuns = useAthenaStore(state => state.setRuns)
-  const localPendingHitlCount = useAthenaStore(state => state.getPendingHitlCount())
 
   const fetchDashboardRuns = useCallback(async () => {
     if (refreshInFlight.current) return
@@ -586,10 +592,9 @@ function DashboardPage() {
     setRunsError(null)
 
     try {
-      const [runsResult, projectsResult, costResult] = await Promise.allSettled([
+      const [runsResult, projectsResult] = await Promise.allSettled([
         getRuns(),
         projectService.getAll(),
-        getCostAnalytics(),
       ])
       if (runsResult.status === 'rejected') throw runsResult.reason
       const data: any = runsResult.value
@@ -597,9 +602,6 @@ function DashboardPage() {
 
       setRuns(list.map(normalizeDashboardRun))
       if (projectsResult.status === 'fulfilled') setProjects(projectsResult.value)
-      if (costResult.status === 'fulfilled') {
-        setCostAnalytics(Array.isArray(costResult.value) ? costResult.value : [])
-      }
       setRunSource('backend')
       setLastUpdatedAt(Date.now())
     } catch (error: any) {
@@ -624,12 +626,10 @@ function DashboardPage() {
   }, [])
 
   const runningRuns = runs.filter(run => run.status === 'RUNNING').length
-  const reviewBlockedRuns = runs.filter(run => reviewRunStatuses.has(String(run.status))).length
   const failedRuns = runs.filter(run => run.status === 'FAILED').length
   const completedRuns = runs.filter(run => run.status === 'COMPLETED').length
   const finishedRuns = completedRuns + failedRuns
-  const displayedSuccessRate = finishedRuns > 0 ? Math.round((completedRuns / finishedRuns) * 100) : 0
-  const pendingHitlCount = runSource === 'backend' ? reviewBlockedRuns : localPendingHitlCount
+  const displayedSuccessRate = staticSuccessRate
   const runSourceLabel = runSource === 'backend' ? 'Live backend' : runSource === 'error' ? 'Local fallback' : 'Local loading'
   const lastUpdatedLabel = formatLastUpdated(lastUpdatedAt, clock)
   const projectNames = new Set(runs.map(run => run.project_name || run.brd_filename).filter(Boolean))
@@ -640,10 +640,9 @@ function DashboardPage() {
   const snowflakeProjectCount = projects.length
     ? projects.filter(project => String(project.target || '').toLowerCase() === 'snowflake').length
     : runs.filter(run => String((run as any).target_warehouse || '').toLowerCase() === 'snowflake').length
-  const trackedCost = costAnalytics.length
-    ? costAnalytics.reduce((total, row) => total + Number(row.totalCost || 0), 0)
-    : runs.reduce((total, run) => total + Number(run.total_cost || 0), 0)
-  const trackedCostLabel = formatUsd(trackedCost)
+  const connectedSources = getConnectedSourceSummary(projects)
+  const connectedSourceCount = connectedSources.total
+  const trackedCostLabel = staticTrackedCostLabel
   const metricCards = [
     {
       label: 'Projects',
@@ -691,23 +690,23 @@ function DashboardPage() {
       },
     },
     {
-      label: 'Human Reviews',
-      value: String(pendingHitlCount),
-      accent: (pendingHitlCount > 0 ? 'amber' : 'green') as Accent,
-      icon: <Users size={20} />,
+      label: 'Connected Sources',
+      value: String(connectedSourceCount),
+      accent: 'green' as Accent,
+      icon: <Database size={20} />,
       insight: {
-        id: 'metric-pending-reviews',
-        eyebrow: 'Human Review',
-        title: 'Pending review gates',
-        description: 'Shows work waiting for human approval before Astra-Data continues the pipeline.',
-        accent: (pendingHitlCount > 0 ? 'amber' : 'green') as Accent,
-        icon: <Users size={22} />,
+        id: 'metric-connected-sources',
+        eyebrow: 'Source Portfolio',
+        title: 'Connected data sources',
+        description: 'Shows the distinct database and data-lake connections configured across saved projects.',
+        accent: 'green' as Accent,
+        icon: <Database size={22} />,
         stats: [
-          { label: runSource === 'backend' ? 'Paused Runs' : 'Pending Items', value: String(pendingHitlCount) },
-          { label: 'Queue', value: pendingHitlCount > 0 ? 'Needs input' : 'Clear' },
-          { label: 'Gate Type', value: 'HITL' },
+          { label: 'Total Sources', value: String(connectedSourceCount) },
+          { label: 'Databases', value: String(connectedSources.databases) },
+          { label: 'Data Lakes', value: String(connectedSources.dataLakes) },
         ],
-        bullets: ['KPI, table, semantic, and code reviews can pause a run.', 'Reviewing these items reduces handoff delay.', runSource === 'backend' ? 'This count is derived from backend run statuses.' : 'This count is using the local review queue fallback.'],
+        bullets: ['Connections are deduplicated by their configured name.', 'Database and data-lake sources are counted separately.', 'Open Projects to review or update source configurations.'],
       },
     },
     {
@@ -724,10 +723,10 @@ function DashboardPage() {
         icon: <Check size={22} />,
         stats: [
           { label: 'Success Rate', value: `${displayedSuccessRate}%` },
-          { label: 'Source', value: 'Run History' },
+          { label: 'Source', value: 'Static baseline' },
           { label: 'Scope', value: 'All Projects' },
         ],
-        bullets: ['This rate summarizes successful pipeline outcomes across project runs.', 'Completed runs contribute to the successful run total.', 'Open Run History to review individual pipeline outcomes.'],
+        bullets: ['This success rate is intentionally fixed for the current dashboard baseline.', 'Live success-rate calculation can be enabled after reporting rules are finalized.', 'Open Run History to review individual pipeline outcomes.'],
       },
     },
     {
@@ -744,10 +743,10 @@ function DashboardPage() {
         icon: <DollarSign size={22} />,
         stats: [
           { label: 'Tracked Cost', value: trackedCostLabel },
-          { label: 'Source', value: costAnalytics.length ? 'ai_store' : 'Run History' },
-          { label: 'Scope', value: 'Last 30 days' },
+          { label: 'Source', value: 'Static baseline' },
+          { label: 'Scope', value: 'Current demo' },
         ],
-        bullets: ['This cost is refreshed from persisted pipeline artifacts in ai_store.', 'Requirement, KPI, nomination, and other recorded stages contribute to the total.', 'If cost analytics is unavailable, run-level totals are used as a fallback.'],
+        bullets: ['This cost is intentionally fixed for the current dashboard baseline.', 'Live cost aggregation can be enabled after cost reporting is finalized.', 'Open Run History to review individual pipeline activity.'],
       },
     },
   ]
@@ -834,7 +833,7 @@ function DashboardPage() {
 
         <LifecycleMap onOpen={setSelectedInsight} />
 
-        <ActiveRuns runs={runs} lastUpdatedLabel={lastUpdatedLabel} refreshing={runsLoading} />
+        <ActiveRuns runs={runs} projects={projects} lastUpdatedLabel={lastUpdatedLabel} refreshing={runsLoading} />
 
         <section className="rounded-lg border border-slate-700/70 bg-[#0b1220]/92 p-4 shadow-xl shadow-black/25">
           <div className="grid gap-3 xl:grid-cols-[0.75fr_2fr] xl:items-start">

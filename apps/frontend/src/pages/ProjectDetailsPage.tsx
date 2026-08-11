@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { AnimatePresence } from 'framer-motion'
 import { AlertTriangle, ArrowLeft, CalendarDays, Edit2, FileText, Folder, Info, Loader2, Play, RefreshCw } from 'lucide-react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { getRun } from '../api/athenaApi'
 import { PageHeader } from '../components/shared/DashboardLayout'
 import PythonCodeDialog from '../components/shared/PythonCodeDialog'
@@ -23,6 +23,8 @@ import { ProjectForm } from './ProjectInitiation'
 export default function ProjectDetailsPage() {
   const { projectId } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
+  const requestedRunId = new URLSearchParams(location.search).get('runId') || ''
   const { data: project, isLoading, error } = useProject(projectId)
   const { data: connections = [], isLoading: connectionsLoading } = useDbConfigurations()
   const updateProject = useUpdateProject()
@@ -44,10 +46,10 @@ export default function ProjectDetailsPage() {
       setSelectedRunId('')
       return
     }
-    if (!runs.some((run) => String(run.run_id) === selectedRunId)) {
-      setSelectedRunId(String(runs[0].run_id))
-    }
-  }, [runs, selectedRunId])
+    if (runs.some((run) => String(run.run_id) === selectedRunId)) return
+    const requestedRun = runs.find((run) => String(run.run_id) === requestedRunId)
+    setSelectedRunId(String(requestedRun?.run_id || runs[0].run_id))
+  }, [runs, selectedRunId, requestedRunId])
 
   useEffect(() => {
     setRunInfoOpen(true)

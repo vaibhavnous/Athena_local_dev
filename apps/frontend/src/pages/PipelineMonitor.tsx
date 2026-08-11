@@ -1140,9 +1140,6 @@ function StepRow({ step, index = 0, isLast = false, onOpenReview, onOpenReport, 
         {step.preparingReview && (
           <span className="shrink-0 text-[10px] font-medium text-[#3f82ff]">Loading…</span>
         )}
-        {step.inferredProgress && (
-          <span className="shrink-0 text-[10px] font-medium text-[#3f82ff]">Starting…</span>
-        )}
         {complete && step.key === 'report_generation' && (
           <button
             type="button"
@@ -1168,7 +1165,7 @@ function StepRow({ step, index = 0, isLast = false, onOpenReview, onOpenReport, 
             className="inline-flex shrink-0 items-center gap-1 rounded border border-emerald-500/40 bg-[#0b1424] px-1.5 py-0.5 text-[9px] font-medium text-emerald-400 opacity-0 transition-opacity hover:bg-emerald-500/10 group-hover:opacity-100 focus-visible:opacity-100 disabled:cursor-wait disabled:opacity-60"
           >
             <RotateCcw size={8} className={rerunning ? 'animate-spin' : ''} />
-            {rerunning ? 'Starting' : 'Re-run'}
+            {rerunning ? 'Re-running' : 'Re-run'}
           </button>
         )}
       </div>

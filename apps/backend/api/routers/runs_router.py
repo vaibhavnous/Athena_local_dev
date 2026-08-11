@@ -492,7 +492,7 @@ def runs(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
     if demo_enabled():
         return demo_runs()
 
-    from services.pipeline_runtime import list_runs
+    from services.pipeline_runtime import list_runs, load_checkpoint_fields_many
 
     try:
         # ✅ configurable timeout with safe minimum
@@ -517,12 +517,45 @@ def runs(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
 
         if fast_summary:
+            run_ids = [str(row.get("run_id")) for row in rows if row.get("run_id")]
+            checkpoints = load_checkpoint_fields_many(
+                run_ids,
+                "brd_filename",
+                "display_name",
+                "source",
+                "project_id",
+                "project_name",
+                "project_description",
+                "database_type",
+                "db_type",
+                "database_name",
+                "target_warehouse",
+                "execution_engine",
+                "dbt_deployment_mode",
+                "database_flow_version",
+                "status",
+                "background_stage",
+                "next_gate",
+                "next_review_key",
+                "resume_message",
+                "execution_ready",
+                "awaiting_stage_confirmation",
+                "next_stage_key",
+                "next_stage_label",
+                "started_at",
+                "completed_at",
+                "updated_at",
+                "failed_background_stage",
+                "last_failed_stage_key",
+                "failed_stage_label",
+                "error",
+            )
             for row in rows:
                 run_id = row.get("run_id")
                 if not run_id:
                     continue
                 try:
-                    results.append(_checkpoint_run_summary(row))
+                    results.append(_checkpoint_run_summary({**row, "checkpoint": checkpoints.get(str(run_id), {})}))
                 except Exception:
                     logger.warning("Failed to build checkpoint run summary; returning fallback summary", extra={"run_id": run_id})
                     results.append(_fallback_run_summary(row))
