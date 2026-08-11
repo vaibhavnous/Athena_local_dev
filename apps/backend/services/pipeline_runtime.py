@@ -49,6 +49,18 @@ SNOWFLAKE_COMPLETED_EXECUTION_STATUSES = {
     "SKIPPED_DBT_CODEGEN_ONLY",
 }
 COMPLETED_EXECUTION_STATUSES = {"COMPLETED", "COMPLETED_WITH_WARNINGS", "SKIPPED", "HANDOFF_ONLY"}
+REVIEW_CHECKPOINT_FIELDS = {
+    "bronze_review_decision",
+    "bronze_review_artifact",
+    "gate4",
+    "silver_merge_key_review_decision",
+    "silver_merge_key_review_artifact",
+    "silver_review_decision",
+    "silver_review_artifact",
+    "gate5",
+    "gold_review_decision",
+    "gold_review_artifact",
+}
 GENERATION_ARTIFACT_TYPES = {
     "bronze": {"BRONZE_GENERATION", "BRONZE_SCRIPTS", "SFTP_BRONZE_GENERATION"},
     "silver": {"SILVER_GENERATION", "SILVER_SCRIPTS", "SFTP_SILVER_GENERATION"},
@@ -145,6 +157,26 @@ def _invalidate_generation_first_review_state(
         "gate5": {"gold_generation_contract"},
         "gold_review": set(),
     }.get(boundary, set())
+    invalidated_review_fields = {
+        "gate4": {
+            "silver_merge_key_review_decision",
+            "silver_merge_key_review_artifact",
+            "silver_review_decision",
+            "silver_review_artifact",
+            "gate5",
+            "gold_review_decision",
+            "gold_review_artifact",
+        },
+        "silver_merge_key_review": {
+            "silver_review_decision",
+            "silver_review_artifact",
+            "gate5",
+            "gold_review_decision",
+            "gold_review_artifact",
+        },
+        "gate5": {"gold_review_decision", "gold_review_artifact"},
+        "gold_review": set(),
+    }.get(boundary, set())
 
     for key in list(updated):
         if generation_first_snowflake_dbt_flow(state) and key.startswith("snowflake_dbt_"):
@@ -185,6 +217,9 @@ def _invalidate_generation_first_review_state(
         "run_report",
     ):
         updated.pop(key, None)
+    # Explicit nulls distinguish intentional downstream invalidation from a
+    # stale checkpoint that merely omitted an already-approved review.
+    updated.update({key: None for key in invalidated_review_fields})
     updated.update(
         {
             "execution_ready": False,
@@ -1452,6 +1487,20 @@ def save_checkpoint_state(run_id: str, state: Dict[str, Any]) -> None:
     conn = get_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT TOP 1 full_state_json
+            FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (UPDLOCK, HOLDLOCK)
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        )
+        current = cursor.fetchone()
+        if current and current[0]:
+            current_state = json.loads(current[0])
+            for field in REVIEW_CHECKPOINT_FIELDS:
+                if field not in persisted_state and field in current_state:
+                    persisted_state[field] = current_state[field]
         state_json = json.dumps(persisted_state, default=str)
         cursor.execute(
             f"""

@@ -1113,12 +1113,14 @@ def test_gold_contract_includes_dimensions_from_certified_join_tables(monkeypatc
             "source_table": "bronze.claim_information",
             "target_table": "silver.silver_claim_information",
             "column_count": 3,
+            "merge_keys": ["claim_id"],
         },
         {
             "table": "policy_transactions",
             "source_table": "bronze.policy_transactions",
             "target_table": "silver.silver_policy_transactions",
             "column_count": 2,
+            "merge_keys": ["policy_id"],
         },
     ]
     enriched_metadata = {
@@ -1163,6 +1165,35 @@ def test_gold_contract_includes_dimensions_from_certified_join_tables(monkeypatc
         and item["columns"] == ["policy_state"]
         for item in dimension_mappings
     )
+
+
+def test_independent_gold_dimensions_keep_three_best_executable_entities():
+    results = [
+        {
+            "table": name,
+            "target_table": f"silver.silver_{name}",
+            "merge_keys": [f"{name}_id"] if name != "unkeyed" else [],
+        }
+        for name in ("claims", "policies", "agents", "payments", "unkeyed")
+    ]
+    columns = [
+        {
+            "table_name": table,
+            "column_name": f"attribute_{ordinal}",
+            "semantic_type": "DIMENSION",
+        }
+        for table, count in (("claims", 4), ("policies", 3), ("agents", 2), ("payments", 1), ("unkeyed", 8))
+        for ordinal in range(count)
+    ]
+
+    dimensions = silver_gen._independent_gold_dimensions(
+        columns=columns,
+        results=results,
+        silver_tables={item["table"]: item["target_table"] for item in results},
+        kpi_mappings=[],
+    )
+
+    assert [item["logical_table"] for item in dimensions] == ["claims", "policies", "agents"]
 
 
 def test_dimension_script_reads_joined_dimension_table():

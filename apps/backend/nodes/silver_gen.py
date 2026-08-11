@@ -29,6 +29,7 @@ from utilis.logger import logger
 SILVER_MAX_WORKERS = int(os.environ.get("SILVER_MAX_WORKERS", "4"))
 SILVER_LLM_ENV_KEYS = ("ATHENA_SILVER_USE_LLM", "USE_LLM")
 KIMBALL_LLM_ENV_KEYS = ("ATHENA_GOLD_KIMBALL_PLAN_USE_LLM", "ATHENA_GOLD_USE_LLM", "USE_LLM")
+MAX_GOLD_DIMENSION_TABLES = 3
 
 
 class SilverTableRef(TypedDict):
@@ -2308,17 +2309,24 @@ def _independent_gold_dimensions(
         if not row.get("natural_key_columns"):
             row["natural_key_columns"] = [name]
 
-    # Prefer reviewed key-backed entities with richer descriptive context. The
-    # materialization boundary still reloads and validates the exact active keys.
+    # Prefer KPI-relevant, reviewed key-backed entities with richer descriptive
+    # context. The materialization boundary still reloads and validates the keys.
+    eligible = [
+        item
+        for item in grouped.values()
+        if (
+            result_by_table.get(str(item["logical_table"]).casefold()) or {}
+        ).get("merge_keys")
+    ]
     ranked = sorted(
-        grouped.values(),
+        eligible,
         key=lambda item: (
-            -int(bool((result_by_table.get(str(item["logical_table"]).casefold()) or {}).get("merge_keys"))),
+            -len(item.get("consumed_by_kpis") or []),
             -len(item.get("columns") or []),
             str(item.get("logical_table") or ""),
         ),
     )
-    return ranked
+    return ranked[:MAX_GOLD_DIMENSION_TABLES]
 
 
 def _factless_gold_mappings(
