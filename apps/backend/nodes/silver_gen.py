@@ -2002,6 +2002,51 @@ def _best_measure_for_kpi(kpi: Dict[str, Any], columns: List[Dict[str, Any]]) ->
     return selected if _score_column_for_kpi(kpi, selected) >= minimum_score else None
 
 
+def _count_anchor_for_kpi(
+    kpi: Dict[str, Any],
+    columns: List[Dict[str, Any]],
+    results: List[Dict[str, object]],
+) -> Dict[str, Any] | None:
+    """Resolve COUNT(*) to one unambiguous approved Silver business process."""
+    columns_by_table: Dict[str, List[Dict[str, Any]]] = {}
+    for column in columns:
+        table = str(column.get("table_name") or "").casefold()
+        if table:
+            columns_by_table.setdefault(table, []).append(column)
+    result_by_table = {
+        str(item.get("table") or item.get("table_name") or "").casefold(): item
+        for item in results
+        if isinstance(item, dict)
+    }
+    candidates = [table for table in result_by_table if columns_by_table.get(table)]
+    if not candidates:
+        return None
+    kpi_tokens = _tokens(" ".join(
+        str(kpi.get(key) or "") for key in ("kpi_name", "name", "kpi_description", "description")
+    ))
+    scores = {
+        table: 20 * len(kpi_tokens.intersection(_tokens(table)))
+        + max((_score_column_for_kpi(kpi, column) for column in columns_by_table[table]), default=0)
+        for table in candidates
+    }
+    ranked = sorted(candidates, key=lambda table: (-scores[table], table))
+    if len(ranked) > 1 and scores[ranked[0]] <= scores[ranked[1]]:
+        return None
+    selected_table = ranked[0]
+    result = result_by_table[selected_table]
+    key_names = [
+        str(key).casefold()
+        for key in (result.get("merge_keys") or result.get("primary_keys") or [])
+    ]
+    by_name = {
+        str(column.get("column_name") or "").casefold(): column
+        for column in columns_by_table[selected_table]
+    }
+    return next((by_name[key] for key in key_names if key in by_name), None) or max(
+        columns_by_table[selected_table], key=lambda column: _score_column_for_kpi(kpi, column)
+    )
+
+
 def _dimension_scope_tables(joins: List[Dict[str, Any]], measure_table: str | None) -> set[str]:
     if not measure_table:
         return set()
@@ -2030,7 +2075,7 @@ def _dimension_columns(
     dimensions: List[Dict[str, str]] = []
     for column in columns:
         semantic = str(column.get("semantic_type") or "")
-        if semantic not in {"DIMENSION", "DATE", "FLAG"}:
+        if semantic not in {"DIMENSION", "FLAG"}:
             continue
         table_name = str(column.get("table_name") or "")
         if scoped_tables and table_name not in scoped_tables and semantic != "DATE":
@@ -2229,7 +2274,23 @@ def _star_dimension_entity(column: Any, table: Any = None) -> str:
     return text or _canonical_gold_column(table) or "dimension"
 
 
-def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tables: Dict[str, str]) -> List[Dict[str, Any]]:
+def _silver_business_entity(table: Any) -> str:
+    """Use the approved Silver object as the stable dimension boundary."""
+    value = re.sub(r"[^a-z0-9_]+", "_", str(table or "").strip().lower()).strip("_")
+    return value.removeprefix("silver_") or "dimension"
+
+
+def _dimension_mappings_from_kpis(
+    kpi_mappings: List[Dict[str, Any]],
+    silver_tables: Dict[str, str],
+    results: List[Dict[str, object]],
+) -> List[Dict[str, Any]]:
+    """Group KPI-selected attributes into Silver-backed business dimensions."""
+    result_by_table = {
+        str(item.get("table") or item.get("table_name") or "").casefold(): item
+        for item in results
+        if isinstance(item, dict)
+    }
     grouped: Dict[str, Dict[str, Any]] = {}
     for mapping in kpi_mappings:
         if not isinstance(mapping, dict) or str(mapping.get("readiness") or "").upper() == "BLOCKED":
@@ -2244,7 +2305,19 @@ def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tab
             column = str(dimension.get("column") or "").strip()
             if not table or not column:
                 continue
-            entity = _star_dimension_entity(column, table)
+            entity = str(dimension.get("entity") or _silver_business_entity(table)).strip()
+            entity = re.sub(r"[^a-z0-9_]+", "_", entity.lower()).strip("_")
+            silver_result = result_by_table.get(table.casefold()) or {}
+            natural_keys = list(dict.fromkeys(
+                str(key).strip()
+                for key in (
+                    dimension.get("natural_key_columns")
+                    or silver_result.get("merge_keys")
+                    or silver_result.get("primary_keys")
+                    or []
+                )
+                if str(key).strip()
+            ))
             row = grouped.setdefault(
                 f"{table.lower()}::{entity}",
                 {
@@ -2256,8 +2329,9 @@ def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tab
                     "consumed_by_kpis": [],
                 },
             )
-            if column not in row["natural_key_columns"]:
-                row["natural_key_columns"].append(column)
+            for key in natural_keys:
+                if key not in row["natural_key_columns"]:
+                    row["natural_key_columns"].append(key)
             if column not in row["columns"]:
                 row["columns"].append(column)
             if kpi_name and kpi_name not in row["consumed_by_kpis"]:
@@ -2272,77 +2346,45 @@ def _independent_gold_dimensions(
     silver_tables: Dict[str, str],
     kpi_mappings: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Plan reusable dimensions from approved Silver structure, independently of KPI computability."""
-    grouped = {
-        f"{str(item['logical_table']).casefold()}::{str(item.get('entity') or '').casefold()}": dict(item)
-        for item in _dimension_mappings_from_kpis(kpi_mappings, silver_tables)
-    }
+    """Plan dimensions only when an approved, computable KPI consumes them."""
+    # ponytail: `columns` remains in the signature for caller compatibility; it
+    # must never independently create a physical Gold object.
+    del columns
+    return _dimension_mappings_from_kpis(kpi_mappings, silver_tables, results)
+
+
+def _bind_kpi_dimensions_to_silver_entities(
+    mapping: Dict[str, Any], results: List[Dict[str, object]]
+) -> Dict[str, Any]:
+    """Pin every selected KPI attribute to one reviewed Silver business entity."""
     result_by_table = {
         str(item.get("table") or item.get("table_name") or "").casefold(): item
         for item in results
         if isinstance(item, dict)
     }
-    for column in columns:
-        if not isinstance(column, dict) or str(column.get("semantic_type") or "").upper() not in {
-            "DIMENSION", "DATE", "FLAG"
-        }:
+    dimensions = []
+    for raw in mapping.get("grouping_dimensions") or []:
+        if not isinstance(raw, dict):
             continue
-        logical = str(column.get("table_name") or "").strip()
-        name = str(column.get("column_name") or "").strip()
-        if not logical or not name or logical.casefold() not in silver_tables:
-            continue
-        entity = _star_dimension_entity(name, logical)
-        row = grouped.setdefault(
-            f"{logical.casefold()}::{entity}",
-            {
-                "logical_table": logical,
-                "entity": entity,
-                "source_silver_table": silver_tables[logical.casefold()],
-                "natural_key_columns": [name],
-                "columns": [],
-                "consumed_by_kpis": [],
-            },
-        )
-        if name not in row["columns"]:
-            row["columns"].append(name)
-        if not row.get("natural_key_columns"):
-            row["natural_key_columns"] = [name]
-
-    # Prefer reviewed key-backed entities with richer descriptive context. The
-    # materialization boundary still reloads and validates the exact active keys.
-    ranked = sorted(
-        grouped.values(),
-        key=lambda item: (
-            -int(bool((result_by_table.get(str(item["logical_table"]).casefold()) or {}).get("merge_keys"))),
-            -len(item.get("columns") or []),
-            str(item.get("logical_table") or ""),
-        ),
-    )
-    return ranked
-
-
-def _factless_gold_mappings(
-    *, results: List[Dict[str, object]], silver_tables: Dict[str, str]
-) -> List[Dict[str, Any]]:
-    """Plan one auditable entity-coverage fact per reviewed, key-backed Silver object."""
-    mappings: List[Dict[str, Any]] = []
-    for result in sorted(results, key=lambda item: str(item.get("table") or item.get("table_name") or "")):
-        if not isinstance(result, dict):
-            continue
-        logical = str(result.get("table") or result.get("table_name") or "").strip()
-        key_hints = list(dict.fromkeys(str(key).strip() for key in (
-            result.get("merge_keys") or result.get("primary_keys") or []
-        ) if str(key).strip()))
-        if not logical or logical.casefold() not in silver_tables:
-            continue
-        mappings.append({
-            "fact_type": "FACTLESS_ENTITY_COVERAGE",
-            "logical_table": logical,
-            "source_silver_table": silver_tables[logical.casefold()],
-            "grain_columns": key_hints,
-            "readiness": "PENDING_EXACT_KEY_VALIDATION",
+        table = str(raw.get("table") or (mapping.get("measure") or {}).get("table") or "").strip()
+        result = result_by_table.get(table.casefold()) or {}
+        natural_keys = list(dict.fromkeys(
+            str(key).strip()
+            for key in (
+                raw.get("natural_key_columns")
+                or result.get("merge_keys")
+                or result.get("primary_keys")
+                or []
+            )
+            if str(key).strip()
+        ))
+        dimensions.append({
+            **raw,
+            "table": table,
+            "entity": str(raw.get("entity") or _silver_business_entity(table)),
+            "natural_key_columns": natural_keys,
         })
-    return mappings
+    return {**mapping, "grouping_dimensions": dimensions}
 
 
 def _extract_json_object(value: Any) -> Dict[str, Any]:
@@ -2358,6 +2400,7 @@ def _kimball_candidates(columns: List[Dict[str, Any]], certified_joins: List[Dic
     measures: Dict[str, Dict[str, Any]] = {}
     dimensions: Dict[str, Dict[str, Any]] = {}
     times: Dict[str, Dict[str, Any]] = {}
+    keys: Dict[str, Dict[str, Any]] = {}
     joins: Dict[str, Dict[str, Any]] = {}
     for column in columns:
         if not isinstance(column, dict):
@@ -2375,12 +2418,16 @@ def _kimball_candidates(columns: List[Dict[str, Any]], certified_joins: List[Dic
         }
         if not candidate["table"] or not candidate["column"]:
             continue
-        if candidate["semantic_type"] in {"MEASURE", "FLAG"}:
+        if candidate["semantic_type"] in {"MEASURE", "FLAG", "ID", "SURROGATE_KEY"}:
             measures[f"M{len(measures) + 1}"] = candidate
-        if candidate["semantic_type"] in {"DIMENSION", "DATE", "FLAG"}:
+        if candidate["semantic_type"] in {"DIMENSION", "FLAG"}:
             dimensions[f"D{len(dimensions) + 1}"] = candidate
         if candidate["semantic_type"] in {"DATE", "AUDIT_TIMESTAMP"}:
             times[f"T{len(times) + 1}"] = candidate
+        if candidate["semantic_type"] in {"ID", "SURROGATE_KEY"} or bool(
+            column.get("is_primary_key") or column.get("is_business_key")
+        ):
+            keys[f"K{len(keys) + 1}"] = candidate
     for join in certified_joins:
         if not isinstance(join, dict) or not join.get("certified"):
             continue
@@ -2388,7 +2435,13 @@ def _kimball_candidates(columns: List[Dict[str, Any]], certified_joins: List[Dic
             key: join.get(key)
             for key in ("left_table", "left_column", "right_table", "right_column", "join_type", "cardinality", "confidence")
         }
-    return {"measures": measures, "dimensions": dimensions, "times": times, "joins": joins}
+    return {
+        "measures": measures,
+        "dimensions": dimensions,
+        "times": times,
+        "keys": keys,
+        "joins": joins,
+    }
 
 
 def _kimball_plan_prompt(
@@ -2405,10 +2458,11 @@ def _kimball_plan_prompt(
         if validation_feedback
         else ""
     )
-    shape = '{"measure_id":"M1","aggregation":"SUM|AVG|MIN|MAX|COUNT","dimension_ids":["D1"],"time_id":"T1|null","time_grain":"day|week|month|quarter|year","join_ids":["J1"],"fact_grain":["D1","period_start"]}'
+    shape = '{"measure_id":"M1","aggregation":"SUM|AVG|MIN|MAX|COUNT","dimensions":[{"dimension_id":"D1","entity":"business_entity","key_ids":["K1"]}],"time_id":"T1|null","time_grain":"day|week|month|quarter|year","join_ids":["J1"],"fact_grain":["D1","period_start"]}'
     return (
         "Design a Kimball Gold model. Return only JSON matching this exact shape. "
         "Use only candidate IDs. Do not invent IDs, columns, joins, or aggregations. "
+        "Group attributes of the same Silver-backed business entity under the same concise entity name. "
         "fact_grain must include every selected dimension ID and include period_start only when time_id is set."
         + retry_context
         + "\nKPI=" + json.dumps(kpi, default=str)
@@ -2423,16 +2477,42 @@ def _normalize_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any
 
     def canonical_column(item: Dict[str, Any]) -> Dict[str, Any]:
         meta = index.get((str(item.get("table") or "").casefold(), str(item.get("column") or "").casefold()))
-        return {
+        normalized = {
             "table": str((meta or item).get("table_name") or item.get("table") or ""),
             "column": str((meta or item).get("column_name") or item.get("column") or ""),
             "semantic_type": str((meta or item).get("semantic_type") or item.get("semantic_type") or "").upper(),
         }
+        if item.get("entity"):
+            normalized["entity"] = re.sub(
+                r"[^a-z0-9_]+", "_", str(item["entity"]).strip().lower()
+            ).strip("_")
+        if item.get("natural_key_columns"):
+            normalized["natural_key_columns"] = [
+                str(value) for value in item["natural_key_columns"] if str(value or "").strip()
+            ]
+        return normalized
 
     measure_input = plan.get("measure") or candidates["measures"].get(str(plan.get("measure_id") or ""), {})
-    dimensions_input = plan.get("dimensions") if isinstance(plan.get("dimensions"), list) else [
-        candidates["dimensions"].get(str(identifier) or "", {}) for identifier in plan.get("dimension_ids") or []
-    ]
+    if isinstance(plan.get("dimensions"), list):
+        dimensions_input = []
+        for item in plan["dimensions"]:
+            if not isinstance(item, dict):
+                continue
+            candidate = candidates["dimensions"].get(str(item.get("dimension_id") or ""), {})
+            natural_keys = [
+                str(candidates["keys"].get(str(identifier), {}).get("column") or "")
+                for identifier in item.get("key_ids") or []
+            ]
+            dimensions_input.append({
+                **candidate,
+                **item,
+                "natural_key_columns": [key for key in natural_keys if key],
+            })
+    else:
+        dimensions_input = [
+            candidates["dimensions"].get(str(identifier) or "", {})
+            for identifier in plan.get("dimension_ids") or []
+        ]
     time_input = plan.get("time") or candidates["times"].get(str(plan.get("time_id") or ""), {})
     join_lookup = {
         tuple(str(join.get(key) or "").casefold() for key in ("left_table", "left_column", "right_table", "right_column")): join
@@ -2475,11 +2555,14 @@ def _validate_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]
     index = {(str(c.get("table_name") or "").casefold(), str(c.get("column_name") or "").casefold()): c for c in columns if isinstance(c, dict)}
     measure = plan.get("measure") or {}
     measure_meta = index.get((str(measure.get("table") or "").casefold(), str(measure.get("column") or "").casefold()))
-    if not measure_meta or str(measure_meta.get("semantic_type") or "").upper() not in {"MEASURE", "FLAG"}:
-        raise ValueError("Kimball plan selected an invalid measure")
     aggregation = str(measure.get("aggregation") or "").upper()
     if aggregation not in {"SUM", "AVG", "MIN", "MAX", "COUNT"}:
         raise ValueError("Kimball plan selected an unsupported aggregation")
+    measure_semantic = str((measure_meta or {}).get("semantic_type") or "").upper()
+    if not measure_meta or (
+        aggregation != "COUNT" and measure_semantic not in {"MEASURE", "FLAG"}
+    ):
+        raise ValueError("Kimball plan selected an invalid measure")
 
     def type_family(column: Dict[str, Any] | None) -> str:
         data_type = str(
@@ -2509,6 +2592,19 @@ def _validate_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]
         meta = index.get((str(item.get("table") or "").casefold(), str(item.get("column") or "").casefold()))
         if not meta or str(meta.get("semantic_type") or "").upper() not in {"DIMENSION", "DATE", "FLAG"}:
             raise ValueError("Kimball plan selected an invalid dimension")
+        entity = str(item.get("entity") or "")
+        if entity and not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", entity):
+            raise ValueError("Kimball plan selected an invalid business-entity name")
+        natural_keys = [str(value) for value in item.get("natural_key_columns") or []]
+        if entity and not natural_keys:
+            raise ValueError("Kimball plan business dimension has no approved natural key")
+        for key in natural_keys:
+            key_meta = index.get((str(item.get("table") or "").casefold(), key.casefold()))
+            if not key_meta or not (
+                str(key_meta.get("semantic_type") or "").upper() in {"ID", "SURROGATE_KEY"}
+                or bool(key_meta.get("is_primary_key") or key_meta.get("is_business_key"))
+            ):
+                raise ValueError("Kimball plan business dimension selected an invalid natural key")
     time = plan.get("time") or {}
     if time:
         meta = index.get((str(time.get("table") or "").casefold(), str(time.get("column") or "").casefold()))
@@ -2629,6 +2725,9 @@ def _build_gold_generation_contract(
             continue
         kpi_name = _extract_kpi_name(kpi)
         measure = _best_measure_for_kpi(kpi, columns)
+        inferred_without_measure = _infer_aggregation(kpi_name, None)
+        if measure is None and inferred_without_measure == "COUNT":
+            measure = _count_anchor_for_kpi(kpi, columns, results)
         measure_table = str((measure or {}).get("table_name") or "")
         measure_column = str((measure or {}).get("column_name") or "")
         aggregation = _infer_aggregation(kpi_name, measure)
@@ -2706,6 +2805,7 @@ def _build_gold_generation_contract(
         else:
             mapping["kimball_plan_source"] = "DETERMINISTIC"
         mapping, mapping_warnings = _constrain_gold_mapping(mapping, silver_tables)
+        mapping = _bind_kpi_dimensions_to_silver_entities(mapping, results)
         warnings.extend(f"KPI '{kpi_name}': {warning}" for warning in mapping_warnings)
         kpi_mappings.append(mapping)
 
@@ -2715,7 +2815,9 @@ def _build_gold_generation_contract(
         silver_tables=silver_tables,
         kpi_mappings=kpi_mappings,
     )
-    factless_mappings = _factless_gold_mappings(results=results, silver_tables=silver_tables)
+    # Factless facts require an explicit approved business-event KPI; a Silver
+    # table alone is not sufficient justification for a Gold table.
+    factless_mappings: List[Dict[str, Any]] = []
     status = "READY"
     if warnings:
         status = "READY_WITH_WARNINGS"

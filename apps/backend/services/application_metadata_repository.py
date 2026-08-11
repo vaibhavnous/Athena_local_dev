@@ -21,6 +21,7 @@ class ApplicationMetadataRepository(MetadataRepository):
     """Persist design metadata in the application Azure SQL database."""
 
     uses_environment_source = True
+    max_bind_parameters = 2000
 
     def __init__(
         self,
