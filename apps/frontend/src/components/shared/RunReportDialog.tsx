@@ -46,12 +46,16 @@ export default function RunReportDialog({ isOpen, onClose, report }) {
   const kpis = Array.isArray(report.kpis) ? report.kpis : []
   const reviews = Object.entries(report.reviews || {})
   const deployment = report.deployment || {}
+  const primaryKeyColumns = tables.reduce(
+    (count, table) => count + (table.columns || []).filter((column) => column.is_primary_key).length,
+    0,
+  )
   const summaryCards = [
     { label: 'Tables', value: metrics.tables ?? tables.length, icon: Table2, tone: 'text-cyan-300 bg-cyan-400/10 border-cyan-400/20' },
     { label: 'Columns', value: metrics.columns ?? 0, icon: Columns3, tone: 'text-violet-300 bg-violet-400/10 border-violet-400/20' },
     { label: 'KPIs', value: metrics.kpis ?? kpis.length, icon: BarChart3, tone: 'text-amber-300 bg-amber-400/10 border-amber-400/20' },
     { label: 'Artifacts', value: metrics.artifacts ?? artifacts.length, icon: FileCheck2, tone: 'text-emerald-300 bg-emerald-400/10 border-emerald-400/20' },
-    { label: 'Key Columns', value: metrics.key_columns ?? 0, icon: KeyRound, tone: 'text-blue-300 bg-blue-400/10 border-blue-400/20' },
+    { label: 'Primary Keys', value: metrics.primary_key_columns ?? primaryKeyColumns, icon: KeyRound, tone: 'text-blue-300 bg-blue-400/10 border-blue-400/20' },
     { label: 'PII Columns', value: metrics.pii_columns ?? 0, icon: ShieldCheck, tone: 'text-rose-300 bg-rose-400/10 border-rose-400/20' },
   ]
 
@@ -215,35 +219,72 @@ export default function RunReportDialog({ isOpen, onClose, report }) {
                       <Table2 size={15} className="text-cyan-300" />
                       Tables and columns
                     </div>
-                    <span className="text-[10px] text-[#7184a3]">{tables.length} governed tables</span>
+                    <div className="flex flex-wrap justify-end gap-2 text-[9px] text-[#7184a3]">
+                      <span className="inline-flex items-center gap-1"><KeyRound size={10} className="text-amber-300" />Primary key</span>
+                      <span className="rounded bg-cyan-400/10 px-1.5 py-0.5 text-cyan-300">JOIN</span>
+                      <span className="rounded bg-violet-400/10 px-1.5 py-0.5 text-violet-300">MERGE</span>
+                      <span className="rounded bg-blue-400/10 px-1.5 py-0.5 text-blue-300">ID</span>
+                    </div>
                   </div>
-                  <div className="grid gap-3 lg:grid-cols-2">
-                    {tables.map((table, index) => (
-                      <div key={`${table.name}:${index}`} className="overflow-hidden rounded-xl border border-[#22314a] bg-[#0f1929]">
-                        <div className="flex items-center justify-between border-b border-[#22314a] px-4 py-3">
-                          <div>
-                            <div className="text-sm font-semibold text-white">{displayValue(table.name)}</div>
-                            <div className="mt-0.5 font-mono text-[10px] text-[#7184a3]">{[table.database, table.schema].filter(Boolean).join('.') || 'Source metadata'}</div>
-                          </div>
-                          <span className="rounded-md bg-[#17243a] px-2 py-1 text-[10px] text-[#9eb0ca]">{table.columns?.length || 0} columns</span>
-                        </div>
-                        <div className="max-h-56 overflow-y-auto">
-                          {(table.columns || []).map((column, columnIndex) => (
-                            <div key={`${column.name}:${columnIndex}`} className="grid grid-cols-[minmax(0,1fr)_110px_95px] items-center gap-3 border-b border-[#1c293d] px-4 py-2.5 last:border-b-0">
-                              <div className="flex min-w-0 items-center gap-2">
-                                {column.is_key && <KeyRound size={11} className="shrink-0 text-amber-300" />}
-                                <span className="truncate font-mono text-[11px] text-[#d6deeb]">{displayValue(column.name)}</span>
-                                {column.is_pii && <span className="rounded bg-rose-400/10 px-1.5 py-0.5 text-[9px] text-rose-300">PII</span>}
+                  <div className="grid gap-4 xl:grid-cols-2">
+                    {tables.map((table, index) => {
+                      const primaryKeys = (table.columns || []).filter((column) => column.is_primary_key)
+                      const primaryKeyNames = primaryKeys.map((column) => displayValue(column.name)).join(' + ')
+                      return (
+                        <div key={`${table.name}:${index}`} className="overflow-hidden rounded-xl border border-[#2a3b56] bg-[#0f1929] shadow-[0_12px_30px_rgba(0,0,0,0.18)]">
+                          <div className="border-b border-[#22314a] bg-[#111d30] px-4 py-3.5">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-semibold text-white">{displayValue(table.name)}</div>
+                                <div className="mt-1 font-mono text-[10px] text-[#7184a3]">{[table.database, table.schema].filter(Boolean).join('.') || 'Source metadata'}</div>
                               </div>
-                              <span className="truncate text-[10px] text-[#8fa0ba]">{displayValue(column.data_type)}</span>
-                              <span className="truncate text-right text-[10px] text-[#74a7ff]">{displayValue(column.semantic_type)}</span>
+                              <span className="shrink-0 rounded-md border border-[#263955] bg-[#17243a] px-2 py-1 text-[10px] text-[#9eb0ca]">{table.columns?.length || 0} columns</span>
                             </div>
-                          ))}
-                          {!table.columns?.length && <div className="px-4 py-5 text-center text-xs text-[#7184a3]">Column metadata was not recorded.</div>}
+                            <div className={`mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[10px] ${
+                              primaryKeys.length
+                                ? 'border-amber-400/20 bg-amber-400/[0.06] text-amber-200'
+                                : 'border-[#26354c] bg-[#0c1625] text-[#7184a3]'
+                            }`}>
+                              <KeyRound size={12} className="mt-0.5 shrink-0" />
+                              <div className="min-w-0">
+                                <span className="font-semibold">
+                                  {primaryKeys.length > 1 ? `Composite primary key (${primaryKeys.length} columns)` : primaryKeys.length === 1 ? 'Primary key' : 'No confirmed primary key'}
+                                </span>
+                                {primaryKeys.length > 0 && <div className="mt-0.5 break-words font-mono text-[9px] opacity-80">{primaryKeyNames}</div>}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="max-h-80 overflow-auto">
+                            <div className="min-w-[640px]">
+                              <div className="sticky top-0 z-10 grid grid-cols-[minmax(190px,1.4fr)_minmax(150px,1fr)_105px_105px] gap-3 border-b border-[#2a3a52] bg-[#0b1423] px-4 py-2 text-[9px] font-semibold uppercase tracking-[0.08em] text-[#7184a3]">
+                                <span>Column</span><span>Role</span><span>Data type</span><span className="text-right">Semantic</span>
+                              </div>
+                              {(table.columns || []).map((column, columnIndex) => {
+                                const semanticIdentifier = column.is_identifier || String(column.semantic_type || '').toUpperCase() === 'ID'
+                                const hasStructuralRole = column.is_primary_key || column.is_merge_key || column.is_join_key
+                                return (
+                                  <div key={`${column.name}:${columnIndex}`} className="grid grid-cols-[minmax(190px,1.4fr)_minmax(150px,1fr)_105px_105px] items-center gap-3 border-b border-[#1c293d] px-4 py-2.5 last:border-b-0 hover:bg-white/[0.025]">
+                                    <span className="truncate font-mono text-[11px] text-[#d6deeb]" title={displayValue(column.name)}>{displayValue(column.name)}</span>
+                                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                                      {column.is_primary_key && <span className="inline-flex items-center gap-1 rounded border border-amber-400/25 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold text-amber-200" title="Confirmed primary key"><KeyRound size={9} />PK</span>}
+                                      {column.is_merge_key && <span className="rounded border border-violet-400/20 bg-violet-400/10 px-1.5 py-0.5 text-[9px] font-semibold text-violet-300" title="Approved dbt merge key">MERGE</span>}
+                                      {column.is_join_key && <span className="rounded border border-cyan-400/20 bg-cyan-400/10 px-1.5 py-0.5 text-[9px] font-semibold text-cyan-300" title="Foreign or join key">JOIN</span>}
+                                      {!hasStructuralRole && semanticIdentifier && <span className="rounded border border-blue-400/20 bg-blue-400/10 px-1.5 py-0.5 text-[9px] font-semibold text-blue-300" title="Semantic identifier">ID</span>}
+                                      {column.is_pii && <span className="rounded border border-rose-400/20 bg-rose-400/10 px-1.5 py-0.5 text-[9px] font-semibold text-rose-300">PII</span>}
+                                      {!hasStructuralRole && !semanticIdentifier && !column.is_pii && <span className="text-[10px] text-[#52637d]">—</span>}
+                                    </div>
+                                    <span className="truncate text-[10px] text-[#9aabc3]">{displayValue(column.data_type)}</span>
+                                    <span className="truncate text-right text-[10px] text-[#74a7ff]">{displayValue(column.semantic_type)}</span>
+                                  </div>
+                                )
+                              })}
+                              {!table.columns?.length && <div className="px-4 py-5 text-center text-xs text-[#7184a3]">Column metadata was not recorded.</div>}
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                    {!tables.length && <div className="rounded-xl border border-dashed border-[#2a3b56] px-4 py-8 text-center text-sm text-[#7184a3] lg:col-span-2">No table metadata was recorded.</div>}
+                      )
+                    })}
+                    {!tables.length && <div className="rounded-xl border border-dashed border-[#2a3b56] px-4 py-8 text-center text-sm text-[#7184a3] xl:col-span-2">No table metadata was recorded.</div>}
                   </div>
                 </section>
 

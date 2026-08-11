@@ -1,4 +1,4 @@
-import { createProject, deleteProject, getProject, getProjects, updateProject } from '../api/athenaApi'
+import { createProject, deleteProject, getProject, getProjectRuns, getProjects, updateProject } from '../api/athenaApi'
 
 export interface AthenaProject {
   id: string
@@ -88,6 +88,7 @@ const toApi = (project: ProjectInput) => {
 export const projectService = {
   getAll: async () => ((await (getProjects() as unknown as Promise<any[]>))).map(fromApi),
   getOne: async (id: string) => fromApi(await (getProject(id) as unknown as Promise<any>)),
+  getRuns: (id: string) => getProjectRuns(id) as unknown as Promise<any[]>,
   create: async (project: ProjectInput) => fromApi(await (createProject(toApi(project)) as unknown as Promise<any>)),
   update: async (id: string, project: ProjectInput) => fromApi(await (updateProject(id, toApi(project)) as unknown as Promise<any>)),
   remove: (id: string) => deleteProject(id) as unknown as Promise<void>,

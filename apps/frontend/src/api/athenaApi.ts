@@ -14,6 +14,7 @@ const api = axios.create({
 
 const READ_TIMEOUT = 15000
 const RUNS_LIST_TIMEOUT = 15000
+const PROJECT_RUNS_TIMEOUT = 30000
 const RUN_DETAIL_TIMEOUT = 30000
 const REVIEW_TIMEOUT = 90000
 const WRITE_TIMEOUT = 90000
@@ -96,7 +97,7 @@ export const getProject = (id: string) => api.get(`/projects/${id}`, { timeout: 
 export const createProject = (data: object) => api.post('/projects', data, { timeout: WRITE_TIMEOUT })
 export const updateProject = (id: string, data: object) => api.put(`/projects/${id}`, data, { timeout: WRITE_TIMEOUT })
 export const deleteProject = (id: string) => api.delete(`/projects/${id}`, { timeout: WRITE_TIMEOUT })
-export const getProjectRuns = (id: string) => api.get(`/projects/${id}/runs`, { timeout: RUNS_LIST_TIMEOUT })
+export const getProjectRuns = (id: string) => api.get(`/projects/${id}/runs`, { timeout: PROJECT_RUNS_TIMEOUT })
 
 export const startRun = (payload: {
   project_id?: string
@@ -137,6 +138,8 @@ export const uploadBrd = (file: File) => {
 export const getRunStatus = (runId: string) => api.get(`/pipeline/${runId}/status`, { timeout: READ_TIMEOUT })
 export const getRunSummaryStatus = (runId: string) =>
   api.get(`/pipeline/${runId}/summary-status`, { timeout: READ_TIMEOUT })
+export const getRunSummaryStatuses = (runIds: string[]) =>
+  api.post('/pipeline/summary-statuses', { run_ids: runIds }, { timeout: READ_TIMEOUT })
 
 export const getPipelineKpis = (runId: string) => api.get(`/kpi-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 export const createKpiReview = (runId: string, payload: { name: string; definition: string }) =>

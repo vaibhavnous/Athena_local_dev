@@ -20,7 +20,8 @@ import {
   X,
 } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
-import { getRuns } from '../api/athenaApi'
+import { getCostAnalytics, getRuns } from '../api/athenaApi'
+import { projectService, type AthenaProject } from '../services/projectService'
 import './DashboardPage.css'
 
 type Accent = 'blue' | 'green' | 'amber' | 'red'
@@ -177,7 +178,7 @@ const interactiveButton =
 const revealViewport = { once: false, amount: 0.18 } as const
 const cardHover = { y: -4, scale: 1.015 }
 const reviewRunStatuses = new Set(['HITL_WAIT', 'PAUSED_FOR_HITL', 'PENDING_REVIEW'])
-const dashboardRefreshIntervalMs = 30_000
+const dashboardRefreshIntervalMs = 15_000
 
 function normalizeDashboardRun(run: any, index: number): DashboardRun {
   const id = String(run?.id ?? run?.run_id ?? run?.discovered_run_id ?? `backend-run-${index}`)
@@ -253,6 +254,14 @@ function formatLastUpdated(value: number | null, now: number) {
 
   const minutes = Math.floor(seconds / 60)
   return `Updated ${minutes}m ago`
+}
+
+function formatUsd(value: number) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: value >= 100 ? 0 : 2,
+  }).format(Number.isFinite(value) ? value : 0)
 }
 
 function getStatusStyles(status?: string) {
@@ -562,6 +571,8 @@ function DashboardPage() {
   const [runsError, setRunsError] = useState<string | null>(null)
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
   const [clock, setClock] = useState(() => Date.now())
+  const [projects, setProjects] = useState<AthenaProject[]>([])
+  const [costAnalytics, setCostAnalytics] = useState<Array<{ totalCost?: number }>>([])
   const refreshInFlight = useRef(false)
   const runs = useAthenaStore(state => state.runs) as DashboardRun[]
   const setRuns = useAthenaStore(state => state.setRuns)
@@ -575,10 +586,20 @@ function DashboardPage() {
     setRunsError(null)
 
     try {
-      const data: any = await getRuns()
+      const [runsResult, projectsResult, costResult] = await Promise.allSettled([
+        getRuns(),
+        projectService.getAll(),
+        getCostAnalytics(),
+      ])
+      if (runsResult.status === 'rejected') throw runsResult.reason
+      const data: any = runsResult.value
       const list = Array.isArray(data) ? data : (data?.runs ?? [])
 
       setRuns(list.map(normalizeDashboardRun))
+      if (projectsResult.status === 'fulfilled') setProjects(projectsResult.value)
+      if (costResult.status === 'fulfilled') {
+        setCostAnalytics(Array.isArray(costResult.value) ? costResult.value : [])
+      }
       setRunSource('backend')
       setLastUpdatedAt(Date.now())
     } catch (error: any) {
@@ -607,14 +628,22 @@ function DashboardPage() {
   const failedRuns = runs.filter(run => run.status === 'FAILED').length
   const completedRuns = runs.filter(run => run.status === 'COMPLETED').length
   const finishedRuns = completedRuns + failedRuns
-  const displayedSuccessRate = 85
+  const displayedSuccessRate = finishedRuns > 0 ? Math.round((completedRuns / finishedRuns) * 100) : 0
   const pendingHitlCount = runSource === 'backend' ? reviewBlockedRuns : localPendingHitlCount
   const runSourceLabel = runSource === 'backend' ? 'Live backend' : runSource === 'error' ? 'Local fallback' : 'Local loading'
   const lastUpdatedLabel = formatLastUpdated(lastUpdatedAt, clock)
   const projectNames = new Set(runs.map(run => run.project_name || run.brd_filename).filter(Boolean))
-  const projectCount = projectNames.size
-  const databricksProjectCount = runs.filter(run => String((run as any).target_warehouse || '').toLowerCase() === 'databricks').length
-  const snowflakeProjectCount = runs.filter(run => String((run as any).target_warehouse || '').toLowerCase() === 'snowflake').length
+  const projectCount = projects.length || projectNames.size
+  const databricksProjectCount = projects.length
+    ? projects.filter(project => String(project.target || '').toLowerCase() === 'databricks').length
+    : runs.filter(run => String((run as any).target_warehouse || '').toLowerCase() === 'databricks').length
+  const snowflakeProjectCount = projects.length
+    ? projects.filter(project => String(project.target || '').toLowerCase() === 'snowflake').length
+    : runs.filter(run => String((run as any).target_warehouse || '').toLowerCase() === 'snowflake').length
+  const trackedCost = costAnalytics.length
+    ? costAnalytics.reduce((total, row) => total + Number(row.totalCost || 0), 0)
+    : runs.reduce((total, run) => total + Number(run.total_cost || 0), 0)
+  const trackedCostLabel = formatUsd(trackedCost)
   const metricCards = [
     {
       label: 'Projects',
@@ -634,8 +663,10 @@ function DashboardPage() {
           { label: 'Databricks runs', value: String(databricksProjectCount) },
         ],
         bullets: [
-          `${projectCount} project labels are represented in pipeline history.`,
-          'Project totals are derived from run history and do not require saved project configurations.',
+          projects.length
+            ? `${projectCount} saved projects are currently available to this account.`
+            : `${projectCount} project labels are represented in pipeline history.`,
+          projects.length ? 'This total is refreshed from saved project configurations.' : 'Saved projects were unavailable, so run history is used as a fallback.',
         ],
       },
     },
@@ -701,7 +732,7 @@ function DashboardPage() {
     },
     {
       label: 'Cost Tracked',
-      value: '$1,865',
+      value: trackedCostLabel,
       accent: 'blue' as Accent,
       icon: <DollarSign size={20} />,
       insight: {
@@ -712,11 +743,11 @@ function DashboardPage() {
         accent: 'blue' as Accent,
         icon: <DollarSign size={22} />,
         stats: [
-          { label: 'Tracked Cost', value: '$1,865' },
-          { label: 'Source', value: 'Run History' },
-          { label: 'Scope', value: 'All Projects' },
+          { label: 'Tracked Cost', value: trackedCostLabel },
+          { label: 'Source', value: costAnalytics.length ? 'ai_store' : 'Run History' },
+          { label: 'Scope', value: 'Last 30 days' },
         ],
-        bullets: ['This cost summarizes pipeline activity across configured projects.', 'Pipeline processing and execution contribute to the tracked total.', 'Open Run History to review individual pipeline activity.'],
+        bullets: ['This cost is refreshed from persisted pipeline artifacts in ai_store.', 'Requirement, KPI, nomination, and other recorded stages contribute to the total.', 'If cost analytics is unavailable, run-level totals are used as a fallback.'],
       },
     },
   ]

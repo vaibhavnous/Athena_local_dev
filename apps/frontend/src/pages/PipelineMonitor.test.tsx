@@ -43,7 +43,7 @@ jest.mock('../components/pipeline/PipelineLogsPanel', () => () => <div>Pipeline 
 jest.mock('../components/shared/PythonCodeDialog', () => () => null)
 jest.mock('../components/shared/DashboardLayout', () => ({ PageHeader: () => <div>Header</div> }))
 
-import PipelineMonitor, { buildPipelineDisplayPhase, markNextPendingStage, markPreparingReview, pipelineActivityFromLogs, reviewWaitPatchFromLogs } from './PipelineMonitor'
+import PipelineMonitor, { buildPipelineDisplayPhase, markNextPendingStage, markPreparingReview, pipelineActivityFromLogs, reviewWaitPatchFromLogs, toggleExpandedPhaseIds } from './PipelineMonitor'
 import { getRunStatus } from '../api/athenaApi'
 
 test('hydrates detailed stages for the active run', async () => {
@@ -171,6 +171,14 @@ test('recognizes stage logs but ignores run-detail timeout warnings as pipeline 
   expect(pipelineActivityFromLogs([
     { stage: 'runs_router', message: 'GET run detail timed out' },
   ])).toBeNull()
+})
+
+test('keeps multiple pipeline phases expanded independently', () => {
+  const first = toggleExpandedPhaseIds(new Set(['phase-1']), 'phase-2')
+  expect(Array.from(first)).toEqual(['phase-1', 'phase-2'])
+
+  const second = toggleExpandedPhaseIds(first, 'phase-1')
+  expect(Array.from(second)).toEqual(['phase-2'])
 })
 
 test('renders the SFTP metadata-bootstrap phase in the latest monitor UI', () => {

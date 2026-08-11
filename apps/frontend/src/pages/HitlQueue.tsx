@@ -2046,7 +2046,6 @@ function HitlQueue({ onClose = null }) {
                   const key = tableReviewKey(table)
                   const decision = tableReviewDecisions[key]
                   const confidence = Number(table.confidence_score || table.semantic_score || 0)
-                  const coverage = Number(table.coverage_ratio || table.lexical_score || 0)
                   const matchedItems = Array.isArray(table.matched_keywords) ? table.matched_keywords : []
 
                   return (
@@ -2094,10 +2093,6 @@ function HitlQueue({ onClose = null }) {
                         <div className="h-1.5 overflow-hidden rounded-full bg-[#243247]">
                           <div className="h-full rounded-full bg-[#ffb621]" style={{ width: `${Math.max(8, Math.min(100, confidence * 100))}%` }} />
                         </div>
-                      </div>
-
-                      <div className="mt-4 rounded-[10px] border border-[#263247] bg-[#0d1524] px-4 py-3 text-xs text-[#c8d2e5]">
-                        {table.nomination_reason || `Business coverage=${coverage.toFixed(3)}${matchedItems.length ? `, signals: ${matchedItems.join(', ')}` : ''}`}
                       </div>
 
                       {matchedItems.length > 0 && (
@@ -2521,9 +2516,6 @@ function HitlQueue({ onClose = null }) {
                               </>
                             )}
                           </div>
-                          {table.nomination_reason && (
-                            <p className="text-sm text-text-secondary leading-relaxed mt-2">{table.nomination_reason}</p>
-                          )}
                         </div>
                       </label>
                     )
@@ -3313,7 +3305,7 @@ function CodeReviewPanel({
         onSubmit={onSubmit}
         submitting={submitting}
         submitDisabled={disabled}
-        submitLabel="Submit & Run Stage"
+        submitLabel="Submit & Continue"
       />
     )
   }
@@ -3579,7 +3571,7 @@ function CodeReviewItem({ item, expanded, onToggle, onCodeChange, onMergeKeysCha
           onSubmit={onSubmit}
           submitting={submitting}
           submitDisabled={submitDisabled}
-          submitLabel="Submit & Run Stage"
+          submitLabel="Submit & Continue"
         />
       )}
 

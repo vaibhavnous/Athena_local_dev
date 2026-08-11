@@ -15,12 +15,40 @@ const EMPTY = {
 }
 
 const KB = { Insurance: 'PC_Insurance_V1', Basel: 'BASEL_DW_V1' }
+const VALIDATION_FIELD_LABELS = {
+  name: 'Project Name',
+  description: 'Description',
+  target: 'Target',
+  connectionType: 'Source Type',
+  dbType: 'Database Type',
+  databaseName: 'Database Name',
+  integrationType: 'Ingestion Type',
+  dataLakeName: 'Data Lake Name',
+  domainProfile: 'Domain Profile',
+}
 
 export function isProjectFormValid(form) {
-  const sourceConfigured = form.connectionType === 'database'
-    ? form.dbType && form.databaseName
-    : form.integrationType && (form.integrationType !== 'SFTP' || form.connectionName)
-  return !!(form.name.trim() && form.description.trim() && form.connectionType && sourceConfigured)
+  return Object.keys(getProjectFormErrors(form)).length === 0
+}
+
+export function getProjectFormErrors(form) {
+  const errors = {}
+  if (!String(form.name || '').trim()) errors.name = 'Project name is required.'
+  if (!String(form.description || '').trim()) errors.description = 'Description is required.'
+  if (!String(form.target || '').trim()) errors.target = 'Target is required.'
+  if (!String(form.connectionType || '').trim()) errors.connectionType = 'Source type is required.'
+  if (form.connectionType === 'database') {
+    if (!String(form.dbType || '').trim()) errors.dbType = 'Database type is required.'
+    if (!String(form.connectionName || '').trim() || !String(form.databaseName || '').trim()) errors.databaseName = 'Database name is required.'
+  }
+  if (form.connectionType === 'data_lake') {
+    if (!String(form.integrationType || '').trim()) errors.integrationType = 'Ingestion type is required.'
+    if (form.integrationType === 'SFTP' && !String(form.connectionName || '').trim()) errors.dataLakeName = 'Data lake name is required.'
+  }
+  if (form.useDomainKB && (!String(form.domainProfile || '').trim() || !String(form.knowledgeBaseId || '').trim())) {
+    errors.domainProfile = 'Domain profile is required when the knowledge base is enabled.'
+  }
+  return errors
 }
 
 export default function ProjectInitiation() {
@@ -101,7 +129,9 @@ export function ProjectForm({ initial, connections, connectionsLoading, busy, on
   const lakeConnections = connections.filter(c => c.sourceType === 'data_lake')
   const set = (key, value) => setForm(current => ({...current, [key]: value}))
   const snowflakeDatabaseTarget = String(form.target).toLowerCase() === 'snowflake' && form.connectionType === 'database'
-  const valid = isProjectFormValid(form)
+  const validationErrors = getProjectFormErrors(form)
+  const missingFieldLabels = Object.keys(validationErrors).map((key) => VALIDATION_FIELD_LABELS[key] || key)
+  const valid = Object.keys(validationErrors).length === 0
   return <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={onClose} className="fixed inset-0 z-[100] flex justify-end bg-black/60 backdrop-blur-sm">
     <motion.aside initial={{x:440}} animate={{x:0}} exit={{x:440}} onClick={e => e.stopPropagation()} className="flex h-full w-full max-w-md flex-col border-l border-bg-border bg-bg-card shadow-2xl">
       <header className="flex items-center justify-between border-b border-bg-border p-5"><div><h2 className="text-base font-bold">{initial ? 'Edit Project' : 'New Project'}</h2><p className="mt-1 text-xs text-text-tertiary">Project settings are reused for every run.</p></div><button onClick={onClose}><X size={17}/></button></header>
@@ -119,7 +149,7 @@ export function ProjectForm({ initial, connections, connectionsLoading, busy, on
           {form.connectionType === 'database' && <><label className="flex items-center gap-3 rounded-lg border border-bg-border bg-bg-base p-3 text-sm"><input type="checkbox" checked={form.useDomainKB} onChange={e=>set('useDomainKB',e.target.checked)}/><BookOpen size={15}/>Use Domain Knowledge Base</label>{form.useDomainKB && <Field label="Domain Profile"><select className="input-field" value={form.domainProfile} onChange={e=>setForm({...form,domainProfile:e.target.value,knowledgeBaseId:KB[e.target.value]||''})}><option value="">Select domain...</option>{Object.keys(KB).map(k=><option key={k}>{k}</option>)}</select></Field>}</>}
         </>}
       </div>
-      <footer className="space-y-3 border-t border-bg-border p-5"><div className="flex gap-3"><button className="btn-secondary h-11 flex-1" onClick={onClose}>Cancel</button><button className="btn-primary flex h-11 flex-1 items-center justify-center gap-2" disabled={!valid||busy} onClick={()=>onSave(form,false)}><Save size={14}/>Save</button></div>{!initial && <button className="btn-primary flex h-11 w-full items-center justify-center gap-2" disabled={!valid||busy} onClick={()=>onSave(form,true)}><Play size={14}/>Save & Start Run</button>}</footer>
+      <footer className="space-y-3 border-t border-bg-border p-5">{!valid && <div role="alert" className="rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">Please complete: {missingFieldLabels.join(', ')}.</div>}<div className="flex gap-3"><button className="btn-secondary h-11 flex-1" onClick={onClose}>Cancel</button><button className="btn-primary flex h-11 flex-1 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400 disabled:hover:bg-slate-700 disabled:active:bg-slate-700" disabled={!valid||busy} onClick={()=>onSave(form,false)}><Save size={14}/>Save</button></div>{!initial && <button className="btn-primary flex h-11 w-full items-center justify-center gap-2 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400 disabled:hover:bg-slate-700 disabled:active:bg-slate-700" disabled={!valid||busy} onClick={()=>onSave(form,true)}><Play size={14}/>Save & Start Run</button>}</footer>
     </motion.aside>
   </motion.div>
 }

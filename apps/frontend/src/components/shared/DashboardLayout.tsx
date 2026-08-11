@@ -70,7 +70,7 @@ export function PageHeader({ eyebrow, title, description, icon: Icon, leadingAct
             </div>
           </div>
           {actions && (
-            <div className={cx('flex flex-col sm:flex-row sm:items-center lg:justify-end', compact ? 'gap-2' : 'gap-3')}>
+            <div className={cx('flex w-full flex-col sm:w-auto sm:flex-row sm:items-center lg:shrink-0 lg:justify-end', compact ? 'gap-2' : 'gap-3')}>
               {iconBadge}
               {actions}
             </div>

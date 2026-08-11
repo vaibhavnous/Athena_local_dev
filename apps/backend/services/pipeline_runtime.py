@@ -695,6 +695,52 @@ def load_checkpoint_fields(run_id: str, *fields: str) -> Dict[str, Any]:
         conn.close()
 
 
+def load_checkpoint_fields_many(run_ids: List[str], *fields: str) -> Dict[str, Dict[str, Any]]:
+    """Load the latest lightweight checkpoint projection for several runs at once."""
+    normalized_run_ids = list(dict.fromkeys(str(run_id or "").strip() for run_id in run_ids))
+    normalized_run_ids = [run_id for run_id in normalized_run_ids if run_id]
+    safe_fields = [field for field in fields if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field or "")]
+    if not normalized_run_ids or not safe_fields:
+        return {}
+
+    select_list = ", ".join(
+        f"JSON_VALUE(full_state_json, '$.{field}') AS [{field}]"
+        for field in safe_fields
+    )
+    placeholders = ", ".join("?" for _ in normalized_run_ids)
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            WITH latest_checkpoints AS (
+                SELECT
+                    run_id,
+                    full_state_json,
+                    ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY checkpoint_at DESC) AS row_number
+                FROM [{_pipeline_schema()}].[kpi_checkpoints]
+                WHERE run_id IN ({placeholders})
+            )
+            SELECT run_id, {select_list}
+            FROM latest_checkpoints
+            WHERE row_number = 1
+            """,
+            tuple(normalized_run_ids),
+        )
+        rows = cursor.fetchall()
+        return {
+            str(row[0]): {
+                field: row[index + 1]
+                for index, field in enumerate(safe_fields)
+                if row[index + 1] is not None
+            }
+            for row in rows
+        }
+    finally:
+        conn.close()
+
+
 def load_checkpoint_state(run_id: str) -> Optional[Dict[str, Any]]:
     conn = get_connection()
     try:
@@ -3794,6 +3840,15 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
                     "resume_message": "Silver dbt models generated; continuing to Gold generation.",
                 }
             )
+            logger.info(
+                "Silver dbt models approved; execution is deferred to the combined Snowflake dbt build after Gold Review.",
+                extra={
+                    "run_id": run_id,
+                    "node": "silver_code_execution",
+                    "stage": "silver_code_execution",
+                    "step_name": "dbt_execution_deferred",
+                },
+            )
         elif not generation_first_native_database_flow(final_state) and target_warehouse == "snowflake":
             from services.snowflake_silver_runtime import run_snowflake_silver_scripts
 
@@ -4186,6 +4241,30 @@ def build_run_report(state: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(item, dict)
     ]
 
+    merge_review = (
+        state.get("silver_merge_key_review_artifact")
+        or enriched.get("gate4_reviewed_merge_keys")
+        or state.get("bronze_review_artifact")
+        or {}
+    )
+    reviewed_merge_keys = {
+        (
+            str(
+                feed.get("table")
+                or feed.get("entity")
+                or feed.get("table_name")
+                or feed.get("feed_id")
+                or feed.get("target_table")
+                or ""
+            ).split(".")[-1].strip().casefold(),
+            str(key).strip().casefold(),
+        )
+        for feed in (merge_review.get("feeds") or [])
+        if isinstance(feed, dict)
+        for key in (feed.get("merge_keys") or feed.get("primary_keys") or [])
+        if str(key).strip()
+    }
+
     def table_name(item: Dict[str, Any]) -> str:
         return str(
             item.get("table_name")
@@ -4215,16 +4294,21 @@ def build_run_report(state: Dict[str, Any]) -> Dict[str, Any]:
                 "columns": [],
             },
         )
+        is_primary_key = bool(column.get("is_primary_key"))
+        column_name = str(column.get("column_name") or column.get("name") or "Unnamed column")
+        is_merge_key = (name.casefold(), column_name.strip().casefold()) in reviewed_merge_keys
+        is_join_key = bool(column.get("is_foreign_key") or column.get("is_join_key")) and not is_primary_key and not is_merge_key
+        is_identifier = str(column.get("semantic_type") or "").upper() in {"ID", "SURROGATE_KEY"}
         row["columns"].append(
             {
-                "name": column.get("column_name") or column.get("name") or "Unnamed column",
+                "name": column_name,
                 "data_type": column.get("data_type") or column.get("type") or "UNKNOWN",
                 "semantic_type": column.get("semantic_type") or "UNKNOWN",
-                "is_key": bool(
-                    column.get("is_join_key")
-                    or column.get("is_primary_key")
-                    or str(column.get("semantic_type") or "").upper() in {"ID", "SURROGATE_KEY"}
-                ),
+                "is_key": is_primary_key,
+                "is_primary_key": is_primary_key,
+                "is_join_key": is_join_key,
+                "is_merge_key": is_merge_key,
+                "is_identifier": is_identifier,
                 "is_pii": bool(column.get("is_pii") or column.get("is_pii_candidate")),
                 "is_measure": bool(column.get("is_measure")),
             }
@@ -4276,11 +4360,23 @@ def build_run_report(state: Dict[str, Any]) -> Dict[str, Any]:
             "kpis": len(kpis),
             "artifacts": len(artifacts),
             "pii_columns": sum(1 for column in columns if column.get("is_pii") or column.get("is_pii_candidate")),
-            "key_columns": sum(
-                1 for column in columns
+            "key_columns": sum(1 for column in columns if column.get("is_primary_key")),
+            "primary_key_columns": sum(1 for column in columns if column.get("is_primary_key")),
+            "join_key_columns": sum(
+                1
+                for table in report_tables
+                for column in table["columns"]
                 if column.get("is_join_key")
-                or column.get("is_primary_key")
-                or str(column.get("semantic_type") or "").upper() in {"ID", "SURROGATE_KEY"}
+            ),
+            "merge_key_columns": sum(
+                1
+                for table in report_tables
+                for column in table["columns"]
+                if column.get("is_merge_key")
+            ),
+            "identifier_columns": sum(
+                1 for column in columns
+                if str(column.get("semantic_type") or "").upper() in {"ID", "SURROGATE_KEY"}
             ),
         },
         "artifacts": artifacts,

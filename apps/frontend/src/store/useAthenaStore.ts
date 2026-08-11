@@ -143,6 +143,13 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
   }
   const incomingStatus = normalizeRunStatus(incoming?.status)
   const incomingFallback = incoming?.hydration_fallback === true
+  const existingStatus = normalizeRunStatus(existing?.status)
+  const preserveAuthoritativeStatus =
+    existing?.status_authoritative === true &&
+    existingStatus !== '' &&
+    existingStatus !== 'UNKNOWN' &&
+    incoming?.status_authoritative !== true &&
+    incomingStatus === 'UNKNOWN'
   const suppressFallbackFailure =
     incomingFallback &&
     incoming?.status_authoritative !== true &&
@@ -182,6 +189,14 @@ function mergeRunPreservingDetail(existing: any, incoming: any): any {
     merged.pending_failure_confirmation = true
   } else {
     merged.pending_failure_confirmation = false
+  }
+
+  // A degraded run-list fallback must never replace a status already read from
+  // the persisted checkpoint. Keep its authority metadata as well as its value.
+  if (preserveAuthoritativeStatus) {
+    merged.status = existing.status
+    merged.status_authoritative = true
+    merged.hydration_fallback = existing.hydration_fallback ?? false
   }
   const clearsExecutionGate =
     !suppressFallbackFailure &&

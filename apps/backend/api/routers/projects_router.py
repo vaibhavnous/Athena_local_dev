@@ -111,12 +111,27 @@ def delete_project(project_id: str, user: AuthUser = Depends(get_current_user)) 
 @router.get("/{project_id}/runs")
 def project_runs(project_id: str, user: AuthUser = Depends(get_current_user)) -> list[dict[str, Any]]:
     _owned_project(project_id, user)
-    from services.pipeline_runtime import list_runs, load_checkpoint_state
+    from services.pipeline_runtime import list_runs, load_checkpoint_fields_many
 
-    matches = []
-    for item in list_runs(limit=200, project_id=project_id):
-        run_id = str(item.get("run_id") or "")
-        checkpoint = load_checkpoint_state(run_id) or {}
-        if str(checkpoint.get("project_id") or "") == project_id:
-            matches.append({**item, **checkpoint, "run_id": run_id})
-    return matches
+    indexed_runs = list_runs(limit=200, project_id=project_id)
+    run_ids = [str(item.get("run_id") or "") for item in indexed_runs if item.get("run_id")]
+    checkpoints = load_checkpoint_fields_many(
+        run_ids,
+        "project_id",
+        "brd_filename",
+        "status",
+        "created_at",
+        "started_at",
+        "updated_at",
+        "completed_at",
+        "error",
+        "error_message",
+        "failed_background_stage",
+    )
+
+    return [
+        {**item, **checkpoints.get(run_id, {}), "run_id": run_id}
+        for item in indexed_runs
+        if (run_id := str(item.get("run_id") or ""))
+        and str(checkpoints.get(run_id, {}).get("project_id") or "") == project_id
+    ]

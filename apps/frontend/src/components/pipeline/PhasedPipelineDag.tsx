@@ -520,20 +520,18 @@ export default function PhasedPipelineDag({ stages = [], connectionType, target,
   // Determine which phase is active
   const activePhaseIdx = findActivePhaseIndex(pipelinePhases, stagesById)
 
-  // Only the active phase is expanded; completed and pending phases are collapsed.
-  // User can manually expand any non-pending phase by clicking its header.
+  // Phases expand independently so operators can compare multiple stage groups.
   const [expandedPhases, setExpandedPhases] = useState(() => {
     const init = {}
     pipelinePhases.forEach((_, i) => { init[i] = i === activePhaseIdx })
     return init
   })
 
-  // When active phase changes: collapse the old one, expand the new one.
+  // Keep manually opened phases visible when execution advances.
   const prevActive = React.useRef(activePhaseIdx)
   if (prevActive.current !== activePhaseIdx) {
-    const prev = prevActive.current
     prevActive.current = activePhaseIdx
-    setExpandedPhases((old) => ({ ...old, [prev]: false, [activePhaseIdx]: true }))
+    setExpandedPhases((old) => ({ ...old, [activePhaseIdx]: true }))
   }
 
   const togglePhase = (idx) => {

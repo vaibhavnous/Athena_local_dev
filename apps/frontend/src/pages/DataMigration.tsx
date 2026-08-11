@@ -12,6 +12,8 @@ import {
   KeyRound,
   Layers3,
   Loader2,
+  Maximize2,
+  Minimize2,
   Network,
   Search,
   Sparkles,
@@ -67,12 +69,6 @@ const LAYER_DESCRIPTIONS = {
   bronze: 'Raw Delta landing and audit capture',
   silver: 'Curated conformed tables with merge keys',
   gold: 'Metric-ready KPI fact outputs',
-}
-
-const OPERATION_LABELS = {
-  bronze_ingest: 'Raw ingest',
-  silver_transform: 'Cast, dedupe, merge key',
-  gold_aggregation: 'KPI aggregation',
 }
 
 function displayRunLabel(run) {
@@ -159,10 +155,6 @@ function nodeMetricChips(node) {
   return [...new Set(chips)].slice(0, 4)
 }
 
-function operationLabel(edge) {
-  return OPERATION_LABELS[edge?.operation] || String(edge?.operation || edge?.type || 'lineage').replaceAll('_', ' ')
-}
-
 function groupNodesByLayer(lineage) {
   const grouped = {
     source: [],
@@ -200,9 +192,9 @@ function buildRelationshipEdges(lineage) {
 function computeNodeLayout(groups) {
   const positions = {}
   const columnWidth = 270
-  const columnGap = 80
+  const columnGap = 96
   const topOffset = 76
-  const cardHeight = 196
+  const cardHeight = 220
   const cardGap = 30
 
   LAYER_ORDER.forEach((layer, columnIndex) => {
@@ -233,17 +225,6 @@ function edgePath(sourceBox, targetBox) {
   const y2 = targetBox.y + targetBox.height / 2
   const mid = (x1 + x2) / 2
   return `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`
-}
-
-function edgeLabelPosition(sourceBox, targetBox) {
-  const x1 = sourceBox.x + sourceBox.width
-  const y1 = sourceBox.y + sourceBox.height / 2
-  const x2 = targetBox.x
-  const y2 = targetBox.y + targetBox.height / 2
-  return {
-    left: (x1 + x2) / 2 - 62,
-    top: (y1 + y2) / 2 - 14,
-  }
 }
 
 function relationshipConfidence(edge) {
@@ -286,7 +267,7 @@ function FlowStep({ label, count, tone, detail }) {
 }
 
 function FlowArrow() {
-  return <div className="hidden h-px flex-1 bg-gradient-to-r from-white/10 via-white/40 to-white/10 md:block" />
+  return <div className="hidden h-px flex-1 bg-gradient-to-r from-white/10 via-white/40 to-white/10 lg:block" />
 }
 
 function ModelingRail({ summary }) {
@@ -341,6 +322,16 @@ function DataLineagePage() {
   const [loadingRuns, setLoadingRuns] = useState(true)
   const [loadingLineage, setLoadingLineage] = useState(false)
   const [error, setError] = useState('')
+  const [flowExpanded, setFlowExpanded] = useState(false)
+
+  useEffect(() => {
+    if (!flowExpanded) return undefined
+    const closeExpandedFlow = (event) => {
+      if (event.key === 'Escape') setFlowExpanded(false)
+    }
+    window.addEventListener('keydown', closeExpandedFlow)
+    return () => window.removeEventListener('keydown', closeExpandedFlow)
+  }, [flowExpanded])
 
   useEffect(() => {
     let cancelled = false
@@ -518,20 +509,32 @@ function DataLineagePage() {
           </aside>
 
           <div className="space-y-6">
-            <section className="rounded-[28px] border border-bg-border bg-bg-card p-5 shadow-card">
-              <div className="flex items-center justify-between gap-4">
+            {flowExpanded && <div className="fixed inset-0 z-40 bg-black/75 backdrop-blur-sm" aria-hidden="true" />}
+            <section className={`${flowExpanded ? 'fixed inset-2 z-50 flex flex-col overflow-hidden sm:inset-4' : ''} rounded-[28px] border border-bg-border bg-bg-card p-4 shadow-card sm:p-5`}>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h2 className="text-lg font-semibold tracking-[-0.03em] text-text-primary">Medallion Flow</h2>
                   <p className="mt-1 text-sm text-text-tertiary">
                     Visual lineage view for the selected run. FK and heuristic joins are summarized below to keep the core flow readable.
                   </p>
                 </div>
+                <div className="flex shrink-0 items-center gap-2">
                 {(loadingRuns || loadingLineage) && (
                   <div className="inline-flex items-center gap-2 rounded-full border border-accent-blue/20 bg-accent-blue/10 px-3 py-1 text-xs text-accent-blue">
                     <Loader2 size={14} className="animate-spin" />
                     Loading lineage
                   </div>
                 )}
+                  <button
+                    type="button"
+                    onClick={() => setFlowExpanded((current) => !current)}
+                    className="inline-flex h-9 items-center gap-2 rounded-lg border border-bg-border bg-bg-base px-3 text-xs font-semibold text-text-secondary transition-colors hover:border-accent-blue/40 hover:text-text-primary"
+                    aria-label={flowExpanded ? 'Exit expanded lineage view' : 'Expand lineage view'}
+                  >
+                    {flowExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                    <span>{flowExpanded ? 'Exit full view' : 'Expand'}</span>
+                  </button>
+                </div>
               </div>
 
               {lineage?.summary?.fallback && !error && (
@@ -546,8 +549,8 @@ function DataLineagePage() {
                   <span>{error}</span>
                 </div>
               ) : (
-                <div className="mt-6 rounded-[24px] border border-white/5 bg-[linear-gradient(180deg,rgba(15,23,42,0.45),rgba(17,24,39,0.2))] p-4">
-                  <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center">
+                <div className={`${flowExpanded ? 'min-h-0 flex-1 overflow-y-auto' : ''} mt-6 rounded-[24px] border border-white/5 bg-[linear-gradient(180deg,rgba(15,23,42,0.45),rgba(17,24,39,0.2))] p-3 sm:p-4`}>
+                  <div className="mb-5 grid grid-cols-2 gap-3 lg:flex lg:items-center">
                     <FlowStep label="Source" count={lineage?.summary?.source_count ?? 0} tone="sky" detail="insurance.dbo" />
                     <FlowArrow />
                     <FlowStep label="Bronze" count={lineage?.summary?.bronze_count ?? 0} tone="amber" detail="raw + audit" />
@@ -556,7 +559,35 @@ function DataLineagePage() {
                     <FlowArrow />
                     <FlowStep label="Gold KPIs" count={lineage?.summary?.gold_count ?? 0} tone="emerald" detail="analytics facts" />
                   </div>
-                  <div className="overflow-x-auto overflow-y-hidden">
+                  <div className="space-y-4 lg:hidden">
+                    {LAYER_ORDER.map((layer, layerIndex) => {
+                      const style = LAYER_STYLES[layer]
+                      return (
+                        <div key={`${layer}:mobile`}>
+                          <div className={`rounded-2xl border ${style.border} bg-gradient-to-r ${style.bg} px-4 py-3`}>
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="flex items-center gap-2 font-semibold text-white">{layerIcon(layer, 15)}{LAYER_TITLES[layer]}</div>
+                              <span className={`rounded-full border px-2 py-1 text-[10px] ${style.pill}`}>{(grouped[layer] || []).length} nodes</span>
+                            </div>
+                            <div className="mt-1 text-xs text-slate-300">{LAYER_DESCRIPTIONS[layer]}</div>
+                          </div>
+                          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                            {(grouped[layer] || []).map((node) => (
+                              <div key={`${node.id}:mobile`} className={`min-w-0 rounded-2xl border ${style.border} bg-gradient-to-br ${style.bg} p-4`}>
+                                <div className="break-all text-sm font-semibold leading-5 text-white">{nodeLabel(node)}</div>
+                                <div className="mt-1 break-all text-[11px] leading-4 text-slate-400">{node.name}</div>
+                                <div className="mt-3 flex flex-wrap gap-1.5">
+                                  {nodeMetricChips(node).map((chip) => <span key={`${node.id}:mobile:${chip}`} className="rounded-full border border-white/10 px-2 py-1 text-[10px] text-slate-200">{chip}</span>)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          {layerIndex < LAYER_ORDER.length - 1 && <div className="flex justify-center py-3 text-text-tertiary"><ArrowRight className="rotate-90" size={18} /></div>}
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <div className="hidden overflow-x-auto overflow-y-hidden lg:block">
                   <div className="relative" style={{ width: layout.width, minHeight: layout.height }}>
                     <svg className="absolute left-0 top-0" width={layout.width} height={layout.height}>
                       <defs>
@@ -584,23 +615,7 @@ function DataLineagePage() {
                       })}
                     </svg>
 
-                    {pipelineEdges.map((edge) => {
-                      const sourceBox = layout.positions[edge.source]
-                      const targetBox = layout.positions[edge.target]
-                      if (!sourceBox || !targetBox) return null
-                      const position = edgeLabelPosition(sourceBox, targetBox)
-                      return (
-                        <div
-                          key={`${edge.id}:label`}
-                          className="pointer-events-none absolute z-20 w-[124px] rounded-full border border-white/10 bg-[#111827]/95 px-2 py-1 text-center text-[10px] font-medium uppercase tracking-[0.12em] text-slate-200 shadow-[0_12px_28px_rgba(2,6,23,0.4)]"
-                          style={{ left: position.left, top: position.top }}
-                        >
-                          {operationLabel(edge)}
-                        </div>
-                      )
-                    })}
-
-                    <div className="absolute left-0 top-0 flex gap-20">
+                    <div className="absolute left-0 top-0 flex gap-[96px]">
                       {LAYER_ORDER.map((layer) => {
                         const style = LAYER_STYLES[layer]
                         return (
@@ -627,18 +642,18 @@ function DataLineagePage() {
                                   initial={{ opacity: 0, y: 12 }}
                                   animate={{ opacity: 1, y: 0 }}
                                   transition={{ duration: 0.28, delay: index * 0.03 }}
-                                  className={`rounded-[22px] border ${style.border} bg-gradient-to-br ${style.bg} bg-[#0f172a]/90 p-4 shadow-[0_18px_40px_rgba(2,6,23,0.28)]`}
-                                  style={{ minHeight: 196 }}
+                                  className={`min-w-0 overflow-hidden rounded-[22px] border ${style.border} bg-gradient-to-br ${style.bg} bg-[#0f172a]/90 p-4 shadow-[0_18px_40px_rgba(2,6,23,0.28)]`}
+                                  style={{ minHeight: 220 }}
                                 >
-                                  <div className="flex items-start justify-between gap-3">
-                                    <div className="min-w-0">
-                                      <div className="text-sm font-semibold text-white">{nodeLabel(node)}</div>
-                                      <div className="mt-1 break-words text-[11px] leading-4 text-slate-400">{node.name}</div>
-                                    </div>
-                                    <span className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.12em] ${style.pill}`}>
+                                  <div className="flex flex-col items-start gap-2">
+                                    <span className={`inline-flex shrink-0 items-center gap-1 self-end rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.12em] ${style.pill}`}>
                                       {layerIcon(layer, 11)}
                                       {layer}
                                     </span>
+                                    <div className="min-w-0">
+                                      <div className="break-all text-sm font-semibold leading-5 text-white">{nodeLabel(node)}</div>
+                                      <div className="mt-1 break-all text-[11px] leading-4 text-slate-400">{node.name}</div>
+                                    </div>
                                   </div>
                                   <div className="mt-3 flex flex-wrap gap-1.5">
                                     {nodeMetricChips(node).map((chip) => (

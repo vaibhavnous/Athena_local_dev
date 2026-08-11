@@ -16,7 +16,7 @@ import {
   Search,
 } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
-import { getRun, getRuns, getRunStatus, getRunSummaryStatus } from '../api/athenaApi'
+import { getRun, getRuns, getRunStatus, getRunSummaryStatuses } from '../api/athenaApi'
 import { PageHeader } from '../components/shared/DashboardLayout'
 import PythonCodeDialog from '../components/shared/PythonCodeDialog'
 import RunReportDialog from '../components/shared/RunReportDialog'
@@ -58,7 +58,11 @@ function RunHistoryPage() {
   const [reportOpen, setReportOpen] = useState(false)
   const runsRequestInFlightRef = useRef(false)
   const detailRequestInFlightRef = useRef<string | null>(null)
-  const statusHydratedRunIdsRef = useRef(new Set<string>())
+  const statusHydrationInFlightRef = useRef(new Set<string>())
+  const unavailableDetailAttemptedRef = useRef(new Set<string>())
+  const statusHydrationRetryTimerRef = useRef<number | null>(null)
+  const [hydratingRunIds, setHydratingRunIds] = useState<Set<string>>(() => new Set())
+  const [hydrationRetryVersion, setHydrationRetryVersion] = useState(0)
 
   useEffect(() => {
     if (!selectedRunId && runs[0]?.id) setSelectedRunId(runs[0].id)
@@ -105,49 +109,111 @@ function RunHistoryPage() {
 
   useEffect(() => {
     const pendingIds = (runs || [])
-      .filter((run) => (
-        String(run?.status || '').toUpperCase() === 'UNKNOWN' &&
-        run?.status_authoritative !== true &&
-        !statusHydratedRunIdsRef.current.has(run.id)
-      ))
+      .filter((run) => {
+        const status = String(run?.status || '').toUpperCase()
+        const needsInitialHydration = status === 'UNKNOWN' && run?.status_authoritative !== true
+        const needsCompatibilityRetry = status === 'UNAVAILABLE' && !unavailableDetailAttemptedRef.current.has(run.id)
+        return (needsInitialHydration || needsCompatibilityRetry) && !statusHydrationInFlightRef.current.has(run.id)
+      })
       .map((run) => run.id)
 
     if (pendingIds.length === 0) return undefined
-    pendingIds.forEach((runId) => statusHydratedRunIdsRef.current.add(runId))
+    pendingIds.forEach((runId) => statusHydrationInFlightRef.current.add(runId))
+    setHydratingRunIds((current) => new Set([...current, ...pendingIds]))
 
-    let nextIndex = 0
-    const hydrateNext = async () => {
-      while (nextIndex < pendingIds.length) {
-        const runId = pendingIds[nextIndex]
-        nextIndex += 1
-        try {
-          const payload = await getRunSummaryStatus(runId)
-          if (payload?.run) {
+    const hydrateVisibleRuns = async () => {
+      let retryNeeded = false
+      let unresolvedIds = [...pendingIds]
+      try {
+        const payload = await getRunSummaryStatuses(pendingIds)
+        const hydratedRuns = Array.isArray(payload?.runs) ? payload.runs : []
+        const hydratedById = new Map(hydratedRuns.map((run) => [String(run?.id || run?.run_id), run]))
+        unresolvedIds = pendingIds.filter((runId) => {
+          const hydrated = hydratedById.get(String(runId))
+          const hydratedStatus = String(hydrated?.status || '').toUpperCase()
+          if (!hydrated || ['UNKNOWN', 'UNAVAILABLE', ''].includes(hydratedStatus)) return true
+          updateRun(runId, {
+            ...hydrated,
+            hydration_fallback: false,
+            status_authoritative: true,
+          })
+          return false
+        })
+      } catch (error) {
+        // The batch endpoint is an optimization. The selected-run detail route
+        // is the compatibility fallback and must also hydrate unselected rows.
+        unresolvedIds = [...pendingIds]
+      }
+
+      let nextIndex = 0
+      const hydrateFromDetail = async () => {
+        while (nextIndex < unresolvedIds.length) {
+          const runId = unresolvedIds[nextIndex]
+          nextIndex += 1
+          unavailableDetailAttemptedRef.current.add(runId)
+          try {
+            const statusPayload = await getRunStatus(runId)
+            let resolvedRun = statusPayload?.run
+            let resolvedStatus = String(resolvedRun?.status || statusPayload?.status || '').toUpperCase()
+            if (!resolvedRun || ['UNKNOWN', 'UNAVAILABLE', ''].includes(resolvedStatus)) {
+              const detail = await getRun(runId)
+              resolvedRun = detail
+              resolvedStatus = String(detail?.status || '').toUpperCase()
+            }
+            if (!resolvedRun || ['UNKNOWN', 'UNAVAILABLE', ''].includes(resolvedStatus)) {
+              retryNeeded = true
+              continue
+            }
             updateRun(runId, {
-              ...payload.run,
+              ...resolvedRun,
+              status: resolvedStatus,
               hydration_fallback: false,
               status_authoritative: true,
             })
+          } catch (error) {
+            if (isTransientReadError(error)) {
+              retryNeeded = true
+            } else {
+              updateRun(runId, {
+                status: 'UNAVAILABLE',
+                status_authoritative: true,
+                hydration_fallback: false,
+              })
+            }
           }
-        } catch (error) {
-          if (isTransientReadError(error)) {
-            statusHydratedRunIdsRef.current.delete(runId)
-          } else {
-            updateRun(runId, {
-              status: 'UNAVAILABLE',
-              status_authoritative: true,
-              hydration_fallback: false,
-            })
+        }
+      }
+
+      try {
+        await Promise.all([hydrateFromDetail(), hydrateFromDetail()])
+      } finally {
+        pendingIds.forEach((runId) => statusHydrationInFlightRef.current.delete(runId))
+        setHydratingRunIds((current) => {
+          const next = new Set(current)
+          pendingIds.forEach((runId) => next.delete(runId))
+          return next
+        })
+        if (retryNeeded) {
+          if (statusHydrationRetryTimerRef.current !== null) {
+            window.clearTimeout(statusHydrationRetryTimerRef.current)
           }
+          statusHydrationRetryTimerRef.current = window.setTimeout(() => {
+            statusHydrationRetryTimerRef.current = null
+            setHydrationRetryVersion((version) => version + 1)
+          }, 8000)
         }
       }
     }
 
-    // Two workers keep the badges moving without recreating the database
-    // request flood that previously blocked Run History.
-    void Promise.all([hydrateNext(), hydrateNext()])
+    void hydrateVisibleRuns()
     return undefined
-  }, [runs, updateRun])
+  }, [runs, updateRun, hydrationRetryVersion])
+
+  useEffect(() => () => {
+    if (statusHydrationRetryTimerRef.current !== null) {
+      window.clearTimeout(statusHydrationRetryTimerRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     if (!selectedRunId) return
@@ -315,13 +381,17 @@ function RunHistoryPage() {
                         </span>
                         <span className="ml-auto flex items-center gap-1 whitespace-nowrap">
                           <Clock size={9} />
-                          {run.hydration_fallback && !run.status_authoritative
+                          {run.hydration_fallback && !run.status_authoritative && hydratingRunIds.has(run.id)
                             ? 'Refreshing details'
                             : formatRelativeTime(run.updated_at || run.completed_at || run.started_at)}
                         </span>
                       </div>
                     </div>
-                    <StatusPill status={run.status} tone={tone} />
+                    <RunStatusPill
+                      status={run.status}
+                      tone={tone}
+                      isRefreshing={hydratingRunIds.has(run.id)}
+                    />
                   </div>
                 </button>
               )
@@ -340,7 +410,7 @@ function RunHistoryPage() {
                   <div className="mt-2 font-mono text-xs text-white">{selectedRun.id}</div>
                 </div>
                 <div className="flex items-center gap-4">
-                  <StatusPill status={selectedRun.status} tone={statusTone(selectedRun.status)} large />
+                  <RunStatusPill status={selectedRun.status} tone={statusTone(selectedRun.status)} large />
                   <RefreshCw size={18} className="text-white" />
                 </div>
               </div>
@@ -385,7 +455,7 @@ function RunHistoryPage() {
                 <div className="mb-3 text-xs font-semibold text-[#c4cee0]">Stages by Phase</div>
                 <div className="overflow-hidden rounded-lg border border-[#253044] bg-[#0d1525]">
                   {phases.map((phase, index) => (
-                    <PhaseRow
+                    <RunHistoryPhaseRow
                       key={phase.id}
                       phase={phase}
                       index={index + 1}
@@ -434,7 +504,7 @@ function InfoRow({ icon: Icon, label, value }) {
   )
 }
 
-function PhaseRow({ phase, index, onViewCode, onViewReport }) {
+export function RunHistoryPhaseRow({ phase, index, onViewCode, onViewReport }) {
   const [expanded, setExpanded] = useState(false)
   const displaySteps = getHistoryDisplaySteps(phase)
   const completed = displaySteps.filter((step) => isCompletedStep(step.state)).length
@@ -832,7 +902,7 @@ function isCompletedStep(state) {
   return normalizeState(state) === 'COMPLETED'
 }
 
-function StatusPill({ status, tone, large = false }) {
+export function RunStatusPill({ status, tone, large = false, isRefreshing = false }) {
   const toneClasses = {
     emerald: 'border-emerald-400/25 bg-emerald-500/10 text-emerald-400',
     blue: 'border-[#3f82ff]/35 bg-[#3f82ff]/10 text-[#3f82ff]',
@@ -845,14 +915,14 @@ function StatusPill({ status, tone, large = false }) {
       large ? 'px-3 py-1.5 text-xs' : 'px-2.5 py-1 text-[10px]'
     }`}>
       <span className={`h-2 w-2 rounded-full bg-current ${isRunningStatus(status) ? 'animate-pulse' : ''}`} />
-      {statusLabel(status)}
+      {statusLabel(status, isRefreshing)}
     </div>
   )
 }
 
-function statusLabel(status) {
+function statusLabel(status, isRefreshing = false) {
   const rawValue = String(status || '').toUpperCase()
-  if (rawValue === 'UNKNOWN') return 'Refreshing'
+  if (rawValue === 'UNKNOWN') return isRefreshing ? 'Refreshing' : 'Status unavailable'
   const value = ['SUCCESS', 'PIPELINE_COMPLETED'].includes(rawValue)
     ? 'Completed'
     : rawValue.replace(/_/g, ' ').trim()
@@ -881,7 +951,7 @@ function parseBackendDate(value) {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-function formatCompactDate(value) {
+export function formatCompactDate(value) {
   if (!value) return 'Unknown'
   const date = parseBackendDate(value)
   if (!date) return 'Unknown'
@@ -894,7 +964,7 @@ function formatCompactDate(value) {
   })
 }
 
-function formatRelativeTime(value) {
+export function formatRelativeTime(value) {
   if (!value) return ''
   const date = parseBackendDate(value)
   if (!date) return ''
@@ -907,7 +977,7 @@ function formatRelativeTime(value) {
   return `${Math.floor(hours / 24)}d ago`
 }
 
-function formatFullDate(value) {
+export function formatFullDate(value) {
   if (!value) return '-'
   const date = parseBackendDate(value)
   if (!date) return '-'

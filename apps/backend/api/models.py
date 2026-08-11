@@ -100,6 +100,15 @@ class StageContinueRequest(BaseModel):
     auto_advance: Optional[bool] = False
 
 
+class RunSummaryStatusBatchRequest(BaseModel):
+    run_ids: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("run_ids")
+    @classmethod
+    def normalize_run_ids(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(str(value or "").strip() for value in values if str(value or "").strip()))
+
+
 class HitlDecision(BaseModel):
     kpi_id: str
     decision: str

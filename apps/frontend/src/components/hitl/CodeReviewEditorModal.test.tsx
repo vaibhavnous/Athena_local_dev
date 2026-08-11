@@ -35,7 +35,7 @@ test.each(['BRONZE', 'SILVER', 'GOLD'])('uses the shared %s code review layout',
 
   expect(screen.getByRole('heading', { name: new RegExp(`Code Review.*${type.toLowerCase()}`) })).toBeInTheDocument()
   expect(screen.getAllByText(`${type.toLowerCase()}_transform.sql`).length).toBeGreaterThan(0)
-  fireEvent.click(screen.getByRole('button', { name: 'Submit & Run Stage' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Submit & Continue' }))
   expect(onSubmit).toHaveBeenCalledTimes(1)
 })
 
@@ -50,4 +50,25 @@ test('keeps the Athena desktop modal width instead of expanding across the viewp
 
   expect(screen.getByRole('dialog').firstElementChild).toHaveClass('max-w-4xl')
   expect(screen.getByRole('dialog').firstElementChild).not.toHaveClass('max-w-[1344px]')
+})
+
+test('changes Copy to Copied after copying the draft', async () => {
+  const writeText = jest.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  })
+
+  render(
+    <CodeReviewEditorModal
+      item={{ type: 'GOLD', fileName: 'gold_transform.sql', code: 'SELECT 1;' }}
+      onClose={jest.fn()}
+      onSave={jest.fn()}
+    />
+  )
+
+  fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+
+  expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+  expect(writeText).toHaveBeenCalledWith('SELECT 1;')
 })

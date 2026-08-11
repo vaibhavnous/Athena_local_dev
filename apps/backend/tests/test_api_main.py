@@ -29,6 +29,28 @@ def test_health_endpoint():
     assert embeddings["mode"] in {"blocked", "disabled", "enabled"}
 
 
+def test_pipeline_summary_statuses_batches_authoritative_results(monkeypatch):
+    from api.models import RunSummaryStatusBatchRequest
+    from api.routers import pipeline_router
+
+    monkeypatch.setattr(pipeline_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_fields_many",
+        lambda run_ids, *fields: {
+            "run-running": {"run_id": "run-running", "status": "PROCESSING", "background_stage": "silver"},
+            "run-waiting": {"run_id": "run-waiting", "status": "HITL_WAIT", "next_gate": "3"},
+        },
+    )
+
+    result = pipeline_router.pipeline_summary_statuses(
+        RunSummaryStatusBatchRequest(run_ids=["run-running", "run-waiting", "run-missing"]),
+        AuthUser(uid="admin", username="Admin", email="admin@example.com", userType="Admin"),
+    )
+
+    assert [run["status"] for run in result["runs"]] == ["RUNNING", "HITL_WAIT", "UNAVAILABLE"]
+    assert all(run["status_authoritative"] is True for run in result["runs"])
+
+
 def test_business_endpoints_require_authentication():
     override = app.dependency_overrides.pop(get_current_user)
     try:

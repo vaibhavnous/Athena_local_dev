@@ -274,6 +274,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
     from services.pipeline_runtime import (
         apply_waiting_stage_state,
         build_pipeline_steps,
+        build_run_report,
     )
 
     generation_first = checkpoint.get("database_flow_version") == "generation_first_v1"
@@ -406,6 +407,14 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         )
         if key in checkpoint
     }
+    display_run_report = checkpoint.get("run_report") or {}
+    if display_run_report:
+        try:
+            normalized_report = build_run_report(checkpoint)
+            normalized_report["generated_at"] = display_run_report.get("generated_at") or normalized_report.get("generated_at")
+            display_run_report = normalized_report
+        except Exception:
+            logger.warning("Unable to normalize persisted run report", extra={"run_id": run_id})
 
     return {
         **_fallback_run_summary(
@@ -456,7 +465,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         "gold_generation_completed": gold_completed,
         "report_generation_enabled": bool(checkpoint.get("report_generation_enabled")),
         "report_generation_status": checkpoint.get("report_generation_status"),
-        "run_report": checkpoint.get("run_report") or {},
+        "run_report": display_run_report,
         "candidate_feed": checkpoint.get("candidate_feed"),
         "candidate_feeds": checkpoint.get("candidate_feeds") or [],
         "compliance_enabled": bool(checkpoint.get("compliance_enabled")),

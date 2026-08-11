@@ -94,6 +94,55 @@ def test_project_list_is_scoped_to_client_owner(monkeypatch):
         app.dependency_overrides.pop(get_current_user, None)
 
 
+def test_project_runs_batch_loads_lightweight_checkpoint_fields(monkeypatch):
+    previous_override = app.dependency_overrides.get(get_current_user)
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="owner", username="Owner", email="owner@astra.local", userType="Client"
+    )
+    monkeypatch.setattr(
+        projects_router.repository,
+        "find",
+        lambda project_id: {"id": project_id, "owner_email": "owner@astra.local"},
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.list_runs",
+        lambda limit, project_id: [
+            {"run_id": "run-1", "last_activity": "2026-08-07T06:00:00"},
+            {"run_id": "run-2", "last_activity": "2026-08-07T05:00:00"},
+        ],
+    )
+    captured = {}
+
+    def load_many(run_ids, *fields):
+        captured.update({"run_ids": run_ids, "fields": fields})
+        return {
+            "run-1": {"project_id": "project-1", "brd_filename": "claims.docx", "status": "COMPLETED"},
+            "run-2": {"project_id": "different-project", "status": "FAILED"},
+        }
+
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_fields_many", load_many)
+
+    response = client.get("/projects/project-1/runs")
+
+    assert response.status_code == 200
+    assert response.json() == [{
+        "run_id": "run-1",
+        "last_activity": "2026-08-07T06:00:00",
+        "project_id": "project-1",
+        "brd_filename": "claims.docx",
+        "status": "COMPLETED",
+    }]
+    assert captured["run_ids"] == ["run-1", "run-2"]
+    assert "brd_filename" in captured["fields"]
+    assert "error" in captured["fields"]
+    assert "error_message" in captured["fields"]
+    assert "failed_background_stage" in captured["fields"]
+    if previous_override:
+        app.dependency_overrides[get_current_user] = previous_override
+    else:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
 def test_project_delete_returns_empty_204(monkeypatch):
     previous_override = app.dependency_overrides.get(get_current_user)
     app.dependency_overrides[get_current_user] = lambda: AuthUser(

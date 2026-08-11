@@ -18,6 +18,14 @@ export const useProject = (id?: string) => {
   })
 }
 
+export const useProjectRuns = (id?: string) => useQuery({
+  queryKey: [...PROJECTS_KEY, id, 'runs'],
+  queryFn: () => projectService.getRuns(id!),
+  enabled: !!id,
+  retry: false,
+  staleTime: 30 * 1000,
+})
+
 export const useCreateProject = () => {
   const client = useQueryClient()
   return useMutation({

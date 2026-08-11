@@ -15,7 +15,7 @@ from api.auth import (
     load_project_for_user,
 )
 from api.demo import demo_action, demo_enabled, demo_start_progress, demo_status, new_demo_run_id
-from api.models import PipelineRunRequest, StageContinueRequest
+from api.models import PipelineRunRequest, RunSummaryStatusBatchRequest, StageContinueRequest
 from utilis.logger import logger
 
 router = APIRouter()
@@ -469,6 +469,8 @@ def pipeline_summary_status(
     )
     checkpoint = assert_run_access(run_id, user, checkpoint=fields)
     status = _status_from_checkpoint(checkpoint)
+    if status == "UNKNOWN":
+        status = "UNAVAILABLE"
     return {
         "run_id": run_id,
         "status": status,
@@ -482,6 +484,69 @@ def pipeline_summary_status(
             "status_authoritative": True,
         },
     }
+
+
+@router.post("/pipeline/summary-statuses")
+def pipeline_summary_statuses(
+    payload: RunSummaryStatusBatchRequest,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Return authoritative badge statuses for a visible group of Run History items."""
+    if not payload.run_ids:
+        return {"runs": []}
+    if demo_enabled():
+        return {"runs": [demo_status(run_id).get("run", {}) for run_id in payload.run_ids]}
+
+    from api.routers.runs_router import _status_from_checkpoint
+    from services.pipeline_runtime import load_checkpoint_fields_many
+
+    field_names = (
+        "run_id",
+        "status",
+        "background_stage",
+        "next_gate",
+        "next_review_key",
+        "next_stage_key",
+        "next_stage_label",
+        "resume_message",
+        "error",
+        "failed_background_stage",
+        "project_id",
+        "project_name",
+        "brd_filename",
+        "started_at",
+        "completed_at",
+        "updated_at",
+        "owner_email",
+        "created_by_email",
+        "submitted_by_email",
+        "user_email",
+    )
+    checkpoints = load_checkpoint_fields_many(payload.run_ids, *field_names)
+    runs = []
+    for run_id in payload.run_ids:
+        checkpoint = checkpoints.get(run_id)
+        if not checkpoint:
+            runs.append({
+                "id": run_id,
+                "run_id": run_id,
+                "status": "UNAVAILABLE",
+                "hydration_fallback": False,
+                "status_authoritative": True,
+            })
+            continue
+        checkpoint = assert_run_access(run_id, user, checkpoint=checkpoint)
+        status = _status_from_checkpoint(checkpoint)
+        runs.append({
+            "id": run_id,
+            "run_id": run_id,
+            **checkpoint,
+            "status": "UNAVAILABLE" if status == "UNKNOWN" else status,
+            "failed_stage_key": checkpoint.get("failed_background_stage"),
+            "hydration_fallback": False,
+            "status_authoritative": True,
+        })
+    return {"runs": runs}
 
 
 @router.get("/pipeline/{run_id}/status")

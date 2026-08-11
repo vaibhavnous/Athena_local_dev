@@ -109,6 +109,13 @@ export function pipelineActivityFromLogs(logs = []) {
   return null
 }
 
+export function toggleExpandedPhaseIds(current, phaseId) {
+  const next = new Set(current)
+  if (next.has(phaseId)) next.delete(phaseId)
+  else next.add(phaseId)
+  return next
+}
+
 function shouldUseStatusRefresh(run) {
   const status = normalizeState(run?.status)
   const stageKey = String(run?.external_execution?.stage_key || run?.background_stage || '').trim()
@@ -342,7 +349,7 @@ function PipelineMonitor() {
     return firstIncomplete?.id || renderedPhases[renderedPhases.length - 1].id
   }, [renderedPhases])
 
-  const [expandedPhase, setExpandedPhase] = useState(defaultExpandedPhase)
+  const [expandedPhases, setExpandedPhases] = useState(() => new Set([defaultExpandedPhase]))
   const autoExpandedPhaseRef = useRef(defaultExpandedPhase)
   const previousRunIdRef = useRef<string | null>(null)
 
@@ -354,7 +361,13 @@ function PipelineMonitor() {
 
     previousRunIdRef.current = activeRun.id
     autoExpandedPhaseRef.current = defaultExpandedPhase
-    setExpandedPhase(defaultExpandedPhase)
+  setExpandedPhases((current) => {
+    if (runChanged) return new Set([defaultExpandedPhase])
+    if (current.has(defaultExpandedPhase)) return current
+    const next = new Set(current)
+    next.add(defaultExpandedPhase)
+    return next
+  })
   }, [defaultExpandedPhase, activeRun?.id])
 
   const monitorRun = activeRun
@@ -798,12 +811,12 @@ function PipelineMonitor() {
           </div>
           <div className="min-h-0 flex-1 divide-y divide-[#253044] overflow-y-auto">
             {renderedPhases.map((phase, index) => {
-              const expanded = expandedPhase === phase.id
+              const expanded = expandedPhases.has(phase.id)
               const tone = statusTone(phase.status)
               return (
                 <div key={phase.id}>
                   <button
-                    onClick={() => setExpandedPhase(expanded ? '' : phase.id)}
+                    onClick={() => setExpandedPhases((current) => toggleExpandedPhaseIds(current, phase.id))}
                     className={`flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors ${
                       expanded ? 'bg-[#101735]' : 'bg-[#080e1d] hover:bg-[#0f1728]'
                     }`}

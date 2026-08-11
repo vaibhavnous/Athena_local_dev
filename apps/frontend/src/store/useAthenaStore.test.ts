@@ -265,6 +265,29 @@ test('keeps detailed HITL status when history refresh returns an UNKNOWN summary
   })
 })
 
+test('keeps an authoritative sparse status when a fallback summary becomes UNKNOWN', () => {
+  resetStore()
+  useAthenaStore.getState().addRun({
+    id: 'run-authoritative',
+    status: 'HITL_WAIT',
+    status_authoritative: true,
+    hydration_fallback: false,
+  })
+
+  useAthenaStore.getState().setRuns([{
+    id: 'run-authoritative',
+    status: 'UNKNOWN',
+    status_authoritative: false,
+    hydration_fallback: true,
+  }])
+
+  expect(useAthenaStore.getState().runs[0]).toMatchObject({
+    status: 'HITL_WAIT',
+    status_authoritative: true,
+    hydration_fallback: false,
+  })
+})
+
 test('keeps known runs when polling returns a transient empty snapshot', () => {
   resetStore()
   useAthenaStore.getState().addRun({ id: 'run-4', status: 'RUNNING' })

@@ -967,6 +967,16 @@ def execute_finalized_snowflake_dbt_project(state: Dict[str, Any]) -> Dict[str, 
             "The finalized Snowflake dbt project changed after review; regenerate and approve it before deployment."
         )
 
+    logger.info(
+        "START Snowflake dbt build stage=gold_code_execution models=%s",
+        state.get("snowflake_dbt_model_count"),
+        extra={
+            "run_id": str(state.get("run_id") or ""),
+            "node": "gold_code_execution",
+            "stage": "gold_code_execution",
+            "step_name": "dbt_build_start",
+        },
+    )
     with _NATIVE_DBT_DEPLOY_LOCK:
         final_state = _execute_snowflake_dbt(state, project_dir)
     _write_ai_store_summary(
@@ -988,8 +998,8 @@ def execute_finalized_snowflake_dbt_project(state: Dict[str, Any]) -> Dict[str, 
         expected_hash,
         extra={
             "run_id": str(state.get("run_id") or ""),
-            "node": "gold_execution",
-            "stage": "gold",
+            "node": "gold_code_execution",
+            "stage": "gold_code_execution",
             "step_name": "dbt_build_complete",
         },
     )

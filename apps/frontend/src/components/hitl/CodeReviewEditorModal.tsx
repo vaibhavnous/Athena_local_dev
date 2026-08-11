@@ -1,7 +1,7 @@
 // @ts-nocheck
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Code2, Copy, Download, FileCode2, Pencil, Play, RotateCcw, Save, X } from 'lucide-react'
+import { Check, Code2, Copy, Download, FileCode2, Pencil, Play, RotateCcw, Save, X } from 'lucide-react'
 
 function codeLanguage(fileName = '') {
   const extension = String(fileName).split('.').pop()?.toLowerCase()
@@ -37,12 +37,14 @@ function highlightedLine(line, language) {
   })
 }
 
-function CodeReviewEditorModal({ item, onClose, onSave, onSubmit = null, submitting = false, submitLabel = 'Submit & Run Stage', submitDisabled = false }) {
+function CodeReviewEditorModal({ item, onClose, onSave, onSubmit = null, submitting = false, submitLabel = 'Submit & Continue', submitDisabled = false }) {
   const originalCode = String(item?.code || '# Generated code is not available yet.')
   const [draftCode, setDraftCode] = useState(originalCode)
   const [savedCode, setSavedCode] = useState(originalCode)
   const [editing, setEditing] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const copyResetTimerRef = useRef(null)
   const fileName = item?.fileName || `${String(item?.title || 'generated_code').replace(/[^a-zA-Z0-9_.-]+/g, '_')}.txt`
   const language = codeLanguage(fileName)
   const lines = useMemo(() => draftCode.split('\n'), [draftCode])
@@ -68,6 +70,10 @@ function CodeReviewEditorModal({ item, onClose, onSave, onSubmit = null, submitt
     }
   }, [draftCode, onClose, onSave])
 
+  useEffect(() => () => {
+    if (copyResetTimerRef.current !== null) window.clearTimeout(copyResetTimerRef.current)
+  }, [])
+
   const saveDraft = () => {
     onSave(draftCode)
     setSavedCode(draftCode)
@@ -86,6 +92,13 @@ function CodeReviewEditorModal({ item, onClose, onSave, onSubmit = null, submitt
       document.execCommand('copy')
       textarea.remove()
     }
+
+    setCopied(true)
+    if (copyResetTimerRef.current !== null) window.clearTimeout(copyResetTimerRef.current)
+    copyResetTimerRef.current = window.setTimeout(() => {
+      setCopied(false)
+      copyResetTimerRef.current = null
+    }, 2000)
   }
 
   return createPortal(
@@ -112,7 +125,18 @@ function CodeReviewEditorModal({ item, onClose, onSave, onSubmit = null, submitt
                 <Pencil size={12} /> Edit
               </button>
             )}
-            <button type="button" onClick={copyDraft} className="hidden items-center gap-1.5 rounded-md border border-[#26334a] bg-[#111b2d] px-2.5 py-1 text-xs text-[#b5bfd0] hover:border-gray-500 hover:text-white sm:inline-flex"><Copy size={12} /> Copy</button>
+            <button
+              type="button"
+              onClick={copyDraft}
+              className={`hidden items-center gap-1.5 rounded-md border bg-[#111b2d] px-2.5 py-1 text-xs transition-colors sm:inline-flex ${
+                copied
+                  ? 'border-emerald-500/40 text-emerald-400'
+                  : 'border-[#26334a] text-[#b5bfd0] hover:border-gray-500 hover:text-white'
+              }`}
+            >
+              {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
             <button type="button" onClick={() => downloadDraft(fileName, draftCode)} className="hidden items-center gap-1.5 rounded-md border border-[#26334a] bg-[#111b2d] px-2.5 py-1 text-xs text-[#b5bfd0] hover:border-gray-500 hover:text-white md:inline-flex"><Download size={12} /> Download</button>
             <button type="button" onClick={onClose} aria-label="Close code review" className="rounded-md p-1.5 text-[#9ea9bc] hover:bg-white/5 hover:text-white"><X size={15} /></button>
           </div>

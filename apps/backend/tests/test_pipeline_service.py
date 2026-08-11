@@ -10,6 +10,40 @@ from api.services import pipeline_service
 from services import pipeline_runtime
 
 
+def test_run_report_distinguishes_confirmed_keys_from_semantic_identifiers():
+    report = pipeline_runtime.build_run_report(
+        {
+            "run_id": "report-keys",
+            "certified_tables": [{"table_name": "claims"}],
+            "enriched_metadata": {
+                "columns": [
+                    {"table_name": "claims", "column_name": "claim_id", "semantic_type": "ID", "is_primary_key": True, "is_join_key": True},
+                    {"table_name": "claims", "column_name": "policy_id", "semantic_type": "ID", "is_foreign_key": True},
+                    {"table_name": "claims", "column_name": "update_num", "semantic_type": "ID", "is_join_key": True},
+                    {"table_name": "claims", "column_name": "audit_id", "semantic_type": "ID"},
+                ],
+                "gate4_reviewed_merge_keys": {
+                    "feeds": [{"table": "claims", "merge_keys": ["update_num"]}],
+                },
+            },
+        }
+    )
+
+    columns = report["tables"][0]["columns"]
+    assert columns[0]["is_key"] is True
+    assert columns[0]["is_join_key"] is False
+    assert columns[1]["is_join_key"] is True
+    assert columns[2]["is_merge_key"] is True
+    assert columns[2]["is_join_key"] is False
+    assert columns[3]["is_key"] is False
+    assert columns[3]["is_identifier"] is True
+    assert report["metrics"]["key_columns"] == 1
+    assert report["metrics"]["primary_key_columns"] == 1
+    assert report["metrics"]["join_key_columns"] == 1
+    assert report["metrics"]["merge_key_columns"] == 1
+    assert report["metrics"]["identifier_columns"] == 4
+
+
 def test_validate_pipeline_result_rejects_non_dict():
     with pytest.raises(ValueError, match="invalid response object"):
         pipeline_service._validate_pipeline_result("bad")
@@ -703,6 +737,46 @@ def test_load_checkpoint_fields_uses_json_value_projection(monkeypatch):
     assert "JSON_VALUE(full_state_json, '$.source')" in recorded["query"]
     assert "JSON_VALUE(full_state_json, '$.status')" in recorded["query"]
     assert recorded["params"] == ("run-fast",)
+    assert recorded["closed"] is True
+
+
+def test_load_checkpoint_fields_many_uses_one_ranked_query(monkeypatch):
+    from services import pipeline_runtime
+
+    recorded = {}
+
+    class StubCursor:
+        def execute(self, query, params):
+            recorded["query"] = query
+            recorded["params"] = params
+
+        def fetchall(self):
+            return [
+                ("run-1", "RUNNING", "bronze"),
+                ("run-2", "HITL_WAIT", None),
+            ]
+
+    class StubConnection:
+        def cursor(self):
+            return StubCursor()
+
+        def close(self):
+            recorded["closed"] = True
+
+    monkeypatch.setattr(pipeline_runtime, "get_connection", lambda: StubConnection())
+
+    fields = pipeline_runtime.load_checkpoint_fields_many(
+        ["run-1", "run-2", "run-1"],
+        "status",
+        "background_stage",
+    )
+
+    assert fields == {
+        "run-1": {"status": "RUNNING", "background_stage": "bronze"},
+        "run-2": {"status": "HITL_WAIT"},
+    }
+    assert "ROW_NUMBER() OVER (PARTITION BY run_id" in recorded["query"]
+    assert recorded["params"] == ("run-1", "run-2")
     assert recorded["closed"] is True
 
 
