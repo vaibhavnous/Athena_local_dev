@@ -306,6 +306,66 @@ test('shows metadata DDL generation while keeping review gates out of the monito
   ])
 })
 
+test('renders ADLS generation-first phases exactly like database phases', () => {
+  const phase = {
+    id: 'phase-3',
+    label: 'Code Generation & Reviews',
+    status: 'Pending',
+    steps: [
+      { key: 'metadata_ddl', state: 'PENDING' },
+      { key: 'metadata_ddl_review', state: 'PENDING' },
+      { key: 'bronze', state: 'PENDING' },
+      { key: 'gate4', state: 'PENDING' },
+      { key: 'silver_merge_key_resolution', state: 'PENDING' },
+      { key: 'silver_merge_key_review', state: 'PENDING' },
+      { key: 'silver', state: 'PENDING' },
+      { key: 'gate5', state: 'PENDING' },
+      { key: 'gold', state: 'PENDING' },
+      { key: 'gold_review', state: 'PENDING' },
+    ],
+  }
+
+  const database = buildPipelineDisplayPhase(phase, phase.steps, { source: 'database' })
+  const adls = buildPipelineDisplayPhase(phase, phase.steps, { source: 'adls_gen2' })
+
+  expect(adls).toEqual(database)
+  expect(adls.steps.map((step) => step.label)).toEqual([
+    'Metadata DDL Generation',
+    'Bronze Code Generation',
+    'Silver Merge Key Resolution',
+    'Silver Merge Key Review',
+    'Silver Code Generation',
+    'Gold Code Generation',
+  ])
+})
+
+test('shows a terminal ADLS Gold failure instead of a stale running stage', () => {
+  const phase = {
+    id: 'phase-3',
+    label: 'Code Generation & Reviews',
+    status: 'Running',
+    steps: [
+      { key: 'metadata_ddl', state: 'COMPLETED' },
+      { key: 'bronze', state: 'COMPLETED' },
+      { key: 'gate4', state: 'COMPLETED' },
+      { key: 'silver_merge_key_resolution', state: 'COMPLETED' },
+      { key: 'silver_merge_key_review', state: 'COMPLETED' },
+      { key: 'silver', state: 'COMPLETED' },
+      { key: 'gate5', state: 'COMPLETED' },
+      { key: 'gold', state: 'RUNNING' },
+    ],
+  }
+
+  const display = buildPipelineDisplayPhase(phase, phase.steps, {
+    source: 'adls_gen2',
+    status: 'FAILED',
+    gold_generation_status: 'FAILED',
+  })
+
+  expect(display.steps.find((step) => step.key === 'gold')?.state).toBe('FAILED')
+  expect(display.status).toBe('Failed')
+})
+
 test('renders deployment followed by report generation for enabled Snowflake dbt runs', () => {
   const phase = {
     id: 'phase-4',
@@ -332,5 +392,37 @@ test('renders deployment followed by report generation for enabled Snowflake dbt
     { key: 'metadata_setup_execution', label: 'Metadata Setup Execution', state: 'PENDING' },
     { key: 'gold_code_execution', label: 'Code Execution', state: 'PENDING' },
     { key: 'report_generation', label: 'Report Generation', state: 'PENDING' },
+  ])
+})
+
+test('keeps ADLS native generation and report-enabled execution stages in separate phases', () => {
+  const phase = {
+    id: 'phase-4',
+    label: 'Target Execution & Report Generation',
+    status: 'Pending',
+    steps: [
+      { key: 'metadata_setup_execution', state: 'PENDING' },
+      { key: 'bronze_code_execution', state: 'PENDING' },
+      { key: 'silver_code_execution', state: 'PENDING' },
+      { key: 'gold_code_execution', state: 'PENDING' },
+      { key: 'report_generation', state: 'PENDING' },
+    ],
+  }
+  const run = {
+    source: 'adls_gen2',
+    target_warehouse: 'databricks',
+    execution_engine: 'native',
+    database_flow_version: 'generation_first_v2',
+    report_generation_enabled: true,
+  }
+
+  const display = buildPipelineDisplayPhase(phase, phase.steps, run)
+
+  expect(display.steps.map((step) => step.key)).toEqual([
+    'metadata_setup_execution',
+    'bronze_code_execution',
+    'silver_code_execution',
+    'gold_code_execution',
+    'report_generation',
   ])
 })

@@ -602,7 +602,9 @@ class MetadataRepository(ABC):
         return result
 
     def upsert_connection_draft(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
-        normalized = validate_jdbc_connection(payload)
+        from services.metadata_contracts import validate_connection
+
+        normalized = validate_connection(payload)
         source_system_id = int(normalized["source_system_id"])
         source_system = self.get_source_system(source_system_id)
         if not source_system or not _as_bool(source_system.get("active_flag")):

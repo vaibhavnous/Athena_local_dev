@@ -88,7 +88,7 @@ def generation_first_database_flow(state: Dict[str, Any]) -> bool:
             DATABASE_GENERATION_FIRST_FLOW_VERSION,
             LEGACY_DATABASE_GENERATION_FIRST_FLOW_VERSION,
         }
-        and str(state.get("source") or "database").lower() == "database"
+        and str(state.get("source") or "database").lower() in {"database", "adls_gen2"}
         and str(state.get("target_warehouse") or "").lower() in {"databricks", "snowflake"}
     )
 
@@ -334,7 +334,7 @@ def wait_for_minimum_stage_runtime(stage_key: str, started_at: float, state: Opt
 def run_with_minimum_stage_runtime(stage_key: str, runner, state: Dict[str, Any]) -> Dict[str, Any]:
     started_at = time.monotonic()
     run_id = str(state.get("run_id") or "").strip()
-    stage_labels = FILE_SOURCE_STAGE_LABELS if str(state.get("source") or "").lower() in {"sftp", "adls_gen2"} else DATABASE_STAGE_LABELS
+    stage_labels = FILE_SOURCE_STAGE_LABELS if str(state.get("source") or "").lower() == "sftp" else DATABASE_STAGE_LABELS
     running_state = {
         **state,
         "status": "RUNNING",
@@ -396,7 +396,7 @@ def _gate_label(gate: int, *, source: str = "database") -> str:
     if gate == 1:
         return "KPI Review"
     if gate == 2:
-        return "Feed Review" if str(source or "").lower() in {"sftp", "adls_gen2"} else "Table Review"
+        return "Feed Review" if str(source or "").lower() == "sftp" else "Table Review"
     if gate == 3:
         return "Semantic Review"
     if gate == 4:
@@ -451,7 +451,14 @@ def _pause_for_stage_confirmation(
     return updated
 
 
-def _database_stage_runner(stage_key: str):
+def _database_stage_runner(stage_key: str, state: Optional[Dict[str, Any]] = None):
+    if (
+        stage_key == "gate1"
+        and str((state or {}).get("source") or "").lower() == "adls_gen2"
+    ):
+        from sftp_nodes.governance import sftp_gate1_node
+
+        return sftp_gate1_node
     if stage_key == "ingestion":
         from nodes.ingestion import ingestion_node
 
@@ -586,7 +593,10 @@ def _run_database_metadata_ddl_stage(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _run_database_bronze_stage(state: Dict[str, Any]) -> Dict[str, Any]:
-    from nodes.bronze_gen import bronze_code_generation_node
+    if str(state.get("source") or "").lower() == "adls_gen2":
+        from sftp_nodes.bronze_generation import bronze_code_generation_node
+    else:
+        from nodes.bronze_gen import bronze_code_generation_node
 
     result = bronze_code_generation_node(_mapping_driven_bronze_state(state))
     if state.get("source_system_id") is not None:
@@ -1213,7 +1223,10 @@ def _mapping_driven_bronze_state(
 
 
 def _run_database_silver_stage(state: Dict[str, Any]) -> Dict[str, Any]:
-    from nodes.silver_gen import silver_code_generation_node
+    if str(state.get("source") or "").lower() == "adls_gen2":
+        from sftp_nodes.silver_generation import silver_code_generation_node
+    else:
+        from nodes.silver_gen import silver_code_generation_node
 
     result = silver_code_generation_node(state)
     if str(result.get("silver_generation_status") or "").upper() == "COMPLETED":
@@ -1227,7 +1240,10 @@ def _run_database_silver_stage(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _run_database_gold_stage(state: Dict[str, Any]) -> Dict[str, Any]:
-    from nodes.gold_gen import gold_code_generation_node
+    if str(state.get("source") or "").lower() == "adls_gen2":
+        from sftp_nodes.gold_generation import gold_code_generation_node
+    else:
+        from nodes.gold_gen import gold_code_generation_node
 
     result = gold_code_generation_node(state)
     if str(result.get("gold_generation_status") or "").upper().startswith("COMPLETED"):
@@ -1289,7 +1305,7 @@ def continue_database_pipeline(
         save_checkpoint_state_timed(run_id, running_state, context=f"{current_stage_key}:running")
         working_state = running_state
 
-        runner = _database_stage_runner(current_stage_key)
+        runner = _database_stage_runner(current_stage_key, working_state)
         result = runner(working_state)
         if not isinstance(result, dict):
             raise ValueError(f"Stage {current_stage_key} returned an invalid state.")
@@ -2557,7 +2573,7 @@ def build_pipeline_steps(
         needle = text.lower()
         return any(needle in stage for stage in stages)
 
-    if source in {"sftp", "adls_gen2"}:
+    if source == "sftp":
         gate1_decision = (checkpoint.get("gate1") or {}).get("decision")
         gate2_decision = (checkpoint.get("gate2") or {}).get("decision")
         gate4_decision = (checkpoint.get("gate4") or {}).get("decision")
@@ -2862,7 +2878,11 @@ def build_pipeline_steps(
         {
             "key": "gate1",
             "label": _gate_label(1, source=source),
-            "complete": bool("GATE1_CERTIFIED_KPIS" in artifact_types or (completed_gate1 and not pending_gate1)),
+            "complete": bool(
+                "GATE1_CERTIFIED_KPIS" in artifact_types
+                or (completed_gate1 and not pending_gate1)
+                or str((checkpoint.get("gate1") or {}).get("decision") or "").upper() == "APPROVED"
+            ),
             "detail": "Human KPI certification",
         },
         {
@@ -2874,7 +2894,11 @@ def build_pipeline_steps(
         {
             "key": "gate2",
             "label": _gate_label(2, source=source),
-            "complete": bool("GATE2_CERTIFIED_TABLES" in artifact_types or certified_tables),
+            "complete": bool(
+                "GATE2_CERTIFIED_TABLES" in artifact_types
+                or certified_tables
+                or str((checkpoint.get("gate2") or {}).get("decision") or "").upper() == "APPROVED"
+            ),
             "detail": "Human table certification",
         },
         {
@@ -3324,9 +3348,9 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
     if downstream_progress_exists and completed_gate1:
         pending_gate1 = []
 
-    # For SFTP runs, the feed review replaces table nomination.
-    # Ensure we don't render DB-table review panels for SFTP runs.
-    if source_value in {"sftp", "adls_gen2"}:
+    # Keep only the retired SFTP checkpoint projection isolated. ADLS v2 uses
+    # the shared generation-first table/review state populated from its files.
+    if source_value == "sftp":
         nominated_tables = []
         certified_tables = []
         pending_gate1 = []  # SFTP gate1 is tracked via checkpoint.gate1, not SQL queue.
@@ -3355,8 +3379,14 @@ def get_run_context(run_id: str) -> Dict[str, Any]:
             measure_columns.append(column)
 
     known_stage_completion = {
-        "gate1": bool(completed_gate1 and not pending_gate1),
-        "gate2": bool(certified_tables),
+        "gate1": bool(
+            (completed_gate1 and not pending_gate1)
+            or str((checkpoint.get("gate1") or {}).get("decision") or "").upper() == "APPROVED"
+        ),
+        "gate2": bool(
+            certified_tables
+            or str((checkpoint.get("gate2") or {}).get("decision") or "").upper() == "APPROVED"
+        ),
         "enrichment": bool(enriched_payload or checkpoint.get("semantic_enrichment_status") == "COMPLETED"),
         "gate3": bool(gate3_payload),
         "bronze": bool(bronze_generation_completed),
@@ -3774,6 +3804,8 @@ def start_pipeline(
             brd_text=initial_state["brd_text"],
             sftp_entity=initial_state["sftp_entity"],
             source=source_value,
+            target_warehouse=initial_state["target_warehouse"],
+            target_environment=initial_state["target_environment"],
         ).get("result")
     else:
         result = continue_database_pipeline(
@@ -5177,7 +5209,13 @@ def submit_gate4_review(
             final_state["bronze_review_artifact"],
         )
         if final_state.get("source_system_id") is not None:
-            final_state = _activate_reviewed_bronze_metadata(_attach_bronze_execution_specs(final_state))
+            final_state = _attach_bronze_execution_specs(final_state)
+            if str(final_state.get("source") or "database").lower() == "adls_gen2":
+                from services.file_metadata import activate_file_bronze_artifacts
+
+                final_state = activate_file_bronze_artifacts(final_state)
+            else:
+                final_state = _activate_reviewed_bronze_metadata(final_state)
         if target_warehouse == "snowflake" and snowflake_dbt_enabled(final_state):
             if (
                 str(final_state.get("dbt_deployment_mode") or "generate_only").lower() == "generate_and_deploy"
@@ -5354,7 +5392,10 @@ def submit_silver_merge_key_review(run_id: str, action: str = "APPROVED", review
             [item for item in final_state.get("bronze_generation_results") or [] if isinstance(item, dict)],
             artifact,
         )
-        if final_state.get("source_system_id") is not None:
+        if (
+            final_state.get("source_system_id") is not None
+            and str(final_state.get("source") or "database").lower() == "database"
+        ):
             final_state = _materialize_bronze_to_silver_metadata(final_state, artifact)
         final_state["status"] = "RUNNING"
         final_state["next_gate"] = None
@@ -5379,25 +5420,6 @@ def submit_silver_merge_key_review(run_id: str, action: str = "APPROVED", review
     )
     save_checkpoint_state(run_id, final_state)
     if decision == "APPROVED":
-        if str(final_state.get("source") or "").lower() in {"sftp", "adls_gen2"}:
-            from sftp_nodes.review_gates import sftp_gate5_node
-            from sftp_nodes.silver_code_generation import sftp_silver_code_generation_node
-
-            silver_state = sftp_silver_code_generation_node(final_state)
-            silver_status = str(silver_state.get("silver_generation_status") or "").upper()
-            silver_items = ((silver_state.get("silver_review_artifact") or {}).get("items") or [])
-            if silver_status not in {"COMPLETED", "PARTIAL"} or not silver_items:
-                blocked_state = {
-                    **silver_state,
-                    "status": "FAILED",
-                    "error": silver_state.get("silver_generation_error")
-                    or "Silver generation did not produce a review artifact after merge-key approval.",
-                }
-                save_checkpoint_state(run_id, blocked_state)
-                return blocked_state
-            gate5_state = sftp_gate5_node(silver_state)
-            save_checkpoint_state(run_id, gate5_state)
-            return gate5_state
         return continue_database_pipeline(run_id, start_stage_key="silver", state=final_state)
     return final_state
 
@@ -5802,9 +5824,11 @@ def submit_gate5_review(run_id: str, action: str = "APPROVED", review_artifact: 
 
 
 def submit_gold_generation(run_id: str) -> Dict[str, Any]:
-    from nodes.gold_gen import gold_code_generation_node
-
     checkpoint_state = load_checkpoint_state(run_id) or {"run_id": run_id}
+    if str(checkpoint_state.get("source") or "").lower() == "adls_gen2":
+        from sftp_nodes.gold_generation import gold_code_generation_node
+    else:
+        from nodes.gold_gen import gold_code_generation_node
     contract = (
         checkpoint_state.get("gold_generation_contract")
         or fetch_json_artifact(run_id, "GOLD_GENERATION_CONTRACT")
@@ -5871,7 +5895,10 @@ def _execute_metadata_setup(state: Dict[str, Any]) -> Dict[str, Any]:
     from services.metadata_contracts import file_sha256, split_sql_statements
     from services.metadata_repository import metadata_repository_for_target
     from services.metadata_selection import validated_metadata_selection
-    from services.source_connection_validation import validate_deployment_database_binding
+    from services.source_connection_validation import (
+        validate_deployment_adls_binding,
+        validate_deployment_database_binding,
+    )
     from utilis.generated_code_paths import resolve_generated_artifact_uri
 
     artifact = state.get("metadata_ddl_artifact") or {}
@@ -5930,7 +5957,13 @@ def _execute_metadata_setup(state: Dict[str, Any]) -> Dict[str, Any]:
         repository.validate_and_activate_connection(
             int(connection["connection_id"]),
             int(connection["config_version"]),
-            lambda payload: validate_deployment_database_binding(payload, target_platform=platform),
+            (
+                validate_deployment_adls_binding
+                if str(connection.get("connection_type") or "").upper() == "ADLS"
+                else lambda payload: validate_deployment_database_binding(
+                    payload, target_platform=platform
+                )
+            ),
         )
         repository.deploy_configuration_snapshot(
             ingestion_objects=active_objects,
@@ -6444,9 +6477,10 @@ def execute_database_native_layers(
                     run_id, failed_state, context="metadata_setup_execution:failed"
                 )
                 raise
-        return _execute_queued_metadata_native_runtime(
-            _enqueue_metadata_native_runtime(working_state)
-        )
+        if str(working_state.get("source") or "database").lower() == "database":
+            return _execute_queued_metadata_native_runtime(
+                _enqueue_metadata_native_runtime(working_state)
+            )
 
     target_warehouse = str(working_state.get("target_warehouse") or "").lower()
     stage_keys = [stage_key for _, stage_key in NATIVE_EXECUTION_STAGES]

@@ -522,30 +522,6 @@ def test_metadata_databricks_submission_receipt_failure_preserves_attempt(monkey
     assert waited == []
 
 
-def test_file_bronze_generation_uses_tolerant_databricks_casts():
-    from sftp_nodes import bronze_code_generation
-
-    script = bronze_code_generation._generate_script(
-        {
-            "source_type": "adls_gen2",
-            "source_feed": "Vendor.Feed",
-            "vendor": "vendor",
-            "entity": "feed",
-            "file_format": "csv",
-            "landing_path": "abfss://raw@example.dfs.core.windows.net/vendor/feed/",
-            "target_table": "workspace.bronze.bronze_feed",
-            "schema_location": "/tmp/schema",
-            "checkpoint_path": "/tmp/checkpoint",
-            "expected_columns": ["paiddate", "paidamount"],
-            "expected_types": {"paiddate": "timestamp", "paidamount": "double"},
-        },
-        run_id="run-1",
-        pipeline_version="v1",
-    )
-
-    assert "try_cast(`{escaped_name}` AS {target_type})" in script
-
-
 def test_snowflake_bronze_generation_writes_sql_without_databricks_path(monkeypatch):
     monkeypatch.setenv("ATHENA_ENABLE_LLM_SNOWFLAKE_BRONZE_ENHANCEMENT", "false")
     monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_TABLE_ALLOWLIST", "*")

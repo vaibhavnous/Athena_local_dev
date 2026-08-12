@@ -1315,7 +1315,8 @@ export function markNextPendingStage(phases = [], run = null, observedPipelineAc
 export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
   const steps = Array.isArray(phase?.steps) ? phase.steps : []
   const byKey = new Map([...allSteps, ...steps].map((step) => [step.key, step]))
-  const fileFlow = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
+  const fileFlow = String(run?.source || '').toLowerCase() === 'sftp'
+  const adlsFlow = String(run?.source || '').toLowerCase() === 'adls_gen2'
   const phaseState = phaseStatusToStepState(phase.status)
   const makeStep = (key, label, fallbackState = phaseState, forceState = false) => {
     const step = byKey.get(key)
@@ -1349,10 +1350,17 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
       makeStep('silver_merge_key_review', 'Silver Merge Key Review'),
       makeStep('silver', 'Silver Code Generation'),
       makeStep('gate5', 'Silver Review', reviewAwareStepState(byKey.get('gate5'), phase, run, 5)),
-      makeStep('gold', 'Gold Code Generation'),
+      makeStep(
+        'gold',
+        'Gold Code Generation',
+        adlsFlow && run?.gold_generation_status
+          ? normalizeState(run.gold_generation_status)
+          : (byKey.get('gold')?.state || phaseState),
+        adlsFlow && Boolean(run?.gold_generation_status),
+      ),
       makeStep('gold_review', 'Gold Code Review'),
     ]
-  } else if (!fileFlow && ['Target Execution', 'Code Execution & Report Generation', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
+  } else if (!fileFlow && ['Target Execution', 'Target Execution & Report Generation', 'Code Execution & Report Generation', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
     displaySteps = isGenerationFirstDatabaseRun(run) && isSnowflakeDbtRun(run)
       ? [
           ...(byKey.has('metadata_setup_execution') ? [makeStep('metadata_setup_execution', 'Metadata Setup Execution')] : []),
@@ -1366,6 +1374,9 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
           makeStep('bronze_code_execution', 'Bronze Target Execution'),
           makeStep('silver_code_execution', 'Silver Target Execution'),
           makeStep('gold_code_execution', 'Gold Target Execution'),
+          ...(run?.report_generation_enabled || byKey.has('report_generation')
+            ? [makeStep('report_generation', 'Report Generation')]
+            : []),
         ]
   } else if (phase.id === 'phase-1') {
     displaySteps = [

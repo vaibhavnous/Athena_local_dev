@@ -67,7 +67,7 @@ const FILE_PROGRESS_ORDER = [
 
 function runProgressIndex(run: any, sourceHint?: string): number {
   const source = String(run?.source || sourceHint || '').toLowerCase()
-  const fileSource = ['sftp', 'adls_gen2'].includes(source)
+  const fileSource = source === 'sftp'
   const progressOrder = fileSource ? FILE_PROGRESS_ORDER : getPipelineOrder(run)
   const order = new Map(progressOrder.map((key, index) => [key, index]))
   const progressKey = (value: any) => fileSource

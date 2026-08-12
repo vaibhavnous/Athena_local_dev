@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import threading
 from typing import Any, Dict, List, Optional
 
-from source_ingestion_pipeline import build_source_ingestion_graph
 from services.pipeline_runtime import (
     build_pipeline_steps,
+    continue_database_pipeline,
     fetch_json_artifact,
     fetch_run_summary,
     load_bronze_scripts,
@@ -14,18 +13,6 @@ from services.pipeline_runtime import (
     load_silver_scripts,
 )
 from utilis.logger import logger
-
-_GRAPH = None
-_GRAPH_LOCK = threading.Lock()
-
-
-def _get_graph():
-    global _GRAPH
-    if _GRAPH is None:
-        with _GRAPH_LOCK:
-            if _GRAPH is None:
-                _GRAPH = build_source_ingestion_graph()
-    return _GRAPH
 
 
 def _safe_dict(value: Any) -> Dict[str, Any]:
@@ -109,10 +96,15 @@ def _compute_next_gate_and_message(
 ) -> Dict[str, Any]:
     next_gate = None
     resume_message = None
+    adls_v2 = str(checkpoint.get("source") or "").lower() == "adls_gen2"
+
+    def gate_label(gate: int) -> str:
+        return "Table Review" if adls_v2 and gate == 2 else _gate_label(gate)
+
     feed_review_ready = bool(candidate_feeds) or bool(candidate_feed)
     if gate1_decision in {None, ""}:
         next_gate = 1
-        resume_message = f"{_gate_label(1)} is pending. Review KPI items before continuing."
+        resume_message = f"{gate_label(1)} is pending. Review KPI items before continuing."
     elif gate1_decision == "APPROVED" and gate2_decision in {None, ""}:
         if not source_ingestion_completed:
             resume_message = "Source ingestion is in progress. Feed review will open when source discovery completes."
@@ -131,41 +123,41 @@ def _compute_next_gate_and_message(
             )
             feed_count = len(candidate_feeds) or (1 if candidate_feed else 0)
             if feed_count > 1 and entities:
-                resume_message = f"{_gate_label(2)} is pending. Review {feed_count} discovered feeds ({entities}) before continuing."
+                resume_message = f"{gate_label(2)} is pending. Review {feed_count} discovered files ({entities}) before continuing."
             else:
-                resume_message = f"{_gate_label(2)} is pending. Review the discovered feed before continuing."
+                resume_message = f"{gate_label(2)} is pending. Review the discovered file before continuing."
     elif gate2_decision == "APPROVED":
         if semantic_enrichment_completed and gate3_decision not in {"APPROVED", "REJECTED"}:
             next_gate = 3
-            resume_message = f"{_gate_label(3)} is pending. Review semantic enrichment before continuing."
+            resume_message = f"{gate_label(3)} is pending. Review semantic enrichment before continuing."
         elif (gate3_decision == "APPROVED" or gate3_payload) and bronze_review_ready and gate4_decision not in {"APPROVED", "REJECTED"}:
             next_gate = 4
-            resume_message = f"{_gate_label(4)} is pending. Review Bronze plan before ingestion."
+            resume_message = f"{gate_label(4)} is pending. Review Bronze code before Silver generation."
         elif gate4_decision == "APPROVED" and silver_review_ready and gate5_decision not in {"APPROVED", "REJECTED"}:
             next_gate = 5
-            resume_message = f"{_gate_label(5)} is pending. Review Silver plan before execution."
+            resume_message = f"{gate_label(5)} is pending. Review Silver code before Gold generation."
         elif gate5_decision == "APPROVED":
-            resume_message = f"{_gate_label(5)} is complete."
+            resume_message = f"{gate_label(5)} is complete."
         elif gate4_decision == "APPROVED":
-            resume_message = f"{_gate_label(4)} is complete."
+            resume_message = f"{gate_label(4)} is complete."
         elif gate3_decision == "APPROVED" or gate3_payload:
-            resume_message = "SFTP semantic enrichment is approved."
+            resume_message = "ADLS semantic enrichment is approved." if adls_v2 else "SFTP semantic enrichment is approved."
         elif column_profiling_completed:
             resume_message = "SFTP schema discovery and column profiling are complete."
         elif schema_discovery_completed:
             resume_message = "Schema discovery is complete. Column profiling is in progress."
         else:
-            resume_message = f"{_gate_label(2)} is complete."
+            resume_message = f"{gate_label(2)} is complete."
     elif gate1_decision == "REJECTED":
-        resume_message = f"{_gate_label(1)} was rejected."
+        resume_message = f"{gate_label(1)} was rejected."
     elif gate2_decision == "REJECTED":
-        resume_message = f"{_gate_label(2)} was rejected."
+        resume_message = f"{gate_label(2)} was rejected."
     elif gate3_decision == "REJECTED":
-        resume_message = f"{_gate_label(3)} was rejected."
+        resume_message = f"{gate_label(3)} was rejected."
     elif gate4_decision == "REJECTED":
-        resume_message = f"{_gate_label(4)} was rejected."
+        resume_message = f"{gate_label(4)} was rejected."
     elif gate5_decision == "REJECTED":
-        resume_message = f"{_gate_label(5)} was rejected."
+        resume_message = f"{gate_label(5)} was rejected."
     elif not summary and not checkpoint:
         resume_message = "No stored state was found for this run ID."
     return {"next_gate": next_gate, "resume_message": resume_message}
@@ -340,19 +332,25 @@ def start_sftp_pipeline(
     brd_text: Optional[str] = None,
     brd_filename: Optional[str] = None,
     sftp_entity: Optional[str] = None,
-    source: str = "sftp",
+    source: str = "adls_gen2",
     project_id: Optional[str] = None,
     target_warehouse: str = "databricks",
+    target_environment: Optional[str] = None,
 ) -> Dict[str, Any]:
     logger.info("Starting file-source pipeline run_id=%s source=%s", run_id, source)
-    source_value = str(source or "sftp").lower()
-    entity = str(sftp_entity or "").lower().strip()
-    if source_value == "adls_gen2":
-        entity = "auto"
-    elif source_value == "sftp" and entity not in {"transactions", "employee", "both"}:
-        entity = "transactions"
+    source_value = str(source or "adls_gen2").lower()
+    if source_value != "adls_gen2":
+        raise ValueError("The replacement file-source pipeline supports ADLS only.")
+    if str(target_warehouse or "").strip().lower() != "databricks":
+        raise ValueError("ADLS file sources currently support the Databricks native target only.")
+    entity = "auto"
+    from services.adls_source import source_catalog
+
+    source_system, connection = source_catalog(platform=target_warehouse)
+    seeded_state = load_checkpoint_state(run_id) or {}
 
     initial_state: Dict[str, Any] = {
+        **seeded_state,
         "brd_text": brd_text or "",
         "brd_filename": brd_filename,
         "run_id": run_id,
@@ -362,10 +360,23 @@ def start_sftp_pipeline(
         "sftp_entity": entity,
         "project_id": project_id,
         "target_warehouse": str(target_warehouse or "databricks").lower(),
+        "target_environment": str(target_environment or "qa").lower(),
+        "database_flow_version": "generation_first_v2",
+        "source_system_id": int(source_system["source_system_id"]),
+        "source_connection_id": int(connection["connection_id"]),
+        "source_connection_config_version": int(connection["config_version"]),
+        "source_connection_config_hash": str(connection["config_hash"]),
+        "source_profile": "insurance_adls",
+        "source_databases": ["insurance"],
+        "report_generation_enabled": True,
+        "execution_engine": "native",
     }
-    graph_app = _get_graph()
     try:
-        result = graph_app.invoke(initial_state)
+        result = continue_database_pipeline(
+            run_id,
+            start_stage_key="ingestion",
+            state=initial_state,
+        )
     except Exception:
         logger.exception("File-source pipeline execution failed run_id=%s source=%s", run_id, source_value)
         raise
@@ -420,6 +431,8 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
         )
         bronze_review_ready = bool(checkpoint.get("bronze_review_artifact") or checkpoint.get("bronze_generation_results"))
         silver_review_ready = bool(checkpoint.get("silver_review_artifact") or checkpoint.get("silver_generation_results"))
+        nominated_tables = _safe_list(checkpoint.get("nominated_tables"))
+        certified_tables = _safe_list(checkpoint.get("certified_tables"))
 
         gate_state = _compute_next_gate_and_message(
             gate1_decision=gate1_decision,
@@ -460,8 +473,8 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
             summary=summary,
             pending_gate1=[],
             completed_gate1=[],
-            nominated_tables=[],
-            certified_tables=[],
+            nominated_tables=nominated_tables,
+            certified_tables=certified_tables,
             enriched_payload=enriched_payload,
             gate3_payload=gate3_payload,
             bronze_generation_completed=bronze_generation_completed,
@@ -498,8 +511,8 @@ def get_sftp_run_context(run_id: str) -> Dict[str, Any]:
             "summary": summary,
             "pending_gate1": [],
             "completed_gate1": [],
-            "nominated_tables": [],
-            "certified_tables": [],
+            "nominated_tables": nominated_tables,
+            "certified_tables": certified_tables,
             "enriched_metadata": enriched_payload,
             "enriched_columns": enriched_columns,
             "enriched_joins": enriched_joins,

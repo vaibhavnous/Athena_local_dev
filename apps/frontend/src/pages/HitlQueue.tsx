@@ -526,6 +526,7 @@ function HitlQueue({ onClose = null }) {
   const isGate5 = gateToReview === 5
   const runSource = currentRun?.source || selectedRunDetail?.source || ''
   const isSftpRun = runSource === 'sftp' || runSource === 'adls_gen2'
+  const useLegacyFeedReview = usesLegacyFeedReview(runSource)
   const generationFirstDatabaseRun = isGenerationFirstDatabaseRun({
     ...(currentRun || {}),
     ...(selectedRunDetail || {}),
@@ -785,9 +786,9 @@ function HitlQueue({ onClose = null }) {
             setTableReview(fallbackPatch)
             setSelectedTables((prev) => {
               const next = { ...prev }
-              const items = isSftpRun ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
+              const items = useLegacyFeedReview ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
               for (const table of items) {
-                const key = isSftpRun ? sftpFeedKey(table) : tableReviewKey(table)
+                const key = useLegacyFeedReview ? sftpFeedKey(table) : tableReviewKey(table)
                 next[key] = true
               }
               return next
@@ -816,7 +817,7 @@ function HitlQueue({ onClose = null }) {
           setBronzeReview(currentRun)
           return
         }
-        if (isSilverMergeKeyReview && hasRenderableReviewData(currentRun, 'silver_merge_key_review')) {
+        if (isSilverMergeKeyReview && hasRenderableReviewData(currentRun, 'silver_merge_key_review', runSource === 'adls_gen2')) {
           setSilverMergeKeyReview(currentRun)
           return
         }
@@ -885,7 +886,11 @@ function HitlQueue({ onClose = null }) {
         }
 
         if (isSilverMergeKeyReview) {
-          const review = await waitForRenderableReview(() => getSilverMergeKeyReview(selectedRunId), 'silver_merge_key_review')
+          const review = await waitForRenderableReview(
+            () => getSilverMergeKeyReview(selectedRunId),
+            'silver_merge_key_review',
+            runSource === 'adls_gen2',
+          )
           if (!isCurrentHydration()) return
           if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setSilverMergeKeyReview(review)
@@ -928,15 +933,15 @@ function HitlQueue({ onClose = null }) {
         }
 
         if (isGate2) {
-          const review = await waitForRenderableReview(() => getTableReviews(selectedRunId), 2, isSftpRun)
+          const review = await waitForRenderableReview(() => getTableReviews(selectedRunId), 2, useLegacyFeedReview)
           if (!isCurrentHydration()) return
           if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setTableReview(review)
           setSelectedTables((prev) => {
             const next = { ...prev }
-            const items = isSftpRun ? getSftpFeeds(review) : (review.nominated_tables || [])
+            const items = useLegacyFeedReview ? getSftpFeeds(review) : (review.nominated_tables || [])
             for (const table of items) {
-              const key = isSftpRun ? sftpFeedKey(table) : tableReviewKey(table)
+              const key = useLegacyFeedReview ? sftpFeedKey(table) : tableReviewKey(table)
               if (!(key in next)) next[key] = true
             }
             return next
@@ -1023,9 +1028,9 @@ function HitlQueue({ onClose = null }) {
             setTableReview(fallbackPatch)
             setSelectedTables((prev) => {
               const next = { ...prev }
-              const items = isSftpRun ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
+              const items = useLegacyFeedReview ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
               for (const table of items) {
-                const key = isSftpRun ? sftpFeedKey(table) : tableReviewKey(table)
+                const key = useLegacyFeedReview ? sftpFeedKey(table) : tableReviewKey(table)
                 next[key] = true
               }
               return next
@@ -1089,7 +1094,7 @@ function HitlQueue({ onClose = null }) {
   const reviewedTableCount = availableTableReviews.filter((table) => tableReviewDecisions[tableReviewKey(table)]).length
   const selectedFeedCount = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length
   const totalFeedCount = availableSftpFeeds.length
-  const gate2ContentReady = hasGate2ReviewItems(tableReview, isSftpRun)
+  const gate2ContentReady = hasGate2ReviewItems(tableReview, useLegacyFeedReview)
   const bronzeReviewFeeds = useMemo(
     () => bronzeReview?.bronze_review_artifact?.feeds || [],
     [bronzeReview]
@@ -1118,6 +1123,7 @@ function HitlQueue({ onClose = null }) {
     () => buildSilverMergeKeyReviewItems(silverMergeKeyReviewFeeds),
     [silverMergeKeyReviewFeeds]
   )
+  const allSilverMergeKeysSelected = silverMergeKeyReviewItems.length > 0 && silverMergeKeyReviewItems.every(hasSilverMergeKeys)
   const silverCodeReviewItems = useMemo(
     () => mergeCodeReviewItems(buildSilverCodeReviewItems(silverReviewItems), 'silver'),
     [silverReviewItems]
@@ -1150,7 +1156,7 @@ function HitlQueue({ onClose = null }) {
   const currentCodeReviewReady =
     (isMetadataDdlReview && hasRenderableReviewData(currentRun, 'metadata_ddl_review')) ||
     (isGate4 && hasRenderableReviewData(currentRun, 4)) ||
-    (isSilverMergeKeyReview && hasRenderableReviewData(currentRun, 'silver_merge_key_review')) ||
+    (isSilverMergeKeyReview && hasRenderableReviewData(currentRun, 'silver_merge_key_review', runSource === 'adls_gen2')) ||
     (isGate5 && hasRenderableReviewData(currentRun, 5)) ||
     (isGoldReview && hasRenderableReviewData(currentRun, 'gold_review'))
   const canSubmitReview = isReviewableRun && (isGate2
@@ -1330,6 +1336,7 @@ function HitlQueue({ onClose = null }) {
     setCodeReviewDecisions((prev) => {
       const next = { ...prev }
       activeCodeReviewItems.forEach((item) => {
+        if (isSilverMergeKeyReview && !hasSilverMergeKeys(item)) return
         if (!next[item.key]) next[item.key] = 'APPROVED'
       })
       return next
@@ -1340,6 +1347,7 @@ function HitlQueue({ onClose = null }) {
   const setAllCodeReviewItemsDecision = (decision) => {
     const next = {}
     activeCodeReviewItems.forEach((item) => {
+      if (decision === 'APPROVED' && isSilverMergeKeyReview && !hasSilverMergeKeys(item)) return
       next[item.key] = decision
     })
     setCodeReviewDecisions((prev) => ({ ...prev, ...next }))
@@ -1549,8 +1557,8 @@ function HitlQueue({ onClose = null }) {
     }
 
     if (isGate2) {
-      const approvedTables = isSftpRun ? selectedOrAllFeedKeys() : selectedTableKeys()
-      if (!isSftpRun && approvedTables.length === 0) {
+      const approvedTables = useLegacyFeedReview ? selectedOrAllFeedKeys() : selectedTableKeys()
+      if (!useLegacyFeedReview && approvedTables.length === 0) {
         addNotification({
           type: 'error',
           title: `${gate2Name} Needs an Approval`,
@@ -1562,7 +1570,7 @@ function HitlQueue({ onClose = null }) {
 
       setSubmitting(true)
       try {
-        if (isSftpRun) handleSelectAllFeeds()
+        if (useLegacyFeedReview) handleSelectAllFeeds()
         await submitTableReviews(selectedRunId, approvedTables)
         updateRun(selectedRunId, {
             id: selectedRunId,
@@ -2128,7 +2136,7 @@ function HitlQueue({ onClose = null }) {
     )
   }
 
-  if (selectedRunId && isReviewableRun && isGate2 && !isSftpRun) {
+  if (selectedRunId && isReviewableRun && isGate2 && !useLegacyFeedReview) {
     return (
       <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm sm:p-6">
         <div className="flex h-[85vh] w-full max-w-5xl items-stretch justify-center">
@@ -2454,7 +2462,7 @@ function HitlQueue({ onClose = null }) {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed}
+              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed || !allSilverMergeKeysSelected}
               submitLabel="Submit & Continue"
               hitlGateStyle
             />
@@ -3272,6 +3280,10 @@ function tableReviewKey(table) {
   return qualified || String(table.id || table.key || table.full_name || table.table_id || JSON.stringify(table))
 }
 
+export function usesLegacyFeedReview(source) {
+  return source === 'sftp'
+}
+
 function sftpFeedKey(feed) {
   return [feed.vendor, feed.entity, feed.file_name || feed.feed_id].filter(Boolean).join('.')
 }
@@ -3419,7 +3431,11 @@ function CodeReviewPanel({
 }) {
   const [expandedKey, setExpandedKey] = useState(null)
   const [draftItems, setDraftItems] = useState(items)
-  const itemKeys = items.map((item) => item.key).join('|')
+  const itemKeys = items.map((item) => (
+    item.type === 'MERGE_KEY'
+      ? `${item.key}:${JSON.stringify(item.mergeKeys || item.primaryKeys || [])}`
+      : item.key
+  )).join('|')
 
   useEffect(() => {
     setDraftItems(items)
@@ -3434,8 +3450,7 @@ function CodeReviewPanel({
       return
     }
     setDraftItems((current) => {
-      const currentByKey = new Map(current.map((item) => [item.key, item]))
-      const next = items.map((item) => currentByKey.has(item.key) ? { ...item, ...currentByKey.get(item.key) } : item)
+      const next = mergeRefreshedReviewItems(current, items)
       onDraftItemsChange?.(next)
       return next
     })
@@ -3934,6 +3949,22 @@ function buildSilverMergeKeyReviewItems(feeds) {
     watermark: feed.watermark_column,
     reviewPayload: feed,
   }))
+}
+
+export function hasSilverMergeKeys(item) {
+  const keys = [item?.mergeKeys, item?.primaryKeys, item?.merge_keys, item?.primary_keys]
+    .find((value) => Array.isArray(value) && value.length > 0) || []
+  return Array.isArray(keys) && keys.some((key) => String(key || '').trim())
+}
+
+export function mergeRefreshedReviewItems(currentItems, refreshedItems) {
+  const currentByKey = new Map(currentItems.map((item) => [item.key, item]))
+  return refreshedItems.map((item) => {
+    const current = currentByKey.get(item.key)
+    if (!current) return item
+    if (item.type === 'MERGE_KEY' && !current.edited) return item
+    return { ...item, ...current }
+  })
 }
 
 function buildSilverCodeReviewItems(items) {

@@ -201,7 +201,7 @@ def _seed_run_checkpoint(
             "source_profile": existing.get("source_profile") or payload.source_profile,
             "database_flow_version": existing.get("database_flow_version") or (
                 DATABASE_GENERATION_FIRST_FLOW_VERSION
-                if source == "database"
+                if source in {"database", "adls_gen2"}
                 and not any(
                     existing.get(key)
                     for key in (
@@ -226,10 +226,13 @@ def _seed_run_checkpoint(
                 existing.get("report_generation_enabled")
                 if existing.get("report_generation_enabled") is not None
                 else bool(
-                    source == "database"
-                    and str(payload.target_warehouse or "").lower() == "snowflake"
-                    and str(payload.execution_engine or "").lower() == "dbt"
-                    and str(payload.dbt_deployment_mode or "").lower() == "generate_and_deploy"
+                    source == "adls_gen2"
+                    or (
+                        source == "database"
+                        and str(payload.target_warehouse or "").lower() == "snowflake"
+                        and str(payload.execution_engine or "").lower() == "dbt"
+                        and str(payload.dbt_deployment_mode or "").lower() == "generate_and_deploy"
+                    )
                 )
             ),
             "dbt_target_name": existing.get("dbt_target_name") or payload.dbt_target_name,

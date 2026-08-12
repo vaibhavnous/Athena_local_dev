@@ -2945,12 +2945,14 @@ def test_databricks_gold_partial_success_completes_execution_step():
     assert gold_execution["state"] == "COMPLETED"
 
 
-def test_file_source_pipeline_steps_match_the_six_ui_phases():
+def test_adls_pipeline_steps_match_database_generation_first_phases():
     from services import pipeline_runtime
 
     steps = pipeline_runtime.build_pipeline_steps(
         source="adls_gen2",
         checkpoint={
+            "source": "adls_gen2",
+            "database_flow_version": "generation_first_v2",
             "status": "RUNNING",
             "target_warehouse": "databricks",
             "background_stage": "bronze_code_execution",
@@ -2969,20 +2971,36 @@ def test_file_source_pipeline_steps_match_the_six_ui_phases():
     )
 
     keys = [step["key"] for step in steps]
-    assert keys == [
-        "ingestion", "memory", "requirements", "kpis", "gate1",
-        "discovery", "nomination", "gate2", "schema", "profiling", "enrichment", "gate3",
-        "pre_bronze_bootstrap_metadata", "plan_seal", "plan_freshness",
-        "pre_bronze_metadata_codegen", "bronze", "gate4",
-        "bronze_code_execution", "bronze_runtime_validation",
-        "silver_merge_key_resolution", "silver_merge_key_review", "silver", "gate5",
-        "silver_code_execution", "silver_runtime_validation",
-        "gold", "gold_review", "gold_code_execution", "gold_runtime_validation",
-        "final_publish", "finalize",
+    database_steps = pipeline_runtime.build_pipeline_steps(
+        source="database",
+        checkpoint={
+            "source": "database",
+            "database_flow_version": "generation_first_v2",
+            "status": "RUNNING",
+            "target_warehouse": "databricks",
+            "background_stage": "bronze_code_execution",
+            "databricks_bronze_execution_status": "RUNNING",
+        },
+        summary=[],
+        pending_gate1=[],
+        completed_gate1=[],
+        nominated_tables=[],
+        certified_tables=[],
+        enriched_payload={},
+        gate3_payload={},
+        bronze_generation_completed=True,
+        silver_generation_completed=False,
+        gold_generation_completed=False,
+    )
+    assert [(step["key"], step["label"]) for step in steps] == [
+        (step["key"], step["label"]) for step in database_steps
     ]
+    assert not {
+        "schema", "pre_bronze_bootstrap_metadata", "plan_seal", "plan_freshness",
+        "pre_bronze_metadata_codegen", "bronze_runtime_validation",
+    }.intersection(keys)
     by_key = {step["key"]: step for step in steps}
     assert by_key["bronze_code_execution"]["state"] == "RUNNING"
-    assert by_key["bronze_runtime_validation"]["state"] == "PENDING"
     assert by_key["gold_code_execution"]["state"] == "PENDING"
 
 

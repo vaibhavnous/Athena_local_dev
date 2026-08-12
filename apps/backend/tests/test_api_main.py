@@ -601,6 +601,32 @@ def test_new_native_database_checkpoint_is_versioned_for_generation_first(monkey
     assert saved["state"]["database_flow_version"] == "generation_first_v2"
 
 
+def test_new_adls_checkpoint_is_generation_first_from_initial_poll(monkeypatch):
+    from api.models import PipelineRunRequest
+    from api.routers import pipeline_router
+
+    saved = {}
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda _run_id: None)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_checkpoint_state",
+        lambda run_id, state: saved.update({"run_id": run_id, "state": dict(state)}),
+    )
+
+    pipeline_router._seed_run_checkpoint(
+        "run-adls-generation-first",
+        PipelineRunRequest(
+            brd_text="Infer ADLS files and generate all layers before execution.",
+            source="adls_gen2",
+            target_warehouse="databricks",
+            execution_engine="native",
+        ),
+        owner_email="test@example.com",
+    )
+
+    assert saved["state"]["database_flow_version"] == "generation_first_v2"
+    assert saved["state"]["report_generation_enabled"] is True
+
+
 def test_new_snowflake_dbt_checkpoint_is_versioned_for_generation_first(monkeypatch):
     from api.models import PipelineRunRequest
     from api.routers import pipeline_router
@@ -1173,16 +1199,16 @@ def test_configuration_crud_endpoints():
     assert delete_response.json() == {"id": created["id"], "deleted": True}
 
 
-def test_configurations_include_insurance_sftp_adls_default(monkeypatch):
+def test_configurations_include_insurance_adls_default(monkeypatch):
     from api.routers import config_router
 
     monkeypatch.setenv("ADLS_ACCOUNT_URL", "https://storageaccount.dfs.core.windows.net")
     monkeypatch.setenv("ADLS_FILE_SYSTEM", "athena")
     monkeypatch.setenv("ADLS_SOURCE_ROOT", "INSURANCE_SFTP/insurance")
 
-    connection = next(item for item in config_router.configurations() if item["id"] == "sftp_adls_insurance")
+    connection = next(item for item in config_router.configurations() if item["id"] == "adls_insurance")
 
-    assert connection["integrationType"] == "SFTP"
+    assert connection["integrationType"] == "ADLS"
     assert connection["dataLakeSourceType"] == "ADLS"
     assert connection["directoryName"] == "INSURANCE_SFTP/insurance"
     assert connection["basePath"] == (

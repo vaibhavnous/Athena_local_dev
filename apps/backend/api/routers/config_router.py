@@ -47,10 +47,10 @@ def configurations() -> List[Dict[str, Any]]:
             "jdbcUrl": "",
         },
         {
-            "id": "sftp_adls_insurance",
+            "id": "adls_insurance",
             "name": "Insurance ADLS Gen2",
             "sourceType": "data_lake",
-            "integrationType": "SFTP",
+            "integrationType": "ADLS",
             "dataLakeSourceType": "ADLS",
             "basePath": f"abfss://{file_system}@{account_name}.dfs.core.windows.net/{source_root}",
             "directoryName": source_root,

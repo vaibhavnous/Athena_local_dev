@@ -5,6 +5,28 @@ from typing import Any, Mapping
 from urllib.parse import quote
 
 
+def validate_deployment_adls_binding(connection: Mapping[str, Any]) -> None:
+    """Validate ADLS metadata without opening the selected target platform."""
+    from services.adls_source import account_url, file_system, source_base_path
+
+    if str(connection.get("connection_type") or "").upper() != "ADLS":
+        raise ValueError("The selected connection is not an ADLS connection.")
+    expected = {
+        "base_url": account_url().casefold(),
+        "base_path": source_base_path().casefold(),
+        "database_name": file_system().casefold(),
+    }
+    actual = {
+        "base_url": str(connection.get("base_url") or "").rstrip("/").casefold(),
+        "base_path": (str(connection.get("base_path") or "").rstrip("/") + "/").casefold(),
+        "database_name": str(connection.get("database_name") or "").casefold(),
+    }
+    if actual != expected:
+        raise ValueError("The ADLS metadata endpoint does not match the configured source root.")
+    if str(connection.get("auth_type") or "").upper() not in {"SERVICE_PRINCIPAL", "MANAGED_IDENTITY"}:
+        raise ValueError("ADLS metadata requires service-principal or managed-identity authentication.")
+
+
 def validate_deployment_database_binding(
     connection: Mapping[str, Any], *, target_platform: str = "snowflake"
 ) -> None:

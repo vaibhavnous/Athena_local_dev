@@ -48,7 +48,7 @@ function fromApi(raw: any): DbConnection {
       raw.integrationType ??
       raw.data_lake_integration_type ??
       raw.dataLakeIntegrationType ??
-      'SFTP',
+      'ADLS',
     dataLakeSourceType:
       raw.data_lake_source_type ??
       raw.dataLakeSourceType ??
@@ -83,8 +83,8 @@ function toApi(data: DbConnection): object {
     return {
 
       name: data.name,
-      integrationType: data.integrationType || 'SFTP',
-      integration_type: data.integrationType || 'SFTP',
+      integrationType: data.integrationType || 'ADLS',
+      integration_type: data.integrationType || 'ADLS',
       dataLakeSourceType: data.dataLakeSourceType,
       data_lake_source_type: data.dataLakeSourceType,
       basePath: data.basePath,

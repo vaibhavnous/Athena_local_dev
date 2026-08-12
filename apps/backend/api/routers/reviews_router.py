@@ -247,8 +247,14 @@ def submit_table_reviews(
     logger.info("Submitting table review", extra={"run_id": run_id})
 
     if api_utils.is_file_source(checkpoint.get("source")):
-        submit_background(run_id, "gate2", submit_sftp_gate2_review, run_id, True)
-        return {"run_id": run_id, "status": "SUBMITTED", "approve": True}
+        approved_files = [item for item in payload.approved_tables if str(item).strip()]
+        submit_background(run_id, "gate2", submit_sftp_gate2_review, run_id, True, approved_files)
+        return {
+            "run_id": run_id,
+            "status": "SUBMITTED",
+            "approve": True,
+            "approved_files": approved_files,
+        }
 
     approved_tables = [item for item in payload.approved_tables if str(item).strip()]
 
@@ -495,7 +501,7 @@ def submit_bronze_reviews(
         raise HTTPException(status_code=409, detail="Bronze review is not ready yet. Generated Bronze scripts are still loading.")
 
     if api_utils.is_file_source(checkpoint.get("source")):
-        stage = "bronze_code_execution" if str(payload.action).upper() == "APPROVED" else "gate4"
+        stage = "silver_merge_key_review" if str(payload.action).upper() == "APPROVED" else "gate4"
         submit_background(run_id, stage, submit_sftp_gate4_review, run_id, payload.action, review_artifact)
     else:
         stage = (
@@ -551,7 +557,12 @@ def submit_silver_merge_key_reviews(
         user,
         strip_executable=checkpoint.get("source_system_id") is not None,
     )
-    submit_background(run_id, stage, submit_silver_merge_key_review, run_id, payload.action, review_artifact)
+    if str(checkpoint.get("source") or "").lower() == "adls_gen2":
+        from sftp_nodes.hitl import submit_sftp_silver_merge_key_review
+
+        submit_background(run_id, stage, submit_sftp_silver_merge_key_review, run_id, payload.action, review_artifact)
+    else:
+        submit_background(run_id, stage, submit_silver_merge_key_review, run_id, payload.action, review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
 
@@ -612,7 +623,7 @@ def submit_silver_reviews(
 
     checkpoint = _checkpoint_for_user(run_id, user) or load_checkpoint_state(run_id) or {}
     if api_utils.is_file_source(checkpoint.get("source")):
-        stage = "silver_code_execution" if str(payload.action).upper() == "APPROVED" else "gate5"
+        stage = "gold" if str(payload.action).upper() == "APPROVED" else "gate5"
         submit_background(run_id, stage, submit_sftp_gate5_review, run_id, payload.action, payload.review_artifact)
     else:
         stage = (

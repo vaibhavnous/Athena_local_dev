@@ -408,6 +408,7 @@ test('does not invent Bronze or Silver execution success from later Gold progres
 test('keeps the ADLS merge-key review visible as its own Silver-stage gate', () => {
   const run = {
     source: 'adls_gen2',
+    database_flow_version: 'generation_first_v2',
     status: 'HITL_WAIT',
     next_review_key: 'silver_merge_key_review',
     pipeline_steps: [
@@ -417,9 +418,9 @@ test('keeps the ADLS merge-key review visible as its own Silver-stage gate', () 
     ],
   }
 
-  expect(phaseState(run, 'phase-5', 'silver_merge_key_resolution')).toBe('COMPLETED')
-  expect(phaseState(run, 'phase-5', 'silver_merge_key_review')).toBe('HITL_WAIT')
-  expect(phaseState(run, 'phase-5', 'bronze_to_silver')).toBe('PENDING')
+  expect(phaseState(run, 'phase-3', 'silver_merge_key_resolution')).toBe('COMPLETED')
+  expect(phaseState(run, 'phase-3', 'silver_merge_key_review')).toBe('HITL_WAIT')
+  expect(phaseState(run, 'phase-3', 'silver')).toBe('PENDING')
 })
 
 test('uses the project name instead of rendering a run ID as the pipeline name', () => {
@@ -432,19 +433,25 @@ test('uses the project name instead of rendering a run ID as the pipeline name',
   })).toBe('Vialto')
 })
 
-test('uses the six-phase SFTP and ADLS workflow without changing database phases', () => {
+test('uses the database generation-first stages for ADLS without exposing internal file stages', () => {
   const run = {
     source: 'adls_gen2',
-    status: 'RUNNING',
-    background_stage: 'bronze_code_execution',
+    database_flow_version: 'generation_first_v2',
+    target_warehouse: 'databricks',
+    report_generation_enabled: true,
+    status: 'HITL_WAIT',
+    next_review_key: 'gold_review',
     pipeline_steps: [
-      { key: 'pre_bronze_bootstrap_metadata', state: 'COMPLETED' },
-      { key: 'plan_seal', state: 'COMPLETED' },
-      { key: 'plan_freshness', state: 'COMPLETED' },
-      { key: 'pre_bronze_metadata_codegen', state: 'COMPLETED' },
+      { key: 'metadata_ddl', state: 'COMPLETED' },
+      { key: 'metadata_ddl_review', state: 'COMPLETED' },
       { key: 'bronze', state: 'COMPLETED' },
       { key: 'gate4', state: 'COMPLETED' },
-      { key: 'bronze_code_execution', state: 'RUNNING' },
+      { key: 'silver_merge_key_resolution', state: 'COMPLETED' },
+      { key: 'silver_merge_key_review', state: 'COMPLETED' },
+      { key: 'silver', state: 'COMPLETED' },
+      { key: 'gate5', state: 'COMPLETED' },
+      { key: 'gold', state: 'COMPLETED' },
+      { key: 'gold_review', state: 'PENDING' },
     ],
   }
 
@@ -452,45 +459,36 @@ test('uses the six-phase SFTP and ADLS workflow without changing database phases
 
   expect(phases.map((phase) => phase.label)).toEqual([
     'Discovery & Requirement Intelligence',
-    'Feed & Metadata Intelligence',
-    'Metadata Preparation & Bronze Review',
-    'Bronze Layer (Ingestion & DQ)',
-    'Silver Layer (Transformation & DQ)',
-    'Gold Layer & Deployment',
-  ])
-  expect(phases.find((phase) => phase.id === 'phase-2')?.steps.map((step) => step.key)).toEqual([
-    'feed_discovery',
-    'feed_nomination',
-    'gate2',
-    'column_extraction',
-    'column_profiling',
-    'semantic_enrichment',
-    'gate3',
+    'Source & Metadata Intelligence',
+    'Code Generation & Reviews',
+    'Target Execution & Report Generation',
   ])
   expect(phases.find((phase) => phase.id === 'phase-3')?.steps.map((step) => step.key)).toEqual([
-    'metadata_bootstrap',
-    'plan_seal',
-    'freshness_check',
-    'metadata_codegen',
-    'bronze_codegen',
+    'metadata_ddl',
+    'metadata_ddl_review',
+    'bronze',
     'gate4',
+    'silver_merge_key_resolution',
+    'silver_merge_key_review',
+    'silver',
+    'gate5',
+    'gold',
+    'gold_review',
   ])
-  expect(phaseState(run, 'phase-4', 'bronze_autoloader')).toBe('RUNNING')
-  expect(phases.find((phase) => phase.id === 'phase-6')?.steps.map((step) => step.key)).toEqual([
-    'silver_to_gold',
-    'gold_dq',
-    'gate5_publish',
-    'finalize',
-  ])
+  expect(phases.flatMap((phase) => phase.steps).some((step) =>
+    ['metadata_bootstrap', 'plan_seal', 'freshness_check', 'bronze_autoloader'].includes(step.key)
+  )).toBe(false)
 })
 
-test('shows Gate 4 as Bronze Review without inventing a metadata review gate', () => {
+test('shows the shared Metadata DDL and Bronze reviews for ADLS', () => {
   const run = {
     source: 'adls_gen2',
+    database_flow_version: 'generation_first_v2',
     status: 'HITL_WAIT',
     next_gate: 4,
     pipeline_steps: [
-      { key: 'pre_bronze_metadata_codegen', state: 'COMPLETED' },
+      { key: 'metadata_ddl', state: 'COMPLETED' },
+      { key: 'metadata_ddl_review', state: 'COMPLETED' },
       { key: 'bronze', state: 'COMPLETED' },
       { key: 'gate4', state: 'PENDING' },
     ],
@@ -499,7 +497,7 @@ test('shows Gate 4 as Bronze Review without inventing a metadata review gate', (
   const phases = getPhaseGroups(run, getPipelineSteps(run))
   const phase = phases.find((item) => item.id === 'phase-3')
   expect(phase?.steps.find((step) => step.key === 'gate4')?.state).toBe('HITL_WAIT')
-  expect(phase?.steps.some((step) => step.label.includes('Metadata Codegen Review'))).toBe(false)
+  expect(phase?.steps.find((step) => step.key === 'metadata_ddl_review')?.state).toBe('COMPLETED')
 })
 
 test('maps the legacy SFTP Gold review onto the visible final publish review', () => {

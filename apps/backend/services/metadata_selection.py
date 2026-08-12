@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
 from services.metadata_repository import MetadataRepository, metadata_repository_for_target
-from services.metadata_contracts import validate_jdbc_connection
-from services.source_connection_validation import validate_deployment_database_binding
+from services.metadata_contracts import validate_connection
+from services.source_connection_validation import (
+    validate_deployment_adls_binding,
+    validate_deployment_database_binding,
+)
 
 
 @dataclass(frozen=True)
@@ -50,15 +53,25 @@ def validated_metadata_selection(state: Mapping[str, Any]) -> Optional[Validated
         repository = metadata_repository_for_target(platform=platform, environment=environment)
         return _validated_metadata_selection(state, repository)
     from services.application_metadata_repository import application_metadata_repository
-    from services.database_source_catalog import selected_database_source
+    if str(state.get("source") or "database").lower() == "adls_gen2":
+        from services.adls_source import source_catalog
 
-    source_system, connection = selected_database_source(
-        source_system_id=source_system_id,
-        connection_id=connection_id,
-        platform=platform,
-    )
+        source_system, connection = source_catalog(platform=platform)
+        if int(source_system_id) != int(source_system["source_system_id"]) or int(connection_id) != int(
+            connection["connection_id"]
+        ):
+            raise ValueError("The selected ADLS metadata source does not match the configured source root.")
+    else:
+        from services.database_source_catalog import selected_database_source
+
+        source_system, connection = selected_database_source(
+            source_system_id=source_system_id,
+            connection_id=connection_id,
+            platform=platform,
+        )
     selected_profile = str(state.get("source_profile") or "").strip()
-    if selected_profile and selected_profile != "insurance_azure_sql":
+    expected_profile = "insurance_adls" if str(state.get("source") or "").lower() == "adls_gen2" else "insurance_azure_sql"
+    if selected_profile and selected_profile != expected_profile:
         raise ValueError("The selected source profile does not match the application source catalog.")
     repository = application_metadata_repository(
         platform=platform,
@@ -84,13 +97,22 @@ def validated_target_metadata_selection(state: Mapping[str, Any]) -> Optional[Va
 
     platform = str(state.get("target_warehouse") or "").strip().lower()
     environment = str(state.get("target_environment") or "").strip()
-    from services.database_source_catalog import selected_database_source
+    if str(state.get("source") or "database").lower() == "adls_gen2":
+        from services.adls_source import source_catalog
 
-    source_system, connection = selected_database_source(
-        source_system_id=source_system_id,
-        connection_id=connection_id,
-        platform=platform,
-    )
+        source_system, connection = source_catalog(platform=platform)
+        if int(source_system_id) != int(source_system["source_system_id"]) or int(connection_id) != int(
+            connection["connection_id"]
+        ):
+            raise ValueError("The selected ADLS metadata source does not match the configured source root.")
+    else:
+        from services.database_source_catalog import selected_database_source
+
+        source_system, connection = selected_database_source(
+            source_system_id=source_system_id,
+            connection_id=connection_id,
+            platform=platform,
+        )
     repository = metadata_repository_for_target(platform=platform, environment=environment)
     repository.preflight()
     return ValidatedMetadataSelection(repository, source_system, connection, True)
@@ -126,16 +148,19 @@ def _validated_metadata_selection(
     uses_environment_source = uses_environment_source or not connection_is_active
     if int(connection.get("source_system_id") or 0) != int(source_system_id):
         raise ValueError("The selected connection belongs to a different source system.")
-    normalized = validate_jdbc_connection(connection)
+    normalized = validate_connection(connection)
     if normalized["config_hash"] != str(connection.get("config_hash") or ""):
         raise ValueError("The active connection configuration hash is invalid.")
     expected_hash = str(state.get("source_connection_config_hash") or "")
     if expected_hash and expected_hash != normalized["config_hash"]:
         raise ValueError("The connection configuration changed after table nomination.")
-    validate_deployment_database_binding(
-        connection,
-        target_platform=str(state.get("target_warehouse") or ""),
-    )
+    if str(connection.get("connection_type") or "").upper() == "ADLS":
+        validate_deployment_adls_binding(connection)
+    else:
+        validate_deployment_database_binding(
+            connection,
+            target_platform=str(state.get("target_warehouse") or ""),
+        )
     access = set(json.loads(normalized["config_json"])["allowed_project_ids"])
     project_id = str(state.get("project_id") or "").strip()
     if "*" not in access and project_id not in access:

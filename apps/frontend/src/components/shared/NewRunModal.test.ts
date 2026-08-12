@@ -13,7 +13,7 @@ test('loads the saved ADLS project connection instead of showing the transaction
       name: 'Insurance',
       description: 'Insurance feeds',
       connectionType: 'data_lake',
-      integrationType: 'SFTP',
+      integrationType: 'ADLS',
       dataLakeType: 'ADLS',
       dataLakeName: 'Insurance ADLS Gen2',
       target: 'Databricks',
@@ -23,18 +23,18 @@ test('loads the saved ADLS project connection instead of showing the transaction
   expect(form).toMatchObject({
     source: 'adls_gen2',
     sftpEntity: 'auto',
-    integrationType: 'SFTP',
+    integrationType: 'ADLS',
     dataLakeType: 'ADLS',
     dataLakeName: 'Insurance ADLS Gen2',
   })
 })
 
-test('requires an SFTP data lake selection before a project can be saved', () => {
+test('requires an ADLS data lake selection before a project can be saved', () => {
   const project = {
     name: 'Insurance',
     description: 'Insurance feeds',
     connectionType: 'data_lake',
-    integrationType: 'SFTP',
+    integrationType: 'ADLS',
     connectionName: '',
   }
 

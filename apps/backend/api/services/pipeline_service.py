@@ -152,6 +152,7 @@ def run_pipeline_background(
                 source=str(source or "sftp").lower(),
                 project_id=project_id,
                 target_warehouse=target_warehouse,
+                target_environment=target_environment,
             )
         else:
             result = start_pipeline(
@@ -363,10 +364,20 @@ def continue_database_pipeline_job(
 def continue_file_pipeline_job(run_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
     working_state = dict(state or {})
     working_state["run_id"] = run_id
-    result = source_ingestion_graph().invoke(working_state)
-    if not isinstance(result, dict):
-        raise ValueError("File-source pipeline returned an invalid state.")
-    return result
+    if (
+        str(working_state.get("source") or "").lower() != "adls_gen2"
+        or str(working_state.get("database_flow_version") or "") != "generation_first_v2"
+    ):
+        result = source_ingestion_graph().invoke(working_state)
+        if not isinstance(result, dict):
+            raise ValueError("File-source pipeline returned an invalid state.")
+        return result
+    stage = str(
+        working_state.get("failed_background_stage")
+        or working_state.get("next_stage_key")
+        or "metadata_ddl"
+    ).lower()
+    return continue_database_pipeline_job(run_id, stage, working_state)
 
 
 def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Optional[str]:

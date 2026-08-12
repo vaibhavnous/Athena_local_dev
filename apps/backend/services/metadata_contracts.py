@@ -442,6 +442,103 @@ def validate_jdbc_connection(payload: Mapping[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def validate_adls_connection(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    normalized = dict(payload)
+    required = ("source_system_id", "connection_name", "base_url", "base_path", "auth_type")
+    missing = [name for name in required if normalized.get(name) in (None, "")]
+    if missing:
+        raise ValueError("Missing ADLS connection fields: " + ", ".join(missing))
+    if str(normalized.get("connection_type") or "").upper() != "ADLS":
+        raise ValueError("File-source onboarding requires connection_type=ADLS.")
+    normalized["connection_type"] = "ADLS"
+    normalized["connection_contract_name"] = str(
+        normalized.get("connection_contract_name") or "ADLS_CONNECTION"
+    )
+    normalized["connection_schema_version"] = str(
+        normalized.get("connection_schema_version") or "1.0"
+    )
+    if (
+        normalized["connection_contract_name"] != "ADLS_CONNECTION"
+        or normalized["connection_schema_version"] != "1.0"
+    ):
+        raise ValueError("Only the ADLS_CONNECTION/1.0 contract is supported.")
+    base_url = str(normalized["base_url"]).strip().rstrip("/")
+    base_path = str(normalized["base_path"]).strip().rstrip("/") + "/"
+    if not re.fullmatch(r"https://[a-z0-9-]+\.dfs\.core\.windows\.net", base_url):
+        raise ValueError("ADLS base_url must use the Azure Data Lake dfs endpoint.")
+    if not re.fullmatch(
+        r"abfss://[a-z0-9-]+@[a-z0-9-]+\.dfs\.core\.windows\.net/.+/",
+        base_path,
+    ):
+        raise ValueError("ADLS base_path must be a canonical abfss directory URI.")
+    auth_type = str(normalized.get("auth_type") or "").strip().upper()
+    required_references = {
+        "SERVICE_PRINCIPAL": {"tenant_id", "client_id", "client_secret"},
+        "MANAGED_IDENTITY": set(),
+    }
+    if auth_type not in required_references:
+        raise ValueError(f"Unsupported ADLS auth_type: {auth_type!r}")
+    references = validate_secret_references(
+        normalized.get("secrets_json"), required=bool(required_references[auth_type])
+    )
+    missing_refs = required_references[auth_type] - set(references)
+    if missing_refs:
+        raise ValueError(f"{auth_type} requires secret references: {', '.join(sorted(missing_refs))}")
+    config = parse_json_object(normalized.get("config_json"), field_name="config_json", required=True)
+    _reject_secret_values(config)
+    allowed = {"allowed_extensions", "allowed_project_ids", "source_root", "target_platform"}
+    unknown = set(config) - allowed
+    if unknown:
+        raise ValueError("Unsupported ADLS config_json fields: " + ", ".join(sorted(unknown)))
+    extensions = config.get("allowed_extensions")
+    if not isinstance(extensions, list) or not extensions:
+        raise ValueError("config_json.allowed_extensions must be a non-empty string array.")
+    normalized_extensions = sorted({str(item).strip().lower().lstrip(".") for item in extensions})
+    if not set(normalized_extensions) <= {"csv", "json", "xml"}:
+        raise ValueError("ADLS allowed_extensions may contain only csv, json, and xml.")
+    allowed_projects = config.get("allowed_project_ids")
+    if not isinstance(allowed_projects, list) or not allowed_projects or any(
+        not isinstance(project_id, str) or not project_id.strip() for project_id in allowed_projects
+    ):
+        raise ValueError("config_json.allowed_project_ids must be a non-empty string array.")
+    config["allowed_extensions"] = normalized_extensions
+    config["allowed_project_ids"] = sorted({item.strip() for item in allowed_projects})
+    normalized.update(
+        {
+            "base_url": base_url,
+            "base_path": base_path,
+            "auth_type": auth_type,
+            "host_name": normalized.get("host_name") or base_url.split("://", 1)[-1],
+            "port": int(normalized.get("port") or 443),
+            "secrets_json": json.dumps(references, sort_keys=True),
+            "config_json": json.dumps(config, sort_keys=True),
+        }
+    )
+    executable = {
+        key: normalized.get(key)
+        for key in (
+            "source_system_id",
+            "connection_name",
+            "connection_type",
+            "connection_contract_name",
+            "connection_schema_version",
+            "base_url",
+            "base_path",
+            "auth_type",
+            "secrets_json",
+            "config_json",
+        )
+    }
+    normalized["config_hash"] = canonical_json_hash(executable)
+    return normalized
+
+
+def validate_connection(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    if str(payload.get("connection_type") or "JDBC").upper() == "ADLS":
+        return validate_adls_connection(payload)
+    return validate_jdbc_connection(payload)
+
+
 def ddl_path(platform: str) -> Path:
     normalized = str(platform or "").strip().lower()
     if normalized not in SUPPORTED_METADATA_TARGETS:
