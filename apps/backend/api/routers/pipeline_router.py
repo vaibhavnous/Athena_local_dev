@@ -66,6 +66,11 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
         )
     ):
         result_state = "PIPELINE_COMPLETED"
+    failed_stage_key = checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key")
+    failed_stage_label = checkpoint.get("failed_stage_label") or api_utils.stage_label_from_key(
+        failed_stage_key,
+        checkpoint.get("source"),
+    )
     return {
         "run_id": run_id,
         "status": result_state,
@@ -119,8 +124,8 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "awaiting_stage_confirmation": checkpoint.get("awaiting_stage_confirmation"),
             "next_stage_key": checkpoint.get("next_stage_key"),
             "next_stage_label": checkpoint.get("next_stage_label"),
-            "failed_stage_key": checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key"),
-            "failed_stage_label": checkpoint.get("failed_stage_label"),
+            "failed_stage_key": failed_stage_key,
+            "failed_stage_label": failed_stage_label,
             "error": checkpoint.get("error"),
             "updated_at": checkpoint.get("updated_at") or checkpoint.get("checkpoint_at"),
             "compliance_enabled": bool(checkpoint.get("compliance_enabled")),

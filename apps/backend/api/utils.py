@@ -157,5 +157,9 @@ def stage_label_from_key(key: Optional[str], source: Optional[str] = None) -> Op
         "gate5": gate_label(5, source=str(source or "database")),
         "dq_validation": "DQ Validation",
         "gold": "Gold Generation" if not is_file_source(source) else "Gold Code Generation",
+        "metadata_setup_execution": "Metadata Setup Execution",
+        "bronze_code_execution": "Bronze Target Execution",
+        "silver_code_execution": "Silver Target Execution",
+        "gold_code_execution": "Gold Target Execution",
     }
     return labels.get(str(key), str(key))

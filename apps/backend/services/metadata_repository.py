@@ -26,7 +26,7 @@ from services.metadata_contracts import (
     validate_schema_columns,
     validate_snowflake_logical_work_filters,
 )
-from utilis.logger import redact_sensitive, redact_sensitive_text
+from utilis.logger import logger, redact_sensitive, redact_sensitive_text
 
 
 _PARAMETER = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
@@ -4399,6 +4399,46 @@ class DatabricksMetadataRepository(MetadataRepository):
             raise RuntimeError("DATABRICKS_SQL_WAREHOUSE_ID is required for metadata operations.")
 
     @staticmethod
+    def _transient_retry_attempts() -> int:
+        raw = os.getenv("ATHENA_DATABRICKS_METADATA_SQL_RETRY_ATTEMPTS", "3")
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 3
+
+    @staticmethod
+    def _transient_retry_backoff_seconds() -> float:
+        raw = os.getenv("ATHENA_DATABRICKS_METADATA_SQL_RETRY_BACKOFF_SECONDS", "2")
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return 2.0
+
+    @staticmethod
+    def _is_transient_error(exc: BaseException) -> bool:
+        return bool(getattr(exc, "retryable", False)) or isinstance(exc, TimeoutError)
+
+    def _with_transient_retry(self, description: str, operation: Callable[[], Any]) -> Any:
+        attempts = self._transient_retry_attempts()
+        for attempt in range(1, attempts + 1):
+            try:
+                return operation()
+            except Exception as exc:
+                if not self._is_transient_error(exc) or attempt >= attempts:
+                    raise
+                delay = self._transient_retry_backoff_seconds() * attempt
+                logger.warning(
+                    "Transient Databricks metadata %s failure; retrying attempt=%s delay_seconds=%.1f",
+                    description,
+                    attempt + 1,
+                    delay,
+                    extra={"node": "metadata_setup_execution", "stage": "metadata_setup_execution"},
+                )
+                if delay:
+                    time.sleep(delay)
+        return None
+
+    @staticmethod
     def _parameters(parameters: Optional[Mapping[str, Any]]) -> List[Dict[str, str]]:
         result = []
         for name, value in (parameters or {}).items():
@@ -4459,6 +4499,17 @@ class DatabricksMetadataRepository(MetadataRepository):
             code = str(error.get("error_code") or state or "FAILED")
             raise RuntimeError(f"Databricks metadata statement failed: {code}")
         return response
+
+    def execute_transient_safe(self, sql: str, parameters: Optional[Mapping[str, Any]] = None) -> None:
+        self._with_transient_retry("statement", lambda: self.execute(sql, parameters))
+
+    def query_transient_safe(
+        self, sql: str, parameters: Optional[Mapping[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        return self._with_transient_retry("query", lambda: self.query(sql, parameters))
+
+    def run_transient_safe(self, description: str, operation: Callable[[], Any]) -> Any:
+        return self._with_transient_retry(description, operation)
 
     def execute(self, sql: str, parameters: Optional[Mapping[str, Any]] = None) -> None:
         self._statement(sql, parameters)

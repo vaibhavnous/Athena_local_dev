@@ -150,6 +150,34 @@ test('shows a completed Gold execution warning summary', () => {
   }
 })
 
+test('keeps raw failure error text out of the monitor banner', () => {
+  ;(getRunStatus as jest.Mock).mockImplementation(() => new Promise(() => {}))
+  mockActiveRun = {
+    id: 'run-1',
+    run_id: 'run-1',
+    status: 'FAILED',
+    source: 'database',
+    failed_stage_key: 'metadata_setup_execution',
+    error: 'Databricks API request failed (POST /api/2.0/sql/statements): read timed out',
+    pipeline_steps: [
+      { key: 'metadata_setup_execution', label: 'Metadata Setup Execution', state: 'FAILED' },
+    ],
+  }
+
+  const view = render(<PipelineMonitor />)
+
+  expect(view.getByText('Details are available in Execution Logs.')).toBeInTheDocument()
+  expect(view.getByText('at `Metadata Setup Execution`')).toBeInTheDocument()
+  expect(view.queryByText(/Databricks API request failed/)).not.toBeInTheDocument()
+  view.unmount()
+  mockActiveRun = {
+    id: 'run-1',
+    run_id: 'run-1',
+    status: 'RUNNING',
+    stages: [{ key: 'discovery', name: 'Metadata Discovery', status: 'RUNNING' }],
+  }
+})
+
 test('recovers the pending review gate from HITL checkpoint logs', () => {
   expect(reviewWaitPatchFromLogs([
     {

@@ -11,6 +11,7 @@ import pytest
 
 from services.metadata_contracts import TargetMetadataContext, normalize_bronze_column_name
 from services.metadata_contracts import validate_jdbc_connection
+from services.databricks_runtime import DatabricksTransientError
 from services.metadata_repository import (
     DatabricksMetadataRepository,
     MetadataRepository,
@@ -281,6 +282,30 @@ def test_databricks_result_decoder_preserves_boolean_and_numeric_types() -> None
     assert DatabricksMetadataRepository._decode("42", "BIGINT") == 42
     assert DatabricksMetadataRepository._decode("1.5", "DOUBLE") == 1.5
     assert DatabricksMetadataRepository._decode(None, "STRING") is None
+
+
+def test_databricks_metadata_statement_retries_transient_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = DatabricksMetadataRepository(
+        TargetMetadataContext("databricks", "qa", "main"),
+        warehouse_id="warehouse-id",
+    )
+    calls = []
+
+    def execute(sql: str, parameters: Optional[Mapping[str, Any]] = None) -> None:
+        calls.append((sql, parameters))
+        if len(calls) == 1:
+            raise DatabricksTransientError("SQL statement API read timed out")
+
+    monkeypatch.setenv("ATHENA_DATABRICKS_METADATA_SQL_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("ATHENA_DATABRICKS_METADATA_SQL_RETRY_BACKOFF_SECONDS", "0")
+    monkeypatch.setattr(repository, "execute", execute)
+
+    repository.execute_transient_safe("CREATE SCHEMA IF NOT EXISTS main.metadata_schema")
+
+    assert calls == [
+        ("CREATE SCHEMA IF NOT EXISTS main.metadata_schema", None),
+        ("CREATE SCHEMA IF NOT EXISTS main.metadata_schema", None),
+    ]
 
 
 def test_connection_activates_only_after_validator_succeeds() -> None:

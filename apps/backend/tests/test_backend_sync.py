@@ -139,6 +139,12 @@ def test_ui_failed_stage_key_ignores_running_background_stage():
     ) is None
 
 
+def test_metadata_setup_failed_stage_has_display_label():
+    from api import utils as api_utils
+
+    assert api_utils.stage_label_from_key("metadata_setup_execution", "database") == "Metadata Setup Execution"
+
+
 def test_ui_status_uses_reconciled_context_over_stale_checkpoint_pause():
     context = {
         "checkpoint": {

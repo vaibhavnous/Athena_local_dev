@@ -22,6 +22,10 @@ def test_metadata_setup_is_the_first_target_access_and_deploys_approved_snapshot
     calls = []
 
     class TargetRepository:
+        def query(self, sql, _parameters=None):
+            calls.append(("warmup", sql))
+            return []
+
         def execute(self, sql):
             calls.append(("ddl", sql))
 
@@ -84,7 +88,7 @@ def test_metadata_setup_is_the_first_target_access_and_deploys_approved_snapshot
         }],
     })
 
-    assert [name for name, _ in calls[:3]] == ["ddl", "ddl", "preflight"]
+    assert [name for name, _ in calls[:4]] == ["warmup", "ddl", "ddl", "preflight"]
     assert calls[-1] == ("deploy", (1, 1))
     assert result["metadata_setup_execution_status"] == "COMPLETED"
 

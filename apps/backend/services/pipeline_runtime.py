@@ -6106,9 +6106,16 @@ def _execute_metadata_setup(state: Dict[str, Any]) -> Dict[str, Any]:
         str(state.get("run_id") or ""), running_state, context="metadata_setup_execution:running"
     )
 
+    def target_metadata_call(description: str, operation):
+        runner = getattr(repository, "run_transient_safe", None)
+        if callable(runner):
+            return runner(description, operation)
+        return operation()
+
+    target_metadata_call("warehouse preflight", lambda: repository.query("SELECT 1"))
     for statement in split_sql_statements(artifact_path.read_text(encoding="utf-8")):
-        repository.execute(statement)
-    repository.preflight()
+        target_metadata_call("DDL statement", lambda statement=statement: repository.execute(statement))
+    target_metadata_call("schema preflight", repository.preflight)
 
     design = validated_metadata_selection(state)
     if not design:
@@ -6129,16 +6136,28 @@ def _execute_metadata_setup(state: Dict[str, Any]) -> Dict[str, Any]:
         raise RuntimeError("Metadata setup found no approved active mapping rows.")
 
     with repository.unit_of_work():
-        repository.upsert_source_system(design.source_system)
-        connection = repository.upsert_connection_draft(design.connection)
-        repository.validate_and_activate_connection(
-            int(connection["connection_id"]),
-            int(connection["config_version"]),
-            lambda payload: validate_deployment_database_binding(payload, target_platform=platform),
+        target_metadata_call(
+            "source system activation",
+            lambda: repository.upsert_source_system(design.source_system),
         )
-        repository.deploy_configuration_snapshot(
-            ingestion_objects=active_objects,
-            mappings=mappings,
+        connection = target_metadata_call(
+            "connection draft activation",
+            lambda: repository.upsert_connection_draft(design.connection),
+        )
+        target_metadata_call(
+            "connection validation",
+            lambda: repository.validate_and_activate_connection(
+                int(connection["connection_id"]),
+                int(connection["config_version"]),
+                lambda payload: validate_deployment_database_binding(payload, target_platform=platform),
+            ),
+        )
+        target_metadata_call(
+            "configuration deployment",
+            lambda: repository.deploy_configuration_snapshot(
+                ingestion_objects=active_objects,
+                mappings=mappings,
+            ),
         )
 
     completed_state = {

@@ -148,13 +148,6 @@ function StageNode({ stage, onClick, compact = false }) {
             </div>
           )}
 
-          {/* Error snippet */}
-          {isFailed && stage.error && (
-            <p className="text-[11px] text-accent-red mt-1.5 font-mono leading-relaxed line-clamp-2">
-              {stage.error.slice(0, 100)}
-            </p>
-          )}
-
           {/* Attempts badge */}
           {stage.attempts > 1 && isCompleted && compact && (
             <span className="text-[10px] font-mono text-accent-amber mt-1 block">

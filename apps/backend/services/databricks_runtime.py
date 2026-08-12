@@ -85,11 +85,11 @@ def _auth_token() -> str:
 
 
 def _databricks_timeout_seconds() -> int:
-    raw = os.getenv("ATHENA_DATABRICKS_REQUEST_TIMEOUT_SECONDS", "60")
+    raw = os.getenv("ATHENA_DATABRICKS_REQUEST_TIMEOUT_SECONDS", "180")
     try:
         return max(1, int(raw))
     except ValueError:
-        return 60
+        return 180
 
 
 def _databricks_poll_interval_seconds() -> float:

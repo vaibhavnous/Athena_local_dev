@@ -386,11 +386,6 @@ function StageRow({ stage, isLast, onStageClick, onRetry }) {
           <p className="text-xs font-medium text-text-secondary leading-tight">
             {stage.name}
           </p>
-          {stage.error && (
-            <p className="text-[10px] text-accent-red mt-0.5 truncate max-w-xs">
-              {stage.error}
-            </p>
-          )}
         </div>
 
         <div className="flex items-center gap-2 flex-shrink-0 ml-2">

@@ -747,14 +747,10 @@ function PipelineMonitor() {
                   <span className="text-[#d4d9e5]">at `{failureSummary.failedStage}`</span>
                   <span className="text-[#9da7bb]">{failureSummary.progressLabel}</span>
                 </div>
-                {monitorRun?.error && (
-                  <div className="mt-1 max-w-[920px] truncate text-xs text-red-300/90">
-                    {monitorRun.error}
-                  </div>
-                )}
                 <div className="mt-1 flex items-center gap-1.5 text-xs text-[#9da7bb]">
                   <Clock3 size={12} />
-                  {failureSummary.timeAgo}
+                  <span>{failureSummary.timeAgo}</span>
+                  <span>Details are available in Execution Logs.</span>
                 </div>
               </div>
             </div>
@@ -1023,7 +1019,7 @@ function buildFailureSummary(run) {
   }).length
   const failedStageLabel =
     run?.failed_stage_label ||
-    run?.failed_stage_key ||
+    formatPipelineStepLabel(undefined, run?.failed_stage_key) ||
     formatPipelineStepLabel(failedStep?.label || failedStep?.name, failedStep?.key) ||
     failedStep?.key ||
     failedStep?.id ||

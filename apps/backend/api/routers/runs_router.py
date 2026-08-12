@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from api import utils as api_utils
 from api.auth import AuthUser, assert_run_access, get_current_user
 from api.demo import (
     demo_enabled,
@@ -222,6 +223,11 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         checkpoint = json.loads(checkpoint)
     if not isinstance(checkpoint, dict):
         checkpoint = load_checkpoint_state(run_id) or {}
+    failed_stage_key = checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key")
+    failed_stage_label = checkpoint.get("failed_stage_label") or api_utils.stage_label_from_key(
+        failed_stage_key,
+        checkpoint.get("source"),
+    )
     return {
         **_fallback_run_summary(row),
         "hydration_fallback": False,
@@ -256,8 +262,8 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "next_review_key": checkpoint.get("next_review_key"),
         "resume_message": checkpoint.get("resume_message"),
         "stage_confirmation": checkpoint.get("stage_confirmation"),
-        "failed_stage_key": checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key"),
-        "failed_stage_label": checkpoint.get("failed_stage_label"),
+        "failed_stage_key": failed_stage_key,
+        "failed_stage_label": failed_stage_label,
         "error": checkpoint.get("error") or row.get("error"),
         "updated_at": _utc_timestamp(
             checkpoint.get("updated_at")
