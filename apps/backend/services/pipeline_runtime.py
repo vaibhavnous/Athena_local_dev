@@ -88,7 +88,7 @@ def generation_first_database_flow(state: Dict[str, Any]) -> bool:
             DATABASE_GENERATION_FIRST_FLOW_VERSION,
             LEGACY_DATABASE_GENERATION_FIRST_FLOW_VERSION,
         }
-        and str(state.get("source") or "database").lower() in {"database", "adls_gen2"}
+        and str(state.get("source") or "database").lower() == "database"
         and str(state.get("target_warehouse") or "").lower() in {"databricks", "snowflake"}
     )
 
@@ -5326,7 +5326,8 @@ def submit_gate4_review(
                 save_checkpoint_state_timed(run_id, failed_state, context="bronze_code_execution:failed")
                 raise
             final_state["background_stage"] = None
-        final_state = _pause_for_silver_merge_key_review(run_id, final_state)
+        if generation_first_database_flow(final_state):
+            final_state = _pause_for_silver_merge_key_review(run_id, final_state)
         ai_store_db_writer(
             run_id=run_id,
             stage="Bronze Review",
