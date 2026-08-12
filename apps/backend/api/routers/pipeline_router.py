@@ -62,7 +62,7 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
         and result_state.upper() in {"RUNNING", "PROCESSING", "SUBMITTED", "IN_PROGRESS"}
         and (
             str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
-            or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
+            or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
         )
     ):
         result_state = "PIPELINE_COMPLETED"
@@ -90,9 +90,8 @@ def _fallback_status_payload(run_id: str, status: str = "RUNNING", checkpoint: D
             "execution_engine": checkpoint.get("execution_engine") or "native",
             "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or "generate_only",
             "database_flow_version": checkpoint.get("database_flow_version"),
-            "generation_first_execution": bool(
-                checkpoint.get("database_flow_version") == "generation_first_v1"
-            ),
+            "generation_first_execution": str(checkpoint.get("database_flow_version") or "")
+            in {"generation_first_v1", "generation_first_v2"},
             "dbt_target_name": checkpoint.get("dbt_target_name"),
             "dbt_threads": checkpoint.get("dbt_threads"),
             "dbt_command_timeout_secs": checkpoint.get("dbt_command_timeout_secs"),
@@ -196,9 +195,13 @@ def _seed_run_checkpoint(
             "provider": existing.get("provider") or payload.provider,
             "deployment": existing.get("deployment") or payload.deployment,
             "target_warehouse": existing.get("target_warehouse") or payload.target_warehouse or "databricks",
+            "target_environment": existing.get("target_environment") or payload.target_environment,
+            "source_system_id": existing.get("source_system_id") or payload.source_system_id,
+            "source_connection_id": existing.get("source_connection_id") or payload.source_connection_id,
+            "source_profile": existing.get("source_profile") or payload.source_profile,
             "database_flow_version": existing.get("database_flow_version") or (
                 DATABASE_GENERATION_FIRST_FLOW_VERSION
-                if source == "database"
+                if source in {"database", "adls_gen2"}
                 and not any(
                     existing.get(key)
                     for key in (
@@ -223,10 +226,13 @@ def _seed_run_checkpoint(
                 existing.get("report_generation_enabled")
                 if existing.get("report_generation_enabled") is not None
                 else bool(
-                    source == "database"
-                    and str(payload.target_warehouse or "").lower() == "snowflake"
-                    and str(payload.execution_engine or "").lower() == "dbt"
-                    and str(payload.dbt_deployment_mode or "").lower() == "generate_and_deploy"
+                    source == "adls_gen2"
+                    or (
+                        source == "database"
+                        and str(payload.target_warehouse or "").lower() == "snowflake"
+                        and str(payload.execution_engine or "").lower() == "dbt"
+                        and str(payload.dbt_deployment_mode or "").lower() == "generate_and_deploy"
+                    )
                 )
             ),
             "dbt_target_name": existing.get("dbt_target_name") or payload.dbt_target_name,
@@ -328,6 +334,38 @@ def _resume_failed_run(run_id: str, action_name: str) -> Dict[str, Any]:
 @router.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok", "service": "athena-fastapi"}
+
+
+@router.get("/metadata/source-options")
+def get_metadata_source_options(
+    target_warehouse: str,
+    project_id: str | None = None,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    platform = str(target_warehouse or "").strip().lower()
+    if platform not in {"databricks", "snowflake"}:
+        raise HTTPException(status_code=400, detail="target_warehouse must be Databricks or Snowflake")
+    if project_id:
+        load_project_for_user(project_id, user)
+    environment = str(os.getenv("ATHENA_TARGET_ENVIRONMENT") or "").strip()
+    if not environment:
+        raise HTTPException(status_code=503, detail="Target metadata environment is not configured")
+    try:
+        from services.metadata_selection import metadata_source_options
+
+        sources = metadata_source_options(
+            platform=platform,
+            environment=environment,
+            project_id=project_id,
+        )
+    except Exception:
+        logger.error("Failed to load application source options", exc_info=True, extra={"target": platform})
+        raise HTTPException(status_code=503, detail="Application source options are unavailable") from None
+    return {
+        "target_warehouse": platform,
+        "target_environment": environment,
+        "source_systems": sources,
+    }
 
 
 # -------------------------

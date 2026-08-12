@@ -13,7 +13,14 @@ from services.snowflake_contract_validation import (
     extract_source_column_references,
     validate_catalog_columns,
 )
-from services.snowflake_bronze_runtime import _snowflake_connect
+from services.snowflake_bronze_runtime import (
+    _snowflake_connect,
+    configure_snowflake_runtime_session,
+    is_snowflake_transient_error,
+    reconcile_snowflake_resumed_attempt,
+    SnowflakeAmbiguousExecutionError,
+    snowflake_target_commit_result,
+)
 from utilis.logger import logger
 
 
@@ -41,6 +48,15 @@ def _log_context(run_id: Any, *, table: str | None = None, step_name: str = "sno
 
 
 def _read_sql(script: Dict[str, Any]) -> str:
+    execution_spec = script.get("execution_spec")
+    if execution_spec:
+        from utilis.generated_code_paths import verified_execution_artifact
+
+        verified_path = verified_execution_artifact(execution_spec, platform="snowflake")
+        script_path = Path(str(script.get("script_path") or "")).resolve()
+        if script_path != verified_path:
+            raise RuntimeError("Snowflake Silver script_path does not match the registered execution artifact.")
+        return verified_path.read_text(encoding="utf-8")
     body = str(script.get("script_body") or script.get("generated_silver_script") or "").strip()
     if body:
         return body
@@ -62,7 +78,9 @@ def _qualified_name(value: str) -> str:
 
 
 def _sql_without_comments(sql: str) -> str:
-    return re.sub(r"--[^\n]*|/\*.*?\*/", "", str(sql or ""), flags=re.DOTALL)
+    from nodes.bronze_gen import _sql_without_comments as strip_comments
+
+    return strip_comments(sql)
 
 
 def _require_approved_snowflake_structure(sql: str, source_table: str, target_table: str) -> None:
@@ -109,6 +127,11 @@ def validate_snowflake_silver_script(script: Dict[str, Any], catalog_connection:
     if target_table and _qualified_name(target_table) not in sql:
         raise ValueError(f"Snowflake silver SQL does not write to expected target table: {target_table}")
     _require_approved_snowflake_structure(sql, source_table, target_table)
+    if script.get("metadata_runtime") and (
+        '"_logical_work_id"' not in _sql_without_comments(sql).casefold()
+        or "$ATHENA_LOGICAL_WORK_ID" not in _sql_without_comments(sql).upper()
+    ):
+        raise ValueError("Metadata Snowflake Silver SQL does not isolate the queued logical work.")
     if catalog_connection is not None and source_table:
         validate_catalog_columns(
             catalog_connection,
@@ -121,18 +144,86 @@ def validate_snowflake_silver_script(script: Dict[str, Any], catalog_connection:
     return sql
 
 
+def _blocking_validation_results(script: Dict[str, Any], snowflake_conn: Any) -> List[Dict[str, Any]]:
+    rules = (script.get("validation_policy") or {}).get("rules") or []
+    if not rules:
+        return []
+    target = str(script.get("target_table") or script.get("silver_table") or "").strip()
+    expected_columns = {
+        str(row.get("target_column_name") or "")
+        for row in (script.get("mapping_contract") or [])
+        if str(row.get("target_column_name") or "")
+    }
+    cursor = snowflake_conn.cursor()
+    try:
+        cursor.execute(f"SELECT * FROM {_qualified_name(target)} LIMIT 0")
+        target_columns = {str(item[0]) for item in (cursor.description or [])}
+        results = []
+        for rule in rules:
+            rule_type = str(rule.get("rule_type") or rule.get("rule") or "").upper()
+            threshold = rule.get("threshold_value", 0)
+            if rule_type in {"MAPPED_COLUMNS_PRESENT", "TARGET_SCHEMA_MATCH"}:
+                observed = len(expected_columns - target_columns)
+            elif rule_type == "MERGE_KEYS_NOT_NULL":
+                columns = [str(name) for name in (rule.get("columns") or script.get("merge_keys") or [])]
+                if not columns or any(name not in target_columns for name in columns):
+                    raise RuntimeError("Snowflake merge-key validation references unavailable columns.")
+                predicate = " OR ".join(f"{_quote_identifier(name)} IS NULL" for name in columns)
+                cursor.execute(
+                    f"SELECT COUNT_IF({predicate}) FROM {_qualified_name(target)} "
+                    'WHERE "_logical_work_id" = $ATHENA_LOGICAL_WORK_ID'
+                )
+                observed = int(cursor.fetchone()[0])
+            else:
+                raise RuntimeError(f"Unsupported Snowflake Silver validation rule: {rule_type}")
+            status = "PASSED" if float(observed) <= float(threshold) else "FAILED"
+            result = {
+                "rule_type": rule_type,
+                "observed_value": observed,
+                "threshold_value": threshold,
+                "status": status,
+            }
+            results.append(result)
+            if status != "PASSED":
+                raise RuntimeError(f"Snowflake Silver blocking validation failed: {result}")
+        return results
+    finally:
+        cursor.close()
+
+
 def execute_snowflake_silver_sql(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
     sql = validate_snowflake_silver_script(script, catalog_connection=snowflake_conn)
-    cursors = snowflake_conn.execute_string(sql, return_cursors=True)
-    statement_count = len(list(cursors or []))
-    return {
+    try:
+        cursors = snowflake_conn.execute_string(sql, return_cursors=True)
+    except Exception as exc:
+        if is_snowflake_transient_error(exc):
+            raise SnowflakeAmbiguousExecutionError(
+                "Snowflake execution outcome is ambiguous; the same queue attempt must be resumed."
+            ) from exc
+        raise
+    executed = list(cursors or [])
+    statement_count = len(executed)
+    query_id = next(
+        (str(getattr(cursor, "sfqid", "") or "") for cursor in reversed(executed) if getattr(cursor, "sfqid", None)),
+        "",
+    )
+    result = {
         "table": _table_name(script),
         "source_table": script.get("source_table") or script.get("bronze_table"),
         "target_table": script.get("target_table") or script.get("silver_table"),
         "script_path": script.get("script_path"),
         "statement_count": statement_count,
         "status": "COMPLETED",
+        "snowflake_query_id": query_id,
     }
+    receipt = snowflake_target_commit_result(
+        script,
+        query_id,
+        validation_results=_blocking_validation_results(script, snowflake_conn),
+    )
+    if receipt:
+        result["execution_result"] = receipt
+    return result
 
 
 def _script_key(script: Dict[str, Any]) -> str:
@@ -216,6 +307,8 @@ def run_snowflake_silver_scripts(
 
     snowflake_conn = _snowflake_connect()
     try:
+        configure_snowflake_runtime_session(snowflake_conn, state)
+        reconcile_snowflake_resumed_attempt(snowflake_conn, state)
         for script in scripts:
             validate_snowflake_silver_script(script, catalog_connection=snowflake_conn)
 

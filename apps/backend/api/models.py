@@ -24,6 +24,10 @@ class PipelineRunRequest(BaseModel):
     database_name: Optional[str] = None
     database_type: Optional[str] = None
     target_warehouse: Optional[str] = "databricks"
+    target_environment: Optional[str] = Field(default=None, max_length=40)
+    source_system_id: Optional[int] = Field(default=None, gt=0)
+    source_connection_id: Optional[int] = Field(default=None, gt=0)
+    source_profile: Optional[str] = Field(default=None, max_length=80)
     execution_engine: ExecutionEngine = "native"
     dbt_deployment_mode: DbtDeploymentMode = "generate_only"
     dbt_target_name: Optional[str] = Field(default=None, max_length=80)
@@ -44,6 +48,10 @@ class PipelineRunRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_dbt_target(self) -> "PipelineRunRequest":
+        if (self.source_system_id is None) != (self.source_connection_id is None):
+            raise ValueError("source_system_id and source_connection_id must be supplied together")
+        if self.source_system_id is not None and not str(self.target_environment or "").strip():
+            raise ValueError("target_environment is required for database code generation and execution")
         if self.use_domain_kb:
             from utilis.domain_kb import get_domain_kb_config
 

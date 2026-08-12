@@ -33,7 +33,7 @@ def gate_label(gate: int, *, source: str = "database") -> str:
     if gate == 1:
         return "KPI Review"
     if gate == 2:
-        return "Feed Review" if str(source or "").lower() in {"sftp", "adls_gen2"} else "Table Review"
+        return "Feed Review" if str(source or "").lower() == "sftp" else "Table Review"
     if gate == 3:
         return "Semantic Review"
     if gate == 4:

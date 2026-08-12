@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import csv
 import io
 import time
@@ -11,8 +12,18 @@ from typing import Any, Dict, Iterable, List, Sequence
 from urllib.parse import urlparse
 
 from services.external_execution_progress import save_external_execution_progress
+from services.metadata_contracts import validate_runtime_context
 from utilis.db import get_client_connection
 from utilis.logger import logger
+
+
+class SnowflakeAmbiguousExecutionError(RuntimeError):
+    retryable = True
+    preserve_attempt = True
+
+
+def is_snowflake_transient_error(exc: BaseException) -> bool:
+    return type(exc).__name__ in {"OperationalError", "InterfaceError", "DatabaseError"}
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -69,7 +80,7 @@ def _get_snowflake_connector():
         ) from exc
 
 
-def _snowflake_connect():
+def _snowflake_connect(*, autocommit: bool = True):
     connector = _get_snowflake_connector()
     required = {
         "SNOWFLAKE_USER": os.getenv("SNOWFLAKE_USER"),
@@ -84,7 +95,7 @@ def _snowflake_connect():
         "user": required["SNOWFLAKE_USER"],
         "password": required["SNOWFLAKE_PASSWORD"],
         "account": _normalize_account(str(required["SNOWFLAKE_ACCOUNT"])),
-        "autocommit": True,
+        "autocommit": autocommit,
     }
     for env_name, key in (
         ("SNOWFLAKE_WAREHOUSE", "warehouse"),
@@ -96,6 +107,69 @@ def _snowflake_connect():
         if str(value or "").strip():
             kwargs[key] = _normalize_identifier(value)
     return connector.connect(**kwargs)
+
+
+def configure_snowflake_runtime_session(connection: Any, state: Dict[str, Any]) -> Dict[str, Any] | None:
+    raw = state.get("metadata_runtime_context")
+    if not raw:
+        return None
+    context = validate_runtime_context(raw)
+    query_tag = json.dumps(
+        {
+            "logical_work_id": context["logical_work_id"],
+            "queue_id": context["queue_id"],
+            "attempt_number": context.get("attempt_number", 0),
+            "runtime_run_id": context.get("runtime_run_id"),
+            "processing_stage": context["processing_stage"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    cursor = connection.cursor()
+    try:
+        cursor.execute("ALTER SESSION SET QUERY_TAG = %s", (query_tag,))
+        cursor.execute("SET ATHENA_LOGICAL_WORK_ID = %s", (context["logical_work_id"],))
+        cursor.execute("SET ATHENA_RUNTIME_RUN_ID = %s", (context.get("runtime_run_id") or "",))
+    finally:
+        cursor.close()
+    return context
+
+
+def reconcile_snowflake_resumed_attempt(connection: Any, state: Dict[str, Any]) -> None:
+    raw = state.get("metadata_runtime_context")
+    if not raw or not bool(raw.get("resumed_attempt")):
+        return
+    context = validate_runtime_context(raw)
+    query_tag = json.dumps(
+        {
+            "logical_work_id": context["logical_work_id"],
+            "queue_id": context["queue_id"],
+            "attempt_number": context.get("attempt_number", 0),
+            "runtime_run_id": context.get("runtime_run_id"),
+            "processing_stage": context["processing_stage"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    deadline = time.monotonic() + max(30, int(os.getenv("ATHENA_SNOWFLAKE_RESUME_WAIT_SECONDS", "300")))
+    while True:
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY("
+                "END_TIME_RANGE_START=>DATEADD('hour', -24, CURRENT_TIMESTAMP()), RESULT_LIMIT=>10000)) "
+                "WHERE QUERY_TAG = %s AND SESSION_ID <> CURRENT_SESSION() "
+                "AND EXECUTION_STATUS IN ('RUNNING','QUEUED','RESUMING','BLOCKED')",
+                (query_tag,),
+            )
+            active = int(cursor.fetchone()[0])
+        finally:
+            cursor.close()
+        if active == 0:
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("A prior Snowflake execution for this same queue attempt is still active.")
+        time.sleep(2)
 
 
 def _snowflake_quote_identifier(value: str) -> str:
@@ -133,11 +207,11 @@ def _source_select_sql(schema_name: str, table_name: str, limit: int) -> str:
 
 
 def _batch_size() -> int:
-    raw = os.getenv("ATHENA_SNOWFLAKE_BRONZE_BATCH_SIZE", "5000")
+    raw = os.getenv("ATHENA_SNOWFLAKE_BRONZE_BATCH_SIZE", "10000")
     try:
         return max(1, int(raw))
     except ValueError:
-        return 5000
+        return 10000
 
 
 def _progress_log_interval() -> int:
@@ -158,6 +232,40 @@ def _source_load_limit() -> int:
 
 def _string_rows(rows: Iterable[Sequence[Any]]) -> List[tuple[Any, ...]]:
     return [tuple(None if value is None else str(value) for value in row) for row in rows]
+
+
+def _write_pandas_batch(
+    connection: Any,
+    *,
+    database: str,
+    schema: str,
+    table: str,
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+) -> int:
+    """Load one bounded batch through Snowflake PUT/COPY on the existing session."""
+    import pandas as pd
+    from snowflake.connector.pandas_tools import write_pandas
+
+    frame = pd.DataFrame.from_records(rows, columns=list(columns))
+    success, _chunks, loaded_rows, _output = write_pandas(
+        connection,
+        frame,
+        table_name=table,
+        database=database,
+        schema=schema,
+        chunk_size=len(frame),
+        bulk_upload_chunks=True,
+        quote_identifiers=True,
+        auto_create_table=False,
+        overwrite=False,
+    )
+    if not success or int(loaded_rows) != len(frame):
+        raise RuntimeError(
+            f"Snowflake bulk source load wrote {loaded_rows} of {len(frame)} rows to "
+            f"{database}.{schema}.{table}."
+        )
+    return int(loaded_rows)
 
 
 def _table_name(script: Dict[str, Any]) -> str:
@@ -219,8 +327,6 @@ def load_azure_sql_table_to_snowflake(
         landing_database, landing_schema, landing_name = _landing_relation(script)
         landing_table = _snowflake_qualified_name(landing_database, landing_schema, landing_name)
         column_defs = ", ".join(f"{_snowflake_quote_identifier(column)} VARCHAR" for column in columns)
-        column_list = ", ".join(_snowflake_quote_identifier(column) for column in columns)
-        placeholders = ", ".join(["%s"] * len(columns))
 
         # ponytail: source landing is raw VARCHAR; generated bronze SQL owns all typing via TRY_CAST.
         snowflake_cursor = snowflake_conn.cursor()
@@ -229,16 +335,24 @@ def load_azure_sql_table_to_snowflake(
             snowflake_cursor.execute(
                 f"CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(landing_database, landing_schema)}"
             )
-            snowflake_cursor.execute(f"CREATE OR REPLACE TABLE {landing_table} ({column_defs})")
+            table_kind = "TEMPORARY TABLE" if script.get("metadata_runtime") else "TABLE"
+            snowflake_cursor.execute(
+                f"CREATE OR REPLACE {table_kind} {landing_table} ({column_defs})"
+            )
 
-            insert_sql = f"INSERT INTO {landing_table} ({column_list}) VALUES ({placeholders})"
             while True:
                 rows = source_cursor.fetchmany(_batch_size())
                 if not rows:
                     break
                 values = _string_rows(rows)
-                snowflake_cursor.executemany(insert_sql, values)
-                inserted_rows += len(values)
+                inserted_rows += _write_pandas_batch(
+                    snowflake_conn,
+                    database=landing_database,
+                    schema=landing_schema,
+                    table=landing_name,
+                    columns=columns,
+                    rows=values,
+                )
                 if progress_every and inserted_rows >= next_progress_log:
                     logger.info(
                         "Snowflake Bronze source load progress for %s: rows_loaded=%s",
@@ -599,29 +713,107 @@ def _read_sql_file(path_value: Any) -> str:
 def validate_snowflake_bronze_script(script: Dict[str, Any]) -> str:
     from nodes.bronze_gen import _snowflake_qualified_name, validate_snowflake_bronze_sql
 
-    sql = _read_sql_file(script.get("script_path"))
+    if script.get("execution_spec"):
+        from utilis.generated_code_paths import verified_execution_artifact
+
+        verified_path = verified_execution_artifact(script["execution_spec"], platform="snowflake")
+        if Path(str(script.get("script_path") or "")).resolve() != verified_path:
+            raise RuntimeError("Snowflake script_path does not match the registered execution artifact.")
+        sql = verified_path.read_text(encoding="utf-8")
+    else:
+        sql = _read_sql_file(script.get("script_path"))
     table_name = str(script.get("table") or script.get("table_name") or "").strip()
     database_name = str(script.get("database_name") or "insurance")
     schema_name = str(script.get("schema_name") or "dbo")
     bronze_catalog = str(script.get("bronze_catalog") or os.getenv("BRONZE_CATALOG", "main"))
     bronze_schema = str(script.get("bronze_schema") or os.getenv("BRONZE_SCHEMA", "bronze"))
+    landing_database = str(script.get("snowflake_landing_database") or database_name)
+    landing_schema = str(script.get("snowflake_landing_schema") or schema_name)
+    landing_table = str(script.get("snowflake_landing_table") or table_name)
     validate_snowflake_bronze_sql(
         sql,
-        source_table=_snowflake_qualified_name(database_name, schema_name, table_name) if table_name else None,
+        source_table=(
+            _snowflake_qualified_name(landing_database, landing_schema, landing_table)
+            if table_name else None
+        ),
         target_table=_snowflake_qualified_name(bronze_catalog, bronze_schema, f"bronze_{table_name}") if table_name else None,
+        metadata_driven=bool(script.get("metadata_runtime")),
     )
     return sql
 
 
 def execute_snowflake_sql_file(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
     sql = validate_snowflake_bronze_script(script)
-    cursors = snowflake_conn.execute_string(sql, return_cursors=True)
-    statement_count = len(list(cursors or []))
-    return {
+    try:
+        cursors = snowflake_conn.execute_string(sql, return_cursors=True)
+    except Exception as exc:
+        if is_snowflake_transient_error(exc):
+            raise SnowflakeAmbiguousExecutionError(
+                "Snowflake execution outcome is ambiguous; the same queue attempt must be resumed."
+            ) from exc
+        raise
+    executed = list(cursors or [])
+    statement_count = len(executed)
+    query_id = next(
+        (str(getattr(cursor, "sfqid", "") or "") for cursor in reversed(executed) if getattr(cursor, "sfqid", None)),
+        "",
+    )
+    result = {
         "table": script.get("table"),
         "script_path": script.get("script_path"),
         "statement_count": statement_count,
         "status": "COMPLETED",
+        "snowflake_query_id": query_id,
+    }
+    receipt = snowflake_target_commit_result(script, query_id)
+    if receipt:
+        target_parts = str(script.get("target_table") or "").split(".")
+        if len(target_parts) != 3:
+            raise RuntimeError("Metadata Snowflake Bronze is missing its exact target table.")
+        cursor = snowflake_conn.cursor()
+        try:
+            cursor.execute(
+                f"SELECT COUNT(*) FROM {_snowflake_qualified_name(*target_parts)} "
+                'WHERE "_logical_work_id" = $ATHENA_LOGICAL_WORK_ID'
+            )
+            rows_written = int(cursor.fetchone()[0])
+        finally:
+            cursor.close()
+        rows_read = script.get("source_rows_loaded")
+        if rows_read is not None and int(rows_read) != rows_written:
+            raise RuntimeError(
+                "Snowflake Bronze row reconciliation failed for the queued logical work."
+            )
+        receipt.update({"rows_read": rows_read, "rows_written": rows_written})
+        result["execution_result"] = receipt
+    return result
+
+
+def snowflake_target_commit_result(
+    script: Dict[str, Any],
+    query_id: str,
+    *,
+    validation_results: List[Dict[str, Any]] | None = None,
+) -> Dict[str, Any] | None:
+    raw_context = script.get("metadata_runtime_context")
+    if not raw_context:
+        return None
+    context = validate_runtime_context(raw_context)
+    if not str(query_id or "").strip():
+        raise RuntimeError("Snowflake did not return a target commit query ID.")
+    policy_rules = (script.get("validation_policy") or {}).get("rules") or []
+    if policy_rules and validation_results is None:
+        raise RuntimeError("Snowflake target did not return rule-level blocking-validation evidence.")
+    return {
+        "contract_version": "1.0",
+        "status": "COMPLETED",
+        "logical_work_id": context["logical_work_id"],
+        "runtime_run_id": context.get("runtime_run_id"),
+        "target_table": context["target_table"],
+        "target_commit_id": str(query_id),
+        "validation_status": "PASSED",
+        "validation_policy_hash": context.get("validation_policy_hash"),
+        "validation_results": list(validation_results or []),
     }
 
 
@@ -706,13 +898,15 @@ def run_snowflake_bronze_scripts(
         for script in scripts:
             validate_snowflake_bronze_script(script)
 
-    load_source = snowflake_bronze_source_load_enabled()
+    metadata_runtime = bool(state.get("metadata_runtime_context"))
+    # Metadata JDBC Bronze always uses the already-validated deployment connector.
+    load_source = True if metadata_runtime else snowflake_bronze_source_load_enabled()
     if load_only and not load_source:
         raise RuntimeError(
             "Native Snowflake dbt execution requires ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE=true "
             "so source data is landed before dbt build."
         )
-    source_mode = _source_mode()
+    source_mode = "azure_sql" if metadata_runtime else _source_mode()
     loaded_sources: List[Dict[str, Any]] = []
     executed_scripts: List[Dict[str, Any]] = []
     stage_key = str(progress_stage_key or "bronze_code_execution")
@@ -736,6 +930,8 @@ def run_snowflake_bronze_scripts(
     )
     snowflake_conn = _snowflake_connect()
     try:
+        configure_snowflake_runtime_session(snowflake_conn, state)
+        reconcile_snowflake_resumed_attempt(snowflake_conn, state)
         if load_source and source_mode == "adls":
             logger.info(
                 "Ensuring Snowflake ADLS stage and file format exist",
@@ -745,6 +941,7 @@ def run_snowflake_bronze_scripts(
         for index, script in enumerate(scripts, start=1):
             table_name = _table_name(script)
             source_table = f"{_database_name(script)}.{_schema_name(script)}.{table_name}"
+            load_result: Dict[str, Any] = {}
             if load_source:
                 state = save_external_execution_progress(
                     state,
@@ -825,7 +1022,13 @@ def run_snowflake_bronze_scripts(
                 extra=_log_context(run_id, table=table_name, step_name="bronze_script_execute_start"),
             )
             started_at = time.monotonic()
-            execution_result = execute_snowflake_sql_file(script, snowflake_conn)
+            execution_result = execute_snowflake_sql_file(
+                {
+                    **script,
+                    "source_rows_loaded": load_result.get("rows_loaded"),
+                },
+                snowflake_conn,
+            )
             elapsed_seconds = round(time.monotonic() - started_at, 2)
             executed_scripts.append(execution_result)
             logger.info(

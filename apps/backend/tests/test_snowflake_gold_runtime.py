@@ -154,6 +154,60 @@ DROP TABLE "ATHENA_DB"."GOLD"."fact_average";
         )
 
 
+def test_metadata_gold_requires_logical_work_predicate_for_each_input_alias():
+    sql = '''
+MERGE INTO "ATHENA_DB"."GOLD"."fact_orders" AS target
+USING (
+    SELECT $ATHENA_LOGICAL_WORK_ID AS fake_one, $ATHENA_LOGICAL_WORK_ID AS fake_two
+    FROM "ATHENA_DB"."SILVER"."silver_orders" AS orders
+    JOIN "ATHENA_DB"."SILVER"."silver_customers" AS customers
+      ON orders."customer_id" = customers."customer_id"
+) AS source ON 1 = 0
+WHEN NOT MATCHED THEN INSERT DEFAULT VALUES;
+'''
+
+    with pytest.raises(ValueError, match="does not isolate every input"):
+        snowflake_gold_runtime._require_approved_snowflake_structure(
+            sql,
+            "ATHENA_DB.SILVER.silver_orders",
+            "ATHENA_DB.GOLD.fact_orders",
+            [
+                "ATHENA_DB.SILVER.silver_orders",
+                "ATHENA_DB.SILVER.silver_customers",
+            ],
+        )
+
+
+def test_metadata_gold_executes_validated_artifact_without_runtime_rewrite(monkeypatch):
+    sql = '''CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
+CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_orders" ("order_count" NUMBER);
+MERGE INTO "ATHENA_DB"."GOLD"."fact_orders" AS target
+USING (
+    SELECT COUNT(*) AS "order_count"
+    FROM "ATHENA_DB"."SILVER"."silver_orders" AS orders
+    WHERE orders."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID
+) AS source ON target."order_count" = source."order_count"
+WHEN MATCHED THEN UPDATE SET target."order_count" = source."order_count"
+WHEN NOT MATCHED THEN INSERT ("order_count") VALUES (source."order_count");'''
+    monkeypatch.setattr(snowflake_gold_runtime, "_read_sql", lambda _script: sql)
+    monkeypatch.setattr(
+        snowflake_gold_runtime,
+        "_normalize_snowflake_gold_sql",
+        lambda _sql: (_ for _ in ()).throw(AssertionError("registered artifact must not be rewritten")),
+    )
+
+    validated = snowflake_gold_runtime.validate_snowflake_gold_script(
+        {
+            "metadata_runtime": True,
+            "source_table": "ATHENA_DB.SILVER.silver_orders",
+            "approved_source_tables": ["ATHENA_DB.SILVER.silver_orders"],
+            "target_table": "ATHENA_DB.GOLD.fact_orders",
+        }
+    )
+
+    assert validated == sql
+
+
 def _gold_sql() -> str:
     return """CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."GOLD";
 CREATE TABLE IF NOT EXISTS "ATHENA_DB"."GOLD"."fact_total_claims" (
@@ -284,6 +338,92 @@ def test_snowflake_gold_runtime_executes_generated_scripts(monkeypatch):
     assert 'MERGE INTO "ATHENA_DB"."GOLD"."dim_claim"' in fake_conn.sql[0]
     assert any('MERGE INTO "ATHENA_DB"."GOLD"."fact_total_claims"' in sql for sql in fake_conn.sql)
     assert fake_conn.closed is True
+
+
+def test_snowflake_gold_runtime_one_of_ten_failure_completes_with_warning(monkeypatch):
+    class FakeSnowflakeConnection:
+        def close(self):
+            pass
+
+    scripts = [
+        {
+            "kpi_name": f"KPI {index}",
+            "target_table": f"ATHENA_DB.GOLD.fact_{index}",
+            "script_path": f"gold_{index}.sql",
+        }
+        for index in range(1, 11)
+    ]
+
+    def execute(script, _connection):
+        if script["target_table"].endswith("_10"):
+            raise ValueError("invalid target expression")
+        return {**script, "status": "COMPLETED", "statement_count": 1}
+
+    monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_GOLD", "true")
+    monkeypatch.setattr(snowflake_gold_runtime, "_snowflake_connect", FakeSnowflakeConnection)
+    monkeypatch.setattr(snowflake_gold_runtime, "configure_snowflake_runtime_session", lambda *_: None)
+    monkeypatch.setattr(snowflake_gold_runtime, "reconcile_snowflake_resumed_attempt", lambda *_: None)
+    monkeypatch.setattr(snowflake_gold_runtime, "validate_snowflake_gold_script", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(snowflake_gold_runtime, "validate_snowflake_dimension_script", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(snowflake_gold_runtime, "execute_snowflake_gold_sql", execute)
+    monkeypatch.setattr(
+        snowflake_gold_runtime,
+        "save_external_execution_progress",
+        lambda state, **_kwargs: state,
+    )
+
+    result = snowflake_gold_runtime.run_snowflake_gold_scripts(
+        {"run_id": "partial-gold", "target_warehouse": "snowflake", "gold_generation_results": scripts}
+    )
+
+    assert result["snowflake_gold_execution_status"] == "COMPLETED_WITH_WARNINGS"
+    assert len(result["snowflake_gold_execution_results"]) == 10
+    assert [item["target_table"] for item in result["snowflake_gold_execution_failures"]] == [
+        "ATHENA_DB.GOLD.fact_10"
+    ]
+
+
+def test_snowflake_gold_runtime_persists_failed_progress_below_threshold(monkeypatch):
+    class FakeSnowflakeConnection:
+        def close(self):
+            pass
+
+    progress = []
+    scripts = [
+        {"kpi_name": f"KPI {index}", "target_table": f"ANALYTICS.GOLD.fact_{index}", "script_path": f"gold_{index}.sql"}
+        for index in range(2)
+    ]
+
+    monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_GOLD", "true")
+    monkeypatch.setattr(snowflake_gold_runtime, "_snowflake_connect", FakeSnowflakeConnection)
+    monkeypatch.setattr(snowflake_gold_runtime, "configure_snowflake_runtime_session", lambda *_: None)
+    monkeypatch.setattr(snowflake_gold_runtime, "reconcile_snowflake_resumed_attempt", lambda *_: None)
+    monkeypatch.setattr(snowflake_gold_runtime, "validate_snowflake_gold_script", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(snowflake_gold_runtime, "validate_snowflake_dimension_script", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        snowflake_gold_runtime,
+        "execute_snowflake_gold_sql",
+        lambda script, _connection: (
+            (_ for _ in ()).throw(ValueError("invalid model"))
+            if script["target_table"].endswith("_1")
+            else {**script, "status": "COMPLETED"}
+        ),
+    )
+    monkeypatch.setattr(
+        snowflake_gold_runtime,
+        "save_external_execution_progress",
+        lambda state, **kwargs: progress.append((state, kwargs)) or state,
+    )
+
+    with pytest.raises(RuntimeError, match="completed only 1/2"):
+        snowflake_gold_runtime.run_snowflake_gold_scripts(
+            {"run_id": "failed-gold", "target_warehouse": "snowflake", "gold_generation_results": scripts}
+        )
+
+    failed_state, failed_progress = progress[-1]
+    assert failed_progress["status"] == "FAILED"
+    assert failed_progress["completed_count"] == 1
+    assert len(failed_state["snowflake_gold_execution_failures"]) == 1
 
 
 def test_snowflake_gold_runtime_uses_persisted_dimension_body_when_file_is_unavailable():

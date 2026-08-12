@@ -1,4 +1,5 @@
 from concurrent.futures import TimeoutError as FutureTimeoutError
+import json
 import os
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from fastapi.testclient import TestClient
 
 os.environ.setdefault("ATHENA_DEMO_MODE", "false")
 
-from api.main import app
+from api.main import JavaScriptSafeJSONResponse, app
 from api.auth import AuthUser, get_current_user
 
 app.dependency_overrides[get_current_user] = lambda: AuthUser(
@@ -16,6 +17,21 @@ app.dependency_overrides[get_current_user] = lambda: AuthUser(
 )
 
 client = TestClient(app)
+
+
+def test_default_json_response_preserves_bigint_precision_for_javascript_clients():
+    unsafe_id = 4_134_741_637_349_269_810
+    body = json.loads(
+        JavaScriptSafeJSONResponse(
+            {"silver_ingestion_object_id": unsafe_id, "safe_count": 42, "enabled": True}
+        ).body
+    )
+
+    assert body == {
+        "silver_ingestion_object_id": str(unsafe_id),
+        "safe_count": 42,
+        "enabled": True,
+    }
 
 
 def test_health_endpoint():
@@ -71,6 +87,45 @@ def test_silver_merge_key_review_get_returns_checkpoint_artifact(monkeypatch):
 
     assert response["next_review_key"] == "silver_merge_key_review"
     assert response["silver_merge_key_review_artifact"]["feeds"][0]["merge_keys"] == ["claim_id"]
+
+
+def test_silver_merge_key_review_submit_uses_authorized_metadata_checkpoint(monkeypatch):
+    from api.routers import reviews_router
+
+    recorded = {}
+    checkpoint = {
+        "run_id": "run-merge-review",
+        "source_system_id": "7499026347042686646",
+        "next_review_key": "silver_merge_key_review",
+    }
+    monkeypatch.setattr(reviews_router, "assert_run_access", lambda *_args, **_kwargs: checkpoint)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda run_id, stage, fn, *args: recorded.update({"stage": stage, "args": args}),
+    )
+
+    response = client.post(
+        "/silver-merge-key-reviews/run-merge-review",
+        json={
+            "action": "APPROVED",
+            "review_artifact": {
+                "feeds": [{
+                    "silver_ingestion_object_id": "4134741637349269810",
+                    "merge_keys": ["claim_id"],
+                    "script_body": "untrusted replacement",
+                }]
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert recorded["stage"] == "silver"
+    assert recorded["args"][2] == {
+        "feeds": [{
+            "silver_ingestion_object_id": "4134741637349269810",
+            "merge_keys": ["claim_id"],
+        }]
+    }
 
 
 def test_kpi_review_returns_conflict_when_kpi_artifact_failed_without_rows(monkeypatch):
@@ -543,7 +598,33 @@ def test_new_native_database_checkpoint_is_versioned_for_generation_first(monkey
         owner_email="test@example.com",
     )
 
-    assert saved["state"]["database_flow_version"] == "generation_first_v1"
+    assert saved["state"]["database_flow_version"] == "generation_first_v2"
+
+
+def test_new_adls_checkpoint_is_generation_first_from_initial_poll(monkeypatch):
+    from api.models import PipelineRunRequest
+    from api.routers import pipeline_router
+
+    saved = {}
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda _run_id: None)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.save_checkpoint_state",
+        lambda run_id, state: saved.update({"run_id": run_id, "state": dict(state)}),
+    )
+
+    pipeline_router._seed_run_checkpoint(
+        "run-adls-generation-first",
+        PipelineRunRequest(
+            brd_text="Infer ADLS files and generate all layers before execution.",
+            source="adls_gen2",
+            target_warehouse="databricks",
+            execution_engine="native",
+        ),
+        owner_email="test@example.com",
+    )
+
+    assert saved["state"]["database_flow_version"] == "generation_first_v2"
+    assert saved["state"]["report_generation_enabled"] is True
 
 
 def test_new_snowflake_dbt_checkpoint_is_versioned_for_generation_first(monkeypatch):
@@ -569,7 +650,7 @@ def test_new_snowflake_dbt_checkpoint_is_versioned_for_generation_first(monkeypa
         owner_email="test@example.com",
     )
 
-    assert saved["state"]["database_flow_version"] == "generation_first_v1"
+    assert saved["state"]["database_flow_version"] == "generation_first_v2"
 
 
 def test_existing_unversioned_snowflake_dbt_checkpoint_keeps_legacy_flow(monkeypatch):
@@ -897,6 +978,7 @@ def test_generation_first_gold_review_submits_review_boundary_not_execution(monk
             "target_warehouse": "databricks",
             "execution_engine": "native",
             "database_flow_version": "generation_first_v1",
+            "source_system_id": "7499026347042686646",
             "status": "HITL_WAIT",
             "next_review_key": "gold_review",
         },
@@ -913,6 +995,7 @@ def test_generation_first_gold_review_submits_review_boundary_not_execution(monk
 
     assert response.status_code == 200
     assert recorded["stage"] == "gold_review"
+    assert recorded["args"][2] == {"items": [{}]}
 
 
 def test_generation_first_fallback_keeps_pending_gold_review():
@@ -1116,16 +1199,16 @@ def test_configuration_crud_endpoints():
     assert delete_response.json() == {"id": created["id"], "deleted": True}
 
 
-def test_configurations_include_insurance_sftp_adls_default(monkeypatch):
+def test_configurations_include_insurance_adls_default(monkeypatch):
     from api.routers import config_router
 
     monkeypatch.setenv("ADLS_ACCOUNT_URL", "https://storageaccount.dfs.core.windows.net")
     monkeypatch.setenv("ADLS_FILE_SYSTEM", "athena")
     monkeypatch.setenv("ADLS_SOURCE_ROOT", "INSURANCE_SFTP/insurance")
 
-    connection = next(item for item in config_router.configurations() if item["id"] == "sftp_adls_insurance")
+    connection = next(item for item in config_router.configurations() if item["id"] == "adls_insurance")
 
-    assert connection["integrationType"] == "SFTP"
+    assert connection["integrationType"] == "ADLS"
     assert connection["dataLakeSourceType"] == "ADLS"
     assert connection["directoryName"] == "INSURANCE_SFTP/insurance"
     assert connection["basePath"] == (

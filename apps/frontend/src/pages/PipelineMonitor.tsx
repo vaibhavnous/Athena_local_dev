@@ -16,6 +16,7 @@ import {
   getBronzeReview,
   getEnrichmentReviews,
   getGoldReview,
+  getMetadataDdlReview,
   getRunStatus,
   getRunScripts,
   getSilverMergeKeyReview,
@@ -31,9 +32,10 @@ import { activeReviewKey, hasRenderableReviewData } from '../utils/reviewReadine
 const ACTIVE_RUN_REFRESH_INTERVAL_MS = 5000
 const ACTIVE_RUN_FAST_REFRESH_INTERVAL_MS = 1500
 const REVIEW_READY_POLL_INTERVAL_MS = 1500
-const HIDDEN_CODE_REVIEW_STEPS = new Set(['gate4', 'gate5', 'gold_review'])
+const HIDDEN_CODE_REVIEW_STEPS = new Set(['metadata_ddl_review', 'gate4', 'gate5', 'gold_review'])
 
 async function fetchReviewPayload(runId, reviewKey) {
+  if (reviewKey === 'metadata_ddl_review') return getMetadataDdlReview(runId)
   if (reviewKey === 'silver_merge_key_review') return getSilverMergeKeyReview(runId)
   if (reviewKey === 'gold_review') return getGoldReview(runId)
   if (reviewKey === 5) return getSilverReview(runId)
@@ -60,6 +62,15 @@ export function reviewWaitPatchFromLogs(logs = []) {
     }
     if (status !== 'HITL_WAIT' && !/\bHITL_WAIT\b/i.test(text)) continue
 
+    if (/\bmetadata_ddl_review\b/i.test(text)) {
+      return {
+        status: 'HITL_WAIT',
+        next_gate: 0,
+        next_review_key: 'metadata_ddl_review',
+        background_stage: 'metadata_ddl_review',
+        resume_message: 'Metadata DDL Review is loading.',
+      }
+    }
     if (/\bsilver_merge_key_review\b/i.test(text)) {
       return {
         status: 'HITL_WAIT',
@@ -1069,6 +1080,7 @@ function StatusPill({ status, tone }) {
 
 function StepRow({ step, index = 0, isLast = false, onOpenReview, onOpenReport, onRerun, rerunning = false }) {
   const state = normalizeState(step.state)
+  const completedWithWarnings = Boolean(step.warning) || String(step.state || '').toUpperCase() === 'COMPLETED_WITH_WARNINGS'
   const complete = state === 'COMPLETED'
   const waiting = state === 'HITL_WAIT'
   const running = state === 'RUNNING'
@@ -1121,8 +1133,13 @@ function StepRow({ step, index = 0, isLast = false, onOpenReview, onOpenReport, 
         {!isLast && <div className={`mt-1 w-px flex-1 ${complete ? 'bg-emerald-500/30' : 'bg-[#253044]'}`} />}
       </div>
       <div className="ml-2 flex min-w-0 flex-1 items-start justify-between gap-2 pb-3 pt-0.5">
-        <div className={`min-w-0 truncate text-xs font-medium leading-tight ${complete || waiting || running ? 'text-[#d1d5db]' : 'text-[#6b7280]'}`}>
-          {step.label}
+        <div className="min-w-0 flex-1">
+          <div className={`truncate text-xs font-medium leading-tight ${complete || waiting || running ? 'text-[#d1d5db]' : 'text-[#6b7280]'}`}>
+            {step.label}
+          </div>
+          {completedWithWarnings && step.detail && (
+            <div className="mt-1 text-[10px] leading-tight text-amber-300">{step.detail}</div>
+          )}
         </div>
         {step.preparingReview && (
           <span className="shrink-0 text-[10px] font-medium text-[#3f82ff]">Loading…</span>
@@ -1298,7 +1315,8 @@ export function markNextPendingStage(phases = [], run = null, observedPipelineAc
 export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
   const steps = Array.isArray(phase?.steps) ? phase.steps : []
   const byKey = new Map([...allSteps, ...steps].map((step) => [step.key, step]))
-  const fileFlow = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
+  const fileFlow = String(run?.source || '').toLowerCase() === 'sftp'
+  const adlsFlow = String(run?.source || '').toLowerCase() === 'adls_gen2'
   const phaseState = phaseStatusToStepState(phase.status)
   const makeStep = (key, label, fallbackState = phaseState, forceState = false) => {
     const step = byKey.get(key)
@@ -1324,27 +1342,41 @@ export function buildPipelineDisplayPhase(phase, allSteps = [], run = null) {
 
   if (!fileFlow && phase.label === 'Code Generation & Reviews') {
     displaySteps = [
+      ...(byKey.has('metadata_ddl') ? [makeStep('metadata_ddl', 'Metadata DDL Generation')] : []),
+      ...(byKey.has('metadata_ddl_review') ? [makeStep('metadata_ddl_review', 'Metadata DDL Review')] : []),
       makeStep('bronze', 'Bronze Code Generation'),
       makeStep('gate4', 'Bronze Review', reviewAwareStepState(byKey.get('gate4'), phase, run, 4)),
       makeStep('silver_merge_key_resolution', 'Silver Merge Key Resolution'),
       makeStep('silver_merge_key_review', 'Silver Merge Key Review'),
       makeStep('silver', 'Silver Code Generation'),
       makeStep('gate5', 'Silver Review', reviewAwareStepState(byKey.get('gate5'), phase, run, 5)),
-      makeStep('gold', 'Gold Code Generation'),
+      makeStep(
+        'gold',
+        'Gold Code Generation',
+        adlsFlow && run?.gold_generation_status
+          ? normalizeState(run.gold_generation_status)
+          : (byKey.get('gold')?.state || phaseState),
+        adlsFlow && Boolean(run?.gold_generation_status),
+      ),
       makeStep('gold_review', 'Gold Code Review'),
     ]
-  } else if (!fileFlow && ['Target Execution', 'Code Execution & Report Generation', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
+  } else if (!fileFlow && ['Target Execution', 'Target Execution & Report Generation', 'Code Execution & Report Generation', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
     displaySteps = isGenerationFirstDatabaseRun(run) && isSnowflakeDbtRun(run)
       ? [
+          ...(byKey.has('metadata_setup_execution') ? [makeStep('metadata_setup_execution', 'Metadata Setup Execution')] : []),
           makeStep('gold_code_execution', 'Code Execution'),
           ...(run?.report_generation_enabled || byKey.has('report_generation')
             ? [makeStep('report_generation', 'Report Generation')]
             : []),
         ]
       : [
+          ...(byKey.has('metadata_setup_execution') ? [makeStep('metadata_setup_execution', 'Metadata Setup Execution')] : []),
           makeStep('bronze_code_execution', 'Bronze Target Execution'),
           makeStep('silver_code_execution', 'Silver Target Execution'),
           makeStep('gold_code_execution', 'Gold Target Execution'),
+          ...(run?.report_generation_enabled || byKey.has('report_generation')
+            ? [makeStep('report_generation', 'Report Generation')]
+            : []),
         ]
   } else if (phase.id === 'phase-1') {
     displaySteps = [

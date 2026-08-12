@@ -4,6 +4,7 @@ type PipelineStep = {
   detail?: string
   state: string
   complete?: boolean
+  warning?: boolean
 }
 
 export function normalizeState(value: string | undefined) {
@@ -35,7 +36,7 @@ export function formatPipelineStepLabel(label?: string, key?: string) {
 
 export function getGateDisplayName(gate: number, sourceType?: string) {
   if (gate === 1) return 'KPI Review'
-  if (gate === 2) return ['sftp', 'adls_gen2'].includes(String(sourceType || '').toLowerCase()) ? 'Feed Review' : 'Table Review'
+  if (gate === 2) return String(sourceType || '').toLowerCase() === 'sftp' ? 'Feed Review' : 'Table Review'
   if (gate === 3) return 'Semantic Review'
   if (gate === 4) return 'Bronze Review'
   if (gate === 5) return 'Silver Review'
@@ -58,6 +59,8 @@ export const PIPELINE_PHASE_TEMPLATES = {
       id: 'phase-3',
       label: 'Code Generation & Reviews',
       keys: [
+        'metadata_ddl',
+        'metadata_ddl_review',
         'bronze',
         'gate4',
         'silver_merge_key_resolution',
@@ -70,8 +73,8 @@ export const PIPELINE_PHASE_TEMPLATES = {
     },
     {
       id: 'phase-4',
-      label: 'Target Execution',
-      keys: ['bronze_code_execution', 'silver_code_execution', 'gold_code_execution'],
+      label: 'Target Execution & Report Generation',
+      keys: ['metadata_setup_execution', 'bronze_code_execution', 'silver_code_execution', 'gold_code_execution', 'report_generation'],
     },
   ],
   databaseDbt: [
@@ -116,6 +119,8 @@ export const PIPELINE_PHASE_TEMPLATES = {
       id: 'phase-3',
       label: 'Code Generation & Reviews',
       keys: [
+        'metadata_ddl',
+        'metadata_ddl_review',
         'bronze',
         'gate4',
         'silver_merge_key_resolution',
@@ -129,7 +134,7 @@ export const PIPELINE_PHASE_TEMPLATES = {
     {
       id: 'phase-4',
       label: 'Code Execution & Report Generation',
-      keys: ['gold_code_execution', 'report_generation'],
+      keys: ['metadata_setup_execution', 'gold_code_execution', 'report_generation'],
     },
   ],
   file: [
@@ -185,6 +190,10 @@ export function isFileSource(run) {
   return run?.source === 'sftp' || run?.source === 'adls_gen2'
 }
 
+function isLegacySftpSource(run) {
+  return run?.source === 'sftp'
+}
+
 export function isSnowflakeDbtRun(run) {
   const executionEngine = String(run?.execution_engine || '').toLowerCase()
   const deploymentMode = String(run?.dbt_deployment_mode || '').toLowerCase()
@@ -195,7 +204,7 @@ export function isSnowflakeDbtRun(run) {
 }
 
 export function isGenerationFirstDatabaseRun(run) {
-  if (isFileSource(run)) return false
+  if (isLegacySftpSource(run)) return false
   if (run?.generation_first_execution === true) return true
 
   const flowVersion = String(
@@ -204,7 +213,7 @@ export function isGenerationFirstDatabaseRun(run) {
     run?.flow_version ||
     ''
   ).toLowerCase()
-  if (flowVersion === 'generation_first_v1') return true
+  if (['generation_first_v1', 'generation_first_v2'].includes(flowVersion)) return true
 
   const confirmation = run?.stage_confirmation || {}
   if (
@@ -225,9 +234,22 @@ export function isGenerationFirstDatabaseRun(run) {
 }
 
 function pipelineTemplatesForRun(run) {
-  if (isFileSource(run)) return PIPELINE_PHASE_TEMPLATES.file
+  if (isLegacySftpSource(run)) return PIPELINE_PHASE_TEMPLATES.file
   if (!isGenerationFirstDatabaseRun(run)) return PIPELINE_PHASE_TEMPLATES.databaseDbt
-  if (!isSnowflakeDbtRun(run)) return PIPELINE_PHASE_TEMPLATES.database
+  if (!isSnowflakeDbtRun(run)) {
+    if (run?.report_generation_enabled || run?.report_generation_status || run?.run_report?.generated_at) {
+      return PIPELINE_PHASE_TEMPLATES.database
+    }
+    return PIPELINE_PHASE_TEMPLATES.database.map((phase) => (
+      phase.id === 'phase-4'
+        ? {
+            ...phase,
+            label: 'Target Execution',
+            keys: phase.keys.filter((key) => key !== 'report_generation'),
+          }
+        : phase
+    ))
+  }
   if (String(run?.dbt_deployment_mode || 'generate_only').toLowerCase() !== 'generate_and_deploy') {
     return PIPELINE_PHASE_TEMPLATES.databaseDbtGenerationFirst.slice(0, 3)
   }
@@ -309,7 +331,7 @@ export function fileVisibleStepKey(key: string): string {
 }
 
 function resolvePipelineSteps(run, steps: PipelineStep[]): PipelineStep[] {
-  const visibleSteps = isFileSource(run) ? collapseFileSteps(steps) : steps
+  const visibleSteps = isLegacySftpSource(run) ? collapseFileSteps(steps) : steps
   if (isFileSource(run)) {
     return withPendingReviewGate(
       run,
@@ -326,16 +348,21 @@ export function getPipelineSteps(run) {
   if (Array.isArray(run?.pipeline_steps) && run.pipeline_steps.length) {
     const steps = run.pipeline_steps.map((step) => ({
       ...step,
-      label: formatPipelineStepLabel(step.label, step.key),
+      label: run?.source === 'adls_gen2' && step.key === 'gate2'
+        ? 'Table Review'
+        : formatPipelineStepLabel(step.label, step.key),
       detail: step.detail || buildStepDetail(run, step.key, normalizeState(step.state), step.detail),
       state: normalizeState(step.state),
+      warning: String(step.state || '').toUpperCase() === 'COMPLETED_WITH_WARNINGS',
     })) as PipelineStep[]
     return resolvePipelineSteps(run, steps)
   }
   if (Array.isArray(run?.stages) && run.stages.length) {
     const steps = run.stages.map((stage) => ({
       key: stage.key,
-      label: formatPipelineStepLabel(stage.name, stage.key),
+      label: run?.source === 'adls_gen2' && stage.key === 'gate2'
+        ? 'Table Review'
+        : formatPipelineStepLabel(stage.name, stage.key),
       detail: stage.error || buildStepDetail(run, stage.key, normalizeState(stage.status), ''),
       state: normalizeState(stage.status),
       complete: normalizeState(stage.status) === 'COMPLETED',
@@ -351,7 +378,7 @@ function applyExternalExecutionState(run, steps: PipelineStep[]) {
   const rawProgressState = String(progress.status || '').trim()
   const progressState = rawProgressState ? normalizeState(rawProgressState) : ''
   const rawStageKey = String(progress.stage_key || run?.background_stage || '').trim()
-  const stageKey = isFileSource(run) ? fileVisibleStepKey(rawStageKey) : rawStageKey
+  const stageKey = isLegacySftpSource(run) ? fileVisibleStepKey(rawStageKey) : rawStageKey
   if (!stageKey || runState !== 'RUNNING' || (progressState && progressState !== 'RUNNING')) return steps
 
   const sourceType = isFileSource(run) ? 'file' : 'database'
@@ -472,6 +499,12 @@ function withPendingReviewGate(run, steps: PipelineStep[]) {
         complete: false,
       },
     ]
+  }
+
+  if (run?.next_review_key === 'metadata_ddl_review') {
+    return steps.map((step) => step.key === 'metadata_ddl_review'
+      ? { ...step, state: 'HITL_WAIT', complete: false }
+      : step)
   }
 
   if (run?.next_review_key === 'gold_review') {
@@ -609,6 +642,8 @@ function fallbackStepLabel(key, sourceType = 'database') {
     profiling: 'Column Profiling',
     enrichment: 'Semantic Enrichment',
     gate3: 'Semantic Review',
+    metadata_ddl: 'Metadata DDL Generation',
+    metadata_ddl_review: 'Metadata DDL Review',
     bronze: 'Bronze Code Generation',
     gate4: 'Bronze Review',
     pre_bronze_bootstrap_metadata: 'Bootstrap Metadata',
@@ -620,6 +655,7 @@ function fallbackStepLabel(key, sourceType = 'database') {
     pre_bronze_validate_source: 'Validate Source Access',
     pre_bronze_discover_source_objects: 'Discover Source Objects',
     pre_bronze_stage_to_landing: 'Stage Files to Landing',
+    metadata_setup_execution: 'Metadata Setup Execution',
     bronze_code_execution: 'Bronze Code Execution',
     bronze_runtime_validation: 'Bronze Runtime Validation',
     silver_merge_key_resolution: 'Silver Merge Key Resolution',
@@ -718,7 +754,7 @@ function buildStepDetail(run, key, state, existingDetail) {
 
   const nextGate = Number(run?.next_gate || 0)
   const resumeMessage = String(run?.resume_message || '').trim()
-  const isFileSource = ['sftp', 'adls_gen2'].includes(String(run?.source || '').toLowerCase())
+  const isFileSource = String(run?.source || '').toLowerCase() === 'sftp'
   const gateKeyMap = {
     gate1: 1,
     gate2: 2,
@@ -816,7 +852,9 @@ function buildStepDetail(run, key, state, existingDetail) {
     case 'report_generation':
       if (state === 'COMPLETED') return 'The enterprise run report is ready to view.'
       if (state === 'RUNNING') return 'Assembling run artifacts, table metadata, KPIs, and governance outcomes.'
-      return 'Report generation starts automatically after deployment succeeds.'
+      return isSnowflakeDbtRun(run)
+        ? 'Report generation starts automatically after deployment succeeds.'
+        : 'Report generation starts automatically after Gold execution succeeds.'
     default:
       return existingDetail || ''
   }

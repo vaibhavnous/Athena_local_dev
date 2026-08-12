@@ -86,6 +86,32 @@ def save_external_execution_progress(
         f"{platform_name}_{layer}_execution_progress": progress,
         "resume_message": message or state.get("resume_message"),
     }
+    if state.get("metadata_runtime_batch"):
+        labels = {
+            "bronze": "Bronze Target Execution",
+            "silver": "Silver Target Execution",
+            "gold": "Gold Target Execution",
+        }
+        next_layers = {"bronze": "silver", "silver": "gold", "gold": None}
+        layer_name = str(layer or "").lower()
+        if str(status or "").upper() == "RUNNING":
+            updated.update({
+                "next_stage_key": stage_key,
+                "next_stage_label": labels.get(layer_name),
+            })
+        elif terminal_success:
+            next_layer = next_layers.get(layer_name)
+            updated.update({
+                "last_completed_stage_key": stage_key,
+                "last_completed_stage_label": labels.get(layer_name),
+                "next_stage_key": f"{next_layer}_code_execution" if next_layer else None,
+                "next_stage_label": labels.get(next_layer) if next_layer else None,
+            })
+        else:
+            updated.update({
+                "next_stage_key": stage_key,
+                "next_stage_label": labels.get(layer_name),
+            })
 
     # ponytail: keep exact logs, but avoid rewriting the large checkpoint on every fast per-script tick.
     if not _should_save_progress(run_id, layer, status):
@@ -94,7 +120,13 @@ def save_external_execution_progress(
     try:
         from services.pipeline_runtime import save_checkpoint_state
 
-        save_checkpoint_state(str(run_id), updated)
+        transient_keys = {"_metadata_runtime_scripts"}
+        if state.get("metadata_runtime_batch"):
+            transient_keys.add("metadata_runtime_context")
+        save_checkpoint_state(
+            str(run_id),
+            {key: value for key, value in updated.items() if key not in transient_keys},
+        )
     except Exception as exc:
         logger.warning(
             "External execution progress checkpoint save failed: %s",

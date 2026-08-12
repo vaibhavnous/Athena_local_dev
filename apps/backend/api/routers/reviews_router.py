@@ -39,8 +39,13 @@ def _checkpoint_for_user(run_id: str, user: Any) -> Dict[str, Any]:
     return assert_run_access(run_id, user) if has_request_user(user) else {}
 
 
-def _review_artifact_for_user(review_artifact: Dict[str, Any] | None, user: AuthUser) -> Dict[str, Any] | None:
-    if not review_artifact or user.user_type == "Admin":
+def _review_artifact_for_user(
+    review_artifact: Dict[str, Any] | None,
+    user: AuthUser,
+    *,
+    strip_executable: bool = False,
+) -> Dict[str, Any] | None:
+    if not review_artifact or (user.user_type == "Admin" and not strip_executable):
         return review_artifact
 
     def sanitized(value: Any) -> Any:
@@ -242,8 +247,14 @@ def submit_table_reviews(
     logger.info("Submitting table review", extra={"run_id": run_id})
 
     if api_utils.is_file_source(checkpoint.get("source")):
-        submit_background(run_id, "gate2", submit_sftp_gate2_review, run_id, True)
-        return {"run_id": run_id, "status": "SUBMITTED", "approve": True}
+        approved_files = [item for item in payload.approved_tables if str(item).strip()]
+        submit_background(run_id, "gate2", submit_sftp_gate2_review, run_id, True, approved_files)
+        return {
+            "run_id": run_id,
+            "status": "SUBMITTED",
+            "approve": True,
+            "approved_files": approved_files,
+        }
 
     approved_tables = [item for item in payload.approved_tables if str(item).strip()]
 
@@ -394,6 +405,34 @@ def submit_enrichment_review(
 # -------------------------
 # ✅ BRONZE REVIEWS (GET)
 # -------------------------
+@router.get("/metadata-ddl-reviews/{run_id}")
+def metadata_ddl_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
+    from services.pipeline_runtime import load_checkpoint_state
+
+    checkpoint = _checkpoint_for_user(run_id, user) or load_checkpoint_state(run_id) or {}
+    return {
+        "run_id": run_id,
+        "next_review_key": checkpoint.get("next_review_key"),
+        "resume_message": checkpoint.get("resume_message"),
+        "metadata_ddl_review": checkpoint.get("metadata_ddl_review") or {},
+    }
+
+
+@router.post("/metadata-ddl-reviews/{run_id}")
+def submit_metadata_ddl_reviews(
+    run_id: str,
+    payload: GenericGateDecisionPayload,
+    user: AuthUser = Depends(get_current_user),
+) -> Dict[str, Any]:
+    from services.pipeline_runtime import submit_background, submit_metadata_ddl_review
+
+    _checkpoint_for_user(run_id, user)
+    if str(payload.action or "APPROVED").upper() != "APPROVED":
+        raise HTTPException(status_code=400, detail="Metadata DDL review only supports submit and proceed.")
+    submit_background(run_id, "bronze", submit_metadata_ddl_review, run_id)
+    return {"run_id": run_id, "status": "SUBMITTED", "action": "APPROVED"}
+
+
 @router.get("/bronze-reviews/{run_id}")
 def bronze_reviews(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
@@ -462,7 +501,7 @@ def submit_bronze_reviews(
         raise HTTPException(status_code=409, detail="Bronze review is not ready yet. Generated Bronze scripts are still loading.")
 
     if api_utils.is_file_source(checkpoint.get("source")):
-        stage = "bronze_code_execution" if str(payload.action).upper() == "APPROVED" else "gate4"
+        stage = "silver_merge_key_review" if str(payload.action).upper() == "APPROVED" else "gate4"
         submit_background(run_id, stage, submit_sftp_gate4_review, run_id, payload.action, review_artifact)
     else:
         stage = (
@@ -510,11 +549,20 @@ def submit_silver_merge_key_reviews(
 ) -> Dict[str, Any]:
     from services.pipeline_runtime import submit_background, submit_silver_merge_key_review
 
-    _checkpoint_for_user(run_id, user)
+    checkpoint = _checkpoint_for_user(run_id, user)
     logger.info("Submitting Silver merge-key review", extra={"run_id": run_id, "action": payload.action})
     stage = "silver" if str(payload.action).upper() == "APPROVED" else "silver_merge_key_review"
-    review_artifact = _review_artifact_for_user(payload.review_artifact, user)
-    submit_background(run_id, stage, submit_silver_merge_key_review, run_id, payload.action, review_artifact)
+    review_artifact = _review_artifact_for_user(
+        payload.review_artifact,
+        user,
+        strip_executable=checkpoint.get("source_system_id") is not None,
+    )
+    if str(checkpoint.get("source") or "").lower() == "adls_gen2":
+        from sftp_nodes.hitl import submit_sftp_silver_merge_key_review
+
+        submit_background(run_id, stage, submit_sftp_silver_merge_key_review, run_id, payload.action, review_artifact)
+    else:
+        submit_background(run_id, stage, submit_silver_merge_key_review, run_id, payload.action, review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
 
@@ -575,7 +623,7 @@ def submit_silver_reviews(
 
     checkpoint = _checkpoint_for_user(run_id, user) or load_checkpoint_state(run_id) or {}
     if api_utils.is_file_source(checkpoint.get("source")):
-        stage = "silver_code_execution" if str(payload.action).upper() == "APPROVED" else "gate5"
+        stage = "gold" if str(payload.action).upper() == "APPROVED" else "gate5"
         submit_background(run_id, stage, submit_sftp_gate5_review, run_id, payload.action, payload.review_artifact)
     else:
         stage = (
@@ -592,7 +640,11 @@ def submit_silver_reviews(
             else "gold" if str(payload.action).upper() == "APPROVED"
             else "gate5"
         )
-        review_artifact = _review_artifact_for_user(payload.review_artifact, user)
+        review_artifact = _review_artifact_for_user(
+            payload.review_artifact,
+            user,
+            strip_executable=checkpoint.get("source_system_id") is not None,
+        )
         submit_background(run_id, stage, submit_gate5_review, run_id, payload.action, review_artifact)
 
     return {"run_id": run_id, "status": "SUBMITTED", "action": payload.action}
@@ -640,7 +692,11 @@ def submit_gold_reviews(
 
     checkpoint = _checkpoint_for_user(run_id, user) or load_checkpoint_state(run_id) or {}
     logger.info("Submitting Gold review", extra={"run_id": run_id, "action": payload.action})
-    review_artifact = _review_artifact_for_user(payload.review_artifact, user)
+    review_artifact = _review_artifact_for_user(
+        payload.review_artifact,
+        user,
+        strip_executable=checkpoint.get("source_system_id") is not None,
+    )
     stage = (
         "gold_review"
         if generation_first_database_flow(checkpoint)

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, TypedDict
 
 from services import dbt_snowflake_runtime
+from services.metadata_contracts import CANONICAL_COLUMN_NAME_CORRECTIONS
 from state import Stage01State
 from utilis.db import ai_store_db_writer
 from utilis.generated_code_paths import generated_code_dir
@@ -28,7 +29,7 @@ from utilis.logger import logger
 SILVER_MAX_WORKERS = int(os.environ.get("SILVER_MAX_WORKERS", "4"))
 SILVER_LLM_ENV_KEYS = ("ATHENA_SILVER_USE_LLM", "USE_LLM")
 KIMBALL_LLM_ENV_KEYS = ("ATHENA_GOLD_KIMBALL_PLAN_USE_LLM", "ATHENA_GOLD_USE_LLM", "USE_LLM")
-DEFAULT_MAX_GOLD_DIMENSION_TABLES = 2
+MAX_GOLD_DIMENSION_TABLES = 3
 
 
 class SilverTableRef(TypedDict):
@@ -40,6 +41,121 @@ class SilverTableRef(TypedDict):
     existing_script_path: str | None
     source_columns: List[Dict[str, Any]]
     bronze_model_name: str | None
+
+
+def _metadata_tables_for_silver(
+    state: Stage01State, *, _selection: Any = None
+) -> List[SilverTableRef]:
+    """Reload the exact approved draft; checkpoint data only selects its immutable version."""
+    from services.metadata_selection import validated_metadata_selection
+
+    selection = _selection or validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("Metadata-driven Silver generation requires a valid target selection.")
+    if _selection is None and callable(getattr(selection.repository, "unit_of_work", None)):
+        with selection.repository.unit_of_work():
+            return _metadata_tables_for_silver(state, _selection=selection)
+    refs: List[SilverTableRef] = []
+    seen_objects: set[int] = set()
+    for bronze in state.get("bronze_generation_results") or []:
+        if not isinstance(bronze, dict):
+            continue
+        object_id = int(bronze.get("silver_ingestion_object_id") or 0)
+        config_version = int(bronze.get("silver_ingestion_object_config_version") or 0)
+        config_hash = str(bronze.get("silver_ingestion_object_config_hash") or "")
+        mapping_version = int(bronze.get("bronze_to_silver_mapping_version") or 0)
+        mapping_hash = str(bronze.get("bronze_to_silver_mapping_hash") or "")
+        if not all((object_id, config_version, config_hash, mapping_version, mapping_hash)):
+            raise ValueError("Silver generation is missing its exact transformation-object or mapping pins.")
+        if object_id in seen_objects:
+            raise ValueError("Silver generation contains a duplicate transformation object.")
+        seen_objects.add(object_id)
+        transformation = selection.repository.get_ingestion_object(object_id, config_version)
+        if (
+            not transformation
+            or str(transformation.get("config_hash") or "") != config_hash
+            or str(transformation.get("object_kind") or "").upper() != "TRANSFORMATION"
+            or str(transformation.get("processing_stage") or "").upper() != "BRONZE_TO_SILVER"
+            or bool(transformation.get("active_flag"))
+            or bool(transformation.get("is_current"))
+        ):
+            raise RuntimeError("The pinned Bronze-to-Silver transformation draft is invalid.")
+        target_table = str(transformation.get("target_table") or "")
+        bundle = selection.repository.get_mapping_bundle(
+            ingestion_object_id=object_id,
+            processing_stage="BRONZE_TO_SILVER",
+            mapping_version=mapping_version,
+            expected_hash=mapping_hash,
+            expected_target=target_table,
+            require_active=None,
+        )
+        rows = bundle["mappings"]
+        input_pin = json.loads(str(rows[0].get("input_objects_json") or "[]"))
+        if len(input_pin) != 1:
+            raise RuntimeError("Bronze-to-Silver requires exactly one pinned Bronze input.")
+        upstream_pin = input_pin[0]
+        upstream_id = int(upstream_pin.get("ingestion_object_id") or 0)
+        upstream = selection.repository.get_ingestion_object(
+            upstream_id, int(upstream_pin.get("config_version") or 0)
+        )
+        if (
+            not upstream
+            or int(upstream.get("config_version") or 0) != int(upstream_pin.get("config_version") or 0)
+            or str(upstream.get("config_hash") or "") != str(upstream_pin.get("config_hash") or "")
+            or str(upstream.get("processing_stage") or "").upper() != "SOURCE_TO_BRONZE"
+            or str(upstream.get("target_bronze_table") or "").casefold()
+            != str(rows[0].get("source_object_name") or "").casefold()
+        ):
+            raise RuntimeError("The pinned Bronze dependency changed after Silver approval.")
+        selection.repository.get_mapping_bundle(
+            ingestion_object_id=upstream_id,
+            processing_stage="SOURCE_TO_BRONZE",
+            mapping_version=int(upstream_pin.get("mapping_version") or 0),
+            expected_hash=str(upstream_pin.get("mapping_hash") or ""),
+            expected_target=str(upstream.get("target_bronze_table") or ""),
+            require_active=None,
+        )
+        merge_keys = [str(row.get("target_column_name") or "") for row in rows if bool(row.get("is_primary_key"))]
+        if not merge_keys or merge_keys != json.loads(str(transformation.get("merge_keys_json") or "[]")):
+            raise RuntimeError("The reviewed Silver merge keys do not match the mapping bundle.")
+        target_parts = target_table.split(".")
+        source_table = str(rows[0].get("source_object_name") or "")
+        source_parts = source_table.split(".")
+        table_name = target_parts[-1]
+        if table_name.casefold().startswith("silver_"):
+            table_name = table_name[7:]
+        mapping_columns = [
+            {
+                "table_name": table_name,
+                "source_column_name": str(row.get("source_field_path") or ""),
+                "column_name": str(row.get("target_column_name") or ""),
+                "data_type": str(row.get("target_data_type") or ""),
+                "type": str(row.get("target_data_type") or ""),
+                "is_join_key": bool(row.get("is_primary_key")),
+                "transformation_rule": str(row.get("transformation_rule") or ""),
+            }
+            for row in rows
+        ]
+        refs.append({
+            "database_name": source_parts[-3] if len(source_parts) == 3 else "",
+            "schema_name": source_parts[-2] if len(source_parts) >= 2 else "",
+            "table_name": table_name,
+            "bronze_table": source_table,
+            "silver_table": target_table,
+            "existing_script_path": None,
+            "source_columns": mapping_columns,
+            "bronze_model_name": bronze.get("dbt_model_name"),
+            "mapping_columns": mapping_columns,
+            "metadata_driven": True,
+            "silver_ingestion_object_id": object_id,
+            "silver_ingestion_object_config_version": config_version,
+            "silver_ingestion_object_config_hash": config_hash,
+            "bronze_to_silver_mapping_version": mapping_version,
+            "bronze_to_silver_mapping_hash": mapping_hash,
+        })
+    if not refs:
+        raise ValueError("Metadata-driven Silver generation found no approved transformation drafts.")
+    return refs
 
 
 def _silver_output_dir() -> str:
@@ -400,7 +516,7 @@ def _require_databricks_silver_safety_scaffold(
         "col(actual_name).alias(expected_name)",
     )
     if any(marker not in code for marker in required_scaffold):
-        raise ValueError("LLM Silver PySpark omitted deterministic safety scaffold")
+        raise ValueError("LLM Silver PySpark omitted deterministic case-insensitive column resolution")
     _require_databricks_rendered_contract(code, table_ref)
 
 
@@ -654,6 +770,8 @@ def _safe_python_list(values: List[str]) -> str:
 
 def _datatype_cast(data_type: str) -> str | None:
     normalized = data_type.lower().strip()
+    if re.fullmatch(r"decimal\(\d+,\s*\d+\)", normalized):
+        return normalized
     if normalized in {"int", "integer", "smallint", "tinyint"}:
         return "int"
     if normalized in {"bigint"}:
@@ -682,51 +800,12 @@ def _key_columns(enriched_columns: List[Dict[str, Any]]) -> List[str]:
     return list(dict.fromkeys(
         _normalized_column_name(column)
         for column in enriched_columns
-        if _semantic_type(column) in {"ID", "SURROGATE_KEY"}
+        if str(column.get("semantic_type") or "") in {"ID", "SURROGATE_KEY"}
         and _normalized_column_name(column)
     ))
 
 
-COLUMN_NAME_CORRECTIONS = {
-    "agen_t_category_name": "agent_category_name",
-    "claimid": "claim_id",
-    "garageid": "garage_id",
-    "garagetypeid": "garage_type_id",
-    "hospitalid": "hospital_id",
-    "paidamount": "paid_amount",
-    "paiddate": "paid_date",
-    "paymentid": "payment_id",
-    "rererence_id": "reference_id",
-    "servicetax": "service_tax",
-    "updatenum": "update_num",
-}
-
-
-def _semantic_type(column: Dict[str, Any]) -> str:
-    name = _normalized_column_name(column)
-    source_name = _source_column_name(column)
-    semantic = str(column.get("semantic_type") or "").upper()
-    if semantic:
-        return semantic
-    if name.endswith("_id") or source_name.endswith("id"):
-        return "ID"
-    if any(token in name for token in ("amount", "premium", "reserve", "tax", "sum_insured")):
-        return "MEASURE"
-    return ""
-
-
-def _effective_data_type(column: Dict[str, Any]) -> str:
-    name = _normalized_column_name(column)
-    source_name = _source_column_name(column)
-    data_type = str(column.get("data_type") or column.get("type") or "").strip().lower()
-    semantic = _semantic_type(column)
-    if semantic in {"ID", "SURROGATE_KEY"} or name.endswith("_id") or source_name.endswith("id"):
-        return "bigint"
-    if name == "branch_office_name":
-        return "varchar"
-    if any(token in name for token in ("amount", "premium", "reserve", "tax", "sum_insured")):
-        return "decimal"
-    return data_type
+COLUMN_NAME_CORRECTIONS = CANONICAL_COLUMN_NAME_CORRECTIONS
 
 
 def _normalized_column_name(column: Dict[str, Any]) -> str:
@@ -739,6 +818,20 @@ def _source_column_name(column: Dict[str, Any]) -> str:
     if source_name:
         return source_name
     return str(column.get("column_name") or "").strip().lower()
+
+
+def _databricks_effective_data_type(column: Dict[str, Any]) -> str:
+    name = _normalized_column_name(column)
+    source_name = _source_column_name(column)
+    data_type = str(column.get("data_type") or column.get("type") or "").strip().lower()
+    semantic = str(column.get("semantic_type") or "").upper()
+    if semantic in {"ID", "SURROGATE_KEY"} or name.endswith("_id") or source_name.endswith("id"):
+        return "bigint"
+    if name == "branch_office_name":
+        return "varchar"
+    if any(token in name for token in ("amount", "premium", "reserve", "tax", "sum_insured")):
+        return "decimal"
+    return data_type
 
 
 def _canonicalize_databricks_columns(enriched_columns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -766,6 +859,7 @@ def generate_silver_script(
     run_id: str,
     silver_catalog: str = "main",
     silver_schema: str = "silver",
+    strict_mapping: bool = False,
 ) -> str:
     enriched_columns = _canonicalize_databricks_columns(enriched_columns)
     table_name = table_ref["table_name"]
@@ -780,7 +874,7 @@ def generate_silver_script(
     string_columns = list(dict.fromkeys(
         _normalized_column_name(column)
         for column in enriched_columns
-        if _effective_data_type(column) in {"varchar", "nvarchar", "text", "char", "nchar"}
+        if _databricks_effective_data_type(column) in {"varchar", "nvarchar", "text", "char", "nchar"}
     ))
     pii_columns = list(dict.fromkeys(
         _normalized_column_name(column)
@@ -788,8 +882,14 @@ def generate_silver_script(
         if column.get("is_pii_candidate") or column.get("is_pii") or column.get("semantic_type") == "PII"
     ))
     key_columns = _key_columns(enriched_columns)
+    if strict_mapping:
+        key_columns = list(dict.fromkeys(
+            _source_column_name(column)
+            for column in enriched_columns
+            if column.get("is_join_key") is True and _source_column_name(column)
+        )) or key_columns
     cast_rules = {
-        _normalized_column_name(column): _datatype_cast(_effective_data_type(column))
+        _normalized_column_name(column): _datatype_cast(_databricks_effective_data_type(column))
         for column in enriched_columns
     }
     cast_rules = {key: value for key, value in cast_rules.items() if key and value}
@@ -799,6 +899,28 @@ def generate_silver_script(
         if _source_column_name(column)
         and _source_column_name(column) != _normalized_column_name(column)
     }
+    strict_merge_condition = " AND ".join(
+        f"target.`{name.replace('`', '``')}` = source.`{name.replace('`', '``')}`"
+        for name in key_columns
+    )
+    runtime_identity = (
+        '''RUNTIME_CONTEXT = globals().get("ATHENA_RUNTIME_CONTEXT")
+if not isinstance(RUNTIME_CONTEXT, dict):
+    raise RuntimeError("Metadata Silver execution requires ATHENA_RUNTIME_CONTEXT")
+RUN_ID = str(RUNTIME_CONTEXT.get("runtime_run_id") or "")
+LOGICAL_WORK_ID = str(RUNTIME_CONTEXT.get("logical_work_id") or "")
+if not RUN_ID or not LOGICAL_WORK_ID:
+    raise RuntimeError("Metadata runtime context is missing run or logical-work identity")'''
+        if strict_mapping
+        else f'RUN_ID = "{run_id}"\nLOGICAL_WORK_ID = None'
+    )
+    logical_work_filter = (
+        '''if "_logical_work_id" not in df.columns:
+    raise ValueError(f"Metadata Bronze source lacks _logical_work_id: {SOURCE_TABLE}")
+df = df.filter(col("_logical_work_id") == lit(LOGICAL_WORK_ID))'''
+        if strict_mapping
+        else ""
+    )
 
     return f'''
 """
@@ -816,7 +938,7 @@ DO NOT EDIT MANUALLY
 
 from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import coalesce, col, concat_ws, current_timestamp, expr, lit, row_number, sha2, trim, when
+from pyspark.sql.functions import col, current_timestamp, expr, lit, row_number, sha2, struct, to_json, trim, when
 from pyspark.sql.window import Window
 
 spark = SparkSession.builder.getOrCreate()
@@ -826,7 +948,7 @@ try:
 except Exception:
     print("Could not create schema '{silver_schema}' in the current catalog")
 
-RUN_ID = "{run_id}"
+{runtime_identity}
 SOURCE_TABLE = "{bronze_table}"
 TARGET_TABLE = "{silver_table}"
 TEMP_VIEW = "silver_src_{table_name}"
@@ -837,6 +959,8 @@ PII_COLUMNS = {_safe_python_list(pii_columns)}
 KEY_COLUMNS = {_safe_python_list(key_columns)}
 CAST_RULES = {repr(cast_rules)}
 COLUMN_ALIASES = {repr(column_aliases)}
+STRICT_MAPPING = {strict_mapping!r}
+STRICT_MERGE_CONDITION = {strict_merge_condition!r}
 
 def _try_cast_column(column_name, target_type):
     escaped_name = column_name.replace("`", "``")
@@ -846,6 +970,7 @@ if not spark.catalog.tableExists(SOURCE_TABLE):
     raise ValueError(f"Missing bronze source table: {{SOURCE_TABLE}}")
 
 df = spark.table(SOURCE_TABLE)
+{logical_work_filter}
 
 if df.limit(1).count() == 0:
     raise ValueError(f"Bronze source table has no rows: {{SOURCE_TABLE}}")
@@ -857,7 +982,7 @@ for old_name, new_name in COLUMN_ALIASES.items():
 
 available_columns = set(df.columns)
 metadata_columns = [
-    name for name in ["run_id", "ingestion_timestamp", "source_system", "source_table"]
+    name for name in ["run_id", "ingestion_timestamp", "source_system", "source_table", "_logical_work_id"]
     if name in available_columns
 ]
 
@@ -876,7 +1001,7 @@ if EXPECTED_COLUMNS:
     for expected_name in EXPECTED_COLUMNS:
         if expected_name in selected_output_columns:
             continue
-        actual_name = available_by_compact.get(compact_name(expected_name))
+        actual_name = expected_name if STRICT_MAPPING and expected_name in available_columns else available_by_compact.get(compact_name(expected_name))
         if actual_name:
             select_expressions.append(col(actual_name).alias(expected_name))
             selected_output_columns.add(expected_name)
@@ -901,7 +1026,9 @@ if not select_expressions:
 metadata_expressions = [col(name) for name in metadata_columns if name not in selected_output_columns]
 df = df.select(*select_expressions, *metadata_expressions)
 
-if missing_columns:
+if missing_columns and STRICT_MAPPING:
+    raise ValueError(f"Missing approved mapped columns in {{SOURCE_TABLE}}: {{missing_columns}}")
+elif missing_columns:
     print(f"WARNING: Missing expected columns in {{SOURCE_TABLE}}: {{missing_columns}}")
 
 for column_name in STRING_COLUMNS:
@@ -920,23 +1047,25 @@ for column_name in PII_COLUMNS:
         df = df.withColumn(column_name, col(column_name).cast("string"))
 
 dedup_keys = [column_name for column_name in KEY_COLUMNS if column_name in df.columns]
+if STRICT_MAPPING and len(dedup_keys) != len(KEY_COLUMNS):
+    raise ValueError(f"Approved Silver merge keys are missing from {{SOURCE_TABLE}}: {{KEY_COLUMNS}}")
+if STRICT_MAPPING and not dedup_keys:
+    raise ValueError(f"Metadata-driven MERGE requires reviewed keys for {{TARGET_TABLE}}")
+if STRICT_MAPPING and any(df.filter(col(name).isNull()).limit(1).count() for name in dedup_keys):
+    raise ValueError(f"Approved Silver merge keys contain nulls for {{TARGET_TABLE}}")
+if STRICT_MAPPING and df.groupBy(*dedup_keys).count().filter(col("count") > 1).limit(1).count():
+    raise ValueError(f"Approved Silver merge keys are not unique for {{TARGET_TABLE}}")
 business_columns = [
     name for name in df.columns
     if name not in metadata_columns
 ]
-hash_columns = dedup_keys or business_columns
+hash_columns = dedup_keys if STRICT_MAPPING else (dedup_keys or business_columns)
 if not hash_columns:
     raise ValueError(f"No columns available to build Silver upsert key for {{TARGET_TABLE}}")
 
 df = df.withColumn(
     "silver_upsert_key",
-    sha2(
-        concat_ws(
-            "||",
-            *[coalesce(col(name).cast("string"), lit("__NULL__")) for name in hash_columns]
-        ),
-        256,
-    ),
+    sha2(to_json(struct(*[col(name).alias(name) for name in hash_columns])), 256),
 )
 
 dedup_order_columns = [
@@ -979,7 +1108,13 @@ create_table_sql = (
 spark.sql(create_table_sql)
 
 target_columns = set(spark.table(TARGET_TABLE).columns)
-if "silver_upsert_key" not in target_columns:
+source_columns = set(df.columns)
+if STRICT_MAPPING and target_columns != source_columns:
+    raise ValueError(
+        f"Target schema differs from approved Silver mapping for {{TARGET_TABLE}}: "
+        f"missing={{sorted(source_columns - target_columns)}}, extra={{sorted(target_columns - source_columns)}}"
+    )
+if not STRICT_MAPPING and "silver_upsert_key" not in target_columns:
     spark.sql(f"ALTER TABLE {{TARGET_TABLE}} ADD COLUMNS (silver_upsert_key STRING)")
 
 target_column_names = spark.table(TARGET_TABLE).columns
@@ -1012,11 +1147,16 @@ if not insert_assignments:
     raise ValueError(f"No common columns available to merge into {{TARGET_TABLE}}")
 
 delta_target = DeltaTable.forName(spark, TARGET_TABLE)
+merge_condition = (
+    STRICT_MERGE_CONDITION
+    if STRICT_MAPPING
+    else "target.silver_upsert_key = source.silver_upsert_key"
+)
 merge_builder = (
     delta_target.alias("target")
     .merge(
         df.alias("source"),
-        "target.silver_upsert_key = source.silver_upsert_key",
+        merge_condition,
     )
 )
 if update_assignments:
@@ -1029,9 +1169,9 @@ print(f"SUCCESS: Silver upsert completed for {{TARGET_TABLE}}")
 
 def _snowflake_type_from_metadata(column: Dict[str, Any]) -> str:
     explicit_type = str(column.get("type") or "").strip()
-    if explicit_type and _effective_data_type(column) == str(column.get("type") or "").strip().lower():
+    if explicit_type:
         return explicit_type
-    data_type = _effective_data_type(column)
+    data_type = str(column.get("data_type") or "").strip().lower()
     precision = column.get("numeric_precision")
     scale = column.get("numeric_scale")
     max_length = column.get("character_maximum_length") or column.get("max_length")
@@ -1066,7 +1206,7 @@ def _snowflake_column_expr(column: Dict[str, Any]) -> str:
     target_name = _normalized_column_name(column)
     source_name = _source_column_name(column)
     source_ref = f"GET_IGNORE_CASE(OBJECT_CONSTRUCT_KEEP_NULL(src.*), {_snowflake_string_literal(source_name)})"
-    data_type = _effective_data_type(column)
+    data_type = str(column.get("data_type") or "").strip().lower()
     target_type = _snowflake_type_from_metadata(column)
 
     if data_type in {"varchar", "nvarchar", "char", "nchar", "text", "ntext", "string"}:
@@ -1102,10 +1242,8 @@ def _snowflake_variant_cast_expr(source_ref: str, target_type: str) -> str:
 def _snowflake_hash_expr(columns: List[str]) -> str:
     if not columns:
         return "SHA2('__NO_BUSINESS_COLUMNS__', 256)"
-    parts = ",\n            ".join(
-        f"COALESCE(TO_VARCHAR({_snowflake_quote_identifier(column)}), '__NULL__')" for column in columns
-    )
-    return f"SHA2(CONCAT_WS('||',\n            {parts}\n        ), 256)"
+    parts = ", ".join(_snowflake_quote_identifier(column) for column in columns)
+    return f"SHA2(TO_JSON(ARRAY_CONSTRUCT({parts})), 256)"
 
 
 def generate_snowflake_silver_script(
@@ -1115,6 +1253,7 @@ def generate_snowflake_silver_script(
     run_id: str,
     silver_catalog: str = "ATHENA_DB",
     silver_schema: str = "SILVER",
+    strict_mapping: bool = False,
 ) -> str:
     table_name = table_ref["table_name"]
     source_table = _snowflake_qualified_name(*str(table_ref["bronze_table"]).split("."))
@@ -1134,6 +1273,12 @@ def generate_snowflake_silver_script(
 
     business_column_names = [_normalized_column_name(column) for column in business_columns]
     key_columns = [column for column in _key_columns(business_columns) if column in business_column_names]
+    if strict_mapping:
+        key_columns = list(dict.fromkeys(
+            _source_column_name(column)
+            for column in business_columns
+            if column.get("is_join_key") is True and _source_column_name(column)
+        )) or key_columns
     hash_columns = key_columns or business_column_names
     column_defs = ",\n    ".join(
         f"{_snowflake_quote_identifier(_normalized_column_name(column))} {_snowflake_type_from_metadata(column)}"
@@ -1141,6 +1286,13 @@ def generate_snowflake_silver_script(
     )
     business_selects = ",\n        ".join(_snowflake_column_expr(column) for column in business_columns)
     business_insert_columns = ",\n    ".join(_snowflake_quote_identifier(column) for column in business_column_names)
+    logical_work_definition = ',\n    "_logical_work_id" VARCHAR' if strict_mapping else ""
+    logical_work_select = ',\n        src."_logical_work_id" AS "_logical_work_id"' if strict_mapping else ""
+    logical_work_filter = (
+        '\n    WHERE src."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID'
+        if strict_mapping else ""
+    )
+    silver_run_expression = "$ATHENA_RUNTIME_RUN_ID" if strict_mapping else _snowflake_string_literal(run_id)
     all_insert_columns = ",\n    ".join(
         [
             business_insert_columns,
@@ -1151,6 +1303,7 @@ def generate_snowflake_silver_script(
             '"silver_upsert_key"',
             '"silver_run_id"',
             '"silver_processed_timestamp"',
+            *(['"_logical_work_id"'] if strict_mapping else []),
         ]
     )
     update_assignments = ",\n        ".join(
@@ -1166,11 +1319,60 @@ def generate_snowflake_silver_script(
             'target."source_table" = source."source_table"',
             'target."silver_run_id" = source."silver_run_id"',
             'target."silver_processed_timestamp" = source."silver_processed_timestamp"',
+            *([
+                'target."_logical_work_id" = source."_logical_work_id"'
+            ] if strict_mapping else []),
         ]
     )
     insert_values = ",\n    ".join(f"source.{column}" for column in all_insert_columns.split(",\n    "))
     hash_expr = _snowflake_hash_expr(hash_columns)
+    if strict_mapping and not key_columns:
+        raise ValueError(f"Metadata-driven MERGE requires reviewed keys for {table_ref['silver_table']}.")
+    merge_predicate = (
+        " AND ".join(
+            f"target.{_snowflake_quote_identifier(column)} = source.{_snowflake_quote_identifier(column)}"
+            for column in key_columns
+        )
+        if strict_mapping
+        else 'target."silver_upsert_key" = source."silver_upsert_key"'
+    )
     order_expr = 'COALESCE("ingestion_timestamp", "silver_processed_timestamp") DESC NULLS LAST'
+    null_key_check = ""
+    if strict_mapping:
+        null_predicate = " OR ".join(f"{_snowflake_quote_identifier(column)} IS NULL" for column in key_columns)
+        grouped_keys = ", ".join(_snowflake_quote_identifier(column) for column in key_columns)
+        null_key_check = f"""
+WITH normalized AS (
+    SELECT
+        {business_selects}
+    FROM {source_table} AS src
+    {logical_work_filter}
+)
+SELECT IFF(
+    COUNT_IF({null_predicate}) = 0,
+    1,
+    TO_NUMBER('APPROVED_SILVER_MERGE_KEYS_CONTAIN_NULLS')
+)
+FROM normalized;
+
+WITH normalized AS (
+    SELECT
+        {business_selects}
+    FROM {source_table} AS src
+    {logical_work_filter}
+), duplicate_keys AS (
+    SELECT {grouped_keys}
+    FROM normalized
+    GROUP BY {grouped_keys}
+    HAVING COUNT(*) > 1
+)
+SELECT IFF(
+    COUNT(*) = 0,
+    1,
+    TO_NUMBER('APPROVED_SILVER_MERGE_KEYS_ARE_NOT_UNIQUE')
+)
+FROM duplicate_keys;
+"""
 
     return f"""-- AUTO-GENERATED SILVER TRANSFORMATION SCRIPT
 -- Source table: {table_ref["bronze_table"]}
@@ -1189,8 +1391,9 @@ CREATE TABLE IF NOT EXISTS {target_table} (
     "source_table" VARCHAR,
     "silver_upsert_key" VARCHAR,
     "silver_run_id" VARCHAR,
-    "silver_processed_timestamp" TIMESTAMP_NTZ
+    "silver_processed_timestamp" TIMESTAMP_NTZ{logical_work_definition}
 );
+{null_key_check}
 
 MERGE INTO {target_table} AS target
 USING (
@@ -1201,9 +1404,10 @@ USING (
         src."ingestion_timestamp" AS "ingestion_timestamp",
         src."source_system" AS "source_system",
         src."source_table" AS "source_table",
-        {_snowflake_string_literal(run_id)} AS "silver_run_id",
-        CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "silver_processed_timestamp"
+        {silver_run_expression} AS "silver_run_id",
+        CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "silver_processed_timestamp"{logical_work_select}
         FROM {source_table} AS src
+        {logical_work_filter}
     ),
     keyed AS (
         SELECT
@@ -1218,7 +1422,7 @@ USING (
         ORDER BY {order_expr}
     ) = 1
 ) AS source
-ON target."silver_upsert_key" = source."silver_upsert_key"
+ON {merge_predicate}
 WHEN MATCHED THEN UPDATE SET
         {update_assignments}
 WHEN NOT MATCHED THEN INSERT (
@@ -1268,6 +1472,7 @@ def generate_snowflake_silver_dbt_model(
     run_id: str,
     silver_catalog: str,
     silver_schema: str,
+    strict_mapping: bool = False,
 ) -> str:
     table_name = table_ref["table_name"]
     physical_alias = f"silver_{table_name}"
@@ -1286,7 +1491,9 @@ def generate_snowflake_silver_dbt_model(
 
     business_column_names = [_normalized_column_name(column) for column in business_columns]
     key_columns = [column for column in _key_columns(business_columns) if column in business_column_names]
-    hash_columns = key_columns or business_column_names
+    if strict_mapping and not key_columns:
+        raise ValueError(f"Metadata-driven MERGE requires reviewed keys for {table_ref['silver_table']}.")
+    hash_columns = key_columns if strict_mapping else (key_columns or business_column_names)
     business_selects = (
         ",\n        ".join(_snowflake_column_expr(column) for column in business_columns)
         if business_columns
@@ -1305,7 +1512,7 @@ def generate_snowflake_silver_dbt_model(
     alias={json.dumps(physical_alias)},
     unique_key='"silver_upsert_key"',
     incremental_strategy='merge',
-    on_schema_change='sync_all_columns'
+    on_schema_change={'\'fail\'' if strict_mapping else '\'sync_all_columns\''}
 ) }}}}
 
 -- AUTO-GENERATED SILVER DBT MODEL
@@ -1539,7 +1746,12 @@ def _generate_one_table(
     target_warehouse = str(target_warehouse or "databricks").lower()
     execution_engine = str(execution_engine or "native").lower()
     dbt_codegen = target_warehouse == "snowflake" and execution_engine == "dbt"
-    enriched_columns = _columns_for_table(enriched_metadata, table_name)
+    metadata_driven = bool(table_ref.get("metadata_driven"))
+    enriched_columns = (
+        list(table_ref.get("mapping_columns") or [])
+        if metadata_driven
+        else _columns_for_table(enriched_metadata, table_name)
+    )
     if not enriched_columns and target_warehouse == "snowflake":
         enriched_columns = table_ref.get("source_columns") or []
     if target_warehouse == "databricks" and execution_engine == "native":
@@ -1553,6 +1765,7 @@ def _generate_one_table(
             run_id=run_id,
             silver_catalog=silver_catalog,
             silver_schema=silver_schema,
+            strict_mapping=metadata_driven,
         )
         validate_snowflake_silver_dbt_model(code, table_ref=table_ref)
         script_language = "sql"
@@ -1565,6 +1778,7 @@ def _generate_one_table(
             run_id=run_id,
             silver_catalog=silver_catalog,
             silver_schema=silver_schema,
+            strict_mapping=metadata_driven,
         )
         script_language = "sql"
         extension = "sql"
@@ -1576,6 +1790,7 @@ def _generate_one_table(
             run_id=run_id,
             silver_catalog=silver_catalog,
             silver_schema=silver_schema,
+            strict_mapping=metadata_driven,
         )
         _validate_python(code)
         script_language = "python"
@@ -1583,7 +1798,7 @@ def _generate_one_table(
         merge_strategy = "Delta MERGE on silver_upsert_key built from reviewed merge keys"
 
     llm_configured = _llm_enabled_for_silver()
-    llm_enabled = llm_configured and not dbt_codegen
+    llm_enabled = llm_configured and not dbt_codegen and not metadata_driven
     generation_mode = "DETERMINISTIC_DBT" if dbt_codegen else "DETERMINISTIC"
     if llm_enabled:
         try:
@@ -1638,14 +1853,6 @@ def _generate_one_table(
                     retry_exc,
                 )
 
-    if not dbt_codegen:
-        _validate_generated_silver_code(
-            code,
-            table_ref=table_ref,
-            enriched_columns=enriched_columns,
-            target_warehouse=target_warehouse,
-        )
-
     dbt_model_name = (
         dbt_snowflake_runtime.dbt_safe_name(f"silver_{table_name}", prefix="silver")
         if dbt_codegen
@@ -1699,6 +1906,17 @@ def _generate_one_table(
         "bronze_model_name": table_ref.get("bronze_model_name") if dbt_codegen else None,
         "status": "APPROVED",
         "script_path": script_path,
+        **{
+            key: table_ref[key]
+            for key in (
+                "silver_ingestion_object_id",
+                "silver_ingestion_object_config_version",
+                "silver_ingestion_object_config_hash",
+                "bronze_to_silver_mapping_version",
+                "bronze_to_silver_mapping_hash",
+            )
+            if key in table_ref
+        },
     }
 
 
@@ -1812,11 +2030,12 @@ def _write_silver_ui(
 
 
 def _tokens(value: str) -> set[str]:
-    return {
+    tokens = {
         token
         for token in re.split(r"[^a-z0-9]+", str(value or "").lower())
         if len(token) > 2
     }
+    return tokens | {token[:-1] for token in tokens if len(token) > 3 and token.endswith("s")}
 
 
 def _column_tokens(column: Dict[str, Any]) -> set[str]:
@@ -1870,12 +2089,6 @@ def _score_column_for_kpi(kpi: Dict[str, Any], column: Dict[str, Any]) -> int:
     compact_name = re.sub(r"[^a-z0-9]+", "", column_name)
     kpi_tokens = _tokens(kpi_text)
     score += sum(6 for token in kpi_tokens if token in compact_name)
-    monetary_intent = {"amount", "premium", "insured", "estimate", "cost", "expense", "payment", "paid"}
-    monetary_columns = ("amount", "premium", "insured", "estimate", "cost", "expense", "paid", "gross")
-    if kpi_tokens & monetary_intent:
-        score += 25 if any(token in compact_name for token in monetary_columns) else -25
-    if any(token in compact_name for token in ("updatenum", "rownumber", "sequence", "version")):
-        score -= 50
     return score
 
 
@@ -1888,7 +2101,12 @@ def _best_measure_for_kpi(kpi: Dict[str, Any], columns: List[Dict[str, Any]]) ->
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda column: _score_column_for_kpi(kpi, column))
+    selected = max(candidates, key=lambda column: _score_column_for_kpi(kpi, column))
+    try:
+        minimum_score = int(os.getenv("ATHENA_GOLD_MIN_MEASURE_MATCH_SCORE", "10"))
+    except ValueError:
+        minimum_score = 10
+    return selected if _score_column_for_kpi(kpi, selected) >= minimum_score else None
 
 
 def _dimension_scope_tables(joins: List[Dict[str, Any]], measure_table: str | None) -> set[str]:
@@ -1932,13 +2150,6 @@ def _dimension_columns(
             }
         )
     return dimensions[:12]
-
-
-def _max_gold_dimension_tables() -> int:
-    try:
-        return max(0, int(os.getenv("ATHENA_GOLD_MAX_DIMENSION_TABLES", str(DEFAULT_MAX_GOLD_DIMENSION_TABLES))))
-    except ValueError:
-        return DEFAULT_MAX_GOLD_DIMENSION_TABLES
 
 
 def _canonical_gold_column(value: Any) -> str:
@@ -2009,10 +2220,7 @@ def _constrain_gold_mapping(
         })
 
     ranked_dimension_tables = sorted(table_scores, key=lambda table: (-table_scores[table], table))
-    kept_dimension_tables = set(ranked_dimension_tables[:_max_gold_dimension_tables()])
-    dropped_dimension_tables = [table for table in ranked_dimension_tables if table not in kept_dimension_tables]
-    if dropped_dimension_tables:
-        warnings.append(f"Gold dimension table cap applied; dropped {', '.join(dropped_dimension_tables)}.")
+    kept_dimension_tables = set(ranked_dimension_tables)
     dimensions = [
         item
         for item in dimensions
@@ -2051,7 +2259,6 @@ def _constrain_gold_mapping(
         "time": time_info,
         "join_paths": valid_joins,
         "fact_grain": list(dict.fromkeys(fact_grain)),
-        "dimension_table_limit": _max_gold_dimension_tables(),
         "selected_dimension_tables": sorted(kept_dimension_tables),
     }, warnings
 
@@ -2118,7 +2325,7 @@ def _silver_tables_by_name(results: List[Dict[str, object]]) -> Dict[str, str]:
 def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tables: Dict[str, str]) -> List[Dict[str, Any]]:
     grouped: Dict[str, Dict[str, Any]] = {}
     for mapping in kpi_mappings:
-        if not isinstance(mapping, dict):
+        if not isinstance(mapping, dict) or str(mapping.get("readiness") or "").upper() == "BLOCKED":
             continue
         kpi_name = str(mapping.get("kpi_name") or "")
         for dimension in mapping.get("grouping_dimensions") or []:
@@ -2146,6 +2353,88 @@ def _dimension_mappings_from_kpis(kpi_mappings: List[Dict[str, Any]], silver_tab
     return sorted(grouped.values(), key=lambda item: str(item.get("logical_table") or ""))
 
 
+def _independent_gold_dimensions(
+    *,
+    columns: List[Dict[str, Any]],
+    results: List[Dict[str, object]],
+    silver_tables: Dict[str, str],
+    kpi_mappings: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Plan reusable dimensions from approved Silver structure, independently of KPI computability."""
+    grouped = {
+        str(item["logical_table"]).casefold(): dict(item)
+        for item in _dimension_mappings_from_kpis(kpi_mappings, silver_tables)
+    }
+    result_by_table = {
+        str(item.get("table") or item.get("table_name") or "").casefold(): item
+        for item in results
+        if isinstance(item, dict)
+    }
+    for column in columns:
+        if not isinstance(column, dict) or str(column.get("semantic_type") or "").upper() not in {
+            "DIMENSION", "DATE", "FLAG"
+        }:
+            continue
+        logical = str(column.get("table_name") or "").strip()
+        name = str(column.get("column_name") or "").strip()
+        if not logical or not name or logical.casefold() not in silver_tables:
+            continue
+        row = grouped.setdefault(
+            logical.casefold(),
+            {
+                "logical_table": logical,
+                "source_silver_table": silver_tables[logical.casefold()],
+                "columns": [],
+                "consumed_by_kpis": [],
+            },
+        )
+        if name not in row["columns"]:
+            row["columns"].append(name)
+
+    # Prefer KPI-relevant, reviewed key-backed entities with richer descriptive
+    # context. The materialization boundary still reloads and validates the keys.
+    eligible = [
+        item
+        for item in grouped.values()
+        if (
+            result_by_table.get(str(item["logical_table"]).casefold()) or {}
+        ).get("merge_keys")
+    ]
+    ranked = sorted(
+        eligible,
+        key=lambda item: (
+            -len(item.get("consumed_by_kpis") or []),
+            -len(item.get("columns") or []),
+            str(item.get("logical_table") or ""),
+        ),
+    )
+    return ranked[:MAX_GOLD_DIMENSION_TABLES]
+
+
+def _factless_gold_mappings(
+    *, results: List[Dict[str, object]], silver_tables: Dict[str, str]
+) -> List[Dict[str, Any]]:
+    """Plan one auditable entity-coverage fact per reviewed, key-backed Silver object."""
+    mappings: List[Dict[str, Any]] = []
+    for result in sorted(results, key=lambda item: str(item.get("table") or item.get("table_name") or "")):
+        if not isinstance(result, dict):
+            continue
+        logical = str(result.get("table") or result.get("table_name") or "").strip()
+        key_hints = list(dict.fromkeys(str(key).strip() for key in (
+            result.get("merge_keys") or result.get("primary_keys") or []
+        ) if str(key).strip()))
+        if not logical or logical.casefold() not in silver_tables:
+            continue
+        mappings.append({
+            "fact_type": "FACTLESS_ENTITY_COVERAGE",
+            "logical_table": logical,
+            "source_silver_table": silver_tables[logical.casefold()],
+            "grain_columns": key_hints,
+            "readiness": "PENDING_EXACT_KEY_VALIDATION",
+        })
+    return mappings
+
+
 def _extract_json_object(value: Any) -> Dict[str, Any]:
     text = str(value or "").strip()
     match = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
@@ -2163,12 +2452,16 @@ def _kimball_candidates(columns: List[Dict[str, Any]], certified_joins: List[Dic
     for column in columns:
         if not isinstance(column, dict):
             continue
-        if column.get("is_pii_candidate") or column.get("is_pii") or str(column.get("semantic_type") or "").upper() == "PII":
-            continue
         candidate = {
             "table": str(column.get("table_name") or ""),
             "column": str(column.get("column_name") or ""),
             "semantic_type": str(column.get("semantic_type") or "").upper(),
+            "data_type": str(
+                column.get("target_data_type")
+                or column.get("source_data_type")
+                or column.get("data_type")
+                or ""
+            ),
         }
         if not candidate["table"] or not candidate["column"]:
             continue
@@ -2206,9 +2499,7 @@ def _kimball_plan_prompt(
     return (
         "Design a Kimball Gold model. Return only JSON matching this exact shape. "
         "Use only candidate IDs. Do not invent IDs, columns, joins, or aggregations. "
-        "fact_grain must include every selected dimension ID and include period_start only when time_id is set. "
-        "Every selected table must be reachable from the measure table through selected certified joins. "
-        "Never use many-to-many joins, PII columns, duplicate dimensions, or a weaker measure."
+        "fact_grain must include every selected dimension ID and include period_start only when time_id is set."
         + retry_context
         + "\nKPI=" + json.dumps(kpi, default=str)
         + "\nCURRENT_MAPPING=" + json.dumps(mapping, default=str)
@@ -2276,78 +2567,56 @@ def _validate_kimball_plan(plan: Dict[str, Any], *, columns: List[Dict[str, Any]
     measure_meta = index.get((str(measure.get("table") or "").casefold(), str(measure.get("column") or "").casefold()))
     if not measure_meta or str(measure_meta.get("semantic_type") or "").upper() not in {"MEASURE", "FLAG"}:
         raise ValueError("Kimball plan selected an invalid measure")
-    if measure_meta.get("is_pii_candidate") or measure_meta.get("is_pii"):
-        raise ValueError("Kimball plan selected a PII measure")
-    if str(measure.get("aggregation") or "").upper() not in {"SUM", "AVG", "MIN", "MAX", "COUNT"}:
-        raise ValueError("Kimball plan selected an unsupported aggregation")
     aggregation = str(measure.get("aggregation") or "").upper()
-    numeric_types = {
-        "int", "integer", "smallint", "tinyint", "bigint", "float", "real", "double",
-        "decimal", "numeric", "number", "money", "smallmoney",
-    }
-    measure_type = _effective_data_type(measure_meta)
-    if aggregation in {"SUM", "AVG"} and measure_type and measure_type not in numeric_types:
-        raise ValueError("Kimball plan selected a non-numeric measure for numeric aggregation")
+    if aggregation not in {"SUM", "AVG", "MIN", "MAX", "COUNT"}:
+        raise ValueError("Kimball plan selected an unsupported aggregation")
+
+    def type_family(column: Dict[str, Any] | None) -> str:
+        data_type = str(
+            (column or {}).get("target_data_type")
+            or (column or {}).get("source_data_type")
+            or (column or {}).get("data_type")
+            or ""
+        ).upper()
+        base = re.split(r"[<(]", data_type, maxsplit=1)[0].strip()
+        if any(token in base for token in ("INT", "DECIMAL", "NUMERIC", "NUMBER", "FLOAT", "DOUBLE", "REAL")):
+            return "NUMERIC"
+        if any(token in base for token in ("DATE", "TIME")):
+            return "TEMPORAL"
+        if any(token in base for token in ("CHAR", "STRING", "TEXT", "VARCHAR")):
+            return "STRING"
+        return base
+
+    measure_family = type_family(measure_meta)
+    if aggregation in {"SUM", "AVG"} and measure_family != "NUMERIC":
+        raise ValueError(f"Kimball plan selected {aggregation} for a non-numeric measure")
+    if aggregation in {"MIN", "MAX"} and measure_family not in {"NUMERIC", "TEMPORAL", "STRING"}:
+        raise ValueError(f"Kimball plan selected {aggregation} for a non-comparable measure")
     dimensions = plan.get("dimensions") or []
     if not isinstance(dimensions, list) or len(dimensions) > 12:
         raise ValueError("Kimball plan has an invalid dimension list")
-    dimension_keys = [
-        (str(item.get("table") or "").casefold(), str(item.get("column") or "").casefold())
-        for item in dimensions
-    ]
-    if len(dimension_keys) != len(set(dimension_keys)):
-        raise ValueError("Kimball plan selected duplicate dimensions")
-    if len({table for table, _ in dimension_keys if table}) > _max_gold_dimension_tables():
-        raise ValueError("Kimball plan selected too many dimension tables")
     for item in dimensions:
         meta = index.get((str(item.get("table") or "").casefold(), str(item.get("column") or "").casefold()))
         if not meta or str(meta.get("semantic_type") or "").upper() not in {"DIMENSION", "DATE", "FLAG"}:
             raise ValueError("Kimball plan selected an invalid dimension")
-        if meta.get("is_pii_candidate") or meta.get("is_pii"):
-            raise ValueError("Kimball plan selected a PII dimension")
     time = plan.get("time") or {}
     if time:
         meta = index.get((str(time.get("table") or "").casefold(), str(time.get("column") or "").casefold()))
         if not meta or str(meta.get("semantic_type") or "").upper() not in {"DATE", "AUDIT_TIMESTAMP"}:
             raise ValueError("Kimball plan selected an invalid time column")
-        if meta.get("is_pii_candidate") or meta.get("is_pii"):
-            raise ValueError("Kimball plan selected a PII time column")
+        if type_family(meta) != "TEMPORAL":
+            raise ValueError("Kimball plan selected a non-temporal time column")
         if str(time.get("grain") or "").lower() not in {"day", "week", "month", "quarter", "year"}:
             raise ValueError("Kimball plan selected an invalid time grain")
-    certified = {
-        tuple(str(j.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column"))
-        for j in certified_joins
-        if isinstance(j, dict) and j.get("certified") is True
-    }
-    selected_edges: List[Tuple[str, str]] = []
+    certified = {tuple(str(j.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column")) for j in certified_joins if isinstance(j, dict)}
     for join in plan.get("join_paths") or []:
         signature = tuple(str(join.get(k) or "").casefold() for k in ("left_table", "left_column", "right_table", "right_column"))
         if signature not in certified:
             raise ValueError("Kimball plan selected a non-certified join")
-        cardinality = re.sub(r"\s+", "", str(join.get("cardinality") or "").casefold())
-        if cardinality in {"many_to_many", "many-to-many", "m:m", "n:n", "*:*"}:
-            raise ValueError("Kimball plan selected a many-to-many join")
-        selected_edges.append((signature[0], signature[2]))
-    measure_table = str(measure.get("table") or "").casefold()
-    required_tables = {table for table, _ in dimension_keys if table}
-    if time:
-        required_tables.add(str(time.get("table") or "").casefold())
-    reachable = {measure_table}
-    changed = True
-    while changed:
-        changed = False
-        for left_table, right_table in selected_edges:
-            if left_table in reachable and right_table not in reachable:
-                reachable.add(right_table)
-                changed = True
-            elif right_table in reachable and left_table not in reachable:
-                reachable.add(left_table)
-                changed = True
-    unreachable = sorted(required_tables - reachable)
-    if unreachable:
-        raise ValueError("Kimball plan selected tables unreachable from the measure: " + ", ".join(unreachable))
-    if selected_edges and any(left not in reachable or right not in reachable for left, right in selected_edges):
-        raise ValueError("Kimball plan selected a disconnected join path")
+        left_meta = index.get((signature[0], signature[1]))
+        right_meta = index.get((signature[2], signature[3]))
+        if not left_meta or not right_meta or type_family(left_meta) != type_family(right_meta):
+            raise ValueError("Kimball plan selected a join with missing or incompatible key datatypes")
     expected_grain = {str(item.get("column") or "") for item in dimensions}
     if time:
         expected_grain.add("period_start")
@@ -2397,16 +2666,10 @@ def _llm_kimball_plan(
         None,
     )
     best = _best_measure_for_kpi(kpi, columns)
-    if selected_meta and best and (
-        str(selected_meta.get("table_name") or "").casefold(),
-        str(selected_meta.get("column_name") or "").casefold(),
-    ) != (
-        str(best.get("table_name") or "").casefold(),
-        str(best.get("column_name") or "").casefold(),
-    ):
+    if selected_meta and best and _score_column_for_kpi(kpi, selected_meta) < _score_column_for_kpi(kpi, best):
         raise ValueError(
-            "Kimball plan changed the deterministic KPI measure: "
-            f"{selected.get('column')} != {best.get('column_name')}"
+            "Kimball plan selected a weaker KPI measure than the deterministic semantic match: "
+            f"{selected.get('column')} < {best.get('column_name')}"
         )
     expected_aggregation = _infer_aggregation(_extract_kpi_name(kpi), selected_meta)
     if expected_aggregation != "RATIO" and str(selected.get("aggregation") or "").upper() != expected_aggregation:
@@ -2431,13 +2694,23 @@ def _build_gold_generation_contract(
     else:
         joins = []
         fallback_joins = []
+    silver_tables = _silver_tables_by_name(results)
+    approved_silver_names = set(silver_tables)
+    columns = [
+        column
+        for column in columns
+        if isinstance(column, dict)
+        and str(column.get("table_name") or "").strip().casefold() in approved_silver_names
+    ]
     joins = [
         join
         for join in joins
-        if isinstance(join, dict) and join.get("certified") is True
+        if isinstance(join, dict)
+        and join.get("certified") is True
+        and str(join.get("left_table") or "").strip().casefold() in approved_silver_names
+        and str(join.get("right_table") or "").strip().casefold() in approved_silver_names
     ]
     certified_kpis = state.get("certified_kpis") or enriched_metadata.get("certified_kpis") or []
-    silver_tables = _silver_tables_by_name(results)
     warnings: List[str] = []
     kpi_mappings: List[Dict[str, Any]] = []
 
@@ -2488,7 +2761,8 @@ def _build_gold_generation_contract(
                     "grain": _time_grain(state),
                     "column": date_column,
                 },
-                "filters": list(state.get("req_constraints") or []),
+                # ponytail: BRD prose remains planning context until a validated filter DSL exists.
+                "filters": [],
                 "join_paths": join_paths,
                 "readiness": "BLOCKED" if not measure else "READY_WITH_WARNINGS" if join_paths else "READY",
             }
@@ -2508,20 +2782,40 @@ def _build_gold_generation_contract(
                     mapping = _apply_kimball_plan(mapping, plan)
                     mapping["kimball_plan_source"] = "LLM_RETRY_VALIDATED"
                 except Exception as retry_exc:
-                    mapping["kimball_plan_source"] = "DETERMINISTIC_FALLBACK"
-                    warnings.append(f"KPI '{kpi_name}' Kimball LLM plan rejected; deterministic plan retained: {retry_exc}")
-                    logger.warning("Kimball plan rejected for KPI %s; deterministic fallback retained: %s", kpi_name, retry_exc)
+                    mapping["kimball_plan_source"] = "LLM_REJECTED"
+                    mapping["readiness"] = "BLOCKED"
+                    mapping["formula"] = {
+                        **(mapping.get("formula") or {}),
+                        "status": "NEEDS_CERTIFICATION",
+                    }
+                    mapping["mapping_validation_error"] = str(retry_exc)
+                    warnings.append(
+                        f"KPI '{kpi_name}' is not computable because its guarded Kimball plan failed validation: {retry_exc}"
+                    )
+                    logger.warning("Kimball plan rejected for KPI %s after validation retry: %s", kpi_name, retry_exc)
         else:
             mapping["kimball_plan_source"] = "DETERMINISTIC"
         mapping, mapping_warnings = _constrain_gold_mapping(mapping, silver_tables)
         warnings.extend(f"KPI '{kpi_name}': {warning}" for warning in mapping_warnings)
         kpi_mappings.append(mapping)
 
+    dimension_mappings = _independent_gold_dimensions(
+        columns=columns,
+        results=results,
+        silver_tables=silver_tables,
+        kpi_mappings=kpi_mappings,
+    )
+    factless_mappings = _factless_gold_mappings(results=results, silver_tables=silver_tables)
     status = "READY"
     if warnings:
         status = "READY_WITH_WARNINGS"
-    if kpi_mappings and all(item["readiness"] == "BLOCKED" for item in kpi_mappings):
-        status = "FAILED"
+    if (
+        kpi_mappings
+        and all(item["readiness"] == "BLOCKED" for item in kpi_mappings)
+        and not dimension_mappings
+        and not factless_mappings
+    ):
+        status = "NOT_COMPUTABLE"
     if not kpi_mappings:
         status = "SKIPPED"
         warnings.append("No certified KPIs found for gold contract generation.")
@@ -2540,7 +2834,8 @@ def _build_gold_generation_contract(
             }
             for item in sorted(results, key=lambda row: str(row.get("table", "")))
         ],
-        "dimension_mappings": _dimension_mappings_from_kpis(kpi_mappings, silver_tables),
+        "dimension_mappings": dimension_mappings,
+        "factless_mappings": factless_mappings,
         "kpi_mappings": kpi_mappings,
         "kimball_plan_enabled": _llm_enabled_for_kimball_plan(),
         "available_joins": joins,
@@ -2605,7 +2900,11 @@ def silver_code_generation_node(state: Stage01State) -> Stage01State:
         dbt_project_path = str(dbt_snowflake_runtime.write_snowflake_dbt_scaffold(state))
         _refresh_snowflake_dbt_models(run_id)
 
-    table_refs = _resolve_tables_for_silver(state)
+    metadata_driven = bool(state.get("silver_transformation_objects")) or any(
+        isinstance(item, dict) and item.get("silver_ingestion_object_id") is not None
+        for item in state.get("bronze_generation_results") or []
+    )
+    table_refs = _metadata_tables_for_silver(state) if metadata_driven else _resolve_tables_for_silver(state)
 
     if dbt_codegen:
         _assert_unique_dbt_model_names(

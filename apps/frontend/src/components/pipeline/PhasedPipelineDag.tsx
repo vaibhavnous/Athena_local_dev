@@ -224,9 +224,8 @@ export function getPipelinePhases(connectionType, stages = [], target = '') {
   const isDataLake = isDataLakePipeline(connectionType, stages)
   const isSnowflake = isSnowflakeTarget(target)
 
-  if (isSnowflake && isDataLake) return SNOWFLAKE_DATA_LAKE_PIPELINE_PHASES
+  if (isDataLake) return PIPELINE_PHASES
   if (isSnowflake) return SNOWFLAKE_DATABASE_PIPELINE_PHASES
-  if (isDataLake) return DATA_LAKE_PIPELINE_PHASES
   return PIPELINE_PHASES
 }
 
