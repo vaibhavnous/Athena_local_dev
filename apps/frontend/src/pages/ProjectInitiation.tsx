@@ -19,7 +19,7 @@ const KB = { Insurance: 'PC_Insurance_V1', Basel: 'BASEL_DW_V1' }
 export function isProjectFormValid(form) {
   const sourceConfigured = form.connectionType === 'database'
     ? form.dbType && form.databaseName
-    : form.integrationType && (form.integrationType !== 'SFTP' || form.connectionName)
+    : form.integrationType && (!['SFTP', 'ADLS'].includes(form.integrationType) || form.connectionName)
   return !!(form.name.trim() && form.description.trim() && form.connectionType && sourceConfigured)
 }
 
