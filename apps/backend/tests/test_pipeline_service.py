@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+import json
 
 import pytest
 from fastapi import HTTPException
@@ -750,8 +751,10 @@ def test_load_checkpoint_fields_uses_json_value_projection(monkeypatch):
     fields = pipeline_runtime.load_checkpoint_fields("run-fast", "source", "status")
 
     assert fields == {"source": "database", "status": "RUNNING"}
-    assert "JSON_VALUE(full_state_json, '$.source')" in recorded["query"]
-    assert "JSON_VALUE(full_state_json, '$.status')" in recorded["query"]
+    assert "'$.source'" in recorded["query"]
+    assert "'$.status'" in recorded["query"]
+    assert "CASE WHEN ISJSON(full_state_json) = 1" in recorded["query"]
+    assert "ISJSON(full_state_json) = 1" in recorded["query"]
     assert recorded["params"] == ("run-fast",)
     assert recorded["closed"] is True
 
@@ -759,17 +762,17 @@ def test_load_checkpoint_fields_uses_json_value_projection(monkeypatch):
 def test_load_checkpoint_fields_many_uses_direct_nonblocking_latest_query(monkeypatch):
     from services import pipeline_runtime
 
-    recorded = {}
+    recorded = {"queries": []}
 
     class StubCursor:
-        def execute(self, query, params):
+        def execute(self, query, *params):
             recorded["query"] = query
             recorded["params"] = params
 
         def fetchall(self):
             return [
-                ("run-1", "RUNNING", "bronze"),
-                ("run-2", "HITL_WAIT", None),
+                ("run-1", json.dumps({"status": "RUNNING", "background_stage": "bronze"})),
+                ("run-2", json.dumps({"status": "HITL_WAIT"})),
             ]
 
     class StubConnection:
@@ -791,10 +794,129 @@ def test_load_checkpoint_fields_many_uses_direct_nonblocking_latest_query(monkey
         "run-1": {"status": "RUNNING", "background_stage": "bronze"},
         "run-2": {"status": "HITL_WAIT"},
     }
-    assert "SELECT TOP 1 cp.full_state_json" in recorded["query"]
+    assert "SELECT run_id, full_state_json" in recorded["query"]
     assert "WITH (READUNCOMMITTED)" in recorded["query"]
-    assert "OPENJSON(latest.full_state_json)" in recorded["query"]
+    assert "OPENJSON(" not in recorded["query"]
+    assert "WHERE run_id IN (?, ?)" in recorded["query"]
     assert recorded["params"] == ("run-1", "run-2")
+    assert recorded["closed"] is True
+
+
+def test_checkpoint_read_reconnects_after_transient_fetch_failure(monkeypatch):
+    from services import pipeline_runtime
+
+    calls = {"connections": 0}
+
+    class StubConnection:
+        def __init__(self, should_fail):
+            self.should_fail = should_fail
+
+        def cursor(self):
+            return self
+
+        def execute(self, query, *params):
+            return None
+
+        def fetchall(self):
+            if self.should_fail:
+                raise RuntimeError("08S01 10053 communication link failure")
+            return [("run-1", json.dumps({"status": "COMPLETED"}))]
+
+        def close(self):
+            return None
+
+    def connection():
+        calls["connections"] += 1
+        return StubConnection(calls["connections"] == 1)
+
+    monkeypatch.setattr(pipeline_runtime, "get_connection", connection)
+
+    result = pipeline_runtime.load_checkpoint_fields_many(["run-1"], "status")
+
+    assert result == {"run-1": {"status": "COMPLETED"}}
+    assert calls["connections"] == 2
+
+
+def test_load_project_run_history_filters_registry_before_loading_checkpoints(monkeypatch):
+    from services import pipeline_runtime
+
+    recorded = {"queries": [], "params": []}
+
+    class StubCursor:
+        def execute(self, query, *params):
+            recorded["queries"].append(query)
+            recorded["params"].append(params)
+
+        def fetchall(self):
+            if len(recorded["queries"]) == 1:
+                return [("run-project", "2026-08-12T06:00:00")]
+            return [("run-project", json.dumps({
+                "project_id": "project-1",
+                "brd_filename": "claims.docx",
+                "status": "COMPLETED",
+            }))]
+
+    class StubConnection:
+        def cursor(self):
+            return StubCursor()
+
+        def close(self):
+            recorded["closed"] = True
+
+    monkeypatch.setattr(pipeline_runtime, "get_connection", lambda: StubConnection())
+
+    rows = pipeline_runtime.load_project_run_history("project-1", limit=200)
+
+    assert rows[0]["run_id"] == "run-project"
+    assert rows[0]["project_id"] == "project-1"
+    assert rows[0]["status"] == "COMPLETED"
+    assert "brd_run_registry" in recorded["queries"][0]
+    assert "kpi_checkpoints" not in recorded["queries"][0]
+    assert "registry.project_id = ?" in recorded["queries"][0]
+    assert "kpi_checkpoints" in recorded["queries"][1]
+    assert "OPENJSON" not in recorded["queries"][1]
+    assert recorded["params"] == [("project-1",), ("run-project",)]
+    assert recorded["closed"] is True
+
+
+def test_load_lineage_ready_runs_requires_checkpoint_join(monkeypatch):
+    from services import pipeline_runtime
+
+    recorded = {"queries": []}
+
+    class StubCursor:
+        def execute(self, query, *params):
+            recorded["queries"].append(query)
+
+        def fetchall(self):
+            if len(recorded["queries"]) == 1:
+                return [("persisted-run", "2026-08-12T06:00:00"), ("orphan-run", "2026-08-12T05:00:00")]
+            return [
+                ("persisted-run", json.dumps({
+                    "run_id": "persisted-run",
+                    "brd_filename": "claims.docx",
+                    "owner_email": "client@example.com",
+                    "status": "COMPLETED",
+                })),
+            ]
+
+    class StubConnection:
+        def cursor(self):
+            return StubCursor()
+
+        def close(self):
+            recorded["closed"] = True
+
+    monkeypatch.setattr(pipeline_runtime, "get_connection", lambda: StubConnection())
+
+    rows = pipeline_runtime.load_lineage_ready_runs(50, owner_email="client@example.com")
+
+    assert [row["run_id"] for row in rows] == ["persisted-run"]
+    assert rows[0]["checkpoint"]["brd_filename"] == "claims.docx"
+    assert "brd_run_registry" in recorded["queries"][0]
+    assert "kpi_checkpoints" not in recorded["queries"][0]
+    assert "kpi_checkpoints" in recorded["queries"][1]
+    assert "orphan-run" not in [row["run_id"] for row in rows]
     assert recorded["closed"] is True
 
 
@@ -861,6 +983,10 @@ def test_list_runs_filters_owner_before_top_limit(monkeypatch):
 
     assert runs[0]["run_id"] == "owned-run"
     assert "LOWER(COALESCE" in recorded["queries"][0]
+    assert "WITH recent_registry AS" in recorded["queries"][0]
+    assert "SELECT TOP (100) run_id" in recorded["queries"][0]
+    assert "ISJSON(cp.full_state_json) = 1" in recorded["queries"][0]
+    assert "CASE WHEN ISJSON(latest.full_state_json) = 1" in recorded["queries"][0]
     assert recorded["parameters"][0] == ("client@example.com",)
 
 
@@ -2102,6 +2228,51 @@ def test_background_completion_callback_preserves_abort(monkeypatch):
 
     assert saved[-1][0]["status"] == "ABORTED"
     assert saved[-1][1] == "gate2:background_aborted"
+
+
+def test_submit_background_does_not_hold_job_lock_during_checkpoint_io(monkeypatch):
+    checkpoint_lock_was_available = []
+
+    class DeferredExecutor:
+        def submit(self, fn, *args):
+            return Future()
+
+    def mark_processing(_run_id, _stage):
+        acquired = pipeline_runtime.BACKGROUND_JOB_LOCK.acquire(blocking=False)
+        checkpoint_lock_was_available.append(acquired)
+        if acquired:
+            pipeline_runtime.BACKGROUND_JOB_LOCK.release()
+
+    monkeypatch.setattr(pipeline_runtime, "BACKGROUND_EXECUTOR", DeferredExecutor())
+    monkeypatch.setattr(pipeline_runtime, "mark_run_processing", mark_processing)
+
+    future = pipeline_runtime.submit_background("run-lock-check", "bronze", lambda: None)
+    try:
+        assert checkpoint_lock_was_available == [True]
+    finally:
+        future.cancel()
+        pipeline_runtime.BACKGROUND_JOBS.pop("run-lock-check:bronze", None)
+
+
+def test_abort_background_does_not_hold_job_lock_during_checkpoint_io(monkeypatch):
+    checkpoint_lock_was_available = []
+
+    def save_checkpoint(_run_id, _state):
+        acquired = pipeline_runtime.BACKGROUND_JOB_LOCK.acquire(blocking=False)
+        checkpoint_lock_was_available.append(acquired)
+        if acquired:
+            pipeline_runtime.BACKGROUND_JOB_LOCK.release()
+
+    monkeypatch.setattr(pipeline_runtime, "save_checkpoint_state", save_checkpoint)
+
+    try:
+        pipeline_runtime.abort_background_run(
+            "run-abort-lock-check",
+            {"run_id": "run-abort-lock-check", "status": "RUNNING"},
+        )
+        assert checkpoint_lock_was_available == [True]
+    finally:
+        pipeline_runtime.clear_run_abort("run-abort-lock-check")
 
 
 def test_database_continue_clears_stale_failure_when_retrying(monkeypatch):

@@ -3,12 +3,14 @@ import os
 import re
 import threading
 import time
+import zipfile
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from api.auth import AuthUser, assert_run_access, get_current_user
 from api.demo import (
@@ -26,9 +28,26 @@ RUN_SUMMARY_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHE
 RUN_LIST_RETRY_LOCK = threading.Lock()
 RUN_LIST_RETRY_AFTER = 0.0
 RUN_LIST_RETRY_DELAY_SECONDS = max(30, int(os.getenv("ATHENA_RUNS_RETRY_DELAY_SECONDS", "120")))
+LINEAGE_RUNS_CACHE_SECONDS = max(1, int(os.getenv("ATHENA_LINEAGE_RUNS_CACHE_SECONDS", "30")))
+LINEAGE_GRAPH_CACHE_SECONDS = max(1, int(os.getenv("ATHENA_LINEAGE_GRAPH_CACHE_SECONDS", "60")))
+LINEAGE_CACHE_LOCK = threading.Lock()
+LINEAGE_RUNS_CACHE: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
+LINEAGE_GRAPH_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 RUN_ID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
+COMPLETED_RUN_STATUSES = {"SUCCESS", "COMPLETED", "PIPELINE_COMPLETED", "COMPLETED_WITH_WARNINGS"}
+SCRIPT_BODY_FIELDS = (
+    "script_body",
+    "generated_bronze_script",
+    "generated_silver_script",
+    "generated_gold_script",
+    "code",
+    "content",
+    "script",
+    "sql",
+    "python_code",
 )
 
 
@@ -161,6 +180,7 @@ def _local_run_history(limit: int) -> List[Dict[str, Any]]:
                         "last_activity": timestamp,
                         "source": item.get("source") or "database",
                         "status": "UNKNOWN",
+                        "_has_persisted_progress": False,
                     },
                 )
                 if timestamp:
@@ -169,10 +189,23 @@ def _local_run_history(limit: int) -> List[Dict[str, Any]]:
                     row["source"] = item["source"]
 
                 message = str(item.get("message") or "")
+                lowered = message.lower()
+                # A request log is written before the first checkpoint exists.
+                # Do not turn that line into a navigable history record: doing
+                # so creates orphan run IDs whose details/lineage cannot load.
+                step_name = str(item.get("step_name") or "").lower()
+                event_type = str(item.get("event_type") or "").lower()
+                if (
+                    step_name == "checkpoint_save_complete"
+                    or event_type in {"stage_start", "stage_end"}
+                    or "checkpoint save finished" in lowered
+                    or "pipeline completed" in lowered
+                    or "pipeline complete" in lowered
+                ):
+                    row["_has_persisted_progress"] = True
                 status_match = re.search(r"\bstatus=([A-Za-z_]+)", message)
                 if status_match:
                     row["status"] = _status_from_checkpoint({"status": status_match.group(1)})
-                lowered = message.lower()
                 if "pipeline aborted" in lowered:
                     row["status"] = "ABORTED"
                 elif "pipeline completed" in lowered or "pipeline complete" in lowered:
@@ -184,7 +217,7 @@ def _local_run_history(limit: int) -> List[Dict[str, Any]]:
         return []
 
     ordered = sorted(
-        runs.values(),
+        (row for row in runs.values() if row.pop("_has_persisted_progress", False)),
         key=lambda row: str(row.get("last_activity") or ""),
         reverse=True,
     )
@@ -690,6 +723,125 @@ def run_scripts(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict
         raise HTTPException(status_code=503, detail="Failed to fetch run scripts")
 
 
+def _script_file_name(script: Dict[str, Any], layer: str, index: int) -> str:
+    requested = next(
+        (
+            script.get(field)
+            for field in ("script_path", "filename", "file_name", "name")
+            if script.get(field)
+        ),
+        "",
+    )
+    name = re.split(r"[\\/]", str(requested))[-1]
+    if name:
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+    extension = "sql" if str(script.get("language") or "").lower() == "sql" else "py"
+    return f"{layer}_{index}.{extension}"
+
+
+def _layer_download_file(layer: str, bundle: Dict[str, Any]) -> tuple[str, str] | None:
+    files: List[tuple[str, str]] = []
+    for index, raw_script in enumerate(bundle.get("scripts") or [], start=1):
+        if isinstance(raw_script, str):
+            if raw_script.strip():
+                files.append((f"{layer}_{index}.py", raw_script))
+            continue
+        if not isinstance(raw_script, dict):
+            continue
+        body = next(
+            (str(raw_script.get(field)) for field in SCRIPT_BODY_FIELDS if raw_script.get(field)),
+            "",
+        )
+        if body.strip():
+            files.append((_script_file_name(raw_script, layer, index), body))
+        dimension_body = str(
+            raw_script.get("dimension_script_body") or raw_script.get("dimension_body") or ""
+        )
+        if dimension_body.strip():
+            dimension_name = re.split(
+                r"[\\/]", str(raw_script.get("dimension_script_path") or "")
+            )[-1] or f"dimension_{index}.py"
+            files.append((re.sub(r"[^A-Za-z0-9._-]+", "_", dimension_name), dimension_body))
+
+    if not files:
+        return None
+    extensions = {os.path.splitext(name)[1].lower() for name, _ in files}
+    extension = extensions.pop() if len(extensions) == 1 else ".txt"
+    comment = "#" if extension == ".py" else "--"
+    body = "\n\n".join(
+        f"{comment} ===== ATHENA_FILE_{index}: {name} =====\n{content.rstrip()}"
+        for index, (name, content) in enumerate(files)
+    )
+    return f"{layer}_scripts{extension}", f"{body}\n"
+
+
+@router.get("/run-scripts/{run_id}/download")
+def download_run_scripts(run_id: str, user: AuthUser = Depends(get_current_user)) -> Response:
+    from services.pipeline_runtime import (
+        load_bronze_scripts,
+        load_checkpoint_state,
+        load_gold_scripts,
+        load_silver_scripts,
+    )
+
+    try:
+        if demo_enabled():
+            checkpoint = demo_run(run_id, include_scripts=False)
+        else:
+            checkpoint = assert_run_access(
+                run_id,
+                user,
+                checkpoint=load_checkpoint_state(run_id) or {},
+            )
+
+        status_value = str(checkpoint.get("status") or "").upper()
+        if status_value not in COMPLETED_RUN_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail="All scripts can be downloaded only after the pipeline completes.",
+            )
+
+        bundles = (
+            demo_scripts(run_id)
+            if demo_enabled()
+            else {
+                "bronze": load_bronze_scripts(run_id, checkpoint),
+                "silver": load_silver_scripts(run_id, checkpoint),
+                "gold": load_gold_scripts(run_id, checkpoint),
+            }
+        )
+
+        layer_files = {
+            layer: _layer_download_file(layer, bundles.get(layer) or {})
+            for layer in ("bronze", "silver", "gold")
+        }
+        missing = [layer.capitalize() for layer, file in layer_files.items() if file is None]
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Completed run is missing generated scripts for: {', '.join(missing)}.",
+            )
+
+        archive = BytesIO()
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            for file in layer_files.values():
+                file_name, content = file
+                output.writestr(file_name, content)
+        safe_run_id = re.sub(r"[^A-Za-z0-9._-]+", "_", run_id)
+        return Response(
+            content=archive.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="astra_scripts_{safe_run_id}.zip"',
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Failed to download run scripts", exc_info=True, extra={"run_id": run_id})
+        raise HTTPException(status_code=503, detail="Failed to prepare script download")
+
+
 @router.get("/run-lineage/{run_id}")
 def run_lineage(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict[str, Any]:
     if demo_enabled():
@@ -699,7 +851,14 @@ def run_lineage(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict
 
     try:
         checkpoint = assert_run_access(run_id, user, checkpoint=load_checkpoint_state(run_id) or {})
-        return build_run_lineage(run_id, checkpoint)
+        with LINEAGE_CACHE_LOCK:
+            cached = LINEAGE_GRAPH_CACHE.get(run_id)
+        if cached and cached[0] > time.monotonic():
+            return dict(cached[1])
+        graph = build_run_lineage(run_id, checkpoint)
+        with LINEAGE_CACHE_LOCK:
+            LINEAGE_GRAPH_CACHE[run_id] = (time.monotonic() + LINEAGE_GRAPH_CACHE_SECONDS, dict(graph))
+        return graph
     except HTTPException:
         raise
     except Exception:
@@ -709,3 +868,36 @@ def run_lineage(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict
             extra={"run_id": run_id},
         )
         raise HTTPException(status_code=503, detail="Failed to fetch run lineage")
+
+
+@router.get("/lineage/runs")
+def lineage_runs(user: AuthUser = Depends(get_current_user)) -> List[Dict[str, Any]]:
+    """List only runs backed by checkpoints and therefore eligible for lineage."""
+    if demo_enabled():
+        return demo_runs()
+
+    from services.pipeline_runtime import load_lineage_ready_runs
+
+    cache_key = "admin" if user.user_type == "Admin" else user.email.strip().lower()
+    with LINEAGE_CACHE_LOCK:
+        cached = LINEAGE_RUNS_CACHE.get(cache_key)
+    if cached and cached[0] > time.monotonic():
+        return [dict(row) for row in cached[1]]
+
+    try:
+        rows = load_lineage_ready_runs(
+            limit=max(1, min(50, int(os.getenv("ATHENA_LINEAGE_RUNS_LIMIT", "20")))),
+            owner_email=None if user.user_type == "Admin" else user.email,
+        )
+        summaries = [_checkpoint_run_summary(row) for row in rows]
+        with LINEAGE_CACHE_LOCK:
+            LINEAGE_RUNS_CACHE[cache_key] = (
+                time.monotonic() + LINEAGE_RUNS_CACHE_SECONDS,
+                [dict(row) for row in summaries],
+            )
+        return summaries
+    except Exception:
+        logger.exception("Failed to fetch lineage-ready runs")
+        if cached:
+            return [dict(row) for row in cached[1]]
+        raise HTTPException(status_code=503, detail="Lineage-ready runs are temporarily unavailable")

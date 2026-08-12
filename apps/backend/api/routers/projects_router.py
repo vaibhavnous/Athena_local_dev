@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -7,9 +10,15 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from api.auth import AuthUser, get_current_user
 from api.models import ProjectRequest
 from api.repositories.project_repository import ProjectRepository
+from utilis.logger import logger
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 repository = ProjectRepository()
+PROJECT_RUNS_EXECUTOR = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("ATHENA_PROJECT_RUN_WORKERS", "2"))))
+PROJECT_RUNS_LOCK = threading.Lock()
+PROJECT_RUNS_FUTURES: dict[str, Future] = {}
+PROJECT_RUNS_CACHE: dict[str, list[dict[str, Any]]] = {}
+PROJECT_RUNS_TIMEOUT_SECONDS = max(1, int(os.getenv("ATHENA_PROJECT_RUN_TIMEOUT_SECONDS", "12")))
 
 
 def _payload(
@@ -108,30 +117,60 @@ def delete_project(project_id: str, user: AuthUser = Depends(get_current_user)) 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def _load_project_runs(project_id: str) -> list[dict[str, Any]]:
+    from services.pipeline_runtime import load_project_run_history
+
+    return load_project_run_history(project_id, limit=200)
+
+
+def _cached_project_runs(project_id: str) -> list[dict[str, Any]] | None:
+    with PROJECT_RUNS_LOCK:
+        cached = PROJECT_RUNS_CACHE.get(project_id)
+    if not cached:
+        return None
+    return [dict(row) for row in cached]
+
+
+def _project_runs_future(project_id: str) -> Future:
+    with PROJECT_RUNS_LOCK:
+        existing = PROJECT_RUNS_FUTURES.get(project_id)
+        if existing and not existing.done():
+            return existing
+        future = PROJECT_RUNS_EXECUTOR.submit(_load_project_runs, project_id)
+        PROJECT_RUNS_FUTURES[project_id] = future
+
+    def store_result(done: Future) -> None:
+        try:
+            rows = done.result()
+        except Exception:
+            rows = None
+        with PROJECT_RUNS_LOCK:
+            if rows is not None:
+                PROJECT_RUNS_CACHE[project_id] = [dict(row) for row in rows]
+            if PROJECT_RUNS_FUTURES.get(project_id) is done:
+                PROJECT_RUNS_FUTURES.pop(project_id, None)
+
+    future.add_done_callback(store_result)
+    return future
+
+
 @router.get("/{project_id}/runs")
 def project_runs(project_id: str, user: AuthUser = Depends(get_current_user)) -> list[dict[str, Any]]:
     _owned_project(project_id, user)
-    from services.pipeline_runtime import list_runs, load_checkpoint_fields_many
-
-    indexed_runs = list_runs(limit=200, project_id=project_id)
-    run_ids = [str(item.get("run_id") or "") for item in indexed_runs if item.get("run_id")]
-    checkpoints = load_checkpoint_fields_many(
-        run_ids,
-        "project_id",
-        "brd_filename",
-        "status",
-        "created_at",
-        "started_at",
-        "updated_at",
-        "completed_at",
-        "error",
-        "error_message",
-        "failed_background_stage",
-    )
-
-    return [
-        {**item, **checkpoints.get(run_id, {}), "run_id": run_id}
-        for item in indexed_runs
-        if (run_id := str(item.get("run_id") or ""))
-        and str(checkpoints.get(run_id, {}).get("project_id") or "") == project_id
-    ]
+    future = _project_runs_future(project_id)
+    try:
+        return future.result(timeout=PROJECT_RUNS_TIMEOUT_SECONDS)
+    except FutureTimeoutError:
+        stale = _cached_project_runs(project_id)
+        if stale is not None:
+            logger.warning("Project run history refresh timed out; returning cached rows", extra={"project_id": project_id})
+            return stale
+        logger.warning("Project run history timed out", extra={"project_id": project_id})
+        raise HTTPException(status_code=503, detail="Project run history is still loading. Please retry shortly.")
+    except Exception:
+        stale = _cached_project_runs(project_id)
+        if stale is not None:
+            logger.exception("Project run history refresh failed; returning cached rows", extra={"project_id": project_id})
+            return stale
+        logger.exception("Project run history failed", extra={"project_id": project_id})
+        raise HTTPException(status_code=503, detail="Project run history is temporarily unavailable.")

@@ -5,7 +5,7 @@ import threading
 import uuid
 from typing import Any
 
-from utilis.db import config, get_pipeline_connection
+from utilis.db import config, get_pipeline_connection, run_pipeline_read
 
 
 class ProjectRepository:
@@ -271,14 +271,11 @@ class ProjectRepository:
 
     def _query(self, query: str, *parameters: Any) -> list[dict[str, Any]]:
         self.ensure_table()
-        connection = get_pipeline_connection()
-        try:
-            cursor = connection.cursor()
+        def read(cursor):
             cursor.execute(query, *parameters)
             columns = [column[0] for column in cursor.description]
             return [
                 self._with_execution_defaults(dict(zip(columns, row)))
                 for row in cursor.fetchall()
             ]
-        finally:
-            connection.close()
+        return run_pipeline_read(read)

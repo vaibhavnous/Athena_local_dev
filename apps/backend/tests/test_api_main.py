@@ -1,6 +1,8 @@
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from io import BytesIO
 import os
 from pathlib import Path
+import zipfile
 
 import pytest
 from fastapi import HTTPException
@@ -182,7 +184,7 @@ def test_bulk_kpi_action_persists_pending_items_in_one_batch(monkeypatch):
     }]]
 
 
-def test_sql_tcp_probe_failure_is_cached(monkeypatch):
+def test_sql_tcp_probe_failure_cache_is_rechecked(monkeypatch):
     from utilis import db
 
     calls = {"probe": 0}
@@ -215,7 +217,78 @@ def test_sql_tcp_probe_failure_is_cached(monkeypatch):
             role="pipeline",
         )
 
-    assert calls["probe"] == 1
+    assert calls["probe"] == 2
+
+
+def test_cached_sql_failure_self_heals_when_endpoint_is_reachable(monkeypatch):
+    from utilis import db
+
+    class StubPyodbc:
+        class Error(Exception):
+            pass
+
+        @staticmethod
+        def connect(connection_string):
+            return "connected"
+
+    db._SQL_ENDPOINT_FAILURE_CACHE.clear()
+    monkeypatch.setattr(db, "SQL_TCP_PROBE_ENABLED", True)
+    monkeypatch.setattr(db, "SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS", 60)
+    monkeypatch.setattr(db, "_probe_sql_endpoint", lambda host, port, timeout: None)
+    monkeypatch.setattr(db, "_get_pyodbc", lambda: StubPyodbc)
+    db._cache_sql_endpoint_failure(
+        role="pipeline",
+        host="dataedge.database.windows.net",
+        port=1433,
+        database_name="AdventureWorks2019",
+        message="previous transient failure",
+    )
+
+    connection = db._connect_with_retry(
+        "DRIVER={stub};",
+        database_name="AdventureWorks2019",
+        host="dataedge.database.windows.net",
+        port=1433,
+        role="pipeline",
+    )
+
+    assert connection == "connected"
+    assert db._SQL_ENDPOINT_FAILURE_CACHE == {}
+
+
+def test_transient_odbc_connection_failure_retries_without_negative_cache(monkeypatch):
+    from utilis import db
+
+    calls = {"connect": 0}
+
+    class StubPyodbc:
+        class Error(Exception):
+            pass
+
+        @staticmethod
+        def connect(connection_string):
+            calls["connect"] += 1
+            if calls["connect"] == 1:
+                raise StubPyodbc.Error("08S01 10053 connection aborted")
+            return "recovered"
+
+    db._SQL_ENDPOINT_FAILURE_CACHE.clear()
+    monkeypatch.setattr(db, "SQL_TCP_PROBE_ENABLED", False)
+    monkeypatch.setattr(db, "SQL_CONNECT_RETRIES", 2)
+    monkeypatch.setattr(db, "SQL_CONNECT_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(db, "_get_pyodbc", lambda: StubPyodbc)
+
+    connection = db._connect_with_retry(
+        "DRIVER={stub};Pooling=No;",
+        database_name="AdventureWorks2019",
+        host="dataedge.database.windows.net",
+        port=1433,
+        role="pipeline",
+    )
+
+    assert connection == "recovered"
+    assert calls["connect"] == 2
+    assert db._SQL_ENDPOINT_FAILURE_CACHE == {}
 
 
 def test_schema_embedding_is_skipped_when_embeddings_are_disabled(monkeypatch):
@@ -678,6 +751,9 @@ def test_continue_stage_submits_background_job(monkeypatch):
 
 
 def test_run_lineage_endpoint_returns_payload(monkeypatch):
+    from api.routers import runs_router
+
+    runs_router.LINEAGE_GRAPH_CACHE.clear()
     monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda run_id: {"run_id": run_id})
     monkeypatch.setattr(
         "services.pipeline_runtime.build_run_lineage",
@@ -689,6 +765,29 @@ def test_run_lineage_endpoint_returns_payload(monkeypatch):
     assert response.status_code == 200
     assert response.json()["run_id"] == "run-123"
     assert response.json()["nodes"][0]["id"] == "n1"
+
+
+def test_lineage_runs_endpoint_uses_checkpoint_backed_source(monkeypatch):
+    from api.routers import runs_router
+
+    runs_router.LINEAGE_RUNS_CACHE.clear()
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_lineage_ready_runs",
+        lambda limit, owner_email=None: [{
+            "run_id": "lineage-ready",
+            "last_activity": "2026-08-12T06:00:00",
+            "checkpoint": {
+                "run_id": "lineage-ready",
+                "brd_filename": "claims.docx",
+                "status": "COMPLETED",
+            },
+        }],
+    )
+
+    response = client.get("/lineage/runs")
+
+    assert response.status_code == 200
+    assert [row["run_id"] for row in response.json()] == ["lineage-ready"]
 
 
 def test_bronze_review_submit_uses_checkpoint_artifact_when_payload_empty(monkeypatch):
@@ -885,7 +984,7 @@ def test_retry_failed_stage_submits_file_resume(monkeypatch):
     assert recorded["background_fn"] == "continue_file_pipeline_job"
 
 
-def test_runs_returns_503_on_timeout(monkeypatch):
+def test_runs_returns_local_history_on_timeout_for_admin(monkeypatch):
     class StubFuture:
         def result(self, timeout):
             raise FutureTimeoutError()
@@ -895,11 +994,16 @@ def test_runs_returns_503_on_timeout(monkeypatch):
             return StubFuture()
 
     monkeypatch.setattr("api.routers.runs_router.RUN_LIST_EXECUTOR", StubExecutor())
+    monkeypatch.setattr("api.routers.runs_router.RUN_LIST_RETRY_AFTER", 0.0)
+    monkeypatch.setattr(
+        "api.routers.runs_router._local_run_history",
+        lambda limit: [{"run_id": "cached-run", "status": "RUNNING"}],
+    )
 
     response = client.get("/runs")
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Run list temporarily unavailable"
+    assert response.status_code == 200
+    assert response.json() == [{"run_id": "cached-run", "status": "RUNNING"}]
 
 
 def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
@@ -917,6 +1021,7 @@ def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
         return {"run_id": run_id, "status": "SUCCESS"}
 
     monkeypatch.setenv("ATHENA_RUNS_FAST_SUMMARY", "false")
+    monkeypatch.setattr("api.routers.runs_router.RUN_LIST_RETRY_AFTER", 0.0)
     monkeypatch.setattr("api.routers.runs_router.RUN_LIST_EXECUTOR", StubExecutor())
     monkeypatch.setattr("api.services.ui_service.ui_run_summary", fake_summary)
 
@@ -931,6 +1036,7 @@ def test_runs_skips_bad_rows_and_summary_failures(monkeypatch):
 
 def test_runs_uses_fast_checkpoint_summary_by_default(monkeypatch):
     monkeypatch.delenv("ATHENA_RUNS_FAST_SUMMARY", raising=False)
+    monkeypatch.setattr("api.routers.runs_router.RUN_LIST_RETRY_AFTER", 0.0)
     monkeypatch.setattr(
         "services.pipeline_runtime.list_runs",
         lambda limit: [{"run_id": "run-fast", "last_activity": "2026-06-30T00:00:00Z"}],
@@ -986,6 +1092,64 @@ def test_run_detail_returns_fallback_on_failure(monkeypatch):
     assert payload["run_id"] == "run-123"
     assert payload["status"] == "RUNNING"
     assert payload["checkpoint"] == {"status": "RUNNING"}
+
+
+def test_completed_run_downloads_one_file_for_each_script_layer(monkeypatch):
+    from api.routers import runs_router
+
+    monkeypatch.setattr(runs_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "PIPELINE_COMPLETED"},
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_bronze_scripts",
+        lambda run_id, checkpoint: {
+            "scripts": [
+                {"script_path": "bronze/claims.py", "script_body": "print('claims')"},
+                {"script_path": "bronze/policy.py", "script_body": "print('policy')"},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_silver_scripts",
+        lambda run_id, checkpoint: {
+            "scripts": [{"script_path": "silver/transform.sql", "script_body": "select 1;", "language": "sql"}]
+        },
+    )
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_gold_scripts",
+        lambda run_id, checkpoint: {
+            "scripts": [{"script_path": "gold/kpis.sql", "script_body": "select count(*) from claims;", "language": "sql"}]
+        },
+    )
+
+    response = client.get("/run-scripts/completed-run/download")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert 'filename="astra_scripts_completed-run.zip"' in response.headers["content-disposition"]
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["bronze_scripts.py", "silver_scripts.sql", "gold_scripts.sql"]
+        bronze = archive.read("bronze_scripts.py").decode("utf-8")
+        assert "ATHENA_FILE_0: claims.py" in bronze
+        assert "print('claims')" in bronze
+        assert "ATHENA_FILE_1: policy.py" in bronze
+
+
+def test_download_all_scripts_rejects_incomplete_pipeline(monkeypatch):
+    from api.routers import runs_router
+
+    monkeypatch.setattr(runs_router, "demo_enabled", lambda: False)
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {"run_id": run_id, "status": "RUNNING"},
+    )
+
+    response = client.get("/run-scripts/running-run/download")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "All scripts can be downloaded only after the pipeline completes."
 
 
 def test_settings_roundtrip():

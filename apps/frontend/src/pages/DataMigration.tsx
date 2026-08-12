@@ -15,11 +15,15 @@ import {
   Maximize2,
   Minimize2,
   Network,
+  RefreshCw,
+  RotateCcw,
   Search,
   Sparkles,
   Table2,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react'
-import { getRunLineage, getRuns } from '../api/athenaApi'
+import { getLineageRuns, getRunLineage } from '../api/athenaApi'
 
 const LAYER_ORDER = ['source', 'bronze', 'silver', 'gold']
 const LAYER_TITLES = {
@@ -177,12 +181,67 @@ function buildColumnNodeIds(groups) {
   )
 }
 
+function lineageEntityKey(node) {
+  const name = String(node?.name || node?.label || '')
+    .trim()
+    .split('.')
+    .pop()
+    ?.toLowerCase() || ''
+
+  return name
+    .replace(/^(bronze|silver)_/, '')
+    .replace(/_(raw|clean)$/, '')
+}
+
 function buildPipelineEdges(lineage, columnNodeIds) {
-  return (lineage?.edges || []).filter((edge) =>
+  const nodes = (lineage?.nodes || []).filter((node) => columnNodeIds.has(node.id))
+  const nodeById = new Map(nodes.map((node) => [node.id, node]))
+  const edges = (lineage?.edges || []).filter((edge) =>
     edge?.type === 'pipeline' &&
     columnNodeIds.has(edge.source) &&
     columnNodeIds.has(edge.target)
   )
+  const edgeKeys = new Set(edges.map((edge) => `${edge.source}:${edge.target}`))
+
+  // Older artifact payloads can contain all medallion nodes while omitting an
+  // adjacent-layer edge. Restore only unique, same-entity links so the visual
+  // flow remains complete without guessing ambiguous relationships.
+  for (const [sourceLayer, targetLayer] of [['source', 'bronze'], ['bronze', 'silver']]) {
+    const sourceNodes = nodes.filter((node) => node.layer === sourceLayer)
+    const targetsByEntity = new Map()
+    nodes.filter((node) => node.layer === targetLayer).forEach((node) => {
+      const key = lineageEntityKey(node)
+      if (!key) return
+      targetsByEntity.set(key, [...(targetsByEntity.get(key) || []), node])
+    })
+
+    sourceNodes.forEach((sourceNode) => {
+      const key = lineageEntityKey(sourceNode)
+      const targets = targetsByEntity.get(key) || []
+      if (targets.length !== 1) return
+      const targetNode = targets[0]
+      const edgeKey = `${sourceNode.id}:${targetNode.id}`
+      if (edgeKeys.has(edgeKey)) return
+      edges.push({
+        id: `display:${sourceNode.id}:${targetNode.id}`,
+        source: sourceNode.id,
+        target: targetNode.id,
+        type: 'pipeline',
+        display_inferred: true,
+      })
+      edgeKeys.add(edgeKey)
+    })
+  }
+
+  return edges.filter((edge) => nodeById.has(edge.source) && nodeById.has(edge.target))
+}
+
+function pipelineEdgeStroke(edge, nodeById) {
+  const sourceLayer = nodeById.get(edge.source)?.layer
+  const targetLayer = nodeById.get(edge.target)?.layer
+  if (sourceLayer === 'source' && targetLayer === 'bronze') return '#38bdf8'
+  if (sourceLayer === 'bronze' && targetLayer === 'silver') return '#f59e0b'
+  return 'url(#pipelineGradient)'
 }
 
 function buildRelationshipEdges(lineage) {
@@ -322,7 +381,10 @@ function DataLineagePage() {
   const [loadingRuns, setLoadingRuns] = useState(true)
   const [loadingLineage, setLoadingLineage] = useState(false)
   const [error, setError] = useState('')
+  const [runsError, setRunsError] = useState('')
+  const [runsReloadKey, setRunsReloadKey] = useState(0)
   const [flowExpanded, setFlowExpanded] = useState(false)
+  const [flowZoom, setFlowZoom] = useState(1)
 
   useEffect(() => {
     if (!flowExpanded) return undefined
@@ -336,29 +398,54 @@ function DataLineagePage() {
   useEffect(() => {
     let cancelled = false
     const loadRuns = async () => {
+      let lastError = null
       try {
         setLoadingRuns(true)
-        const data = await getRuns()
-        if (cancelled) return
-        const nextRuns = Array.isArray(data) ? data : []
-        setRuns(nextRuns)
-        const requestedExists = requestedRunId
-          ? nextRuns.some((run) => String(run.id || run.run_id || '') === requestedRunId)
-          : false
-        if (requestedExists) {
-          setSelectedRunId(requestedRunId)
-        } else if (!selectedRunId && nextRuns.length > 0) {
-          setSelectedRunId(String(nextRuns[0].id || nextRuns[0].run_id || ''))
+        setRunsError('')
+        // The run selector must recover independently from a transient Azure
+        // SQL reconnect. A single empty/failing response must not leave this
+        // page permanently stuck while Run History is already available.
+        for (let attempt = 0; attempt < 4 && !cancelled; attempt += 1) {
+          try {
+            const data = await getLineageRuns()
+            if (cancelled) return
+            const nextRuns = Array.isArray(data) ? data : []
+            if (nextRuns.length > 0) {
+              setRuns(nextRuns)
+              const requestedExists = requestedRunId
+                ? nextRuns.some((run) => String(run.id || run.run_id || '') === requestedRunId)
+                : false
+              setSelectedRunId((currentRunId) => {
+                if (requestedExists) return requestedRunId
+                const currentExists = currentRunId
+                  ? nextRuns.some((run) => String(run.id || run.run_id || '') === currentRunId)
+                  : false
+                if (currentExists) return currentRunId
+                return String(nextRuns[0].id || nextRuns[0].run_id || '')
+              })
+              return
+            }
+            lastError = new Error('No persisted pipeline runs were returned.')
+          } catch (loadError) {
+            lastError = loadError
+          }
+          if (attempt < 3 && !cancelled) {
+            await new Promise((resolve) => window.setTimeout(resolve, 750 * (attempt + 1)))
+          }
         }
-      } catch (loadError) {
-        if (!cancelled) setError(loadError.message || 'Failed to load runs')
+        if (!cancelled) {
+          setRuns([])
+          setSelectedRunId('')
+          setLineage(null)
+          setRunsError(lastError?.message || 'Failed to load pipeline runs.')
+        }
       } finally {
         if (!cancelled) setLoadingRuns(false)
       }
     }
     loadRuns()
     return () => { cancelled = true }
-  }, [requestedRunId, selectedRunId])
+  }, [requestedRunId, runsReloadKey])
 
   useEffect(() => {
     if (!requestedRunId || requestedRunId === selectedRunId) return
@@ -366,25 +453,29 @@ function DataLineagePage() {
   }, [requestedRunId, selectedRunId])
 
   useEffect(() => {
-    if (!selectedRunId) return
-    let cancelled = false
+    if (!selectedRunId) {
+      setLineage(null)
+      return undefined
+    }
+    const controller = new AbortController()
     const loadLineage = async () => {
       try {
         setLoadingLineage(true)
         setError('')
-        const payload = await getRunLineage(selectedRunId)
-        if (!cancelled) setLineage(payload)
+        setLineage(null)
+        const payload = await getRunLineage(selectedRunId, controller.signal)
+        if (!controller.signal.aborted) setLineage(payload)
       } catch (loadError) {
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
           setLineage(null)
           setError(loadError.message || 'Failed to load lineage')
         }
       } finally {
-        if (!cancelled) setLoadingLineage(false)
+        if (!controller.signal.aborted) setLoadingLineage(false)
       }
     }
     loadLineage()
-    return () => { cancelled = true }
+    return () => controller.abort()
   }, [selectedRunId])
 
   const selectedRun = useMemo(
@@ -408,6 +499,10 @@ function DataLineagePage() {
   const layout = useMemo(() => computeNodeLayout(grouped), [grouped])
   const columnNodeIds = useMemo(() => buildColumnNodeIds(grouped), [grouped])
   const pipelineEdges = useMemo(() => buildPipelineEdges(lineage, columnNodeIds), [lineage, columnNodeIds])
+  const lineageNodeById = useMemo(
+    () => new Map((lineage?.nodes || []).map((node) => [node.id, node])),
+    [lineage]
+  )
   const relationshipEdges = useMemo(() => buildRelationshipEdges(lineage), [lineage])
 
   return (
@@ -440,9 +535,20 @@ function DataLineagePage() {
         <section className="grid gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
           <aside className="space-y-6">
             <div className="rounded-[24px] border border-bg-border bg-bg-card p-5 shadow-card">
-              <div className="flex items-center gap-2 text-sm font-medium text-text-secondary">
-                <Database size={16} />
-                Run Selector
+              <div className="flex items-center justify-between gap-3 text-sm font-medium text-text-secondary">
+                <div className="flex items-center gap-2">
+                  <Database size={16} />
+                  Run Selector
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRunsReloadKey((current) => current + 1)}
+                  disabled={loadingRuns}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-bg-border bg-bg-base px-2.5 text-[11px] font-semibold text-text-secondary transition-colors hover:border-accent-blue/40 hover:text-text-primary disabled:cursor-wait disabled:opacity-50"
+                >
+                  <RefreshCw size={13} className={loadingRuns ? 'animate-spin' : ''} />
+                  Refresh runs
+                </button>
               </div>
               <div className="mt-4">
                 <label className="mb-2 block text-[11px] font-semibold uppercase tracking-[0.16em] text-text-tertiary">
@@ -468,6 +574,9 @@ function DataLineagePage() {
                     )
                   })}
                 </select>
+                {runsError && !loadingRuns && (
+                  <div className="mt-2 text-xs leading-5 text-red-300">{runsError}</div>
+                )}
               </div>
 
               <div className="mt-5">
@@ -525,6 +634,37 @@ function DataLineagePage() {
                     Loading lineage
                   </div>
                 )}
+                  {flowExpanded && (
+                    <div className="inline-flex h-9 items-center overflow-hidden rounded-lg border border-bg-border bg-bg-base">
+                      <button
+                        type="button"
+                        onClick={() => setFlowZoom((current) => Math.max(0.6, Number((current - 0.1).toFixed(1))))}
+                        disabled={flowZoom <= 0.6}
+                        className="flex h-full w-9 items-center justify-center text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-35"
+                        aria-label="Zoom out lineage"
+                      >
+                        <ZoomOut size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFlowZoom(1)}
+                        className="flex h-full min-w-[62px] items-center justify-center gap-1 border-x border-bg-border px-2 text-[11px] font-semibold text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+                        aria-label="Reset lineage zoom"
+                      >
+                        <RotateCcw size={12} />
+                        {Math.round(flowZoom * 100)}%
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFlowZoom((current) => Math.min(1.5, Number((current + 0.1).toFixed(1))))}
+                        disabled={flowZoom >= 1.5}
+                        className="flex h-full w-9 items-center justify-center text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-35"
+                        aria-label="Zoom in lineage"
+                      >
+                        <ZoomIn size={15} />
+                      </button>
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={() => setFlowExpanded((current) => !current)}
@@ -537,19 +677,13 @@ function DataLineagePage() {
                 </div>
               </div>
 
-              {lineage?.summary?.fallback && !error && (
-                <div className="mt-5 rounded-2xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                  Showing checkpoint lineage for this BRD/database run because generated script artifacts are not available yet. Certified tables and run metadata are still used to preserve the Source to Bronze to Silver to Gold flow.
-                </div>
-              )}
-
               {error ? (
                 <div className="mt-5 flex items-start gap-3 rounded-2xl border border-red-500/25 bg-red-500/10 p-4 text-sm text-red-100">
                   <AlertCircle size={18} className="mt-0.5 shrink-0" />
                   <span>{error}</span>
                 </div>
               ) : (
-                <div className={`${flowExpanded ? 'min-h-0 flex-1 overflow-y-auto' : ''} mt-6 rounded-[24px] border border-white/5 bg-[linear-gradient(180deg,rgba(15,23,42,0.45),rgba(17,24,39,0.2))] p-3 sm:p-4`}>
+                <div className={`${flowExpanded ? 'min-h-0 flex-1 overflow-auto overscroll-contain' : 'overflow-x-auto'} mt-6 rounded-[24px] border border-white/5 bg-[linear-gradient(180deg,rgba(15,23,42,0.45),rgba(17,24,39,0.2))] p-3 sm:p-4`}>
                   <div className="mb-5 grid grid-cols-2 gap-3 lg:flex lg:items-center">
                     <FlowStep label="Source" count={lineage?.summary?.source_count ?? 0} tone="sky" detail="insurance.dbo" />
                     <FlowArrow />
@@ -587,9 +721,9 @@ function DataLineagePage() {
                       )
                     })}
                   </div>
-                  <div className="hidden overflow-x-auto overflow-y-hidden lg:block">
-                  <div className="relative" style={{ width: layout.width, minHeight: layout.height }}>
-                    <svg className="absolute left-0 top-0" width={layout.width} height={layout.height}>
+                  <div className="hidden lg:block" style={{ width: layout.width * (flowExpanded ? flowZoom : 1), height: layout.height * (flowExpanded ? flowZoom : 1) }}>
+                  <div className="relative" style={{ width: layout.width, minHeight: layout.height, transform: `scale(${flowExpanded ? flowZoom : 1})`, transformOrigin: 'top left' }}>
+                    <svg className="pointer-events-none absolute left-0 top-0 z-20 overflow-visible" width={layout.width} height={layout.height}>
                       <defs>
                         <linearGradient id="pipelineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
                           <stop offset="0%" stopColor="#38bdf8" />
@@ -606,7 +740,7 @@ function DataLineagePage() {
                             key={edge.id}
                             d={edgePath(sourceBox, targetBox)}
                             fill="none"
-                            stroke="url(#pipelineGradient)"
+                            stroke={pipelineEdgeStroke(edge, lineageNodeById)}
                             strokeWidth="3"
                             strokeLinecap="round"
                             opacity="0.88"
@@ -615,7 +749,7 @@ function DataLineagePage() {
                       })}
                     </svg>
 
-                    <div className="absolute left-0 top-0 flex gap-[96px]">
+                    <div className="absolute left-0 top-0 z-10 flex gap-[96px]">
                       {LAYER_ORDER.map((layer) => {
                         const style = LAYER_STYLES[layer]
                         return (

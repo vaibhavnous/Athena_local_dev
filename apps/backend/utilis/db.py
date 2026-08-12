@@ -60,13 +60,13 @@ config = {
 }
 
 FINGERPRINT_MAX_LEN = 64
-SQL_CONNECT_RETRIES = max(1, int(os.getenv("ATHENA_SQL_CONNECT_RETRIES", "1")))
+SQL_CONNECT_RETRIES = max(1, int(os.getenv("ATHENA_SQL_CONNECT_RETRIES", "2")))
 SQL_CONNECT_RETRY_DELAY_SECONDS = float(os.getenv("ATHENA_SQL_CONNECT_RETRY_DELAY_SECONDS", "1"))
 SQL_TCP_PROBE_TIMEOUT_SECONDS = float(os.getenv("ATHENA_SQL_TCP_PROBE_TIMEOUT_SECONDS", "2"))
 SQL_TCP_PROBE_ENABLED = str(os.getenv("ATHENA_SQL_TCP_PROBE_ENABLED", "true")).lower() not in {"0", "false", "no"}
 SQL_FAIL_FAST_ON_TCP_PROBE = str(os.getenv("ATHENA_SQL_FAIL_FAST_ON_TCP_PROBE", "true")).lower() not in {"0", "false", "no"}
 SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS = max(0, float(os.getenv("ATHENA_SQL_ENDPOINT_NEGATIVE_CACHE_SECONDS", "60")))
-NETWORK_ERROR_MARKERS = ("08S01", "10060", "10061", "10054", "08001")
+NETWORK_ERROR_MARKERS = ("08S01", "10060", "10061", "10054", "10053", "08001")
 TLS_CLIENT_ERROR_MARKERS = (
     "encryption not supported on the client",
     "no credentials are available in the security package",
@@ -77,12 +77,26 @@ TLS_CLIENT_ERROR_MARKERS = (
 _SQL_ENDPOINT_FAILURE_CACHE: Dict[tuple[str, str, int, str], tuple[float, str]] = {}
 _SQL_ENDPOINT_FAILURE_LOCK = threading.Lock()
 _SQL_ENDPOINT_PROBE_LOCK = threading.Lock()
+_RUN_HISTORY_SCHEMA_LOCK = threading.Lock()
+_RUN_HISTORY_SCHEMA_READY = False
+_PIPELINE_CONNECTION_LIMIT = max(1, int(os.getenv("ATHENA_SQL_MAX_CONCURRENT_CONNECTIONS", "2")))
+_PIPELINE_CONNECTION_SEMAPHORE = threading.BoundedSemaphore(_PIPELINE_CONNECTION_LIMIT)
+_PYODBC_POOLING_CONFIGURED = False
+_PYODBC_POOLING_LOCK = threading.Lock()
 
 
 def _get_pyodbc():
+    global _PYODBC_POOLING_CONFIGURED
     try:
         import pyodbc
-
+        if not _PYODBC_POOLING_CONFIGURED:
+            with _PYODBC_POOLING_LOCK:
+                if not _PYODBC_POOLING_CONFIGURED:
+                    # Must be configured before the first connection. This is
+                    # the supported pyodbc mechanism; `Pooling=No` is not a
+                    # valid SQL Server connection-string attribute.
+                    pyodbc.pooling = False
+                    _PYODBC_POOLING_CONFIGURED = True
         return pyodbc
     except Exception as exc:
         raise RuntimeError(
@@ -125,6 +139,26 @@ def _build_connection_string(host, port, database_name, username, password, driv
         f"Connection Timeout={connection_timeout};"
         f"Login Timeout={connection_timeout};"
     )
+
+
+class _LeasedPipelineConnection:
+    """Release a shared pipeline-DB slot when the wrapped connection closes."""
+
+    def __init__(self, connection: Any) -> None:
+        self._connection = connection
+        self._released = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+    def close(self) -> None:
+        if self._released:
+            return
+        try:
+            self._connection.close()
+        finally:
+            self._released = True
+            _PIPELINE_CONNECTION_SEMAPHORE.release()
 
 
 def _driver_candidates() -> list[str]:
@@ -241,7 +275,19 @@ def _connect_with_retry(
                 database_name=database_name,
             )
             if cached_failure:
-                raise RuntimeError(cached_failure)
+                # A prior ODBC connection can be aborted transiently (for
+                # example Windows 10053) while the SQL endpoint is already
+                # reachable again. Re-probe instead of blacking out every API
+                # request for the full negative-cache period.
+                endpoint_error = _probe_sql_endpoint(host, port, SQL_TCP_PROBE_TIMEOUT_SECONDS)
+                if endpoint_error:
+                    raise RuntimeError(cached_failure) from endpoint_error
+                _clear_sql_endpoint_failure(
+                    role=role,
+                    host=host,
+                    port=port,
+                    database_name=database_name,
+                )
 
             endpoint_error = _probe_sql_endpoint(host, port, SQL_TCP_PROBE_TIMEOUT_SECONDS)
             if endpoint_error:
@@ -273,16 +319,9 @@ def _connect_with_retry(
         except pyodbc.Error as exc:
             last_exc = exc
             if attempt >= SQL_CONNECT_RETRIES:
-                if _sql_error_hint(exc, role=role, host=host, port=port, database_name=database_name).startswith(
-                    "Likely connectivity issue"
-                ):
-                    _cache_sql_endpoint_failure(
-                        role=role,
-                        host=host,
-                        port=port,
-                        database_name=database_name,
-                        message=_sql_error_hint(exc, role=role, host=host, port=port, database_name=database_name),
-                    )
+                # Do not cache an ODBC failure as endpoint-wide downtime. A
+                # single stale/aborted socket must not black out auth and every
+                # data page. Only an actual failed TCP probe is cached.
                 logger.error(
                     "%s",
                     _sql_error_hint(exc, role=role, host=host, port=port, database_name=database_name),
@@ -346,34 +385,170 @@ def get_pipeline_connection() -> pyodbc.Connection:
             + " in apps/backend/.env."
         )
 
-    last_exc = None
-    drivers = _driver_candidates()
-    for index, driver in enumerate(drivers):
+    acquired = _PIPELINE_CONNECTION_SEMAPHORE.acquire(timeout=max(10, config["azure_sql"]["connection_timeout"] * 3))
+    if not acquired:
+        raise TimeoutError("Timed out waiting for an available pipeline database connection")
+    try:
+        last_exc = None
+        drivers = _driver_candidates()
+        for index, driver in enumerate(drivers):
+            try:
+                conn_str = _build_connection_string(
+                    db_conf["host"],
+                    db_conf["port"],
+                    db_conf["pipeline_database"],
+                    db_conf["username"],
+                    db_conf["password"],
+                    driver,
+                )
+                connection = _connect_with_retry(
+                    conn_str,
+                    database_name=db_conf["pipeline_database"],
+                    host=db_conf["host"],
+                    port=db_conf["port"],
+                    role="pipeline",
+                )
+                return _LeasedPipelineConnection(connection)
+            except pyodbc.Error as exc:
+                last_exc = exc
+                if "ODBC Driver" not in str(exc):
+                    raise
+                if index + 1 < len(drivers):
+                    logger.warning("Pipeline DB connection failed with driver=%s, retrying fallback driver", driver)
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Unable to establish pipeline DB connection")
+    except Exception:
+        _PIPELINE_CONNECTION_SEMAPHORE.release()
+        raise
+
+
+def ensure_run_history_schema() -> None:
+    """Add the relational project index used by project-scoped run history."""
+    global _RUN_HISTORY_SCHEMA_READY
+    if _RUN_HISTORY_SCHEMA_READY:
+        return
+    with _RUN_HISTORY_SCHEMA_LOCK:
+        if _RUN_HISTORY_SCHEMA_READY:
+            return
+        schema = config["azure_sql"]["pipeline_schema"]
+        table_name = f"[{schema}].[brd_run_registry]"
+        conn = get_pipeline_connection()
         try:
-            conn_str = _build_connection_string(
-                db_conf["host"],
-                db_conf["port"],
-                db_conf["pipeline_database"],
-                db_conf["username"],
-                db_conf["password"],
-                driver,
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                IF COL_LENGTH(N'{schema}.brd_run_registry', N'project_id') IS NULL
+                    ALTER TABLE {table_name} ADD project_id NVARCHAR(36) NULL;
+                """
             )
-            return _connect_with_retry(
-                conn_str,
-                database_name=db_conf["pipeline_database"],
-                host=db_conf["host"],
-                port=db_conf["port"],
-                role="pipeline",
+            cursor.execute(
+                f"""
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.indexes
+                    WHERE object_id = OBJECT_ID(N'{schema}.brd_run_registry')
+                      AND name = N'IX_brd_run_registry_project_timestamp'
+                )
+                    CREATE INDEX IX_brd_run_registry_project_timestamp
+                    ON {table_name} (project_id, [timestamp] DESC);
+                """
             )
-        except pyodbc.Error as exc:
+            conn.commit()
+            _RUN_HISTORY_SCHEMA_READY = True
+        finally:
+            conn.close()
+
+
+def backfill_run_history_index(batch_size: int = 50) -> int:
+    """Backfill legacy registry rows without delaying API requests."""
+    ensure_run_history_schema()
+    schema = config["azure_sql"]["pipeline_schema"]
+    table_name = f"[{schema}].[brd_run_registry]"
+    safe_batch_size = max(1, min(200, int(batch_size or 50)))
+    changed_total = 0
+    conn = get_pipeline_connection()
+    try:
+        cursor = conn.cursor()
+        # Extract the small relational values once. Updating through a JSON
+        # join caused Azure SQL to repeatedly parse the large checkpoint JSON
+        # and could hold the maintenance worker for several minutes.
+        cursor.execute(
+            f"""
+            SELECT registry.run_id,
+                   CONVERT(NVARCHAR(36), JSON_VALUE(cp.full_state_json, '$.project_id'))
+            FROM {table_name} AS registry WITH (READPAST)
+            JOIN [{schema}].[kpi_checkpoints] AS cp WITH (READUNCOMMITTED)
+              ON cp.run_id = registry.run_id
+            WHERE registry.project_id IS NULL
+              AND ISJSON(cp.full_state_json) = 1
+              AND JSON_VALUE(cp.full_state_json, '$.project_id') IS NOT NULL;
+            """
+        )
+        pending = [(str(project_id), str(run_id)) for run_id, project_id in cursor.fetchall() if project_id]
+        for offset in range(0, len(pending), safe_batch_size):
+            batch = pending[offset : offset + safe_batch_size]
+            cursor.executemany(
+                f"UPDATE {table_name} SET project_id = ? WHERE run_id = ? AND project_id IS NULL",
+                batch,
+            )
+            conn.commit()
+            changed_total += len(batch)
+        return changed_total
+    finally:
+        conn.close()
+
+
+def upsert_run_history_index(cursor: Any, run_id: str, state: Dict[str, Any]) -> None:
+    schema = config["azure_sql"]["pipeline_schema"]
+    project_id = str(state.get("project_id") or "").strip() or None
+    status_value = str(state.get("status") or "UNKNOWN").strip().upper()[:100]
+    token_count = int(state.get("token_estimate") or 0)
+    cursor.execute(
+        f"""
+        MERGE [{schema}].[brd_run_registry] AS target
+        USING (VALUES (?)) AS source (run_id)
+        ON target.run_id = source.run_id
+        WHEN MATCHED THEN UPDATE SET
+            project_id = COALESCE(?, target.project_id),
+            status = ?,
+            [timestamp] = SYSUTCDATETIME()
+        WHEN NOT MATCHED THEN INSERT (run_id, status, token_count, [timestamp], project_id)
+            VALUES (?, ?, ?, SYSUTCDATETIME(), ?);
+        """,
+        run_id,
+        project_id,
+        status_value,
+        run_id,
+        status_value,
+        token_count,
+        project_id,
+    )
+
+
+def is_transient_sql_error(exc: Exception) -> bool:
+    """Return whether reconnecting and repeating a read is safe and useful."""
+    message = str(exc)
+    return any(marker.lower() in message.lower() for marker in NETWORK_ERROR_MARKERS)
+
+
+def run_pipeline_read(operation, *, attempts: int = 2):
+    """Run an idempotent read, reconnecting once after a dropped SQL socket."""
+    last_exc: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        connection = get_pipeline_connection()
+        try:
+            return operation(connection.cursor())
+        except Exception as exc:
             last_exc = exc
-            if "ODBC Driver" not in str(exc):
+            if attempt >= attempts or not is_transient_sql_error(exc):
                 raise
-            if index + 1 < len(drivers):
-                logger.warning("Pipeline DB connection failed with driver=%s, retrying fallback driver", driver)
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("Unable to establish pipeline DB connection")
+            logger.warning("Transient SQL read failed; reconnecting once: %s", exc)
+        finally:
+            try:
+                connection.close()
+            except Exception:
+                pass
+    raise last_exc or RuntimeError("SQL read failed")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -820,6 +995,7 @@ def save_checkpoint_state(run_id: str, state: Dict[str, Any]) -> None:
             """,
             (run_id, state_json, run_id, state_json),
         )
+        upsert_run_history_index(cursor, run_id, state)
         conn.commit()
     except Exception as e:
         logger.warning("Checkpoint save failed for %s: %s", run_id, e)

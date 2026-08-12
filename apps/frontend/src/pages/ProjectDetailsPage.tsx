@@ -2,9 +2,9 @@
 import React, { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { AnimatePresence } from 'framer-motion'
-import { AlertTriangle, ArrowLeft, CalendarDays, Edit2, FileText, Folder, Info, Loader2, Play, RefreshCw } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, CalendarDays, Download, Edit2, FileText, Folder, Info, Loader2, Play, RefreshCw } from 'lucide-react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
-import { getRun } from '../api/athenaApi'
+import { downloadRunScripts, getRun } from '../api/athenaApi'
 import { PageHeader } from '../components/shared/DashboardLayout'
 import PythonCodeDialog from '../components/shared/PythonCodeDialog'
 import RunReportDialog from '../components/shared/RunReportDialog'
@@ -33,6 +33,8 @@ export default function ProjectDetailsPage() {
   const [runInfoOpen, setRunInfoOpen] = useState(true)
   const [codeDialogStage, setCodeDialogStage] = useState('')
   const [reportOpen, setReportOpen] = useState(false)
+  const [downloadingScripts, setDownloadingScripts] = useState(false)
+  const [downloadError, setDownloadError] = useState('')
   const {
     data: runs = [],
     isLoading: runsLoading,
@@ -55,6 +57,7 @@ export default function ProjectDetailsPage() {
     setRunInfoOpen(true)
     setCodeDialogStage('')
     setReportOpen(false)
+    setDownloadError('')
   }, [selectedRunId])
 
   const selectedSummary = runs.find((run) => String(run.run_id) === selectedRunId) || null
@@ -79,6 +82,27 @@ export default function ProjectDetailsPage() {
   const phases = selectedRun ? getPhaseGroups(selectedRun) : []
   const runsError = requestErrorMessage(runsRequestError, 'Failed to load project runs.')
   const selectedFailed = normalizeState(selectedRun?.status) === 'FAILED'
+  const selectedCompleted = normalizeState(selectedRun?.status) === 'COMPLETED'
+  const downloadAllScripts = async () => {
+    if (!selectedRunId || downloadingScripts) return
+    setDownloadingScripts(true)
+    setDownloadError('')
+    try {
+      const archive = await downloadRunScripts(selectedRunId)
+      const url = window.URL.createObjectURL(archive)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `astra_scripts_${selectedRunId}.zip`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (downloadFailure) {
+      setDownloadError(downloadFailure?.message || 'Unable to download all scripts for this run.')
+    } finally {
+      setDownloadingScripts(false)
+    }
+  }
 
   if (isLoading) return <LoadingState label="Loading project..." />
   if (error || !project) return <div className="card flex min-h-[320px] flex-col items-center justify-center gap-3"><AlertTriangle className="text-red-400"/><p>{error?.message || 'Project not found'}</p><button className="btn-secondary" onClick={()=>navigate('/app/project')}>Back to projects</button></div>
@@ -107,7 +131,7 @@ export default function ProjectDetailsPage() {
 
     <section className="card overflow-hidden">
       <header className="flex items-center justify-between border-b border-bg-border p-4">
-        <div className="flex items-center gap-2"><FileText size={15} className="text-accent-blue"/><h2 className="text-sm font-semibold">Run History</h2><span className="rounded-full border border-bg-border px-2 py-0.5 text-[10px] text-text-muted">{runs.length} run{runs.length === 1 ? '' : 's'}</span></div>
+        <div className="flex items-center gap-2"><FileText size={15} className="text-accent-blue"/><h2 className="text-sm font-semibold">Run History</h2><span className="rounded-full border border-bg-border px-2 py-0.5 text-[10px] text-text-muted">{runsLoading ? 'Loading' : runsError && !runs.length ? 'Unavailable' : `${runs.length} run${runs.length === 1 ? '' : 's'}`}</span></div>
         <button className="btn-secondary flex items-center gap-2" onClick={()=>refetchRuns()} disabled={runsFetching}><RefreshCw size={12} className={runsFetching?'animate-spin':''}/>Refresh</button>
       </header>
       {runsError && <ErrorBanner message={runsError} onRetry={refetchRuns} />}
@@ -125,7 +149,8 @@ export default function ProjectDetailsPage() {
 
           <div className="min-w-0 p-4 sm:p-5">
             {selectedRun && <>
-              <div className="mb-4 flex items-start justify-between gap-3"><div className="min-w-0"><h3 className="truncate text-base font-bold text-white">{selectedRun.brd_filename || 'Untitled run'}</h3><p className="mt-1 break-all font-mono text-xs text-text-muted">{selectedRunId}</p></div><div className="flex items-center gap-2"><RunStatusPill status={selectedRun.status} tone={statusTone(selectedRun.status)} large/><button type="button" onClick={()=>refetchDetail()} disabled={detailFetching} aria-label="Refresh selected run" className="rounded-md p-2 text-text-tertiary hover:bg-bg-hover hover:text-white"><RefreshCw size={15} className={detailFetching ? 'animate-spin' : ''}/></button></div></div>
+              <div className="mb-4 flex items-start justify-between gap-3"><div className="min-w-0"><h3 className="truncate text-base font-bold text-white">{selectedRun.brd_filename || 'Untitled run'}</h3><p className="mt-1 break-all font-mono text-xs text-text-muted">{selectedRunId}</p></div><div className="flex flex-wrap items-center justify-end gap-2">{selectedCompleted && <button type="button" onClick={downloadAllScripts} disabled={downloadingScripts} className="btn-secondary inline-flex h-9 items-center gap-2 whitespace-nowrap text-xs disabled:cursor-wait disabled:opacity-60">{downloadingScripts ? <Loader2 size={13} className="animate-spin"/> : <Download size={13}/>} {downloadingScripts ? 'Preparing scripts…' : 'Download all scripts'}</button>}<RunStatusPill status={selectedRun.status} tone={statusTone(selectedRun.status)} large/><button type="button" onClick={()=>refetchDetail()} disabled={detailFetching} aria-label="Refresh selected run" className="rounded-md p-2 text-text-tertiary hover:bg-bg-hover hover:text-white"><RefreshCw size={15} className={detailFetching ? 'animate-spin' : ''}/></button></div></div>
+              {downloadError && <ErrorBanner message={downloadError}/>}
               {detailLoading && <LoadingState label="Loading run details..." compact/>}
               {detailError && <ErrorBanner message={requestErrorMessage(detailError, 'Failed to load run details.')} onRetry={refetchDetail}/>}
               {selectedFailed && (selectedRun.error || selectedRun.error_message) && <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300"><div className="mb-1 font-semibold">Failed at {selectedRun.failed_background_stage || selectedRun.last_failed_stage_key || 'pipeline stage'}</div><div className="break-words">{selectedRun.error || selectedRun.error_message}</div></div>}
@@ -164,5 +189,5 @@ function formatDatabaseType(value) {
 function Meta({label,value}) { return <span className="rounded-md border border-bg-border bg-bg-base px-2.5 py-1.5 text-xs"><b className="mr-1 text-[10px] uppercase text-text-muted">{label}:</b>{value}</span> }
 function InfoRow({label,value}) { return <div className="grid gap-1.5 sm:grid-cols-[190px_minmax(0,1fr)]"><div className="flex items-center gap-2 text-text-secondary"><Info size={13}/><span>{label}</span></div><div className="break-words font-mono text-white">{value || '-'}</div></div> }
 function LoadingState({label,compact=false}) { return <div className={`flex items-center justify-center gap-2 text-xs text-text-tertiary ${compact?'p-8':'min-h-[60vh]'}`}><Loader2 size={16} className="animate-spin"/>{label}</div> }
-function ErrorBanner({message,onRetry}) { return <div className="flex items-center justify-center gap-3 border-b border-red-500/20 bg-red-500/5 p-4 text-xs text-red-300"><AlertTriangle size={14}/><span>{message}</span><button type="button" onClick={()=>onRetry()} className="rounded-md border border-red-500/30 px-2.5 py-1 font-semibold hover:bg-red-500/10">Try again</button></div> }
+function ErrorBanner({message,onRetry}) { return <div className="flex items-center justify-center gap-3 border-b border-red-500/20 bg-red-500/5 p-4 text-xs text-red-300"><AlertTriangle size={14}/><span>{message}</span>{onRetry && <button type="button" onClick={()=>onRetry()} className="rounded-md border border-red-500/30 px-2.5 py-1 font-semibold hover:bg-red-500/10">Try again</button>}</div> }
 function EmptyRuns() { return <div className="flex flex-col items-center gap-2 p-12 text-center text-text-tertiary"><FileText size={22}/><p className="text-sm">No pipeline runs found.</p><p className="text-xs">Start the first run from this project.</p></div> }

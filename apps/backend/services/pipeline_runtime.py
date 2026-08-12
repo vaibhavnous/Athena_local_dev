@@ -19,7 +19,7 @@ from services.dbt_snowflake_runtime import (
     run_snowflake_dbt,
     snowflake_dbt_enabled,
 )
-from utilis.db import ai_store_db_writer, config, get_completed_items, get_connection, get_pending_items, timed_stage, update_hitl_items_batch
+from utilis.db import ai_store_db_writer, config, get_completed_items, get_connection, get_pending_items, is_transient_sql_error, timed_stage, update_hitl_items_batch, upsert_run_history_index
 from utilis.generated_code_paths import generated_code_dir
 from utilis.logger import logger
 
@@ -667,7 +667,7 @@ def load_checkpoint_fields(run_id: str, *fields: str) -> Dict[str, Any]:
         return {}
 
     select_list = ", ".join(
-        f"JSON_VALUE(full_state_json, '$.{field}') AS [{field}]"
+        f"JSON_VALUE(CASE WHEN ISJSON(full_state_json) = 1 THEN full_state_json ELSE N'{{}}' END, '$.{field}') AS [{field}]"
         for field in safe_fields
     )
 
@@ -678,7 +678,7 @@ def load_checkpoint_fields(run_id: str, *fields: str) -> Dict[str, Any]:
             f"""
             SELECT TOP 1 {select_list}
             FROM [{_pipeline_schema()}].[kpi_checkpoints]
-            WHERE run_id = ?
+            WHERE run_id = ? AND ISJSON(full_state_json) = 1
             ORDER BY checkpoint_at DESC
             """,
             (run_id,),
@@ -695,6 +695,25 @@ def load_checkpoint_fields(run_id: str, *fields: str) -> Dict[str, Any]:
         conn.close()
 
 
+def _run_checkpoint_read(operation, *, attempts: int = 2):
+    last_exc: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        conn = get_connection()
+        try:
+            return operation(conn.cursor())
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts or not is_transient_sql_error(exc):
+                raise
+            logger.warning("Transient checkpoint read failed; reconnecting once: %s", exc)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    raise last_exc or RuntimeError("Checkpoint read failed")
+
+
 def load_checkpoint_fields_many(run_ids: List[str], *fields: str) -> Dict[str, Dict[str, Any]]:
     """Load the latest lightweight checkpoint projection for several runs at once."""
     normalized_run_ids = list(dict.fromkeys(str(run_id or "").strip() for run_id in run_ids))
@@ -703,52 +722,154 @@ def load_checkpoint_fields_many(run_ids: List[str], *fields: str) -> Dict[str, D
     if not normalized_run_ids or not safe_fields:
         return {}
 
-    select_list = ", ".join(f"parsed.[{field}]" for field in safe_fields)
-    json_schema = ", ".join(
-        f"[{field}] NVARCHAR(MAX) '$.{field}'"
-        for field in safe_fields
-    )
-    requested_rows = ", ".join("(?)" for _ in normalized_run_ids)
+    placeholders = ", ".join("?" for _ in normalized_run_ids)
 
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
+    def read(cursor):
+        try:
+            cursor.timeout = max(1, int(os.getenv("ATHENA_SQL_QUERY_TIMEOUT_SECONDS", "5")))
+        except Exception:
+            pass
         cursor.execute(
             f"""
-            WITH requested_runs(run_id) AS (
-                SELECT requested.run_id
-                FROM (VALUES {requested_rows}) AS requested(run_id)
-            )
-            SELECT requested_runs.run_id, {select_list}
-            FROM requested_runs
-            CROSS APPLY (
-                SELECT TOP 1 cp.full_state_json
-                FROM [{_pipeline_schema()}].[kpi_checkpoints] AS cp WITH (READUNCOMMITTED)
-                WHERE cp.run_id = requested_runs.run_id
-                ORDER BY cp.checkpoint_at DESC
-            ) AS latest
-            OUTER APPLY OPENJSON(latest.full_state_json)
-            WITH ({json_schema}) AS parsed
+            SELECT run_id, full_state_json
+            FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
+            WHERE run_id IN ({placeholders})
             """,
-            tuple(normalized_run_ids),
+            *normalized_run_ids,
         )
         rows = cursor.fetchall()
-        return {
-            str(row[0]): {
-                field: row[index + 1]
-                for index, field in enumerate(safe_fields)
-                if row[index + 1] is not None
+        result: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            try:
+                checkpoint = json.loads(row[1]) if row[1] else {}
+            except (TypeError, ValueError):
+                checkpoint = {}
+            result[str(row[0])] = {
+                field: checkpoint[field]
+                for field in safe_fields
+                if checkpoint.get(field) is not None
             }
-            for row in rows
-        }
-    finally:
-        conn.close()
+        return result
+    return _run_checkpoint_read(read)
+
+
+def load_project_run_history(project_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Load one project's history without scanning every checkpoint JSON.
+
+    Project membership is filtered through the indexed run registry, while the
+    UI summary fields are parsed only for those matching checkpoints. This
+    avoids scanning checkpoint JSON for every run and avoids a second database
+    enrichment request.
+    """
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return []
+    safe_limit = max(1, min(1000, int(limit or 200)))
+    def read(cursor):
+        cursor.execute(
+            f"""
+            SELECT TOP ({safe_limit}) registry.run_id, registry.[timestamp]
+            FROM [{_pipeline_schema()}].[brd_run_registry] AS registry WITH (READUNCOMMITTED)
+            WHERE registry.project_id = ?
+            ORDER BY registry.[timestamp] DESC
+            """,
+            normalized_project_id,
+        )
+        registry_rows = [(str(row[0]), row[1]) for row in cursor.fetchall() if row and row[0]]
+        if not registry_rows:
+            return []
+
+        placeholders = ", ".join("?" for _ in registry_rows)
+        cursor.execute(
+            f"""
+            SELECT run_id, full_state_json
+            FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
+            WHERE run_id IN ({placeholders})
+            """,
+            *(run_id for run_id, _ in registry_rows),
+        )
+        checkpoints: Dict[str, Dict[str, Any]] = {}
+        for row in cursor.fetchall():
+            try:
+                checkpoints[str(row[0])] = json.loads(row[1]) if row[1] else {}
+            except (TypeError, ValueError):
+                checkpoints[str(row[0])] = {}
+
+        result: List[Dict[str, Any]] = []
+        for run_id, last_activity in registry_rows:
+            checkpoint = checkpoints.get(run_id, {})
+            result.append({
+                "run_id": run_id,
+                "last_activity": last_activity,
+                **checkpoint,
+            })
+        return result
+    return _run_checkpoint_read(read)
+
+
+def load_lineage_ready_runs(limit: int = 20, *, owner_email: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return only persisted runs that can be resolved by the lineage endpoint."""
+    safe_limit = max(1, min(200, int(limit or 50)))
+    # Fetch a modest surplus before applying user ownership in Python. This
+    # keeps SQL off the large JSON parsing path while preserving access rules.
+    candidate_limit = min(500, max(safe_limit, safe_limit * 4 if owner_email else safe_limit))
+
+    def read(cursor):
+        cursor.execute(
+            f"""
+            SELECT TOP ({candidate_limit}) run_id, [timestamp]
+            FROM [{_pipeline_schema()}].[brd_run_registry] WITH (READUNCOMMITTED)
+            ORDER BY [timestamp] DESC
+            """
+        )
+        registry_rows = [(str(row[0]), row[1]) for row in cursor.fetchall() if row and row[0]]
+        if not registry_rows:
+            return []
+        placeholders = ", ".join("?" for _ in registry_rows)
+        cursor.execute(
+            f"""
+            SELECT run_id, full_state_json
+            FROM [{_pipeline_schema()}].[kpi_checkpoints] WITH (READUNCOMMITTED)
+            WHERE run_id IN ({placeholders})
+              AND full_state_json IS NOT NULL
+            """,
+            *(run_id for run_id, _ in registry_rows),
+        )
+        checkpoint_json = {str(row[0]): row[1] for row in cursor.fetchall() if row and row[0]}
+        normalized_owner = str(owner_email or "").strip().lower()
+        results: List[Dict[str, Any]] = []
+        for run_id, last_activity in registry_rows:
+            try:
+                raw_checkpoint = checkpoint_json.get(run_id)
+                checkpoint = json.loads(raw_checkpoint) if raw_checkpoint else {}
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(checkpoint, dict) or not checkpoint:
+                continue
+            checkpoint_owner = str(
+                checkpoint.get("owner_email")
+                or checkpoint.get("created_by_email")
+                or checkpoint.get("submitted_by_email")
+                or checkpoint.get("user_email")
+                or ""
+            ).strip().lower()
+            if normalized_owner and checkpoint_owner != normalized_owner:
+                continue
+            results.append({
+                "run_id": run_id,
+                "last_activity": last_activity,
+                "checkpoint": checkpoint,
+                **checkpoint,
+            })
+            if len(results) >= safe_limit:
+                break
+        return results
+
+    return _run_checkpoint_read(read)
 
 
 def load_checkpoint_state(run_id: str) -> Optional[Dict[str, Any]]:
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
+    def read(cursor):
         cursor.execute(
             f"""
             SELECT TOP 1 full_state_json
@@ -762,8 +883,7 @@ def load_checkpoint_state(run_id: str) -> Optional[Dict[str, Any]]:
         if not row or not row[0]:
             return None
         return json.loads(row[0])
-    finally:
-        conn.close()
+    return _run_checkpoint_read(read)
 
 
 def save_checkpoint_state(run_id: str, state: Dict[str, Any]) -> None:
@@ -788,6 +908,7 @@ def save_checkpoint_state(run_id: str, state: Dict[str, Any]) -> None:
             """,
             (run_id, state_json, run_id, state_json),
         )
+        upsert_run_history_index(cursor, run_id, persisted_state)
         conn.commit()
     finally:
         conn.close()
@@ -803,7 +924,11 @@ def abort_background_run(run_id: str, checkpoint: Optional[Dict[str, Any]] = Non
             for job_key, future in BACKGROUND_JOBS.items()
             if job_key == run_id or job_key.startswith(f"{run_id}:")
         ]
-        save_checkpoint_state(run_id, aborted)
+
+    # Checkpoint persistence can be slow or temporarily unavailable. Never keep
+    # the process-wide job lock held while waiting for the database, otherwise
+    # unrelated API requests (including /health) can freeze behind it.
+    save_checkpoint_state(run_id, aborted)
 
     cancelled = sum(1 for future in futures if future.cancel())
     logger.warning(
@@ -990,6 +1115,7 @@ def ensure_background_capacity_locked() -> None:
 
 def submit_background(run_id: str, stage: str, fn, *args) -> Future:
     job_key = f"{run_id}:{stage}"
+    reservation = Future()
     with BACKGROUND_JOB_LOCK:
         if is_run_aborted(run_id):
             raise HTTPException(status_code=409, detail="Run has been aborted.")
@@ -999,56 +1125,89 @@ def submit_background(run_id: str, stage: str, fn, *args) -> Future:
             return existing
 
         ensure_background_capacity_locked()
+        # Reserve capacity before releasing the lock. The database checkpoint
+        # below may be slow, but other requests must still be able to inspect
+        # capacity and health while it is in progress.
+        BACKGROUND_JOBS[job_key] = reservation
+
+    try:
         mark_run_processing(run_id, stage)
-        future = BACKGROUND_EXECUTOR.submit(fn, *args)
-        BACKGROUND_JOBS[job_key] = future
+        with BACKGROUND_JOB_LOCK:
+            if is_run_aborted(run_id) or reservation.cancelled():
+                if BACKGROUND_JOBS.get(job_key) is reservation:
+                    BACKGROUND_JOBS.pop(job_key, None)
+                raise HTTPException(status_code=409, detail="Run has been aborted.")
+            future = BACKGROUND_EXECUTOR.submit(fn, *args)
+            BACKGROUND_JOBS[job_key] = future
+    except Exception as exc:
+        with BACKGROUND_JOB_LOCK:
+            if BACKGROUND_JOBS.get(job_key) is reservation:
+                BACKGROUND_JOBS.pop(job_key, None)
+        if not reservation.done():
+            reservation.set_exception(exc)
+        raise
+
+    def _complete_reservation(done: Future) -> None:
+        if reservation.done():
+            return
+        if done.cancelled():
+            reservation.cancel()
+            return
+        error = done.exception()
+        if error is not None:
+            reservation.set_exception(error)
+        else:
+            reservation.set_result(done.result())
+
+    future.add_done_callback(_complete_reservation)
 
     def _record_background_result(done: Future) -> None:
         try:
             result = done.result()
-            with BACKGROUND_JOB_LOCK:
-                checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
-                if is_run_aborted(run_id, checkpoint):
-                    save_checkpoint_state_timed(
-                        run_id,
-                        aborted_run_state(run_id, checkpoint),
-                        context=f"{stage}:background_aborted",
-                    )
-                else:
-                    if isinstance(result, dict):
-                        checkpoint.update(result)
-                    checkpoint.update({"run_id": run_id, "background_stage": None})
-                    if checkpoint.get("status") == "PROCESSING":
-                        checkpoint["status"] = "RUNNING"
-                    save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_complete")
+            checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+            if is_run_aborted(run_id, checkpoint):
+                save_checkpoint_state_timed(
+                    run_id,
+                    aborted_run_state(run_id, checkpoint),
+                    context=f"{stage}:background_aborted",
+                )
+            else:
+                if isinstance(result, dict):
+                    checkpoint.update(result)
+                checkpoint.update({"run_id": run_id, "background_stage": None})
+                if checkpoint.get("status") == "PROCESSING":
+                    checkpoint["status"] = "RUNNING"
+                save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_complete")
         except Exception as exc:
             logger.exception("Background %s failed for run_id=%s", stage, run_id)
-            with BACKGROUND_JOB_LOCK:
+            try:
+                checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
+            except Exception:
+                logger.exception("Failed to load checkpoint while recording background failure run_id=%s stage=%s", run_id, stage)
+                checkpoint = {"run_id": run_id}
+            if is_run_aborted(run_id, checkpoint):
                 try:
-                    checkpoint = load_checkpoint_state(run_id) or {"run_id": run_id}
-                except Exception:
-                    logger.exception("Failed to load checkpoint while recording background failure run_id=%s stage=%s", run_id, stage)
-                    checkpoint = {"run_id": run_id}
-                if is_run_aborted(run_id, checkpoint):
                     save_checkpoint_state_timed(
                         run_id,
                         aborted_run_state(run_id, checkpoint),
                         context=f"{stage}:background_aborted",
                     )
-                else:
-                    checkpoint.update(
-                        {
-                            "run_id": run_id,
-                            "status": "FAILED",
-                            "background_stage": None,
-                            "failed_background_stage": checkpoint.get("failed_background_stage") or stage,
-                            "error": str(exc),
-                        }
-                    )
-                    try:
-                        save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_failed")
-                    except Exception:
-                        logger.exception("Failed to save background failure checkpoint run_id=%s stage=%s", run_id, stage)
+                except Exception:
+                    logger.exception("Failed to save aborted background checkpoint run_id=%s stage=%s", run_id, stage)
+            else:
+                checkpoint.update(
+                    {
+                        "run_id": run_id,
+                        "status": "FAILED",
+                        "background_stage": None,
+                        "failed_background_stage": checkpoint.get("failed_background_stage") or stage,
+                        "error": str(exc),
+                    }
+                )
+                try:
+                    save_checkpoint_state_timed(run_id, checkpoint, context=f"{stage}:background_failed")
+                except Exception:
+                    logger.exception("Failed to save background failure checkpoint run_id=%s stage=%s", run_id, stage)
         finally:
             with BACKGROUND_JOB_LOCK:
                 if BACKGROUND_JOBS.get(job_key) is done:
@@ -1065,33 +1224,47 @@ def list_runs(
     project_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     safe_limit = max(1, min(1000, int(limit or 50)))
-    filters: List[str] = []
+    candidate_limit = min(1000, max(100, safe_limit * 5))
+    checkpoint_filters: List[str] = []
     parameters: List[str] = []
+    safe_checkpoint_json = (
+        "CASE WHEN ISJSON(latest.full_state_json) = 1 "
+        "THEN latest.full_state_json ELSE N'{}' END"
+    )
     if owner_email:
-        filters.append(
-            """LOWER(COALESCE(
-                NULLIF(JSON_VALUE(full_state_json, '$.owner_email'), ''),
-                NULLIF(JSON_VALUE(full_state_json, '$.created_by_email'), ''),
-                NULLIF(JSON_VALUE(full_state_json, '$.submitted_by_email'), ''),
-                NULLIF(JSON_VALUE(full_state_json, '$.user_email'), '')
+        checkpoint_filters.append(
+            f"""LOWER(COALESCE(
+                NULLIF(JSON_VALUE({safe_checkpoint_json}, '$.owner_email'), ''),
+                NULLIF(JSON_VALUE({safe_checkpoint_json}, '$.created_by_email'), ''),
+                NULLIF(JSON_VALUE({safe_checkpoint_json}, '$.submitted_by_email'), ''),
+                NULLIF(JSON_VALUE({safe_checkpoint_json}, '$.user_email'), '')
             )) = ?"""
         )
         parameters.append(str(owner_email).strip().lower())
     if project_id:
-        filters.append("JSON_VALUE(full_state_json, '$.project_id') = ?")
+        checkpoint_filters.append(f"JSON_VALUE({safe_checkpoint_json}, '$.project_id') = ?")
         parameters.append(str(project_id).strip())
-    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
     # Run history must not scan the large checkpoint JSON payload table just to
     # discover run IDs.  The ingestion pipeline already maintains the compact
     # run registry for this purpose (the same split used by the Athena app).
     # Checkpoint JSON is projected only for the small set of selected run IDs.
-    if filters:
+    if checkpoint_filters:
         index_query = f"""
+            WITH recent_registry AS (
+                SELECT TOP ({candidate_limit}) run_id, [timestamp]
+                FROM [{_pipeline_schema()}].[brd_run_registry] WITH (READUNCOMMITTED)
+                ORDER BY [timestamp] DESC
+            )
             SELECT TOP ({safe_limit}) registry.run_id, registry.[timestamp] AS last_activity
-            FROM [{_pipeline_schema()}].[brd_run_registry] AS registry WITH (READUNCOMMITTED)
-            INNER JOIN [{_pipeline_schema()}].[kpi_checkpoints] AS cp WITH (READUNCOMMITTED)
-                ON cp.run_id = registry.run_id
-            WHERE {' AND '.join(condition.replace('full_state_json', 'cp.full_state_json') for condition in filters)}
+            FROM recent_registry AS registry
+            CROSS APPLY (
+                SELECT TOP 1 cp.full_state_json
+                FROM [{_pipeline_schema()}].[kpi_checkpoints] AS cp WITH (READUNCOMMITTED)
+                WHERE cp.run_id = registry.run_id
+                  AND ISJSON(cp.full_state_json) = 1
+                ORDER BY cp.checkpoint_at DESC
+            ) AS latest
+            WHERE {' AND '.join(checkpoint_filters)}
             ORDER BY registry.[timestamp] DESC
         """
     else:
@@ -1101,9 +1274,7 @@ def list_runs(
             ORDER BY [timestamp] DESC
         """
 
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
+    def read(cursor):
         try:
             cursor.timeout = max(1, int(os.getenv("ATHENA_SQL_QUERY_TIMEOUT_SECONDS", "5")))
         except Exception:
@@ -1134,8 +1305,7 @@ def list_runs(
             }
             for row in base_rows
         ]
-    finally:
-        conn.close()
+    return _run_checkpoint_read(read)
 
 
 def _table_key(item: Dict[str, Any]) -> str:

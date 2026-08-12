@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -22,6 +23,17 @@ from utilis.embedding_status import get_embedding_runtime_status
 from utilis.logger import logger
 
 
+def _recover_interrupted_runs() -> None:
+    try:
+        from utilis.db import backfill_run_history_index
+        from services.pipeline_runtime import mark_interrupted_background_runs_on_startup
+
+        backfill_run_history_index()
+        mark_interrupted_background_runs_on_startup()
+    except Exception:
+        logger.exception("Interrupted run recovery failed during startup")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     embedding_status = get_embedding_runtime_status(probe_models=False)
@@ -33,12 +45,14 @@ async def lifespan(app: FastAPI):
         embedding_status.get("ready"),
         embedding_status.get("provider"),
     )
-    try:
-        from services.pipeline_runtime import mark_interrupted_background_runs_on_startup
-
-        mark_interrupted_background_runs_on_startup()
-    except Exception:
-        logger.exception("Interrupted run recovery failed during startup")
+    # Azure SQL recovery is best-effort maintenance. Run it independently so a
+    # slow or unavailable database cannot prevent health and API routes from
+    # becoming available.
+    threading.Thread(
+        target=_recover_interrupted_runs,
+        name="athena-interrupted-run-recovery",
+        daemon=True,
+    ).start()
     try:
         yield
     finally:

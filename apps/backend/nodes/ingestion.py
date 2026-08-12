@@ -363,20 +363,27 @@ def _store_and_register(state: Stage01State) -> Stage01State:
 
             cursor.execute(
                 f"""
-                INSERT INTO [{pipeline_schema}].brd_run_registry
-                (
-                    run_id,
-                    status,
-                    token_count,
-                    timestamp
-                )
-                VALUES (?, ?, ?, ?)
+                MERGE [{pipeline_schema}].brd_run_registry AS target
+                USING (VALUES (?)) AS source (run_id)
+                ON target.run_id = source.run_id
+                WHEN MATCHED THEN UPDATE SET
+                    status = ?, token_count = ?, [timestamp] = ?,
+                    project_id = COALESCE(?, target.project_id)
+                WHEN NOT MATCHED THEN INSERT
+                    (run_id, status, token_count, [timestamp], project_id)
+                    VALUES (?, ?, ?, ?, ?);
                 """,
                 (
                     run_id,
                     pipeline_status,
                     token_count,
                     utc_now,
+                    new_state.get("project_id"),
+                    run_id,
+                    pipeline_status,
+                    token_count,
+                    utc_now,
+                    new_state.get("project_id"),
                 ),
             )
 

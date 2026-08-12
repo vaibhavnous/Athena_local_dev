@@ -146,10 +146,16 @@ export const createKpiReview = (runId: string, payload: { name: string; definiti
   api.post(`/kpi-reviews/${runId}`, payload, { timeout: WRITE_TIMEOUT })
 
 export const getRuns = () => api.get('/runs', { timeout: RUNS_LIST_TIMEOUT })
+export const getLineageRuns = () => api.get('/lineage/runs', { timeout: RUNS_LIST_TIMEOUT })
 
 export const getRun = (runId: string) => api.get(`/runs/${runId}`, { timeout: RUN_DETAIL_TIMEOUT })
 export const getRunScripts = (runId: string) => api.get(`/run-scripts/${runId}`, { timeout: REVIEW_TIMEOUT })
-export const getRunLineage = (runId: string) => api.get(`/run-lineage/${runId}`, { timeout: REVIEW_TIMEOUT })
+export const downloadRunScripts = (runId: string) => api.get(`/run-scripts/${runId}/download`, {
+  timeout: REVIEW_TIMEOUT,
+  responseType: 'blob',
+}) as unknown as Promise<Blob>
+export const getRunLineage = (runId: string, signal?: AbortSignal) =>
+  api.get(`/run-lineage/${runId}`, { timeout: REVIEW_TIMEOUT, signal })
 export const getTableReviews = (runId: string) => api.get(`/table-reviews/${runId}`, { timeout: REVIEW_TIMEOUT })
 export const submitTableReviews = (runId: string, approvedTables: string[]) =>
   api.post(`/table-reviews/${runId}`, { approved_tables: approvedTables }, { timeout: WRITE_TIMEOUT })

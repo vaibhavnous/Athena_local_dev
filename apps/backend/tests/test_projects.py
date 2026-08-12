@@ -94,7 +94,7 @@ def test_project_list_is_scoped_to_client_owner(monkeypatch):
         app.dependency_overrides.pop(get_current_user, None)
 
 
-def test_project_runs_batch_loads_lightweight_checkpoint_fields(monkeypatch):
+def test_project_runs_loads_single_project_history_snapshot(monkeypatch):
     previous_override = app.dependency_overrides.get(get_current_user)
     app.dependency_overrides[get_current_user] = lambda: AuthUser(
         uid="owner", username="Owner", email="owner@astra.local", userType="Client"
@@ -104,23 +104,21 @@ def test_project_runs_batch_loads_lightweight_checkpoint_fields(monkeypatch):
         "find",
         lambda project_id: {"id": project_id, "owner_email": "owner@astra.local"},
     )
-    monkeypatch.setattr(
-        "services.pipeline_runtime.list_runs",
-        lambda limit, project_id: [
-            {"run_id": "run-1", "last_activity": "2026-08-07T06:00:00"},
-            {"run_id": "run-2", "last_activity": "2026-08-07T05:00:00"},
-        ],
-    )
+    projects_router.PROJECT_RUNS_CACHE.clear()
+    projects_router.PROJECT_RUNS_FUTURES.clear()
     captured = {}
 
-    def load_many(run_ids, *fields):
-        captured.update({"run_ids": run_ids, "fields": fields})
-        return {
-            "run-1": {"project_id": "project-1", "brd_filename": "claims.docx", "status": "COMPLETED"},
-            "run-2": {"project_id": "different-project", "status": "FAILED"},
-        }
+    def load_history(project_id, limit):
+        captured.update({"project_id": project_id, "limit": limit})
+        return [{
+            "run_id": "run-1",
+            "last_activity": "2026-08-07T06:00:00",
+            "project_id": "project-1",
+            "brd_filename": "claims.docx",
+            "status": "COMPLETED",
+        }]
 
-    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_fields_many", load_many)
+    monkeypatch.setattr("services.pipeline_runtime.load_project_run_history", load_history)
 
     response = client.get("/projects/project-1/runs")
 
@@ -132,11 +130,65 @@ def test_project_runs_batch_loads_lightweight_checkpoint_fields(monkeypatch):
         "brd_filename": "claims.docx",
         "status": "COMPLETED",
     }]
-    assert captured["run_ids"] == ["run-1", "run-2"]
-    assert "brd_filename" in captured["fields"]
-    assert "error" in captured["fields"]
-    assert "error_message" in captured["fields"]
-    assert "failed_background_stage" in captured["fields"]
+    assert captured == {"project_id": "project-1", "limit": 200}
+    if previous_override:
+        app.dependency_overrides[get_current_user] = previous_override
+    else:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_project_runs_reports_unavailable_when_snapshot_load_fails(monkeypatch):
+    previous_override = app.dependency_overrides.get(get_current_user)
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="owner", username="Owner", email="owner@astra.local", userType="Client"
+    )
+    monkeypatch.setattr(
+        projects_router.repository,
+        "find",
+        lambda project_id: {"id": project_id, "owner_email": "owner@astra.local"},
+    )
+    projects_router.PROJECT_RUNS_CACHE.clear()
+    projects_router.PROJECT_RUNS_FUTURES.clear()
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_project_run_history",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("database unavailable")),
+    )
+
+    response = client.get("/projects/project-1/runs")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Project run history is temporarily unavailable."
+    if previous_override:
+        app.dependency_overrides[get_current_user] = previous_override
+    else:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_project_runs_returns_stale_cache_when_refresh_times_out(monkeypatch):
+    previous_override = app.dependency_overrides.get(get_current_user)
+    app.dependency_overrides[get_current_user] = lambda: AuthUser(
+        uid="owner", username="Owner", email="owner@astra.local", userType="Client"
+    )
+    monkeypatch.setattr(
+        projects_router.repository,
+        "find",
+        lambda project_id: {"id": project_id, "owner_email": "owner@astra.local"},
+    )
+    projects_router.PROJECT_RUNS_FUTURES.clear()
+    projects_router.PROJECT_RUNS_CACHE["project-1"] = [
+        {"run_id": "cached-run", "status": "COMPLETED"},
+    ]
+
+    class TimeoutFuture:
+        def result(self, timeout):
+            raise FutureTimeoutError()
+
+    monkeypatch.setattr(projects_router, "_project_runs_future", lambda _project_id: TimeoutFuture())
+
+    response = client.get("/projects/project-1/runs")
+
+    assert response.status_code == 200
+    assert response.json() == [{"run_id": "cached-run", "status": "COMPLETED"}]
     if previous_override:
         app.dependency_overrides[get_current_user] = previous_override
     else:

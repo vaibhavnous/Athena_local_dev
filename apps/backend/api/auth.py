@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -79,6 +80,9 @@ class AuthService:
         self.repository = repository or AuthRepository()
         self._ready = False
         self._ready_lock = threading.Lock()
+        self._token_cache_lock = threading.Lock()
+        self._token_cache: dict[str, tuple[float, dict]] = {}
+        self._token_cache_seconds = max(0, int(os.getenv("ASTRA_AUTH_CACHE_SECONDS", "15")))
 
     def login(self, email: str, password: str) -> LoginResponse:
         self._ensure_ready()
@@ -117,6 +121,9 @@ class AuthService:
             "aud": self._audience,
         }
         token = jwt.encode(payload, self._jwt_secret(), algorithm="HS256")
+        if self._token_cache_seconds:
+            with self._token_cache_lock:
+                self._token_cache[token] = (time.monotonic() + self._token_cache_seconds, user)
         return LoginResponse(
             access_token=token,
             expires_in=expires_in,
@@ -137,7 +144,23 @@ class AuthService:
             raise HTTPException(status_code=401, detail="Invalid or expired session") from exc
 
         uid = str(payload.get("sub") or "")
-        user = self.repository.find_by_uid(uid) if uid else None
+        user = None
+        if uid and self._token_cache_seconds:
+            with self._token_cache_lock:
+                cached = self._token_cache.get(token)
+                if cached and cached[0] > time.monotonic():
+                    candidate = cached[1]
+                    if candidate.get("is_active") and int(payload.get("ver", -1)) == int(candidate.get("token_version", -2)):
+                        user = candidate
+                    else:
+                        self._token_cache.pop(token, None)
+                elif cached:
+                    self._token_cache.pop(token, None)
+        if user is None:
+            user = self.repository.find_by_uid(uid) if uid else None
+            if user and self._token_cache_seconds:
+                with self._token_cache_lock:
+                    self._token_cache[token] = (time.monotonic() + self._token_cache_seconds, user)
         if not user or not user["is_active"] or int(payload.get("ver", -1)) != int(user["token_version"]):
             raise HTTPException(status_code=401, detail="Invalid or expired session")
         return self._public_user(user)
@@ -189,6 +212,8 @@ class AuthService:
         )
         if not updated:
             raise HTTPException(status_code=404, detail="User not found")
+        with self._token_cache_lock:
+            self._token_cache.clear()
         return self._public_user(updated)
 
     def set_user_active(self, uid: str, is_active: bool, requester: AuthUser) -> AuthUser:
@@ -201,6 +226,8 @@ class AuthService:
         updated = self.repository.set_active(uid, is_active)
         if not updated:
             raise HTTPException(status_code=404, detail="User not found")
+        with self._token_cache_lock:
+            self._token_cache.clear()
         return self._public_user(updated)
 
     def delete_user(self, uid: str, requester: AuthUser) -> None:
@@ -211,6 +238,8 @@ class AuthService:
         if self._is_primary_admin(self._public_user(current)):
             raise HTTPException(status_code=403, detail="Primary admin cannot be deleted")
         self.repository.delete_user(uid)
+        with self._token_cache_lock:
+            self._token_cache.clear()
 
     def _ensure_ready(self) -> None:
         if self._ready:

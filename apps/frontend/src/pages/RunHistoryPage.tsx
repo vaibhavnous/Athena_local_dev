@@ -8,6 +8,7 @@ import {
   ChevronDown,
   Clock,
   Code2,
+  Download,
   FileText,
   History,
   Info,
@@ -16,7 +17,7 @@ import {
   Search,
 } from 'lucide-react'
 import useAthenaStore from '../store/useAthenaStore'
-import { getRun, getRuns, getRunStatus, getRunSummaryStatuses } from '../api/athenaApi'
+import { downloadRunScripts, getRun, getRuns, getRunStatus, getRunSummaryStatuses } from '../api/athenaApi'
 import { PageHeader } from '../components/shared/DashboardLayout'
 import PythonCodeDialog from '../components/shared/PythonCodeDialog'
 import RunReportDialog from '../components/shared/RunReportDialog'
@@ -56,6 +57,8 @@ function RunHistoryPage() {
   const [runInfoOpen, setRunInfoOpen] = useState(false)
   const [codeDialogStage, setCodeDialogStage] = useState('')
   const [reportOpen, setReportOpen] = useState(false)
+  const [downloadingRunId, setDownloadingRunId] = useState('')
+  const [downloadError, setDownloadError] = useState('')
   const runsRequestInFlightRef = useRef(false)
   const detailRequestInFlightRef = useRef<string | null>(null)
   const statusHydrationInFlightRef = useRef(new Set<string>())
@@ -79,7 +82,29 @@ function RunHistoryPage() {
     setRunInfoOpen(false)
     setCodeDialogStage('')
     setReportOpen(false)
+    setDownloadError('')
   }, [selectedRunId])
+
+  const handleDownloadAllScripts = async () => {
+    if (!selectedRunId || downloadingRunId) return
+    setDownloadingRunId(selectedRunId)
+    setDownloadError('')
+    try {
+      const archive = await downloadRunScripts(selectedRunId)
+      const url = window.URL.createObjectURL(archive)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `astra_scripts_${selectedRunId}.zip`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (error) {
+      setDownloadError(error?.message || 'Unable to download all scripts for this run.')
+    } finally {
+      setDownloadingRunId('')
+    }
+  }
 
   const loadRuns = useCallback(async (showLoading = false) => {
     if (runsRequestInFlightRef.current) return
@@ -409,11 +434,29 @@ function RunHistoryPage() {
                   </h2>
                   <div className="mt-2 font-mono text-xs text-white">{selectedRun.id}</div>
                 </div>
-                <div className="flex items-center gap-4">
+                <div className="flex flex-wrap items-center justify-end gap-3">
+                  {normalizeState(selectedRun.status) === 'COMPLETED' && (
+                    <button
+                      type="button"
+                      onClick={handleDownloadAllScripts}
+                      disabled={Boolean(downloadingRunId)}
+                      className="btn-secondary inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap text-xs disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {downloadingRunId === selectedRunId ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                      {downloadingRunId === selectedRunId ? 'Preparing scripts…' : 'Download all scripts'}
+                    </button>
+                  )}
                   <RunStatusPill status={selectedRun.status} tone={statusTone(selectedRun.status)} large />
                   <RefreshCw size={18} className="text-white" />
                 </div>
               </div>
+
+              {downloadError && (
+                <div role="alert" className="mb-4 flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-950/20 px-3 py-2 text-xs text-red-300">
+                  <AlertCircle size={13} />
+                  {downloadError}
+                </div>
+              )}
 
               <div className="overflow-hidden rounded-lg border border-[#253044] bg-[#0d1525]">
                 <button
