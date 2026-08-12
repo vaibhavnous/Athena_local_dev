@@ -197,6 +197,8 @@ def _design_contract_from_executable(
 
 
 class MetadataRepository(ABC):
+    max_bind_parameters: Optional[int] = None
+
     def __init__(self, context: TargetMetadataContext) -> None:
         self.context = context
 
@@ -274,9 +276,7 @@ class MetadataRepository(ABC):
         if not rows:
             return
         update_columns = tuple(column for column in columns if column not in key_columns and column != "created_at")
-        for offset in range(0, len(rows), 50):
-            chunk = rows[offset : offset + 50]
-            _, source, parameters = self._source_rows(chunk, prefix=f"deploy_{offset}_")
+        for _, source, parameters in self._source_row_batches(rows, prefix="deploy_"):
             join = " AND ".join(f"target.{column} = source.{column}" for column in key_columns)
             updates = ", ".join(f"target.{column} = source.{column}" for column in update_columns)
             self.execute(
@@ -328,6 +328,24 @@ class MetadataRepository(ABC):
             for index in range(len(materialized))
         )
         return names, source, parameters
+
+    def _source_row_batches(
+        self, rows: Iterable[Mapping[str, Any]], *, prefix: str
+    ) -> Iterable[tuple[tuple[str, ...], str, Dict[str, Any]]]:
+        materialized = [dict(row) for row in rows]
+        if not materialized:
+            return
+        width = len(materialized[0])
+        if width < 1 or any(len(row) != width for row in materialized):
+            raise ValueError("Bulk metadata rows must use one consistent contract.")
+        budget = self.max_bind_parameters
+        # Reserve a few parameters for predicates added by the caller.
+        batch_size = len(materialized) if not budget else max(1, (budget - 16) // width)
+        for offset in range(0, len(materialized), batch_size):
+            yield self._source_rows(
+                materialized[offset : offset + batch_size],
+                prefix=prefix,
+            )
 
     @staticmethod
     def _where_pairs(
@@ -2415,8 +2433,7 @@ class MetadataRepository(ABC):
                 "bundle": bundle,
             })
 
-        if executable_rows:
-            names, source, parameters = self._source_rows(executable_rows, prefix="exec")
+        for names, source, parameters in self._source_row_batches(executable_rows, prefix="exec"):
             self.execute(
                 f"MERGE INTO {self.table('cfg_ingestion_object')} AS target USING ({source}) AS source "
                 "ON target.ingestion_object_id = source.ingestion_object_id "
@@ -2436,30 +2453,32 @@ class MetadataRepository(ABC):
             }
             for item in prepared
         ]
-        _, activation_source, activation_parameters = self._source_rows(activation_rows, prefix="active")
-        self.execute(
-            f"MERGE INTO {self.table('cfg_mapping')} AS target USING ({activation_source}) AS source "
-            "ON target.ingestion_object_id = source.ingestion_object_id "
-            "AND target.processing_stage = source.processing_stage "
-            "WHEN MATCHED AND (target.mapping_version = source.mapping_version OR target.is_current = :enabled) "
-            "THEN UPDATE SET active_flag = CASE WHEN target.mapping_version = source.mapping_version THEN :enabled ELSE :disabled END, "
-            "is_current = CASE WHEN target.mapping_version = source.mapping_version THEN :enabled ELSE :disabled END, "
-            "effective_from = CASE WHEN target.mapping_version = source.mapping_version THEN COALESCE(target.effective_from, CURRENT_TIMESTAMP()) ELSE target.effective_from END, "
-            "effective_to = CASE WHEN target.mapping_version = source.mapping_version THEN NULL ELSE CURRENT_TIMESTAMP() END, "
-            "updated_at = CURRENT_TIMESTAMP()",
-            {**activation_parameters, "enabled": True, "disabled": False},
-        )
-        self.execute(
-            f"MERGE INTO {self.table('cfg_ingestion_object')} AS target USING ({activation_source}) AS source "
-            "ON target.ingestion_object_id = source.ingestion_object_id "
-            "WHEN MATCHED AND (target.config_version = source.config_version OR target.is_current = :enabled) "
-            "THEN UPDATE SET active_flag = CASE WHEN target.config_version = source.config_version THEN :enabled ELSE :disabled END, "
-            "is_current = CASE WHEN target.config_version = source.config_version THEN :enabled ELSE :disabled END, "
-            "effective_from = CASE WHEN target.config_version = source.config_version THEN COALESCE(target.effective_from, CURRENT_TIMESTAMP()) ELSE target.effective_from END, "
-            "effective_to = CASE WHEN target.config_version = source.config_version THEN NULL ELSE CURRENT_TIMESTAMP() END, "
-            "updated_at = CURRENT_TIMESTAMP()",
-            {**activation_parameters, "enabled": True, "disabled": False},
-        )
+        for _, activation_source, activation_parameters in self._source_row_batches(
+            activation_rows, prefix="active"
+        ):
+            self.execute(
+                f"MERGE INTO {self.table('cfg_mapping')} AS target USING ({activation_source}) AS source "
+                "ON target.ingestion_object_id = source.ingestion_object_id "
+                "AND target.processing_stage = source.processing_stage "
+                "WHEN MATCHED AND (target.mapping_version = source.mapping_version OR target.is_current = :enabled) "
+                "THEN UPDATE SET active_flag = CASE WHEN target.mapping_version = source.mapping_version THEN :enabled ELSE :disabled END, "
+                "is_current = CASE WHEN target.mapping_version = source.mapping_version THEN :enabled ELSE :disabled END, "
+                "effective_from = CASE WHEN target.mapping_version = source.mapping_version THEN COALESCE(target.effective_from, CURRENT_TIMESTAMP()) ELSE target.effective_from END, "
+                "effective_to = CASE WHEN target.mapping_version = source.mapping_version THEN NULL ELSE CURRENT_TIMESTAMP() END, "
+                "updated_at = CURRENT_TIMESTAMP()",
+                {**activation_parameters, "enabled": True, "disabled": False},
+            )
+            self.execute(
+                f"MERGE INTO {self.table('cfg_ingestion_object')} AS target USING ({activation_source}) AS source "
+                "ON target.ingestion_object_id = source.ingestion_object_id "
+                "WHEN MATCHED AND (target.config_version = source.config_version OR target.is_current = :enabled) "
+                "THEN UPDATE SET active_flag = CASE WHEN target.config_version = source.config_version THEN :enabled ELSE :disabled END, "
+                "is_current = CASE WHEN target.config_version = source.config_version THEN :enabled ELSE :disabled END, "
+                "effective_from = CASE WHEN target.config_version = source.config_version THEN COALESCE(target.effective_from, CURRENT_TIMESTAMP()) ELSE target.effective_from END, "
+                "effective_to = CASE WHEN target.config_version = source.config_version THEN NULL ELSE CURRENT_TIMESTAMP() END, "
+                "updated_at = CURRENT_TIMESTAMP()",
+                {**activation_parameters, "enabled": True, "disabled": False},
+            )
 
         active_objects = self.get_active_ingestion_objects(object_ids)
         active_bundles = self.get_mapping_bundles([

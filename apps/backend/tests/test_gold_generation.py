@@ -14,6 +14,13 @@ from services import dbt_snowflake_runtime
 from services import pipeline_runtime
 
 
+def test_gold_bundle_self_heals_database_datetime_values():
+    payload = json.loads(gold_gen._serialize_gold_artifact({
+        "scripts": [{"mapping_contract": [{"created_at": datetime(2026, 8, 10, 14, 16, 47)}]}],
+    }))
+    assert payload["scripts"][0]["mapping_contract"][0]["created_at"] == "2026-08-10T14:16:47+00:00"
+
+
 def test_metadata_gold_generation_emits_one_artifact_per_fact_and_dimension(monkeypatch):
     monkeypatch.setenv("GOLD_SCHEMA", "gold")
     monkeypatch.setattr(gold_gen, "ai_store_db_writer", lambda **_: None)
@@ -335,6 +342,53 @@ def test_snowflake_metadata_global_count_fact_uses_snapshot_and_count_star(dbt_c
     else:
         assert 'CREATE OR REPLACE TABLE "ANALYTICS"."GOLD"."fact_event_count" AS' in sql
         assert "MERGE INTO" not in sql
+
+
+@pytest.mark.parametrize("warehouse", ["databricks", "snowflake"])
+def test_metadata_fact_hashes_the_complete_silver_business_key(warehouse) -> None:
+    source = "ANALYTICS.SILVER.silver_claims"
+    plan = {
+        "definition": {
+            "artifact_kind": "FACT",
+            "fact_type": "AGGREGATE",
+            "star_dimensions": [{
+                "dimension_key": "claims_key",
+                "source_table": source,
+                "natural_key_columns": ["tenant_id", "claim_id"],
+            }],
+        },
+        "object": {
+            "target_table": "ANALYTICS.GOLD.fact_claim_amount",
+            "write_mode": "MERGE",
+            "merge_keys_json": '["claims_key"]',
+            "validation_policy_json": '{}',
+        },
+        "inputs": [{"object_name": source}],
+        "bundle": {"mappings": [
+            {
+                "source_object_name": source,
+                "source_field_path": "tenant_id",
+                "target_column_name": "claims_key",
+                "target_data_type": "STRING",
+                "transformation_rule": "DIMENSION_KEY",
+                "join_rules_json": "[]",
+            },
+            {
+                "source_object_name": source,
+                "source_field_path": "claim_amount",
+                "target_column_name": "claim_amount_value",
+                "target_data_type": "DECIMAL(38,10)",
+                "transformation_rule": "AGG_SUM",
+                "join_rules_json": "[]",
+            },
+        ]},
+    }
+
+    code = gold_gen._metadata_fact_code(plan, target_warehouse=warehouse)
+
+    assert "tenant_id" in code
+    assert "claim_id" in code
+    assert "CONCAT_WS('||'" in code
 
 
 @pytest.mark.parametrize(
@@ -1195,33 +1249,86 @@ def test_gold_contract_includes_dimensions_from_certified_join_tables(monkeypatc
     )
 
 
-def test_independent_gold_dimensions_keep_three_best_executable_entities():
-    results = [
-        {
-            "table": name,
-            "target_table": f"silver.silver_{name}",
-            "merge_keys": [f"{name}_id"] if name != "unkeyed" else [],
-        }
-        for name in ("claims", "policies", "agents", "payments", "unkeyed")
-    ]
-    columns = [
-        {
-            "table_name": table,
-            "column_name": f"attribute_{ordinal}",
-            "semantic_type": "DIMENSION",
-        }
-        for table, count in (("claims", 4), ("policies", 3), ("agents", 2), ("payments", 1), ("unkeyed", 8))
-        for ordinal in range(count)
-    ]
-
-    dimensions = silver_gen._independent_gold_dimensions(
-        columns=columns,
-        results=results,
-        silver_tables={item["table"]: item["target_table"] for item in results},
-        kpi_mappings=[],
+def test_gold_contract_groups_kpi_attributes_by_silver_business_entity(monkeypatch):
+    monkeypatch.setattr(silver_gen, "_llm_enabled_for_kimball_plan", lambda: False)
+    contract = silver_gen._build_gold_generation_contract(
+        state={"run_id": "run-entity-model", "certified_kpis": [{"kpi_name": "Total Claims"}]},
+        results=[{
+            "table": "claims", "source_table": "bronze.claims",
+            "target_table": "silver.silver_claims", "column_count": 4,
+            "merge_keys": ["claim_id"],
+        }],
+        enriched_metadata={"columns": [
+            {"table_name": "claims", "column_name": "claim_id", "data_type": "bigint", "semantic_type": "ID"},
+            {"table_name": "claims", "column_name": "claim_amount", "data_type": "decimal(18,2)", "semantic_type": "MEASURE", "is_measure": True},
+            {"table_name": "claims", "column_name": "claim_status", "data_type": "varchar", "semantic_type": "DIMENSION"},
+            {"table_name": "claims", "column_name": "claim_type", "data_type": "varchar", "semantic_type": "DIMENSION"},
+        ]},
+        generated_at="2026-08-10T00:00:00Z",
     )
 
-    assert [item["logical_table"] for item in dimensions] == ["claims", "policies", "agents"]
+    assert contract["factless_mappings"] == []
+    assert contract["dimension_mappings"] == [{
+        "logical_table": "claims",
+        "entity": "claims",
+        "source_silver_table": "silver.silver_claims",
+        "natural_key_columns": ["claim_id"],
+        "columns": ["claim_status", "claim_type"],
+        "consumed_by_kpis": ["Total Claims"],
+    }]
+    assert {
+        item["entity"] for item in contract["kpi_mappings"][0]["grouping_dimensions"]
+    } == {"claims"}
+
+
+def test_count_kpi_self_heals_to_unambiguous_silver_business_process(monkeypatch):
+    monkeypatch.setattr(silver_gen, "_llm_enabled_for_kimball_plan", lambda: False)
+    contract = silver_gen._build_gold_generation_contract(
+        state={"run_id": "run-count", "certified_kpis": [{"kpi_name": "Claim Count"}]},
+        results=[
+            {"table": "claims", "target_table": "silver.silver_claims", "merge_keys": ["claim_id"]},
+            {"table": "policies", "target_table": "silver.silver_policies", "merge_keys": ["policy_id"]},
+        ],
+        enriched_metadata={"columns": [
+            {"table_name": "claims", "column_name": "claim_id", "data_type": "bigint", "semantic_type": "ID"},
+            {"table_name": "claims", "column_name": "claim_status", "data_type": "varchar", "semantic_type": "DIMENSION"},
+            {"table_name": "policies", "column_name": "policy_id", "data_type": "bigint", "semantic_type": "ID"},
+        ]},
+        generated_at="2026-08-10T00:00:00Z",
+    )
+
+    mapping = contract["kpi_mappings"][0]
+    assert mapping["readiness"] != "BLOCKED"
+    assert mapping["measure"]["table"] == "claims"
+    assert mapping["measure"]["aggregation"] == "COUNT"
+    assert mapping["measure"]["expression"] == "COUNT(*)"
+
+
+def test_guarded_kimball_plan_preserves_validated_business_entity_name():
+    plan = silver_gen._validate_kimball_plan(
+        {
+            "measure_id": "M1",
+            "aggregation": "SUM",
+            "dimensions": [{"dimension_id": "D1", "entity": "customer", "key_ids": ["K1"]}],
+            "time_id": None,
+            "join_ids": [],
+            "fact_grain": ["D1"],
+        },
+        columns=[
+            {"table_name": "orders", "column_name": "order_amount", "data_type": "decimal(18,2)", "semantic_type": "MEASURE"},
+            {"table_name": "orders", "column_name": "customer_name", "data_type": "varchar", "semantic_type": "DIMENSION"},
+            {"table_name": "orders", "column_name": "customer_id", "data_type": "bigint", "semantic_type": "ID"},
+        ],
+        certified_joins=[],
+    )
+
+    assert plan["dimensions"] == [{
+        "table": "orders",
+        "column": "customer_name",
+        "semantic_type": "DIMENSION",
+        "entity": "customer",
+        "natural_key_columns": ["customer_id"],
+    }]
 
 
 def test_dimension_script_reads_joined_dimension_table():
@@ -1375,15 +1482,9 @@ def test_guarded_kimball_failure_is_not_replaced_by_fallback(monkeypatch):
 
     assert contract["kpi_mappings"][0]["readiness"] == "BLOCKED"
     assert contract["kpi_mappings"][0]["kimball_plan_source"] == "LLM_REJECTED"
-    assert contract["dimension_mappings"][0]["logical_table"] == "claims"
-    assert contract["factless_mappings"] == [{
-        "fact_type": "FACTLESS_ENTITY_COVERAGE",
-        "logical_table": "claims",
-        "source_silver_table": "silver.silver_claims",
-        "grain_columns": ["claim_id"],
-        "readiness": "PENDING_EXACT_KEY_VALIDATION",
-    }]
-    assert contract["status"] == "READY_WITH_WARNINGS"
+    assert contract["dimension_mappings"] == []
+    assert contract["factless_mappings"] == []
+    assert contract["status"] == "NOT_COMPUTABLE"
     assert "invalid candidate" in contract["kpi_mappings"][0]["mapping_validation_error"]
 
 

@@ -11,7 +11,7 @@ import ast
 import json
 import os
 import re
-from datetime import datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Tuple
 
 from state import Stage01State
@@ -2454,6 +2454,27 @@ def _generate_one_mapping(
     }
 
 
+def _serialize_gold_artifact(payload: Dict[str, Any]) -> str:
+    try:
+        return json.dumps(payload, indent=2)
+    except TypeError as exc:
+        def normalize(value: Any) -> Any:
+            if isinstance(value, datetime):
+                timestamp = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+                return timestamp.astimezone(timezone.utc).isoformat()
+            if isinstance(value, date):
+                return value.isoformat()
+            if isinstance(value, dict):
+                return {str(key): normalize(item) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [normalize(item) for item in value]
+            return value
+
+        serialized = json.dumps(normalize(payload), indent=2)
+        logger.warning("Gold artifact serialization self-healed supported date/time values: %s", exc)
+        return serialized
+
+
 def _write_bundle(
     *,
     generated_at: str,
@@ -2474,6 +2495,7 @@ def _write_bundle(
         "llm_enabled": _llm_enabled_for_gold(),
         "scripts": results,
     }
+    serialized = _serialize_gold_artifact(bundle)
     os.makedirs(_gold_output_dir_for(target_warehouse), exist_ok=True)
     path = _bundle_path(target_warehouse)
     write_json_file(path, bundle, indent=2)
@@ -2944,8 +2966,17 @@ def _metadata_fact_code(
     if visited != set(sources):
         raise ValueError("Gold fact join graph does not cover every pinned input.")
 
-    def hash_expression(field: str) -> str:
-        return f"SHA2(CONCAT_WS('||', COALESCE(CAST({field} AS STRING), '__NULL__')), 256)"
+    dimension_specs = {
+        str(item.get("dimension_key") or "").casefold(): item
+        for item in plan.get("definition", {}).get("star_dimensions") or []
+        if isinstance(item, dict) and item.get("dimension_key")
+    }
+
+    def hash_expression(fields: List[str]) -> str:
+        terms = ", ".join(
+            f"COALESCE(CAST({field} AS STRING), '__NULL__')" for field in fields
+        )
+        return f"SHA2(CONCAT_WS('||', {terms}), 256)"
 
     projections: List[str] = []
     groups: List[str] = []
@@ -2961,8 +2992,22 @@ def _metadata_fact_code(
             grain = rule.removeprefix("DATE_TRUNC_")
             expression = f"DATE_TRUNC('{grain}', {field})"
             groups.append(expression)
-        elif rule in {"DIMENSION_KEY", "SURROGATE_KEY"}:
-            expression = hash_expression(field)
+        elif rule == "DIMENSION_KEY":
+            spec = dimension_specs.get(str(row["target_column_name"]).casefold()) or {}
+            dimension_source = str(spec.get("source_table") or source)
+            natural_keys = [
+                str(value)
+                for value in spec.get("natural_key_columns") or [row["source_field_path"]]
+            ]
+            if dimension_source not in aliases:
+                raise ValueError("Gold fact dimension key lacks its approved Silver natural-key contract.")
+            expression = hash_expression([
+                f"{aliases[dimension_source]}.{quote(column)}" for column in natural_keys
+            ])
+            if not factless:
+                groups.append(expression)
+        elif rule == "SURROGATE_KEY":
+            expression = hash_expression([field])
             if not factless:
                 groups.append(expression)
         elif rule in {"IDENTITY", "GROUP_KEY"}:

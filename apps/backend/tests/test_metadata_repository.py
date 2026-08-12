@@ -48,6 +48,29 @@ def test_target_configuration_deployment_does_not_reload_existing_versions() -> 
     )
 
 
+def test_bulk_metadata_rows_respect_sql_server_parameter_budget() -> None:
+    class Repository(MetadataRepository):
+        max_bind_parameters = 2000
+
+        def execute(self, _sql, _parameters=None):
+            return None
+
+        def query(self, _sql, _parameters=None):
+            return []
+
+    repository = Repository(TargetMetadataContext("databricks", "qa", "application"))
+    rows = [
+        {f"column_{column}": f"{row}:{column}" for column in range(55)}
+        for row in range(62)
+    ]
+
+    batches = list(repository._source_row_batches(rows, prefix="gold_"))
+
+    assert len(batches) == 2
+    assert sum(len(parameters) for _, _, parameters in batches) == 62 * 55
+    assert all(len(parameters) <= repository.max_bind_parameters for _, _, parameters in batches)
+
+
 def test_snowflake_dbt_activation_requires_finalized_package_identity() -> None:
     spec = {
         "engine": "SNOWFLAKE_DBT",

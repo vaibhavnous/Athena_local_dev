@@ -4793,20 +4793,28 @@ def _materialize_silver_to_gold_metadata(
 
     dimension_contracts = [dict(raw) for raw in contract.get("dimension_mappings") or [] if isinstance(raw, dict)]
     dimension_contract_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
+    dimension_entity_by_column: Dict[tuple[str, str], str] = {}
     for raw in dimension_contracts:
         logical = str(raw.get("logical_table") or "").strip()
-        natural_key_columns = [
+        natural_key_columns = list(dict.fromkeys(
             normalize_bronze_column_name(column)
             for column in (raw.get("natural_key_columns") or raw.get("grain_columns") or [])
             if str(column or "").strip()
-        ]
-        entity = normalize_bronze_column_name(
-            star_dimension_entity(raw.get("entity") or (natural_key_columns[0] if natural_key_columns else logical), logical)
-        )
+        ))
+        entity = normalize_bronze_column_name(raw.get("entity") or star_dimension_entity(
+            natural_key_columns[0] if natural_key_columns else logical,
+            logical,
+        ))
         if logical and entity:
             raw["logical_table"] = logical
             raw["entity"] = entity
+            if natural_key_columns:
+                raw["natural_key_columns"] = natural_key_columns
             dimension_contract_by_key[(logical.casefold(), entity.casefold())] = raw
+            for column in raw.get("columns") or natural_key_columns:
+                normalized_column = normalize_bronze_column_name(column)
+                if normalized_column:
+                    dimension_entity_by_column[(logical.casefold(), normalized_column.casefold())] = entity
     for mapping in contract.get("kpi_mappings") or []:
         if not isinstance(mapping, dict) or str(mapping.get("readiness") or "").upper() == "BLOCKED":
             continue
@@ -4817,9 +4825,18 @@ def _materialize_silver_to_gold_metadata(
                 continue
             logical = str(dimension.get("table") or measure.get("table") or "").strip()
             column = normalize_bronze_column_name(dimension.get("column"))
-            entity = normalize_bronze_column_name(star_dimension_entity(dimension.get("entity") or column, logical))
+            entity = normalize_bronze_column_name(
+                dimension.get("entity")
+                or dimension_entity_by_column.get((logical.casefold(), column.casefold()))
+                or star_dimension_entity(column, logical)
+            )
             if not logical or not column:
                 continue
+            natural_key_columns = list(dict.fromkeys(
+                normalize_bronze_column_name(key)
+                for key in dimension.get("natural_key_columns") or []
+                if str(key or "").strip()
+            ))
             key = (logical.casefold(), entity.casefold())
             existing = dimension_contract_by_key.get(key)
             if existing:
@@ -4830,19 +4847,31 @@ def _materialize_silver_to_gold_metadata(
                 ]
                 if column not in columns:
                     existing["columns"] = [*columns, column]
+                existing_keys = [
+                    normalize_bronze_column_name(existing_key)
+                    for existing_key in existing.get("natural_key_columns") or []
+                    if str(existing_key or "").strip()
+                ]
+                for natural_key in natural_key_columns:
+                    if natural_key not in existing_keys:
+                        existing_keys.append(natural_key)
+                if existing_keys:
+                    existing["natural_key_columns"] = existing_keys
                 consumed = list(existing.get("consumed_by_kpis") or [])
                 if kpi_name and kpi_name not in consumed:
                     existing["consumed_by_kpis"] = [*consumed, kpi_name]
+                dimension_entity_by_column[(logical.casefold(), column.casefold())] = entity
                 continue
             contract_row = {
                 "logical_table": logical,
                 "entity": entity,
-                "natural_key_columns": [],
+                "natural_key_columns": natural_key_columns,
                 "columns": [column],
                 "consumed_by_kpis": [kpi_name] if kpi_name else [],
             }
             dimension_contracts.append(contract_row)
             dimension_contract_by_key[key] = contract_row
+            dimension_entity_by_column[(logical.casefold(), column.casefold())] = entity
 
     for raw in dimension_contracts:
         if not isinstance(raw, dict):
@@ -4853,9 +4882,10 @@ def _materialize_silver_to_gold_metadata(
             for column in (raw.get("natural_key_columns") or raw.get("grain_columns") or [])
             if str(column or "").strip()
         ]
-        entity = normalize_bronze_column_name(
-            star_dimension_entity(raw.get("entity") or (natural_key_columns[0] if natural_key_columns else logical), logical)
-        )
+        entity = normalize_bronze_column_name(raw.get("entity") or star_dimension_entity(
+            natural_key_columns[0] if natural_key_columns else logical,
+            logical,
+        ))
         name = f"dim_{entity}"
         item = source(logical)
         if not item:
@@ -4870,7 +4900,11 @@ def _materialize_silver_to_gold_metadata(
         if not natural_key_columns:
             reject("DIMENSION", name, "MISSING_BUSINESS_KEY", f"No reviewed business key exists for {logical}.")
             continue
-        requested = list(dict.fromkeys([*natural_key_columns, *(raw.get("columns") or [])]))
+        requested = list(dict.fromkeys(
+            normalize_bronze_column_name(column)
+            for column in [*natural_key_columns, *(raw.get("columns") or [])]
+            if str(column or "").strip()
+        ))
         key_rows = [source_column(item, column_name) for column_name in natural_key_columns]
         if any(row is None for row in key_rows):
             reject("DIMENSION", name, "MISSING_BUSINESS_KEY", f"Dimension natural key is not in the active Silver mapping for {logical}.")
@@ -5155,31 +5189,73 @@ def _materialize_silver_to_gold_metadata(
             return True
 
         invalid_field = False
+        dimension_groups: Dict[tuple[str, str], Dict[str, Any]] = {}
         for dimension in raw.get("grouping_dimensions") or []:
             if not isinstance(dimension, dict):
                 continue
-            input_item = source(dimension.get("table") or measure.get("table"))
-            dimension_column = normalize_bronze_column_name(dimension.get("column"))
-            entity = normalize_bronze_column_name(
-                star_dimension_entity(dimension.get("entity") or dimension_column, dimension.get("table") or measure.get("table"))
-            )
-            target_name = dimension_key(entity)
-            if target_name.casefold() in seen_targets:
+            logical_table = str(dimension.get("table") or measure.get("table") or "").strip()
+            column = normalize_bronze_column_name(dimension.get("column"))
+            if not logical_table or not column:
                 continue
-            key_rows = [row for row in input_item["bundle"]["mappings"] if bool(row.get("is_primary_key"))] if input_item else []
-            key_source_column = normalize_bronze_column_name(key_rows[0]["target_column_name"]) if key_rows else dimension_column
-            if not input_item or not add_output(input_item, key_source_column, target_name, "DIMENSION_KEY", "STRING"):
-                reject("FACT", name, "MISSING_SOURCE_FIELD", f"Gold dimension field {dimension.get('column')} is invalid or duplicated.")
+            entity = normalize_bronze_column_name(
+                dimension.get("entity")
+                or dimension_entity_by_column.get((logical_table.casefold(), column.casefold()))
+                or logical_table.split(".")[-1].removeprefix("silver_")
+            )
+            group = dimension_groups.setdefault(
+                (logical_table.casefold(), entity.casefold()),
+                {
+                    "logical_table": logical_table,
+                    "entity": entity,
+                    "columns": [],
+                    "natural_key_columns": [],
+                },
+            )
+            if column and column not in group["columns"]:
+                group["columns"].append(column)
+            for key in dimension.get("natural_key_columns") or []:
+                normalized_key = normalize_bronze_column_name(key)
+                if normalized_key and normalized_key not in group["natural_key_columns"]:
+                    group["natural_key_columns"].append(normalized_key)
+
+        for group in dimension_groups.values():
+            input_item = source(group["logical_table"])
+            if not input_item:
+                reject("FACT", name, "MISSING_SILVER_INPUT", f"Gold dimension source {group['logical_table']} is unavailable.")
+                invalid_field = True
+                break
+            natural_key_columns = list(group["natural_key_columns"])
+            if not natural_key_columns:
+                natural_key_columns = [
+                    normalize_bronze_column_name(row["target_column_name"])
+                    for row in input_item["bundle"]["mappings"]
+                    if bool(row.get("is_primary_key"))
+                ]
+            natural_key_rows = [source_column(input_item, key) for key in natural_key_columns]
+            if not natural_key_columns or any(row is None for row in natural_key_rows):
+                reject(
+                    "FACT",
+                    name,
+                    "MISSING_BUSINESS_KEY",
+                    f"Gold dimension {group['entity']} has no exact reviewed Silver business key.",
+                )
+                invalid_field = True
+                break
+            target_name = dimension_key(group["entity"])
+            first_key = natural_key_columns[0]
+            if not add_output(input_item, first_key, target_name, "DIMENSION_KEY", "STRING"):
+                reject("FACT", name, "MISSING_SOURCE_FIELD", f"Gold dimension key {target_name} is invalid or duplicated.")
                 invalid_field = True
                 break
             keys.append(target_name)
             star_dimensions.append({
-                "entity": entity,
-                "dimension_table": f"{target_prefix}.dim_{entity}",
+                "entity": group["entity"],
+                "dimension_table": f"{target_prefix}.dim_{group['entity']}",
                 "dimension_key": target_name,
                 "source_table": input_item["target"],
-                "source_column": key_source_column,
-                "natural_key_columns": [key_source_column],
+                "source_column": first_key,
+                "natural_key_columns": natural_key_columns,
+                "attributes": list(group["columns"]),
             })
         if invalid_field:
             continue
