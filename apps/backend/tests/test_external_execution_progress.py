@@ -73,6 +73,40 @@ def test_completed_gold_progress_marks_pipeline_completed(monkeypatch):
     assert saved[-1][1]["status"] == "PIPELINE_COMPLETED"
 
 
+def test_metadata_runtime_progress_moves_ui_from_bronze_to_silver(monkeypatch):
+    saved = []
+    pipeline_runtime = types.ModuleType("services.pipeline_runtime")
+    pipeline_runtime.save_checkpoint_state = lambda run_id, state: saved.append((run_id, state))
+    monkeypatch.setitem(sys.modules, "services.pipeline_runtime", pipeline_runtime)
+
+    running = external_execution_progress.save_external_execution_progress(
+        {"run_id": "design-run", "metadata_runtime_batch": True},
+        run_id="design-run",
+        platform="databricks",
+        layer="bronze",
+        stage_key="bronze_code_execution",
+        status="RUNNING",
+        total_count=8,
+        completed_count=0,
+    )
+    completed = external_execution_progress.save_external_execution_progress(
+        running,
+        run_id="design-run",
+        platform="databricks",
+        layer="bronze",
+        stage_key="bronze_code_execution",
+        status="COMPLETED",
+        total_count=8,
+        completed_count=8,
+    )
+
+    assert running["next_stage_key"] == "bronze_code_execution"
+    assert completed["last_completed_stage_key"] == "bronze_code_execution"
+    assert completed["next_stage_key"] == "silver_code_execution"
+    assert completed["next_stage_label"] == "Silver Target Execution"
+    assert "_metadata_runtime_scripts" not in saved[-1][1]
+
+
 def test_gold_progress_with_warnings_is_terminal_success(monkeypatch):
     saved = []
     pipeline_runtime = types.ModuleType("services.pipeline_runtime")

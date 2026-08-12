@@ -69,6 +69,151 @@ def test_bronze_landing_reuses_existing_database():
     assert statements == ['USE DATABASE "insurance"']
 
 
+def test_metadata_runtime_configures_safe_snowflake_session_identity():
+    calls = []
+
+    class Cursor:
+        def execute(self, sql, parameters=None):
+            calls.append((sql, parameters))
+
+        def close(self):
+            calls.append(("CLOSE", None))
+
+    connection = type("Connection", (), {"cursor": lambda self: Cursor()})()
+    context = {
+        "contract_version": "1.0",
+        "logical_work_id": "logical-1",
+        "queue_id": 91,
+        "ingestion_object_id": 101,
+        "processing_stage": "SOURCE_TO_BRONZE",
+        "load_type": "FULL",
+        "target_table": "ATHENA.BRONZE.CLAIMS",
+        "config_version": 2,
+        "mapping_version": 3,
+        "attempt_number": 0,
+        "runtime_run_id": "runtime-1",
+    }
+
+    configured = snowflake_bronze_runtime.configure_snowflake_runtime_session(
+        connection, {"metadata_runtime_context": context}
+    )
+
+    assert configured == context
+    assert calls[0] == (
+        "ALTER SESSION SET QUERY_TAG = %s",
+        ('{"attempt_number":0,"logical_work_id":"logical-1","processing_stage":"SOURCE_TO_BRONZE",'
+         '"queue_id":91,"runtime_run_id":"runtime-1"}',),
+    )
+    assert calls[1] == ("SET ATHENA_LOGICAL_WORK_ID = %s", ("logical-1",))
+    assert calls[2] == ("SET ATHENA_RUNTIME_RUN_ID = %s", ("runtime-1",))
+
+
+def test_resumed_snowflake_attempt_waits_for_prior_tagged_query(monkeypatch):
+    active_counts = iter([1, 0])
+    calls = []
+
+    class Cursor:
+        def execute(self, sql, parameters=None):
+            calls.append((sql, parameters))
+
+        def fetchone(self):
+            return (next(active_counts),)
+
+        def close(self):
+            pass
+
+    connection = type("Connection", (), {"cursor": lambda self: Cursor()})()
+    monkeypatch.setattr(snowflake_bronze_runtime.time, "sleep", lambda _seconds: None)
+    context = {
+        "contract_version": "1.0",
+        "logical_work_id": "logical-1",
+        "queue_id": 91,
+        "ingestion_object_id": 101,
+        "processing_stage": "SOURCE_TO_BRONZE",
+        "load_type": "FULL",
+        "target_table": "ATHENA.BRONZE.CLAIMS",
+        "config_version": 2,
+        "mapping_version": 3,
+        "attempt_number": 1,
+        "runtime_run_id": "runtime-1",
+        "resumed_attempt": True,
+    }
+
+    snowflake_bronze_runtime.reconcile_snowflake_resumed_attempt(
+        connection, {"metadata_runtime_context": context}
+    )
+
+    assert len(calls) == 2
+    assert all("QUERY_HISTORY" in sql for sql, _ in calls)
+    assert calls[0][1] == calls[1][1]
+
+
+def test_snowflake_execution_result_returns_last_statement_query_id(monkeypatch):
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "validate_snowflake_bronze_script",
+        lambda _script: "SELECT 1; SELECT 2;",
+    )
+    cursors = [type("Cursor", (), {"sfqid": "query-1"})(), type("Cursor", (), {"sfqid": "query-2"})()]
+    connection = type(
+        "Connection",
+        (),
+        {"execute_string": lambda self, sql, return_cursors=True: cursors},
+    )()
+
+    result = snowflake_bronze_runtime.execute_snowflake_sql_file(
+        {"table": "claims", "script_path": "claims.sql"}, connection
+    )
+
+    assert result["statement_count"] == 2
+    assert result["snowflake_query_id"] == "query-2"
+
+
+def test_metadata_snowflake_bronze_always_loads_database_source(monkeypatch):
+    loaded = []
+    connection = type("Connection", (), {"close": lambda self: None})()
+    monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_BRONZE", "true")
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE", "false")
+    monkeypatch.setattr(snowflake_bronze_runtime, "_snowflake_connect", lambda: connection)
+    monkeypatch.setattr(snowflake_bronze_runtime, "configure_snowflake_runtime_session", lambda *_: None)
+    monkeypatch.setattr(snowflake_bronze_runtime, "validate_snowflake_bronze_script", lambda _script: "SQL")
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "load_azure_sql_table_to_snowflake",
+        lambda script, _connection, **_kwargs: loaded.append(script["table"]) or {"rows_loaded": 2},
+    )
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "execute_snowflake_sql_file",
+        lambda script, _connection: {
+            "table": script["table"],
+            "status": "COMPLETED",
+            "statement_count": 1,
+            "snowflake_query_id": "query-1",
+        },
+    )
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "save_external_execution_progress",
+        lambda state, **_kwargs: state,
+    )
+
+    result = snowflake_bronze_runtime.run_snowflake_bronze_scripts({
+        "run_id": "runtime-1",
+        "target_warehouse": "snowflake",
+        "metadata_runtime_context": {"logical_work_id": "logical-1"},
+        "bronze_generation_results": [{
+            "table": "claims",
+            "database_name": "ClaimsDB",
+            "schema_name": "dbo",
+            "script_path": "claims.sql",
+        }],
+    })
+
+    assert loaded == ["claims"]
+    assert result["snowflake_bronze_execution_status"] == "COMPLETED"
+
+
 def test_adls_stage_uses_sas_without_logging_token(monkeypatch):
     token = "sv=test&sig=secret"
     monkeypatch.setenv("SNOWFLAKE_ADLS_SAS_TOKEN", "?" + token)
@@ -485,14 +630,10 @@ def test_load_azure_sql_table_to_snowflake_replaces_landing_table_and_logs_progr
     class FakeSnowflakeCursor:
         def __init__(self):
             self.sql = []
-            self.executemany_calls = []
             self.closed = False
 
         def execute(self, sql):
             self.sql.append(sql)
-
-        def executemany(self, sql, values):
-            self.executemany_calls.append((sql, values))
 
         def close(self):
             self.closed = True
@@ -510,6 +651,13 @@ def test_load_azure_sql_table_to_snowflake_replaces_landing_table_and_logs_progr
     monkeypatch.setattr(snowflake_bronze_runtime, "get_client_connection", lambda database_name: fake_source_conn)
     monkeypatch.setattr(snowflake_bronze_runtime, "_batch_size", lambda: 2)
     monkeypatch.setattr(snowflake_bronze_runtime, "_progress_log_interval", lambda: 3)
+    bulk_calls = []
+
+    def fake_bulk_write(connection, **kwargs):
+        bulk_calls.append((connection, kwargs))
+        return len(kwargs["rows"])
+
+    monkeypatch.setattr(snowflake_bronze_runtime, "_write_pandas_batch", fake_bulk_write)
 
     def capture_info(message, *args, **kwargs):
         progress_messages.append(message % args if args else message)
@@ -528,10 +676,40 @@ def test_load_azure_sql_table_to_snowflake_replaces_landing_table_and_logs_progr
 
     assert result["rows_loaded"] == 4
     assert any(sql.startswith('CREATE OR REPLACE TABLE "insurance"."dbo"."claim_payment_indemnity"') for sql in fake_snowflake_conn.cursor_instance.sql)
-    assert len(fake_snowflake_conn.cursor_instance.executemany_calls) == 2
+    assert len(bulk_calls) == 2
+    assert all(call[0] is fake_snowflake_conn for call in bulk_calls)
+    assert bulk_calls[0][1]["table"] == "claim_payment_indemnity"
     assert any("rows_loaded=4" in message for message in progress_messages)
     assert fake_source_conn.closed is True
     assert fake_snowflake_conn.cursor_instance.closed is True
+
+    metadata_source_conn = FakeSourceConnection()
+    metadata_snowflake_conn = FakeSnowflakeConnection()
+    monkeypatch.setattr(
+        snowflake_bronze_runtime,
+        "get_client_connection",
+        lambda _database_name: metadata_source_conn,
+    )
+    snowflake_bronze_runtime.load_azure_sql_table_to_snowflake(
+        {
+            "table": "claim_payment_indemnity",
+            "database_name": "insurance",
+            "schema_name": "dbo",
+            "snowflake_landing_database": "ATHENA",
+            "snowflake_landing_schema": "BRONZE",
+            "snowflake_landing_table": "raw_claim_payment_indemnity",
+            "metadata_runtime": True,
+        },
+        metadata_snowflake_conn,
+        run_id="runtime-123",
+    )
+
+    assert any(
+        sql.startswith(
+            'CREATE OR REPLACE TEMPORARY TABLE "ATHENA"."BRONZE"."raw_claim_payment_indemnity"'
+        )
+        for sql in metadata_snowflake_conn.cursor_instance.sql
+    )
 
 
 def test_load_bronze_scripts_reads_snowflake_bundle(monkeypatch):

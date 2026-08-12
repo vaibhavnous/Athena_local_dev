@@ -30,6 +30,11 @@ RUN_ID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
+GENERATION_FIRST_DATABASE_FLOW_VERSIONS = {"generation_first_v1", "generation_first_v2"}
+
+
+def _is_generation_first_database_run(payload: Dict[str, Any]) -> bool:
+    return str(payload.get("database_flow_version") or "") in GENERATION_FIRST_DATABASE_FLOW_VERSIONS
 
 
 def _as_bool(value: Any) -> bool:
@@ -94,7 +99,7 @@ def _fallback_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "execution_engine": row.get("execution_engine") or "native",
         "dbt_deployment_mode": row.get("dbt_deployment_mode") or "generate_only",
         "database_flow_version": row.get("database_flow_version"),
-        "generation_first_execution": bool(row.get("database_flow_version") == "generation_first_v1"),
+        "generation_first_execution": _is_generation_first_database_run(row),
         "execution_ready": row.get("execution_ready"),
         "awaiting_stage_confirmation": row.get("awaiting_stage_confirmation"),
         "next_stage_key": row.get("next_stage_key"),
@@ -235,7 +240,7 @@ def _checkpoint_run_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "execution_engine": checkpoint.get("execution_engine") or row.get("execution_engine") or "native",
         "dbt_deployment_mode": checkpoint.get("dbt_deployment_mode") or row.get("dbt_deployment_mode") or "generate_only",
         "database_flow_version": checkpoint.get("database_flow_version"),
-        "generation_first_execution": bool(checkpoint.get("database_flow_version") == "generation_first_v1"),
+        "generation_first_execution": _is_generation_first_database_run(checkpoint),
         "report_generation_enabled": bool(checkpoint.get("report_generation_enabled")),
         "report_generation_status": checkpoint.get("report_generation_status"),
         "execution_ready": checkpoint.get("execution_ready"),
@@ -276,7 +281,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
         build_pipeline_steps,
     )
 
-    generation_first = checkpoint.get("database_flow_version") == "generation_first_v1"
+    generation_first = _is_generation_first_database_run(checkpoint)
     bronze_completed = bool(
         checkpoint.get("bronze_generation_status") == "COMPLETED"
         or checkpoint.get("bronze_generation_results")
@@ -306,7 +311,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
             not generation_first
             and (
                 checkpoint.get("background_stage") == "gold_code_execution"
-                or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED"}
+                or str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED", "COMPLETED_WITH_WARNINGS"}
                 or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"RUNNING", "COMPLETED", "COMPLETED_WITH_WARNINGS"}
             )
         )
@@ -373,7 +378,7 @@ def _fallback_run_detail(run_id: str, checkpoint: Dict[str, Any] | None = None) 
     if checkpoint.get("background_stage"):
         fallback_status = "RUNNING"
     elif gold_completed and (
-        str(checkpoint.get("snowflake_gold_execution_status") or "").upper() == "COMPLETED"
+        str(checkpoint.get("snowflake_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
         or str(checkpoint.get("databricks_gold_execution_status") or "").upper() in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
     ):
         fallback_status = "SUCCESS"

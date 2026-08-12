@@ -123,6 +123,10 @@ def run_pipeline_background(
     compliance_domain: str = "Insurance",
     compliance_countries: Optional[List[str]] = None,
     target_warehouse: str = "databricks",
+    target_environment: Optional[str] = None,
+    source_system_id: Optional[int] = None,
+    source_connection_id: Optional[int] = None,
+    source_profile: Optional[str] = None,
     execution_engine: str = "native",
     dbt_deployment_mode: str = "generate_only",
     dbt_project_object_name: Optional[str] = None,
@@ -148,6 +152,7 @@ def run_pipeline_background(
                 source=str(source or "sftp").lower(),
                 project_id=project_id,
                 target_warehouse=target_warehouse,
+                target_environment=target_environment,
             )
         else:
             result = start_pipeline(
@@ -165,6 +170,10 @@ def run_pipeline_background(
                 compliance_domain=compliance_domain,
                 compliance_countries=compliance_countries or ["US"],
                 target_warehouse=target_warehouse,
+                target_environment=target_environment,
+                source_system_id=source_system_id,
+                source_connection_id=source_connection_id,
+                source_profile=source_profile,
                 execution_engine=execution_engine,
                 dbt_deployment_mode=dbt_deployment_mode,
                 dbt_project_object_name=dbt_project_object_name,
@@ -230,6 +239,10 @@ def submit_pipeline_start(run_id: str, payload: PipelineRunRequest) -> None:
             compliance_domain=str(payload.compliance_domain or "Insurance"),
             compliance_countries=payload.compliance_countries or ["US"],
             target_warehouse=str(payload.target_warehouse or "databricks").lower(),
+            target_environment=payload.target_environment,
+            source_system_id=payload.source_system_id,
+            source_connection_id=payload.source_connection_id,
+            source_profile=payload.source_profile,
             execution_engine=str(payload.execution_engine or "native").lower(),
             dbt_deployment_mode=str(payload.dbt_deployment_mode or "generate_only").lower(),
             dbt_project_object_name=payload.dbt_project_object_name,
@@ -268,6 +281,10 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
         database_name=database_name,
         database_type=checkpoint.get("database_type"),
         target_warehouse=checkpoint.get("target_warehouse") or "databricks",
+        target_environment=checkpoint.get("target_environment"),
+        source_system_id=checkpoint.get("source_system_id"),
+        source_connection_id=checkpoint.get("source_connection_id"),
+        source_profile=checkpoint.get("source_profile"),
         execution_engine=checkpoint.get("execution_engine") or "native",
         dbt_deployment_mode=checkpoint.get("dbt_deployment_mode") or "generate_only",
         dbt_target_name=checkpoint.get("dbt_target_name"),
@@ -320,7 +337,9 @@ def continue_database_pipeline_job(
         and generation_first_snowflake_dbt_flow(state)
     ):
         return execute_generation_first_snowflake_dbt(run_id, state=state)
-    if str(start_stage_key or "").strip().lower() in {
+    normalized_stage = str(start_stage_key or "").strip().lower()
+    if normalized_stage in {
+        "metadata_setup_execution",
         "bronze_code_execution",
         "silver_code_execution",
         "gold_code_execution",
@@ -328,7 +347,11 @@ def continue_database_pipeline_job(
         return execute_database_native_layers(
             run_id,
             state=state,
-            start_stage_key=str(start_stage_key).strip().lower(),
+            start_stage_key=(
+                "bronze_code_execution"
+                if normalized_stage == "metadata_setup_execution"
+                else normalized_stage
+            ),
         )
     return continue_database_pipeline(
         run_id,
@@ -341,16 +364,28 @@ def continue_database_pipeline_job(
 def continue_file_pipeline_job(run_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
     working_state = dict(state or {})
     working_state["run_id"] = run_id
-    result = source_ingestion_graph().invoke(working_state)
-    if not isinstance(result, dict):
-        raise ValueError("File-source pipeline returned an invalid state.")
-    return result
+    if (
+        str(working_state.get("source") or "").lower() != "adls_gen2"
+        or str(working_state.get("database_flow_version") or "") != "generation_first_v2"
+    ):
+        result = source_ingestion_graph().invoke(working_state)
+        if not isinstance(result, dict):
+            raise ValueError("File-source pipeline returned an invalid state.")
+        return result
+    stage = str(
+        working_state.get("failed_background_stage")
+        or working_state.get("next_stage_key")
+        or "metadata_ddl"
+    ).lower()
+    return continue_database_pipeline_job(run_id, stage, working_state)
 
 
 def database_failed_stage_key(run_id: str, checkpoint: Dict[str, Any]) -> Optional[str]:
     def _pipeline_stage(value: Any) -> Optional[str]:
         raw_stage = str(value or "").strip().lower()
         if raw_stage == "snowflake_dbt_codegen":
+            return raw_stage
+        if raw_stage == "metadata_setup_execution" and generation_first_database_flow(checkpoint):
             return raw_stage
         generation_first_execution = generation_first_database_flow(checkpoint)
         if raw_stage == "gold_code_execution":

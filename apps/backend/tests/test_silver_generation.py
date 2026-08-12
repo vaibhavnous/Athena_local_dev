@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
@@ -146,6 +147,21 @@ def test_silver_table_resolution_ignores_existing_silver_outputs(monkeypatch):
     assert [ref["table_name"] for ref in refs] == ["claim_payment_expenses"]
 
 
+def test_silver_table_resolution_excludes_system_tables():
+    refs = silver_gen._resolve_tables_for_silver(
+        {
+            "bronze_generation_results": [
+                {"table": "claim_information"},
+                {"table": "sysdiagrams"},
+            ],
+            "bronze_schema": "bronze",
+            "silver_schema": "silver",
+        }
+    )
+
+    assert [ref["table_name"] for ref in refs] == ["claim_information"]
+
+
 def test_silver_file_slug_caps_long_table_names():
     long_name = "018c963b_38fe_4567_b413_ae0f7dba5a68_" * 4 + "claim_payment_expenses"
 
@@ -239,6 +255,152 @@ def test_snowflake_silver_generation_reads_bronze_and_uses_reviewed_merge_keys(m
     assert 'MERGE INTO "ATHENA_DB"."SILVER"."silver_claim_information" AS target' in sql
     assert 'PARTITION BY "silver_upsert_key"' in sql
     assert "pyspark" not in sql.lower()
+
+
+def test_metadata_silver_inputs_reload_exact_target_resident_draft(monkeypatch):
+    from services import metadata_selection
+
+    mapping_rows = [
+        {
+            "source_object_name": "main.bronze.bronze_claims",
+            "target_table": "main.silver.silver_claims",
+            "input_objects_json": json.dumps([{
+                "ingestion_object_id": 101,
+                "config_version": 2,
+                "config_hash": "sha256:bronze-object",
+                "mapping_version": 7,
+                "mapping_hash": "sha256:bronze-mapping",
+            }]),
+            "source_field_path": "claimid",
+            "source_data_type": "int",
+            "target_column_name": "claimid",
+            "target_data_type": "int",
+            "is_primary_key": True,
+            "transformation_rule": "CAST",
+        },
+        {
+            "source_object_name": "main.bronze.bronze_claims",
+            "target_table": "main.silver.silver_claims",
+            "input_objects_json": json.dumps([{
+                "ingestion_object_id": 101,
+                "config_version": 2,
+                "config_hash": "sha256:bronze-object",
+                "mapping_version": 7,
+                "mapping_hash": "sha256:bronze-mapping",
+            }]),
+            "source_field_path": "description",
+            "source_data_type": "string",
+            "target_column_name": "description",
+            "target_data_type": "string",
+            "is_primary_key": False,
+            "transformation_rule": "TRIM_CAST",
+        },
+    ]
+
+    class Repository:
+        def get_ingestion_object(self, object_id, config_version):
+            if (object_id, config_version) == (101, 2):
+                return {
+                    "ingestion_object_id": 101,
+                    "config_version": 2,
+                    "config_hash": "sha256:bronze-object",
+                    "processing_stage": "SOURCE_TO_BRONZE",
+                    "target_bronze_table": "main.bronze.bronze_claims",
+                    "active_flag": False,
+                    "is_current": False,
+                }
+            assert (object_id, config_version) == (202, 3)
+            return {
+                "ingestion_object_id": 202,
+                "config_version": 3,
+                "config_hash": "sha256:silver-object",
+                "object_kind": "TRANSFORMATION",
+                "processing_stage": "BRONZE_TO_SILVER",
+                "target_table": "main.silver.silver_claims",
+                "merge_keys_json": '["claimid"]',
+                "active_flag": False,
+                "is_current": False,
+            }
+
+        def get_mapping_bundle(self, **kwargs):
+            if kwargs["processing_stage"] == "BRONZE_TO_SILVER":
+                assert kwargs["mapping_version"] == 11
+                assert kwargs["expected_hash"] == "sha256:silver-mapping"
+                assert kwargs["require_active"] is None
+                return {"mappings": mapping_rows}
+            assert kwargs["ingestion_object_id"] == 101
+            assert kwargs["mapping_version"] == 7
+            assert kwargs["expected_hash"] == "sha256:bronze-mapping"
+            assert kwargs["require_active"] is None
+            return {"mappings": []}
+
+    monkeypatch.setattr(
+        metadata_selection,
+        "validated_metadata_selection",
+        lambda _state: type("Selection", (), {"repository": Repository()})(),
+    )
+    refs = silver_gen._metadata_tables_for_silver({
+        "target_warehouse": "databricks",
+        "bronze_generation_results": [{
+            "silver_ingestion_object_id": 202,
+            "silver_ingestion_object_config_version": 3,
+            "silver_ingestion_object_config_hash": "sha256:silver-object",
+            "bronze_to_silver_mapping_version": 11,
+            "bronze_to_silver_mapping_hash": "sha256:silver-mapping",
+        }],
+    })
+
+    assert len(refs) == 1
+    assert refs[0]["bronze_table"] == "main.bronze.bronze_claims"
+    assert refs[0]["silver_table"] == "main.silver.silver_claims"
+    assert refs[0]["mapping_columns"][0]["is_join_key"] is True
+    assert refs[0]["bronze_to_silver_mapping_hash"] == "sha256:silver-mapping"
+
+
+def test_metadata_silver_templates_fail_closed_and_use_reviewed_keys() -> None:
+    table_ref = {
+        "database_name": "main",
+        "schema_name": "bronze",
+        "table_name": "claims",
+        "bronze_table": "main.bronze.bronze_claims",
+        "silver_table": "main.silver.silver_claims",
+        "existing_script_path": None,
+        "source_columns": [],
+        "bronze_model_name": None,
+    }
+    columns = [
+        {"column_name": "claimid", "source_column_name": "claimid", "data_type": "int", "type": "NUMBER(38,0)", "is_join_key": True},
+        {"column_name": "description", "source_column_name": "description", "data_type": "string", "type": "VARCHAR", "is_join_key": False},
+    ]
+
+    databricks_code = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=columns,
+        run_id="design-run",
+        strict_mapping=True,
+    )
+    snowflake_code = silver_gen.generate_snowflake_silver_script(
+        table_ref=table_ref,
+        enriched_columns=columns,
+        run_id="design-run",
+        silver_catalog="main",
+        silver_schema="silver",
+        strict_mapping=True,
+    )
+
+    assert "Missing approved mapped columns" in databricks_code
+    assert "Approved Silver merge keys contain nulls" in databricks_code
+    assert "Approved Silver merge keys are not unique" in databricks_code
+    assert "target.`claimid` = source.`claimid`" in databricks_code
+    assert "to_json(struct(" in databricks_code
+    assert 'RUNTIME_CONTEXT = globals().get("ATHENA_RUNTIME_CONTEXT")' in databricks_code
+    assert 'df = df.filter(col("_logical_work_id") == lit(LOGICAL_WORK_ID))' in databricks_code
+    assert 'ON target."claimid" = source."claimid"' in snowflake_code
+    assert "ARRAY_CONSTRUCT(\"claimid\")" in snowflake_code
+    assert "APPROVED_SILVER_MERGE_KEYS_CONTAIN_NULLS" in snowflake_code
+    assert "APPROVED_SILVER_MERGE_KEYS_ARE_NOT_UNIQUE" in snowflake_code
+    assert 'src."_logical_work_id" = $ATHENA_LOGICAL_WORK_ID' in snowflake_code
+    assert '$ATHENA_RUNTIME_RUN_ID AS "silver_run_id"' in snowflake_code
 
 
 def test_snowflake_silver_uses_state_bronze_results_without_old_bundle_bleed(monkeypatch):
@@ -349,6 +511,78 @@ def test_databricks_silver_uses_serverless_safe_try_cast():
 
     assert "spark.databricks.delta.schema.autoMerge.enabled" not in script
     assert "try_cast(`{escaped_name}` AS {target_type})" in script
+
+
+def test_databricks_silver_rejects_malformed_try_cast_scaffold():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claim_information",
+        "bronze_table": "workspace.bronze.bronze_claim_information",
+        "silver_table": "workspace.silver.silver_claim_information",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+    enriched_columns = [
+        {
+            "table_name": "claim_information",
+            "column_name": "claim_open_date",
+            "data_type": "datetime2",
+        }
+    ]
+    script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=enriched_columns,
+        run_id="run-cast",
+    )
+
+    malformed = script.replace(
+        'return expr(f"try_cast(`{escaped_name}` AS {target_type})")',
+        'return expr(f"try_cast(` AS )")',
+    )
+    with pytest.raises(ValueError, match="malformed try_cast helper"):
+        silver_gen._validate_generated_silver_code(
+            malformed,
+            table_ref=table_ref,
+            enriched_columns=enriched_columns,
+            target_warehouse="databricks",
+        )
+
+
+def test_databricks_silver_rejects_empty_rendered_table_contract():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claim_information",
+        "bronze_table": "workspace.bronze.bronze_claim_information",
+        "silver_table": "workspace.silver.silver_claim_information",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+    enriched_columns = [
+        {
+            "table_name": "claim_information",
+            "column_name": "claim_open_date",
+            "data_type": "datetime2",
+        }
+    ]
+    script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=enriched_columns,
+        run_id="run-cast",
+    )
+
+    malformed = (
+        script.replace('SOURCE_TABLE = "workspace.bronze.bronze_claim_information"', 'SOURCE_TABLE = ""')
+        .replace('TARGET_TABLE = "workspace.silver.silver_claim_information"', 'TARGET_TABLE = ""')
+    )
+    with pytest.raises(ValueError, match="changed approved source or target table"):
+        silver_gen._validate_generated_silver_code(
+            malformed,
+            table_ref=table_ref,
+            enriched_columns=enriched_columns,
+            target_warehouse="databricks",
+        )
 
 
 def test_databricks_silver_canonicalizes_uppercase_metadata_and_duplicate_reference_keys():
@@ -532,6 +766,34 @@ def test_databricks_silver_validates_llm_retry_or_uses_deterministic_fallback(
     assert assignments["COLUMN_ALIASES"] == {"rererence_id": "reference_id"}
     assert len(calls) == 2
     assert calls[1]["validation_feedback"]
+def test_databricks_silver_canonicalizes_bad_schema_types_and_names():
+    table_ref = {
+        "database_name": "insurance",
+        "schema_name": "dbo",
+        "table_name": "claim_payment_expenses",
+        "bronze_table": "workspace.bronze.bronze_claim_payment_expenses",
+        "silver_table": "workspace.silver.silver_claim_payment_expenses",
+        "existing_script_path": None,
+        "source_columns": [],
+    }
+
+    script = silver_gen.generate_silver_script(
+        table_ref=table_ref,
+        enriched_columns=[
+            {"column_name": "claimid", "data_type": "float"},
+            {"column_name": "paidamount", "data_type": "float"},
+            {"column_name": "servicetax", "data_type": "varchar"},
+            {"column_name": "agen_t_category_name", "data_type": "varchar"},
+            {"column_name": "branch_office_name", "data_type": "int"},
+        ],
+        run_id="run-silver-quality",
+    )
+
+    assert "EXPECTED_COLUMNS = ['claim_id', 'paid_amount', 'service_tax', 'agent_category_name', 'branch_office_name']" in script
+    assert "'claim_id': 'bigint'" in script
+    assert "'paid_amount': 'decimal(38,10)'" in script
+    assert "'service_tax': 'decimal(38,10)'" in script
+    assert "'branch_office_name': 'string'" not in script
 
 
 def test_databricks_silver_skips_duplicate_expected_output_columns():

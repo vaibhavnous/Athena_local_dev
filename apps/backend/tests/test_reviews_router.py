@@ -43,3 +43,29 @@ def test_clients_cannot_submit_executable_review_code():
         artifact,
         client.model_copy(update={"user_type": "Admin"}),
     ) == artifact
+
+
+def test_metadata_driven_review_strips_executable_code_for_admins_too():
+    admin = AuthUser(
+        uid="admin-1",
+        username="Admin",
+        email="admin@example.com",
+        userType="Admin",
+    )
+    artifact = {
+        "items": [{
+            "silver_ingestion_object_id": "4134741637349269810",
+            "mapping_version": 7,
+            "review_status": "APPROVED",
+            "generated_silver_script": "print('changed')",
+            "script_body": "print('changed')",
+        }]
+    }
+
+    assert _review_artifact_for_user(artifact, admin, strip_executable=True) == {
+        "items": [{
+            "silver_ingestion_object_id": "4134741637349269810",
+            "mapping_version": 7,
+            "review_status": "APPROVED",
+        }]
+    }

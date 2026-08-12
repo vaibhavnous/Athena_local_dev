@@ -1,0 +1,269 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="5260" viewBox="0 0 2400 5260" role="img" aria-labelledby="title desc">
+  <title id="title">Updated metadata-driven ingestion framework flow</title>
+  <desc id="desc">Database-first end-to-end flow from target selection and BRD ingestion through metadata discovery, stage-specific mapping, generated artifact registration, runtime activation, queue execution, target commit, watermark commit, and finalization. Every stage identifies the tables it reads or writes.</desc>
+
+  <defs>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="140%">
+      <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L13,6.5 L0,13 z" fill="#475569"/>
+    </marker>
+    <marker id="greenArrow" markerWidth="13" markerHeight="13" refX="11" refY="6.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L13,6.5 L0,13 z" fill="#15803d"/>
+    </marker>
+    <style>
+      .page-title { font: 700 42px "Segoe UI", Arial, sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 20px "Segoe UI", Arial, sans-serif; fill: #475569; }
+      .phase-title { font: 700 22px "Segoe UI", Arial, sans-serif; fill: #ffffff; letter-spacing: 1px; }
+      .step-title { font: 700 23px "Segoe UI", Arial, sans-serif; fill: #0f172a; }
+      .step-text { font: 400 17px "Segoe UI", Arial, sans-serif; fill: #334155; }
+      .table-text { font: 600 16px "Segoe UI", Arial, sans-serif; fill: #166534; }
+      .small { font: 400 15px "Segoe UI", Arial, sans-serif; fill: #475569; }
+      .small-bold { font: 700 15px "Segoe UI", Arial, sans-serif; fill: #334155; }
+      .white { font: 600 17px "Segoe UI", Arial, sans-serif; fill: #ffffff; }
+      .phase-bg { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; }
+      .setup { fill: #f1f5f9; stroke: #64748b; stroke-width: 2.5; }
+      .app { fill: #e8f1ff; stroke: #2563eb; stroke-width: 2.5; }
+      .config { fill: #e8f8ef; stroke: #15803d; stroke-width: 2.5; }
+      .code { fill: #f2eafe; stroke: #7c3aed; stroke-width: 2.5; }
+      .runtime { fill: #fff4d6; stroke: #d97706; stroke-width: 2.5; }
+      .decision { fill: #fff1f2; stroke: #e11d48; stroke-width: 2.5; }
+      .note { fill: #fffbeb; stroke: #ca8a04; stroke-width: 2; }
+      .error { fill: #fff1f2; stroke: #dc2626; stroke-width: 2.5; }
+      .arrow { fill: none; stroke: #475569; stroke-width: 3.2; marker-end: url(#arrow); }
+      .meta-link { fill: none; stroke: #15803d; stroke-width: 2.4; stroke-dasharray: 9 7; marker-end: url(#greenArrow); }
+      .error-link { fill: none; stroke: #dc2626; stroke-width: 2.5; stroke-dasharray: 8 6; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="2400" height="5260" fill="#f8fafc"/>
+  <text x="1200" y="64" text-anchor="middle" class="page-title">Updated Metadata-Driven Framework - Database First</text>
+  <text x="1200" y="101" text-anchor="middle" class="subtitle">BRD and design artifacts -&gt; approved target-resident metadata -&gt; generated artifact -&gt; queue-driven execution</text>
+
+  <!-- Legend -->
+  <g transform="translate(185,132)">
+    <rect x="0" y="0" width="25" height="25" rx="6" class="setup"/><text x="38" y="19" class="small">Platform/setup</text>
+    <rect x="245" y="0" width="25" height="25" rx="6" class="app"/><text x="283" y="19" class="small">Application/design</text>
+    <rect x="550" y="0" width="25" height="25" rx="6" class="config"/><text x="588" y="19" class="small">Metadata configuration</text>
+    <rect x="910" y="0" width="25" height="25" rx="6" class="code"/><text x="948" y="19" class="small">Code/artifact</text>
+    <rect x="1195" y="0" width="25" height="25" rx="6" class="runtime"/><text x="1233" y="19" class="small">Runtime control</text>
+    <rect x="1515" y="0" width="25" height="25" rx="6" class="decision"/><text x="1553" y="19" class="small">Approval/decision</text>
+  </g>
+
+  <!-- Phase 1 -->
+  <rect x="80" y="195" width="2240" height="775" rx="24" class="phase-bg"/>
+  <rect x="80" y="195" width="2240" height="52" rx="24" fill="#334155"/>
+  <rect x="80" y="221" width="2240" height="26" fill="#334155"/>
+  <text x="1200" y="230" text-anchor="middle" class="phase-title">PHASE 1 - TARGET PLATFORM SETUP AND SOURCE ONBOARDING</text>
+
+  <rect x="350" y="285" width="1700" height="108" rx="18" class="setup" filter="url(#shadow)"/>
+  <text x="1200" y="321" text-anchor="middle" class="step-title">0. Project initialization and target selection</text>
+  <text x="1200" y="351" text-anchor="middle" class="step-text">Source type = DATABASE; choose Databricks, Snowflake, or Fabric before any metadata read/write.</text>
+  <text x="1200" y="377" text-anchor="middle" class="table-text">Storage: application project configuration (not one of the eight ingestion tables)</text>
+
+  <path d="M1200 393 L1200 438" class="arrow"/>
+  <rect x="300" y="442" width="500" height="104" rx="17" class="code" filter="url(#shadow)"/>
+  <text x="550" y="482" text-anchor="middle" class="step-title">Databricks adapter</text>
+  <text x="550" y="512" text-anchor="middle" class="step-text">Delta / Databricks SQL</text>
+  <rect x="950" y="442" width="500" height="104" rx="17" class="code" filter="url(#shadow)"/>
+  <text x="1200" y="482" text-anchor="middle" class="step-title">Snowflake adapter</text>
+  <text x="1200" y="512" text-anchor="middle" class="step-text">Snowflake SQL repository</text>
+  <rect x="1600" y="442" width="500" height="104" rx="17" class="code" filter="url(#shadow)"/>
+  <text x="1850" y="482" text-anchor="middle" class="step-title">Fabric adapter</text>
+  <text x="1850" y="512" text-anchor="middle" class="step-text">Lakehouse / Warehouse repository</text>
+  <path d="M1200 393 L1200 420 L550 420 L550 442" class="arrow"/>
+  <path d="M1200 393 L1200 442" class="arrow"/>
+  <path d="M1200 393 L1200 420 L1850 420 L1850 442" class="arrow"/>
+
+  <path d="M550 546 L550 580 L1200 580 L1200 610" class="arrow"/>
+  <path d="M1200 546 L1200 610" class="arrow"/>
+  <path d="M1850 546 L1850 580 L1200 580 L1200 610" class="arrow"/>
+  <rect x="350" y="614" width="1700" height="112" rx="18" class="config" filter="url(#shadow)"/>
+  <text x="1200" y="650" text-anchor="middle" class="step-title">1. Bootstrap the target metadata schema</text>
+  <text x="1200" y="680" text-anchor="middle" class="step-text">Create or migrate exactly eight tables through a versioned, idempotent platform migration.</text>
+  <text x="1200" y="707" text-anchor="middle" class="table-text">Writes schema only: cfg_source_system, cfg_connection, cfg_ingestion_object, cfg_mapping, ctl_ingestion_queue, ctl_run, ctl_error_log, ctl_watermark</text>
+
+  <path d="M1200 726 L1200 768" class="arrow"/>
+  <rect x="350" y="772" width="1700" height="132" rx="18" class="config" filter="url(#shadow)"/>
+  <text x="1200" y="808" text-anchor="middle" class="step-title">2. One-time source onboarding</text>
+  <text x="1200" y="838" text-anchor="middle" class="step-text">Register the logical source system, JDBC endpoint, auth type, versioned connection JSON, and secret references.</text>
+  <text x="1200" y="866" text-anchor="middle" class="step-text">Validate connectivity and JSON contract before activation. Secret values are never stored.</text>
+  <text x="1200" y="891" text-anchor="middle" class="table-text">Writes: cfg_source_system -&gt; cfg_connection</text>
+
+  <!-- Phase 2 -->
+  <rect x="80" y="1005" width="2240" height="1450" rx="24" class="phase-bg"/>
+  <rect x="80" y="1005" width="2240" height="52" rx="24" fill="#2563eb"/>
+  <rect x="80" y="1031" width="2240" height="26" fill="#2563eb"/>
+  <text x="1200" y="1040" text-anchor="middle" class="phase-title">PHASE 2 - BRD, KPI, SOURCE DISCOVERY, AND APPROVED DESIGN EVIDENCE</text>
+
+  <rect x="350" y="1095" width="1700" height="116" rx="18" class="app" filter="url(#shadow)"/>
+  <text x="1200" y="1131" text-anchor="middle" class="step-title">3. BRD ingestion and design-run creation</text>
+  <text x="1200" y="1161" text-anchor="middle" class="step-text">Create the BRD workflow run, store the document artifact, and persist resumable application state.</text>
+  <text x="1200" y="1190" text-anchor="middle" class="table-text">Writes: brd_run_registry, kpi_checkpoints, ai_store</text>
+
+  <path d="M1200 1211 L1200 1250" class="arrow"/>
+  <rect x="350" y="1254" width="1700" height="126" rx="18" class="app" filter="url(#shadow)"/>
+  <text x="1200" y="1290" text-anchor="middle" class="step-title">4. Requirement and KPI extraction with Gate 1 review</text>
+  <text x="1200" y="1320" text-anchor="middle" class="step-text">LLM proposes requirements and KPIs; deterministic checks and HITL approve the design artifacts.</text>
+  <text x="1200" y="1352" text-anchor="middle" class="table-text">Reads/writes: ai_store, kpi_checkpoints, hitl_review_queue</text>
+
+  <path d="M1200 1380 L1200 1419" class="arrow"/>
+  <rect x="350" y="1423" width="1700" height="132" rx="18" class="app" filter="url(#shadow)"/>
+  <text x="1200" y="1459" text-anchor="middle" class="step-title">5. Table nomination and Gate 2 review</text>
+  <text x="1200" y="1489" text-anchor="middle" class="step-text">Nominate source tables from KPI evidence; a human approves the source feeds to discover.</text>
+  <text x="1200" y="1518" text-anchor="middle" class="table-text">Writes: ai_store.TABLE_NOMINATIONS, ai_store.GATE2_CERTIFIED_TABLES, hitl_review_queue</text>
+  <text x="1200" y="1541" text-anchor="middle" class="small">No cfg table is authoritative yet.</text>
+
+  <path d="M1200 1555 L1200 1594" class="arrow"/>
+  <rect x="350" y="1598" width="1700" height="132" rx="18" class="app" filter="url(#shadow)"/>
+  <text x="1200" y="1634" text-anchor="middle" class="step-title">6. Database metadata discovery</text>
+  <text x="1200" y="1664" text-anchor="middle" class="step-text">Discover approved table schema, columns, datatypes, nullability, keys, ordinals, and relationships.</text>
+  <text x="1200" y="1694" text-anchor="middle" class="table-text">Writes raw evidence: ai_store and kpi_checkpoints</text>
+  <text x="1200" y="1717" text-anchor="middle" class="small">Discovery evidence is design-time input, not runtime configuration.</text>
+
+  <path d="M1200 1730 L1200 1769" class="arrow"/>
+  <rect x="350" y="1773" width="1700" height="142" rx="18" class="config" filter="url(#shadow)"/>
+  <text x="1200" y="1809" text-anchor="middle" class="step-title">7. Create draft Source-to-Bronze objects</text>
+  <text x="1200" y="1839" text-anchor="middle" class="step-text">Create one object per approved source table or controlled query.</text>
+  <text x="1200" y="1867" text-anchor="middle" class="step-text">object_kind = INGESTION; processing_stage = SOURCE_TO_BRONZE; active_flag = false.</text>
+  <text x="1200" y="1898" text-anchor="middle" class="table-text">Writes: cfg_ingestion_object</text>
+
+  <path d="M1200 1915 L1200 1954" class="arrow"/>
+  <rect x="350" y="1958" width="1700" height="150" rx="18" class="app" filter="url(#shadow)"/>
+  <text x="1200" y="1994" text-anchor="middle" class="step-title">8. Column profiling, semantic enrichment, and Gate 3 review</text>
+  <text x="1200" y="2024" text-anchor="middle" class="step-text">Profile nulls, cardinality, ranges, and numeric distribution; approve meanings and key candidates.</text>
+  <text x="1200" y="2054" text-anchor="middle" class="table-text">Writes evidence: ai_store.COLUMN_PROFILES, kpi_checkpoints, hitl_review_queue</text>
+  <text x="1200" y="2082" text-anchor="middle" class="small">Profiling statistics remain in ai_store; only approved execution decisions become cfg_mapping.</text>
+
+  <path d="M1200 2108 L1200 2147" class="arrow"/>
+  <rect x="350" y="2151" width="1700" height="230" rx="18" class="note" filter="url(#shadow)"/>
+  <text x="1200" y="2190" text-anchor="middle" class="step-title">Design-time / runtime boundary rule</text>
+  <text x="1200" y="2223" text-anchor="middle" class="step-text">ai_store keeps prompts, nominations, profiles, reviews, and generated artifact evidence.</text>
+  <text x="1200" y="2253" text-anchor="middle" class="step-text">The eight target-resident tables contain the complete approved execution contract and runtime state.</text>
+  <text x="1200" y="2283" text-anchor="middle" class="step-text">Generated execution must never query ai_store.</text>
+  <text x="1200" y="2320" text-anchor="middle" class="small-bold">Current BRD run_id is separate from ctl_run.run_id.</text>
+  <text x="1200" y="2352" text-anchor="middle" class="small">BRD/design run tracks design work; ctl_run tracks one actual data-processing attempt.</text>
+
+  <!-- Phase 3 -->
+  <rect x="80" y="2490" width="2240" height="1525" rx="24" class="phase-bg"/>
+  <rect x="80" y="2490" width="2240" height="52" rx="24" fill="#7c3aed"/>
+  <rect x="80" y="2516" width="2240" height="26" fill="#7c3aed"/>
+  <text x="1200" y="2525" text-anchor="middle" class="phase-title">PHASE 3 - STAGE MAPPINGS, CODE GENERATION, EXECUTION SPECIFICATION, AND ACTIVATION</text>
+
+  <rect x="310" y="2580" width="1780" height="144" rx="18" class="config" filter="url(#shadow)"/>
+  <text x="1200" y="2616" text-anchor="middle" class="step-title">9. Source-to-Bronze mapping materialization</text>
+  <text x="1200" y="2646" text-anchor="middle" class="step-text">Create one mapping row per Bronze output column from the approved discovery/enrichment contract.</text>
+  <text x="1200" y="2674" text-anchor="middle" class="step-text">Set one bundle mapping_version/hash; is_current = true; active_flag = false.</text>
+  <text x="1200" y="2705" text-anchor="middle" class="table-text">Writes draft: cfg_mapping; updates draft cfg_ingestion_object</text>
+
+  <path d="M1200 2724 L1200 2763" class="arrow"/>
+  <rect x="310" y="2767" width="1780" height="160" rx="18" class="code" filter="url(#shadow)"/>
+  <text x="1200" y="2803" text-anchor="middle" class="step-title">10. Bronze code generation and review</text>
+  <text x="1200" y="2833" text-anchor="middle" class="step-text">Generate from the approved current draft. The generator may not invent unapproved mappings.</text>
+  <text x="1200" y="2861" text-anchor="middle" class="step-text">Register the target artifact and verify its hash after review.</text>
+  <text x="1200" y="2892" text-anchor="middle" class="table-text">Reads: cfg_connection, cfg_ingestion_object, cfg_mapping | Evidence: ai_store, hitl_review_queue</text>
+
+  <path d="M1200 2927 L1200 2966" class="arrow"/>
+  <rect x="310" y="2970" width="1780" height="180" rx="18" class="config" filter="url(#shadow)"/>
+  <text x="1200" y="3006" text-anchor="middle" class="step-title">11. Register Bronze execution specification and activate</text>
+  <text x="1200" y="3036" text-anchor="middle" class="step-text">Write execution_spec_json: execution mode, target platform, engine, artifact URI/entry point,</text>
+  <text x="1200" y="3064" text-anchor="middle" class="step-text">artifact_hash, generator version. Recompute config_hash and atomically activate object + mappings.</text>
+  <text x="1200" y="3095" text-anchor="middle" class="table-text">Writes: cfg_ingestion_object, cfg_mapping; initializes ctl_watermark only for incremental/CDC objects</text>
+  <text x="1200" y="3123" text-anchor="middle" class="small">Runtime cannot see the object until the executable artifact is registered and hash-verifiable.</text>
+
+  <path d="M1200 3150 L1200 3189" class="arrow"/>
+  <rect x="310" y="3193" width="1780" height="164" rx="18" class="config" filter="url(#shadow)"/>
+  <text x="1200" y="3229" text-anchor="middle" class="step-title">12. Silver Mapping Resolution and review</text>
+  <text x="1200" y="3259" text-anchor="middle" class="step-text">Expand the existing merge-key step to include casts, renames, defaults, validation, dedupe, and merge keys.</text>
+  <text x="1200" y="3287" text-anchor="middle" class="step-text">Create object_kind = TRANSFORMATION and BRONZE_TO_SILVER mapping bundle; keep runtime-inactive.</text>
+  <text x="1200" y="3318" text-anchor="middle" class="table-text">Writes draft: cfg_ingestion_object, cfg_mapping | Review: hitl_review_queue</text>
+
+  <path d="M1200 3357 L1200 3396" class="arrow"/>
+  <rect x="310" y="3400" width="1780" height="166" rx="18" class="code" filter="url(#shadow)"/>
+  <text x="1200" y="3436" text-anchor="middle" class="step-title">13. Silver generation, artifact registration, and activation</text>
+  <text x="1200" y="3466" text-anchor="middle" class="step-text">Generate only from the approved Silver mapping; register and hash-verify the target-specific artifact.</text>
+  <text x="1200" y="3494" text-anchor="middle" class="step-text">Write execution_spec_json, recompute config_hash, and atomically activate Silver object + mappings.</text>
+  <text x="1200" y="3527" text-anchor="middle" class="table-text">Reads/writes: cfg_ingestion_object, cfg_mapping | Evidence: ai_store, hitl_review_queue</text>
+
+  <path d="M1200 3566 L1200 3605" class="arrow"/>
+  <rect x="310" y="3609" width="1780" height="178" rx="18" class="config" filter="url(#shadow)"/>
+  <text x="1200" y="3645" text-anchor="middle" class="step-title">14. Gold model, mapping, dependency design, and review</text>
+  <text x="1200" y="3675" text-anchor="middle" class="step-text">Create one TRANSFORMATION object per fact/dimension. Define all Silver inputs, joins, aggregations,</text>
+  <text x="1200" y="3703" text-anchor="middle" class="step-text">build order, output columns, validation, and ALL_SUCCESS dependency rules. Keep runtime-inactive.</text>
+  <text x="1200" y="3734" text-anchor="middle" class="table-text">Writes draft: cfg_ingestion_object.dependency_objects_json; cfg_mapping input/join/aggregation JSON</text>
+  <text x="1200" y="3762" text-anchor="middle" class="small">Review must compare expected vs computable facts/dimensions; silently excluding a Gold table is forbidden.</text>
+
+  <path d="M1200 3787 L1200 3826" class="arrow"/>
+  <rect x="310" y="3830" width="1780" height="160" rx="18" class="code" filter="url(#shadow)"/>
+  <text x="1200" y="3866" text-anchor="middle" class="step-title">15. Gold generation, artifact registration, and activation</text>
+  <text x="1200" y="3896" text-anchor="middle" class="step-text">Generate every approved fact/dimension; register execution_spec_json and verify artifact_hash.</text>
+  <text x="1200" y="3924" text-anchor="middle" class="step-text">Atomically activate each Gold object and its SILVER_TO_GOLD mapping bundle.</text>
+  <text x="1200" y="3955" text-anchor="middle" class="table-text">Reads/writes: cfg_ingestion_object, cfg_mapping | Evidence: ai_store, hitl_review_queue</text>
+
+  <!-- Phase 4 -->
+  <rect x="80" y="4050" width="2240" height="1120" rx="24" class="phase-bg"/>
+  <rect x="80" y="4050" width="2240" height="52" rx="24" fill="#d97706"/>
+  <rect x="80" y="4076" width="2240" height="26" fill="#d97706"/>
+  <text x="1200" y="4085" text-anchor="middle" class="phase-title">PHASE 4 - ACTUAL DATA EXECUTION, RECOVERY, AND CONTROL TABLES</text>
+
+  <rect x="240" y="4140" width="1500" height="126" rx="18" class="runtime" filter="url(#shadow)"/>
+  <text x="990" y="4176" text-anchor="middle" class="step-title">16. Submit bounded work</text>
+  <text x="990" y="4206" text-anchor="middle" class="step-text">Schedule/manual/event trigger creates logical_work_id, idempotency_key, exact work_scope_json,</text>
+  <text x="990" y="4234" text-anchor="middle" class="step-text">batch correlation, and frozen metadata_snapshot_id.</text>
+  <text x="990" y="4256" text-anchor="middle" class="table-text">Writes: ctl_ingestion_queue (PENDING)</text>
+
+  <path d="M990 4266 L990 4305" class="arrow"/>
+  <rect x="240" y="4309" width="1500" height="126" rx="18" class="runtime" filter="url(#shadow)"/>
+  <text x="990" y="4345" text-anchor="middle" class="step-title">17. Atomically claim work and create attempt</text>
+  <text x="990" y="4375" text-anchor="middle" class="step-text">Conditional claim writes a unique claim token, lease, heartbeat, and attempt count; create a new run_id.</text>
+  <text x="990" y="4407" text-anchor="middle" class="table-text">Updates: ctl_ingestion_queue (RUNNING) | Inserts: ctl_run (RUNNING)</text>
+
+  <path d="M990 4435 L990 4474" class="arrow"/>
+  <rect x="240" y="4478" width="1500" height="146" rx="18" class="runtime" filter="url(#shadow)"/>
+  <text x="990" y="4514" text-anchor="middle" class="step-title">18. Resolve frozen configuration and executable</text>
+  <text x="990" y="4544" text-anchor="middle" class="step-text">Load exact active versions/hashes; validate JSON, object_kind, dependencies, boundary rules,</text>
+  <text x="990" y="4572" text-anchor="middle" class="step-text">execution_spec_json, and artifact_hash. Never switch metadata during the run.</text>
+  <text x="990" y="4604" text-anchor="middle" class="table-text">Reads: all four cfg tables + ctl_watermark | Updates: ctl_run.current_phase</text>
+
+  <path d="M990 4624 L990 4663" class="arrow"/>
+  <rect x="240" y="4667" width="1500" height="164" rx="18" class="runtime" filter="url(#shadow)"/>
+  <text x="990" y="4703" text-anchor="middle" class="step-title">19. Execute, validate, and commit target</text>
+  <text x="990" y="4733" text-anchor="middle" class="step-text">INGESTION: connect and extract JDBC boundary. TRANSFORMATION: read governed Bronze/Silver inputs.</text>
+  <text x="990" y="4761" text-anchor="middle" class="step-text">Apply mappings, controlled transformations, validation gates, lineage, and idempotent write strategy.</text>
+  <text x="990" y="4792" text-anchor="middle" class="table-text">Updates: ctl_run phases, metrics, validation_status, target_write_id, target_commit_status</text>
+
+  <path d="M990 4831 L990 4870" class="arrow"/>
+  <rect x="240" y="4874" width="1500" height="128" rx="18" class="runtime" filter="url(#shadow)"/>
+  <text x="990" y="4910" text-anchor="middle" class="step-title">20. Commit watermark safely</text>
+  <text x="990" y="4940" text-anchor="middle" class="step-text">After target commit and blocking validation, stage candidate and compare-and-swap watermark_version.</text>
+  <text x="990" y="4972" text-anchor="middle" class="table-text">Updates: ctl_watermark; records watermark status in ctl_run</text>
+
+  <path d="M990 5002 L990 5041" class="arrow"/>
+  <rect x="240" y="5045" width="1500" height="92" rx="18" class="runtime" filter="url(#shadow)"/>
+  <text x="990" y="5081" text-anchor="middle" class="step-title">21. Finalize execution</text>
+  <text x="990" y="5112" text-anchor="middle" class="table-text">ctl_run = SUCCESS -&gt; ctl_ingestion_queue = SUCCESS -&gt; release lease</text>
+
+  <!-- Error side rail -->
+  <rect x="1800" y="4309" width="450" height="693" rx="20" class="error" filter="url(#shadow)"/>
+  <text x="2025" y="4352" text-anchor="middle" class="step-title">Failure path</text>
+  <text x="2025" y="4392" text-anchor="middle" class="step-text">At every caught runtime error:</text>
+  <text x="1835" y="4437" class="small-bold">1. Insert ctl_error_log</text>
+  <text x="1835" y="4472" class="small">Run, queue, attempt, object, stage,</text>
+  <text x="1835" y="4498" class="small">safe details, retryable flag.</text>
+  <text x="1835" y="4552" class="small-bold">2. Keep watermark unchanged</text>
+  <text x="1835" y="4587" class="small">Unless it already committed and recovery</text>
+  <text x="1835" y="4613" class="small">verifies that durable state.</text>
+  <text x="1835" y="4667" class="small-bold">3. Update ctl_run</text>
+  <text x="1835" y="4702" class="small">FAILED, current phase, recovery action,</text>
+  <text x="1835" y="4728" class="small">target and watermark commit states.</text>
+  <text x="1835" y="4782" class="small-bold">4. Update ctl_ingestion_queue</text>
+  <text x="1835" y="4817" class="small">RETRY_WAIT or FAILED according to the</text>
+  <text x="1835" y="4843" class="small">versioned retry policy and lease.</text>
+  <text x="2025" y="4910" text-anchor="middle" class="small-bold">Recovery is phase-aware and idempotent.</text>
+  <path d="M1740 4749 L1782 4749" class="error-link"/>
+
+  <!-- Footer -->
+  <rect x="80" y="5195" width="2240" height="45" rx="12" fill="#0f172a"/>
+  <text x="1200" y="5224" text-anchor="middle" class="white">Later SFTP, ADLS/S3, and REST sources reuse this lifecycle; only connector, container handler, parser, and source-scope contracts change.</text>
+</svg>

@@ -576,6 +576,7 @@ function getHistoryDisplaySteps(phase) {
 
   if (phase.label === 'Code Generation & Reviews') {
     return clampLinearHistorySteps([
+      ...(byKey.has('metadata_ddl') ? [actual('metadata_ddl', 'Metadata DDL Generation')] : []),
       actual('bronze', 'Bronze Code Generation'),
       actual('gate4', 'Bronze Review'),
       actual('silver_merge_key_resolution', 'Silver Merge Key Resolution'),
@@ -590,6 +591,7 @@ function getHistoryDisplaySteps(phase) {
   if (['Target Execution', 'Code Execution & Report Generation', 'Snowflake dbt Deployment & Build'].includes(phase.label)) {
     if (steps.some((step) => step.key === 'gold_code_execution' && ['Deployment', 'Code Execution'].includes(step.label))) {
       return clampLinearHistorySteps([
+        ...(byKey.has('metadata_setup_execution') ? [actual('metadata_setup_execution', 'Metadata Setup Execution')] : []),
         actual('gold_code_execution', 'Code Execution'),
         ...(steps.some((step) => step.key === 'report_generation')
           ? [actual('report_generation', 'Report Generation')]
@@ -597,6 +599,7 @@ function getHistoryDisplaySteps(phase) {
       ])
     }
     return clampLinearHistorySteps([
+      ...(byKey.has('metadata_setup_execution') ? [actual('metadata_setup_execution', 'Metadata Setup Execution')] : []),
       actual('bronze_code_execution', 'Bronze Target Execution'),
       actual('silver_code_execution', 'Silver Target Execution'),
       actual('gold_code_execution', 'Gold Target Execution'),

@@ -12,7 +12,7 @@ import {
   Upload,
 } from 'lucide-react'
 import * as mammoth from 'mammoth'
-import { startRun, uploadBrd } from '../../api/athenaApi'
+import { getMetadataSourceOptions, startRun, uploadBrd } from '../../api/athenaApi'
 import useAthenaStore from '../../store/useAthenaStore'
 
 const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024
@@ -32,6 +32,9 @@ const DEFAULT_FORM = {
   dataLakeType: '',
   dataLakeName: '',
   targetWarehouse: 'databricks',
+  targetEnvironment: '',
+  sourceSystemId: '',
+  sourceConnectionId: '',
   executionEngine: 'native',
   dbtDeploymentMode: 'generate_only',
   dbtTargetName: '',
@@ -64,6 +67,9 @@ export function buildInitialForm(settings, seedRun, project) {
           databaseType: seedRun.database_type || DEFAULT_FORM.databaseType,
           databaseName: seedRun.database_name || DEFAULT_FORM.databaseName,
           targetWarehouse: seedRun.target_warehouse || DEFAULT_FORM.targetWarehouse,
+          targetEnvironment: seedRun.target_environment || '',
+          sourceSystemId: seedRun.source_system_id ? String(seedRun.source_system_id) : '',
+          sourceConnectionId: seedRun.source_connection_id ? String(seedRun.source_connection_id) : '',
           executionEngine: seedRun.execution_engine || DEFAULT_FORM.executionEngine,
           dbtDeploymentMode: seedRun.dbt_deployment_mode || 'generate_only',
           dbtTargetName: seedRun.dbt_target_name || '',
@@ -151,17 +157,27 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
+  const [metadataSources, setMetadataSources] = useState([])
+  const [metadataLoading, setMetadataLoading] = useState(false)
+  const [metadataError, setMetadataError] = useState(null)
   const sourceValue = String(form.source || DEFAULT_FORM.source).trim().toLowerCase()
   const targetWarehouseValue = String(form.targetWarehouse || DEFAULT_FORM.targetWarehouse).trim().toLowerCase()
   const snowflakeDatabaseTarget = targetWarehouseValue === 'snowflake' && sourceValue === 'database'
   const executionEngineValue = snowflakeDatabaseTarget && form.executionEngine === 'dbt' ? 'dbt' : 'native'
   const dbtDeploymentModeValue = executionEngineValue === 'dbt' ? 'generate_and_deploy' : 'generate_only'
+  const selectedMetadataSource = metadataSources.find(
+    (item) => String(item.source_system_id) === String(form.sourceSystemId),
+  )
+  const metadataConnections = selectedMetadataSource?.connections || []
 
   const resetState = () => {
     setForm(buildInitialForm(settings, initialSeedRun, project))
     setUploadedFile(null)
     setError(null)
     setIsDragging(false)
+    setMetadataSources([])
+    setMetadataError(null)
+    setMetadataLoading(false)
   }
 
   useEffect(() => {
@@ -171,6 +187,57 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
     setError(null)
     setIsDragging(false)
   }, [initialSeedRun, isOpen, project, settings])
+
+  useEffect(() => {
+    if (!isOpen || sourceValue !== 'database') {
+      setMetadataSources([])
+      setMetadataError(null)
+      setMetadataLoading(false)
+      return
+    }
+    let cancelled = false
+    setMetadataLoading(true)
+    setMetadataError(null)
+    getMetadataSourceOptions(targetWarehouseValue, project?.id)
+      .then((response) => {
+        if (cancelled) return
+        const sources = response?.source_systems || []
+        setMetadataSources(sources)
+        setForm((current) => {
+          const source = sources.find(
+            (item) => String(item.source_system_id) === String(current.sourceSystemId),
+          ) || (sources.length === 1 ? sources[0] : null)
+          const connections = source?.connections || []
+          const connection = connections.find(
+            (item) => String(item.connection_id) === String(current.sourceConnectionId),
+          ) || (connections.length === 1 ? connections[0] : null)
+          return {
+            ...current,
+            targetEnvironment: response.target_environment || '',
+            sourceSystemId: source?.source_system_id || '',
+            sourceConnectionId: connection?.connection_id || '',
+            databaseName: connection?.database_name || current.databaseName,
+          }
+        })
+      })
+      .catch((loadError) => {
+        if (cancelled) return
+        setMetadataSources([])
+        setMetadataError(loadError?.message || 'Failed to load target metadata sources.')
+        setForm((current) => ({
+          ...current,
+          targetEnvironment: '',
+          sourceSystemId: '',
+          sourceConnectionId: '',
+        }))
+      })
+      .finally(() => {
+        if (!cancelled) setMetadataLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isOpen, project?.id, sourceValue, targetWarehouseValue])
 
   const handleClose = () => {
     if (loading) return
@@ -250,6 +317,10 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
       setError('Please provide BRD text or upload a file.')
       return
     }
+    if (sourceValue === 'database' && (!form.sourceSystemId || !form.sourceConnectionId || !form.targetEnvironment)) {
+      setError('Select a metadata source system and connection before starting the database run.')
+      return
+    }
 
     setLoading(true)
     setError(null)
@@ -291,6 +362,16 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         database_type: form.databaseType,
         database_name: form.databaseName,
         target_warehouse: targetWarehouseValue,
+        database_flow_version: form.source === 'adls_gen2' ? 'generation_first_v2' : undefined,
+        generation_first_execution: form.source === 'adls_gen2' ? true : undefined,
+        report_generation_enabled: form.source === 'adls_gen2' ? true : undefined,
+        target_environment: sourceValue === 'database' ? form.targetEnvironment : undefined,
+        source_system_id: sourceValue === 'database' ? String(form.sourceSystemId) : undefined,
+        source_connection_id: sourceValue === 'database' ? String(form.sourceConnectionId) : undefined,
+        source_profile: sourceValue === 'database'
+          ? metadataConnections.find((item) => String(item.connection_id) === String(form.sourceConnectionId))?.source_profile
+            || selectedMetadataSource?.source_profile
+          : undefined,
         execution_engine: executionEngineValue,
         dbt_deployment_mode: dbtDeploymentModeValue,
         dbt_target_name: form.dbtTargetName || undefined,
@@ -321,6 +402,9 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
         provider: form.provider,
         deployment: form.deployment || null,
         target_warehouse: targetWarehouseValue,
+        target_environment: sourceValue === 'database' ? form.targetEnvironment : null,
+        source_system_id: sourceValue === 'database' ? String(form.sourceSystemId) : null,
+        source_connection_id: sourceValue === 'database' ? String(form.sourceConnectionId) : null,
         execution_engine: executionEngineValue,
         dbt_deployment_mode: dbtDeploymentModeValue,
         dbt_target_name: form.dbtTargetName || null,
@@ -520,7 +604,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                       <div className="space-y-4">
                         <div>
                           <h3 className="text-base font-semibold text-text-primary">Project Source Configuration</h3>
-                          <p className="mt-0.5 text-xs text-text-tertiary">Read-only configuration loaded from the selected project.</p>
+                          <p className="mt-0.5 text-xs text-text-tertiary">Select the target-resident metadata source for this run.</p>
                         </div>
 
                         <div>
@@ -539,6 +623,56 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
 
                             {form.source === 'database' ? (
                               <>
+                                <Field label="Source System" compact>
+                                  <select
+                                    className="input-field h-11"
+                                    value={form.sourceSystemId}
+                                    disabled={metadataLoading}
+                                    onChange={(event) => {
+                                      const source = metadataSources.find(
+                                        (item) => String(item.source_system_id) === event.target.value,
+                                      )
+                                      const connection = source?.connections?.length === 1 ? source.connections[0] : null
+                                      setForm((current) => ({
+                                        ...current,
+                                        sourceSystemId: event.target.value,
+                                        sourceConnectionId: connection?.connection_id || '',
+                                        databaseName: connection?.database_name || current.databaseName,
+                                      }))
+                                    }}
+                                  >
+                                    <option value="">{metadataLoading ? 'Loading metadata...' : 'Select source system'}</option>
+                                    {metadataSources.map((source) => (
+                                      <option key={source.source_system_id} value={source.source_system_id}>
+                                        {source.source_system_name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </Field>
+                                <Field label="Source Connection" compact>
+                                  <select
+                                    className="input-field h-11"
+                                    value={form.sourceConnectionId}
+                                    disabled={metadataLoading || !form.sourceSystemId}
+                                    onChange={(event) => {
+                                      const connection = metadataConnections.find(
+                                        (item) => String(item.connection_id) === event.target.value,
+                                      )
+                                      setForm((current) => ({
+                                        ...current,
+                                        sourceConnectionId: event.target.value,
+                                        databaseName: connection?.database_name || current.databaseName,
+                                      }))
+                                    }}
+                                  >
+                                    <option value="">Select source connection</option>
+                                    {metadataConnections.map((connection) => (
+                                      <option key={connection.connection_id} value={connection.connection_id}>
+                                        {connection.connection_name}{connection.design_time_fallback ? ' (design-time fallback)' : ''}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </Field>
                                 <Field label="Database Type" compact>
                                   <input
                                     className="input-field h-11 cursor-not-allowed opacity-80"
@@ -582,6 +716,11 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                     </div>
                                   )}
                                 </div>
+                                {metadataError && (
+                                  <div className="rounded-md border border-accent-red/30 bg-red-500/10 px-3 py-2 text-xs text-accent-red">
+                                    {metadataError}
+                                  </div>
+                                )}
                               </>
                             ) : (
                               <>
@@ -622,7 +761,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                     </button>
                     <button
                       type="submit"
-                      disabled={loading || !form.brdText.trim()}
+                      disabled={loading || metadataLoading || !form.brdText.trim() || (sourceValue === 'database' && (!form.sourceSystemId || !form.sourceConnectionId))}
                       className="btn-primary inline-flex h-11 flex-1 items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {loading ? (

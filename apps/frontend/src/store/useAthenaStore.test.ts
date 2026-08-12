@@ -37,13 +37,13 @@ test('keeps a later phase when a slower status response reports an earlier phase
   expect(useAthenaStore.getState().runs[0].pipeline_steps[0].key).toBe('silver_code_execution')
 })
 
-test('accepts SFTP nomination after discovery in the six-phase order', () => {
+test('accepts ADLS discovery after nomination in the database stage order', () => {
   resetStore()
   useAthenaStore.getState().addRun({
     id: 'run-sftp',
     source: 'adls_gen2',
     status: 'RUNNING',
-    pipeline_steps: [{ key: 'discovery', state: 'RUNNING' }],
+    pipeline_steps: [{ key: 'nomination', state: 'RUNNING' }],
   })
 
   useAthenaStore.getState().updateRun('run-sftp', {
@@ -51,14 +51,14 @@ test('accepts SFTP nomination after discovery in the six-phase order', () => {
     source: 'adls_gen2',
     status: 'RUNNING',
     pipeline_steps: [
-      { key: 'discovery', state: 'COMPLETED' },
-      { key: 'nomination', state: 'RUNNING' },
+      { key: 'nomination', state: 'COMPLETED' },
+      { key: 'discovery', state: 'RUNNING' },
     ],
   })
 
   expect(useAthenaStore.getState().runs[0].pipeline_steps).toEqual([
-    { key: 'discovery', state: 'COMPLETED' },
-    { key: 'nomination', state: 'RUNNING' },
+    { key: 'nomination', state: 'COMPLETED' },
+    { key: 'discovery', state: 'RUNNING' },
   ])
 })
 

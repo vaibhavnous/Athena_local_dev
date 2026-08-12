@@ -37,7 +37,7 @@ const DATA_LAKE_SOURCE_TYPES = [
 ]
 
 const DATA_LAKE_INTEGRATION_TYPES = [
-  { value: 'SFTP', label: 'SFTP' },
+  { value: 'ADLS', label: 'ADLS' },
   { value: 'API', label: 'API' }
 ]
 
@@ -77,7 +77,7 @@ const EMPTY_CONNECTION = {
   port: '1433',
   databaseName: '',
   schema: '',
-  integrationType: 'SFTP',
+  integrationType: 'ADLS',
   dataLakeSourceType: 'ADLS',
   basePath: '',
   directoryName: '',
@@ -198,7 +198,7 @@ function ConnectionCard ({ conn, onEdit, onDelete }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const preset = DB_PRESETS[conn.dbType] || DB_PRESETS.custom
   const isDataLake = conn.sourceType === 'data_lake'
-  const integrationType = conn.integrationType || 'SFTP'
+  const integrationType = conn.integrationType || 'ADLS'
   const isApiDataLake = isDataLake && integrationType === 'API'
 
   return (

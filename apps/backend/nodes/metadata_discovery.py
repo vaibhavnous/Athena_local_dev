@@ -21,10 +21,12 @@ from utilis.db import ai_store_db_writer, get_client_connection
 from utilis.logger import logger
 
 
-class NominatedTable(TypedDict):
+class NominatedTable(TypedDict, total=False):
     database_name: str
     schema_name: str
     table_name: str
+    ingestion_object_id: int
+    ingestion_object_config_version: int
 
 
 class ColumnMetadata(TypedDict):
@@ -45,6 +47,8 @@ class TableMetadata(TypedDict, total=False):
     database_name: str
     schema_name: str
     table_name: str
+    ingestion_object_id: int
+    ingestion_object_config_version: int
     table_status: Literal["COMPLETED", "FAILED"]
     column_count: int
     columns: List[ColumnMetadata]
@@ -92,6 +96,16 @@ def _resolve_tables_for_discovery(state: Stage01State) -> List[NominatedTable]:
                 "database_name": database_name,
                 "schema_name": schema_name,
                 "table_name": table_name,
+                **(
+                    {"ingestion_object_id": int(item["ingestion_object_id"])}
+                    if item.get("ingestion_object_id") is not None
+                    else {}
+                ),
+                **(
+                    {"ingestion_object_config_version": int(item["ingestion_object_config_version"])}
+                    if item.get("ingestion_object_config_version") is not None
+                    else {}
+                ),
             }
         )
 
@@ -438,6 +452,16 @@ def metadata_discovery_node(state: Stage01State) -> Stage01State:
                         "database_name": database_name,
                         "schema_name": schema_name,
                         "table_name": table_name,
+                        **(
+                            {"ingestion_object_id": table_ref["ingestion_object_id"]}
+                            if table_ref.get("ingestion_object_id") is not None
+                            else {}
+                        ),
+                        **(
+                            {"ingestion_object_config_version": table_ref["ingestion_object_config_version"]}
+                            if table_ref.get("ingestion_object_config_version") is not None
+                            else {}
+                        ),
                         "table_status": "COMPLETED",
                         "column_count": len(columns),
                         "columns": columns,
@@ -469,6 +493,16 @@ def metadata_discovery_node(state: Stage01State) -> Stage01State:
                         "database_name": database_name,
                         "schema_name": schema_name,
                         "table_name": table_name,
+                        **(
+                            {"ingestion_object_id": table_ref["ingestion_object_id"]}
+                            if table_ref.get("ingestion_object_id") is not None
+                            else {}
+                        ),
+                        **(
+                            {"ingestion_object_config_version": table_ref["ingestion_object_config_version"]}
+                            if table_ref.get("ingestion_object_config_version") is not None
+                            else {}
+                        ),
                         "table_status": "FAILED",
                         "column_count": 0,
                         "columns": [],

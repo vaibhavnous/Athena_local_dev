@@ -692,6 +692,13 @@ def _dbt_command_timeout(state: Dict[str, Any]) -> int:
         return 1800
 
 
+def _gold_partial_success_ratio() -> float:
+    try:
+        return min(1.0, max(0.5, float(os.getenv("ATHENA_GOLD_MIN_SUCCESS_RATIO", "0.9"))))
+    except (TypeError, ValueError):
+        return 0.9
+
+
 def _redact_output(value: Any) -> str:
     text = str(value or "")
     for key in ("SNOWFLAKE_PASSWORD", "SNOWFLAKE_PRIVATE_KEY", "SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"):
@@ -699,6 +706,13 @@ def _redact_output(value: Any) -> str:
         if secret:
             text = text.replace(secret, "***")
     return text[-12_000:]
+
+
+class _DbtCommandError(RuntimeError):
+    def __init__(self, *, returncode: int, output: str):
+        self.returncode = returncode
+        self.output = output
+        super().__init__(f"dbt command failed with exit code {returncode}. Output: {output}")
 
 
 def _run_dbt_command(
@@ -725,7 +739,7 @@ def _run_dbt_command(
 
     output = _redact_output(f"{completed.stdout or ''}\n{completed.stderr or ''}")
     if completed.returncode != 0:
-        raise RuntimeError(f"dbt command failed with exit code {completed.returncode}. Output: {output}")
+        raise _DbtCommandError(returncode=completed.returncode, output=output)
     dbt_index = command.index("dbt") if "dbt" in command else 0
     return {
         "command": " ".join(command[dbt_index : dbt_index + 2]),
@@ -747,6 +761,8 @@ def _read_json(path: Path, *, label: str) -> Dict[str, Any]:
 
 
 def _execution_state_from_receipt(state: Dict[str, Any], receipt: Dict[str, Any]) -> Dict[str, Any]:
+    receipt_status = str(receipt.get("status") or "COMPLETED").upper()
+    gold_status = "COMPLETED_WITH_WARNINGS" if receipt_status == "COMPLETED_WITH_WARNINGS" else "COMPLETED"
     return {
         **state,
         "snowflake_dbt_status": "EXECUTED",
@@ -755,6 +771,8 @@ def _execution_state_from_receipt(state: Dict[str, Any], receipt: Dict[str, Any]
         "snowflake_dbt_execution": receipt,
         "snowflake_dbt_project_name": receipt.get("project_name"),
         "snowflake_dbt_project_fqn": receipt.get("project_fqn"),
+        "snowflake_gold_execution_status": gold_status,
+        "snowflake_dbt_execution_summary": receipt.get("gold_execution_summary") or {},
         "completion_mode": "dbt_executed",
     }
 
@@ -791,7 +809,7 @@ def _execute_snowflake_dbt(state: Dict[str, Any], project_dir: Path) -> Dict[str
     idempotency_key = str(state.get("snowflake_dbt_idempotency_key") or "")
     existing = _read_json(receipt_path, label="execution receipt") if receipt_path.exists() else {}
     if existing.get("idempotency_key") == idempotency_key and not state.get("force_dbt_deploy"):
-        if existing.get("status") == "COMPLETED":
+        if existing.get("status") in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}:
             return _execution_state_from_receipt(state, existing)
         if existing.get("status") in {"RUNNING", "FAILED"}:
             raise RuntimeError(
@@ -880,18 +898,97 @@ def _execute_snowflake_dbt(state: Dict[str, Any], project_dir: Path) -> Dict[str
                     target,
                     "--threads",
                     str(_dbt_threads(state)),
-                    "--fail-fast",
+                    "--exclude",
+                    "path:models/gold",
                 ],
                 project_dir=project_dir,
                 timeout=max(1, int(deadline - time.monotonic())),
                 env=command_env,
             )
         )
+
+        gold_models = [
+            str(model.get("model_name") or "").strip()
+            for model in state.get("snowflake_dbt_models") or []
+            if isinstance(model, dict) and str(model.get("model_name") or "").strip()
+        ]
+        if not gold_models:
+            raise RuntimeError("The reviewed dbt project contains no approved Gold models to execute.")
+
+        gold_results: List[Dict[str, Any]] = []
+        for model_name in gold_models:
+            try:
+                command_result = _run_dbt_command(
+                    [
+                        *cli_command,
+                        "dbt",
+                        "execute",
+                        *connection_args,
+                        "--format",
+                        "JSON",
+                        project_fqn,
+                        "build",
+                        "--target",
+                        target,
+                        "--threads",
+                        str(_dbt_threads(state)),
+                        "--select",
+                        model_name,
+                    ],
+                    project_dir=project_dir,
+                    timeout=max(1, int(deadline - time.monotonic())),
+                    env=command_env,
+                )
+                command_result["model_name"] = model_name
+                commands.append(command_result)
+                gold_results.append({"model_name": model_name, "status": "SUCCESS"})
+            except TimeoutError:
+                # A timeout has an ambiguous commit state; never classify it as a safe partial failure.
+                raise
+            except _DbtCommandError as exc:
+                # Only an error explicitly tied to the selected model is safe to isolate.
+                if model_name.casefold() not in exc.output.casefold():
+                    raise
+                gold_results.append(
+                    {
+                        "model_name": model_name,
+                        "status": "FAILED",
+                        "error": _redact_output(exc),
+                    }
+                )
+
+        succeeded = sum(1 for result in gold_results if result["status"] == "SUCCESS")
+        total = len(gold_results)
+        failed = total - succeeded
+        success_ratio = succeeded / total
+        if not succeeded or success_ratio < _gold_partial_success_ratio():
+            failed_models = ", ".join(
+                result["model_name"] for result in gold_results if result["status"] == "FAILED"
+            )
+            raise RuntimeError(
+                f"Snowflake dbt Gold execution completed {succeeded}/{total} models; "
+                f"failed models: {failed_models or 'unknown'}."
+            )
+
+        receipt_status = "COMPLETED_WITH_WARNINGS" if failed else "COMPLETED"
+        gold_summary = {
+            "planned_count": total,
+            "completed_count": succeeded,
+            "failed_count": failed,
+            "success_ratio": success_ratio,
+            "results": gold_results,
+            "message": (
+                f"Gold completed with warnings: {succeeded}/{total} tables succeeded."
+                if failed
+                else f"Gold completed: {succeeded}/{total} tables succeeded."
+            ),
+        }
         receipt.update(
             {
-                "status": "COMPLETED",
+                "status": receipt_status,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "commands": commands,
+                "gold_execution_summary": gold_summary,
             }
         )
         _write_text(receipt_path, json.dumps(receipt, indent=2, sort_keys=True))

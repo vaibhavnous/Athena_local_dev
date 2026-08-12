@@ -11,6 +11,7 @@ import SemanticReviewCard from '../components/hitl/SemanticReviewCard'
 import CodeReviewEditorModal from '../components/hitl/CodeReviewEditorModal'
 import {
   getBronzeReview,
+  getMetadataDdlReview,
   getGoldReview,
   getEnrichmentReviews,
   fetchKpiReviews,
@@ -21,6 +22,7 @@ import {
   getSilverMergeKeyReview,
   getTableReviews,
   submitBronzeReview,
+  submitMetadataDdlReview,
   submitGoldReview,
   submitDecisions as submitHitlDecisions,
   submitEnrichmentReview,
@@ -474,6 +476,7 @@ function HitlQueue({ onClose = null }) {
   const [semanticRejectionReasons, setSemanticRejectionReasons] = useState({})
   const [semanticValidationError, setSemanticValidationError] = useState('')
   const [bronzeReview, setBronzeReview] = useState(null)
+  const [metadataDdlReview, setMetadataDdlReview] = useState(null)
   const [silverMergeKeyReview, setSilverMergeKeyReview] = useState(null)
   const [silverReview, setSilverReview] = useState(null)
   const [goldReview, setGoldReview] = useState(null)
@@ -514,6 +517,7 @@ function HitlQueue({ onClose = null }) {
   const reviewKeyToReview = requestedReviewKey || (!requestedGate ? currentRun?.next_review_key : '') || ''
   const isReviewableRun = isReviewGateAccessible(currentRun) || (Boolean(selectedRunId) && (gateToReview > 0 || Boolean(reviewKeyToReview)))
   const isSilverMergeKeyReview = reviewKeyToReview === 'silver_merge_key_review'
+  const isMetadataDdlReview = reviewKeyToReview === 'metadata_ddl_review'
   const isGoldReview = reviewKeyToReview === 'gold_review'
   const isGate1 = gateToReview === 1
   const isGate2 = gateToReview === 2
@@ -522,6 +526,7 @@ function HitlQueue({ onClose = null }) {
   const isGate5 = gateToReview === 5
   const runSource = currentRun?.source || selectedRunDetail?.source || ''
   const isSftpRun = runSource === 'sftp' || runSource === 'adls_gen2'
+  const useLegacyFeedReview = usesLegacyFeedReview(runSource)
   const generationFirstDatabaseRun = isGenerationFirstDatabaseRun({
     ...(currentRun || {}),
     ...(selectedRunDetail || {}),
@@ -531,7 +536,9 @@ function HitlQueue({ onClose = null }) {
   const gate3Name = getGateDisplayName(3)
   const gate4Name = getGateDisplayName(4)
   const gate5Name = getGateDisplayName(5)
-  const activeReviewName = isSilverMergeKeyReview
+  const activeReviewName = isMetadataDdlReview
+    ? 'Metadata DDL Review'
+    : isSilverMergeKeyReview
     ? 'Silver Merge Key Review'
     : isGoldReview ? 'Gold Code Review'
     : isGate5 ? gate5Name : isGate4 ? gate4Name : isGate3 ? gate3Name : isGate2 ? gate2Name : gate1Name
@@ -560,6 +567,7 @@ function HitlQueue({ onClose = null }) {
     setTableReview(null)
     setEnrichmentReview(null)
     setBronzeReview(null)
+    setMetadataDdlReview(null)
     setSilverMergeKeyReview(null)
     setSilverReview(null)
     setGoldReview(null)
@@ -688,6 +696,7 @@ function HitlQueue({ onClose = null }) {
       setTableReview(null)
       setEnrichmentReview(null)
       setBronzeReview(null)
+      setMetadataDdlReview(null)
       setSilverMergeKeyReview(null)
       setSilverReview(null)
       setGoldReview(null)
@@ -709,6 +718,7 @@ function HitlQueue({ onClose = null }) {
       setTableReview(null)
       setEnrichmentReview(null)
       setBronzeReview(null)
+      setMetadataDdlReview(null)
       setSilverMergeKeyReview(null)
       setSilverReview(null)
       setGoldReview(null)
@@ -731,6 +741,7 @@ function HitlQueue({ onClose = null }) {
     setSemanticRejectionReasons({})
     setSemanticValidationError('')
     setBronzeReview(null)
+    setMetadataDdlReview(null)
     setSilverMergeKeyReview(null)
     setSilverReview(null)
     setGoldReview(null)
@@ -775,9 +786,9 @@ function HitlQueue({ onClose = null }) {
             setTableReview(fallbackPatch)
             setSelectedTables((prev) => {
               const next = { ...prev }
-              const items = isSftpRun ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
+              const items = useLegacyFeedReview ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
               for (const table of items) {
-                const key = isSftpRun ? sftpFeedKey(table) : tableReviewKey(table)
+                const key = useLegacyFeedReview ? sftpFeedKey(table) : tableReviewKey(table)
                 next[key] = true
               }
               return next
@@ -798,11 +809,15 @@ function HitlQueue({ onClose = null }) {
           return
         }
 
+        if (isMetadataDdlReview && hasRenderableReviewData(currentRun, 'metadata_ddl_review')) {
+          setMetadataDdlReview(currentRun)
+          return
+        }
         if (isGate4 && hasRenderableReviewData(currentRun, 4)) {
           setBronzeReview(currentRun)
           return
         }
-        if (isSilverMergeKeyReview && hasRenderableReviewData(currentRun, 'silver_merge_key_review')) {
+        if (isSilverMergeKeyReview && hasRenderableReviewData(currentRun, 'silver_merge_key_review', runSource === 'adls_gen2')) {
           setSilverMergeKeyReview(currentRun)
           return
         }
@@ -839,6 +854,23 @@ function HitlQueue({ onClose = null }) {
           return
         }
 
+        if (isMetadataDdlReview) {
+          const review = await waitForRenderableReview(
+            () => getMetadataDdlReview(selectedRunId),
+            'metadata_ddl_review'
+          )
+          if (!isCurrentHydration()) return
+          if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
+          setMetadataDdlReview(review)
+          updateRun(selectedRunId, {
+            next_review_key: review.next_review_key,
+            resume_message: review.resume_message,
+            metadata_ddl_review: review.metadata_ddl_review || {},
+          })
+          window.dispatchEvent(new CustomEvent('athena:review-gate-ready', { detail: { runId: selectedRunId, review: 'metadata_ddl_review', source: runSource } }))
+          return
+        }
+
         if (isGate4) {
           const review = await waitForRenderableReview(() => getBronzeReview(selectedRunId), 4)
           if (!isCurrentHydration()) return
@@ -854,7 +886,11 @@ function HitlQueue({ onClose = null }) {
         }
 
         if (isSilverMergeKeyReview) {
-          const review = await waitForRenderableReview(() => getSilverMergeKeyReview(selectedRunId), 'silver_merge_key_review')
+          const review = await waitForRenderableReview(
+            () => getSilverMergeKeyReview(selectedRunId),
+            'silver_merge_key_review',
+            runSource === 'adls_gen2',
+          )
           if (!isCurrentHydration()) return
           if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setSilverMergeKeyReview(review)
@@ -897,15 +933,15 @@ function HitlQueue({ onClose = null }) {
         }
 
         if (isGate2) {
-          const review = await waitForRenderableReview(() => getTableReviews(selectedRunId), 2, isSftpRun)
+          const review = await waitForRenderableReview(() => getTableReviews(selectedRunId), 2, useLegacyFeedReview)
           if (!isCurrentHydration()) return
           if (!reviewPayloadMatchesRun(review, selectedRunId, runSource)) return
           setTableReview(review)
           setSelectedTables((prev) => {
             const next = { ...prev }
-            const items = isSftpRun ? getSftpFeeds(review) : (review.nominated_tables || [])
+            const items = useLegacyFeedReview ? getSftpFeeds(review) : (review.nominated_tables || [])
             for (const table of items) {
-              const key = isSftpRun ? sftpFeedKey(table) : tableReviewKey(table)
+              const key = useLegacyFeedReview ? sftpFeedKey(table) : tableReviewKey(table)
               if (!(key in next)) next[key] = true
             }
             return next
@@ -992,9 +1028,9 @@ function HitlQueue({ onClose = null }) {
             setTableReview(fallbackPatch)
             setSelectedTables((prev) => {
               const next = { ...prev }
-              const items = isSftpRun ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
+              const items = useLegacyFeedReview ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
               for (const table of items) {
-                const key = isSftpRun ? sftpFeedKey(table) : tableReviewKey(table)
+                const key = useLegacyFeedReview ? sftpFeedKey(table) : tableReviewKey(table)
                 next[key] = true
               }
               return next
@@ -1018,7 +1054,7 @@ function HitlQueue({ onClose = null }) {
         addNotification({
           type: 'error',
           title: activeReviewName + ' Load Failed',
-          message: error.message || (isGate2 ? `Unable to load ${isSftpRun ? 'feed' : 'table'} review data.` : isGate3 ? 'Unable to load column review data.' : isGate4 ? 'Unable to load Bronze review data.' : isSilverMergeKeyReview ? 'Unable to load Silver merge-key review data.' : isGate5 ? 'Unable to load Silver review data.' : 'Unable to load KPI review data.'),
+          message: error.message || (isGate2 ? `Unable to load ${isSftpRun ? 'feed' : 'table'} review data.` : isGate3 ? 'Unable to load column review data.' : isMetadataDdlReview ? 'Unable to load Metadata DDL review data.' : isGate4 ? 'Unable to load Bronze review data.' : isSilverMergeKeyReview ? 'Unable to load Silver merge-key review data.' : isGate5 ? 'Unable to load Silver review data.' : 'Unable to load KPI review data.'),
           duration: 5000
         })
       } finally {
@@ -1033,7 +1069,7 @@ function HitlQueue({ onClose = null }) {
     // Hydration is keyed by run, gate, and source. Full currentRun/runs objects would restart
     // in-flight review requests after every store merge.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRunId, isGate2, isGate3, isGate4, isGate5, isSilverMergeKeyReview, isGoldReview, activeReviewName, gate1Name, gate2Name, gate3Name, gate4Name, gate5Name, isSftpRun, setHitlQueue, setHitlSourceRunId, updateRun, addNotification, runSource])
+  }, [selectedRunId, isGate2, isGate3, isMetadataDdlReview, isGate4, isGate5, isSilverMergeKeyReview, isGoldReview, activeReviewName, gate1Name, gate2Name, gate3Name, gate4Name, gate5Name, isSftpRun, setHitlQueue, setHitlSourceRunId, updateRun, addNotification, runSource])
 
   const filteredQueue = useMemo(() => {
     if (statusFilter === 'All') return queue
@@ -1058,7 +1094,7 @@ function HitlQueue({ onClose = null }) {
   const reviewedTableCount = availableTableReviews.filter((table) => tableReviewDecisions[tableReviewKey(table)]).length
   const selectedFeedCount = availableSftpFeeds.filter((feed) => selectedTables[sftpFeedKey(feed)]).length
   const totalFeedCount = availableSftpFeeds.length
-  const gate2ContentReady = hasGate2ReviewItems(tableReview, isSftpRun)
+  const gate2ContentReady = hasGate2ReviewItems(tableReview, useLegacyFeedReview)
   const bronzeReviewFeeds = useMemo(
     () => bronzeReview?.bronze_review_artifact?.feeds || [],
     [bronzeReview]
@@ -1075,6 +1111,10 @@ function HitlQueue({ onClose = null }) {
     () => silverMergeKeyReview?.silver_merge_key_review_artifact?.feeds || [],
     [silverMergeKeyReview]
   )
+  const metadataDdlCodeReviewItems = useMemo(
+    () => buildMetadataDdlReviewItems(metadataDdlReview?.metadata_ddl_review),
+    [metadataDdlReview]
+  )
   const bronzeCodeReviewItems = useMemo(
     () => mergeCodeReviewItems(buildBronzeCodeReviewItems(bronzeReviewFeeds), 'bronze'),
     [bronzeReviewFeeds]
@@ -1083,6 +1123,7 @@ function HitlQueue({ onClose = null }) {
     () => buildSilverMergeKeyReviewItems(silverMergeKeyReviewFeeds),
     [silverMergeKeyReviewFeeds]
   )
+  const allSilverMergeKeysSelected = silverMergeKeyReviewItems.length > 0 && silverMergeKeyReviewItems.every(hasSilverMergeKeys)
   const silverCodeReviewItems = useMemo(
     () => mergeCodeReviewItems(buildSilverCodeReviewItems(silverReviewItems), 'silver'),
     [silverReviewItems]
@@ -1091,7 +1132,7 @@ function HitlQueue({ onClose = null }) {
     () => mergeCodeReviewItems(buildGoldCodeReviewItems(goldReviewItems), 'gold'),
     [goldReviewItems]
   )
-  const activeCodeReviewItems = isGate4 ? bronzeCodeReviewItems : isSilverMergeKeyReview ? silverMergeKeyReviewItems : isGate5 ? silverCodeReviewItems : isGoldReview ? goldCodeReviewItems : []
+  const activeCodeReviewItems = isMetadataDdlReview ? metadataDdlCodeReviewItems : isGate4 ? bronzeCodeReviewItems : isSilverMergeKeyReview ? silverMergeKeyReviewItems : isGate5 ? silverCodeReviewItems : isGoldReview ? goldCodeReviewItems : []
   const reviewedCodeReviewCount = activeCodeReviewItems.filter((item) => codeReviewDecisions[item.key]).length
   const allCodeReviewItemsReviewed = activeCodeReviewItems.length > 0 && reviewedCodeReviewCount === activeCodeReviewItems.length
   const codeReviewGateDecision = getCodeReviewGateDecision(activeCodeReviewItems, codeReviewDecisions)
@@ -1109,19 +1150,20 @@ function HitlQueue({ onClose = null }) {
   })
   const allSemanticReviewed = semanticReviewItems.length > 0 && pendingSemanticReviewItems.length === 0
   const allKpisReviewed = queue.length > 0 && kpiCounts.pending === 0
-  const isCodeReview = isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview
+  const isCodeReview = isMetadataDdlReview || isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview
   const allCurrentItemsReviewed = isGate3 ? allSemanticReviewed : isCodeReview ? allCodeReviewItemsReviewed : allKpisReviewed
-  const gateReviewReady = isGate4 ? bronzeReviewFeeds.length > 0 : isSilverMergeKeyReview ? silverMergeKeyReviewFeeds.length > 0 : isGate5 ? silverReviewItems.length > 0 : isGoldReview ? goldReviewItems.length > 0 : false
+  const gateReviewReady = isMetadataDdlReview ? metadataDdlCodeReviewItems.length > 0 : isGate4 ? bronzeReviewFeeds.length > 0 : isSilverMergeKeyReview ? silverMergeKeyReviewFeeds.length > 0 : isGate5 ? silverReviewItems.length > 0 : isGoldReview ? goldReviewItems.length > 0 : false
   const currentCodeReviewReady =
+    (isMetadataDdlReview && hasRenderableReviewData(currentRun, 'metadata_ddl_review')) ||
     (isGate4 && hasRenderableReviewData(currentRun, 4)) ||
-    (isSilverMergeKeyReview && hasRenderableReviewData(currentRun, 'silver_merge_key_review')) ||
+    (isSilverMergeKeyReview && hasRenderableReviewData(currentRun, 'silver_merge_key_review', runSource === 'adls_gen2')) ||
     (isGate5 && hasRenderableReviewData(currentRun, 5)) ||
     (isGoldReview && hasRenderableReviewData(currentRun, 'gold_review'))
   const canSubmitReview = isReviewableRun && (isGate2
     ? (isSftpRun ? totalFeedCount > 0 : (tableReview?.nominated_tables || []).length > 0)
     : isGate3
     ? true
-    : (isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview)
+    : (isMetadataDdlReview || isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview)
     ? true
     : queue.length > 0)
 
@@ -1163,6 +1205,8 @@ function HitlQueue({ onClose = null }) {
       !selectedRunId ||
       !isReviewableRun ||
       !isCodeReview ||
+      hydrating ||
+      gateReviewReady ||
       currentCodeReviewReady ||
       isDemoFallbackRun(currentRun)
     ) return
@@ -1175,6 +1219,8 @@ function HitlQueue({ onClose = null }) {
   }, [
     currentCodeReviewReady,
     currentRun,
+    gateReviewReady,
+    hydrating,
     isCodeReview,
     isReviewableRun,
     navigate,
@@ -1290,6 +1336,7 @@ function HitlQueue({ onClose = null }) {
     setCodeReviewDecisions((prev) => {
       const next = { ...prev }
       activeCodeReviewItems.forEach((item) => {
+        if (isSilverMergeKeyReview && !hasSilverMergeKeys(item)) return
         if (!next[item.key]) next[item.key] = 'APPROVED'
       })
       return next
@@ -1300,6 +1347,7 @@ function HitlQueue({ onClose = null }) {
   const setAllCodeReviewItemsDecision = (decision) => {
     const next = {}
     activeCodeReviewItems.forEach((item) => {
+      if (decision === 'APPROVED' && isSilverMergeKeyReview && !hasSilverMergeKeys(item)) return
       next[item.key] = decision
     })
     setCodeReviewDecisions((prev) => ({ ...prev, ...next }))
@@ -1509,8 +1557,8 @@ function HitlQueue({ onClose = null }) {
     }
 
     if (isGate2) {
-      const approvedTables = isSftpRun ? selectedOrAllFeedKeys() : selectedTableKeys()
-      if (!isSftpRun && approvedTables.length === 0) {
+      const approvedTables = useLegacyFeedReview ? selectedOrAllFeedKeys() : selectedTableKeys()
+      if (!useLegacyFeedReview && approvedTables.length === 0) {
         addNotification({
           type: 'error',
           title: `${gate2Name} Needs an Approval`,
@@ -1522,7 +1570,7 @@ function HitlQueue({ onClose = null }) {
 
       setSubmitting(true)
       try {
-        if (isSftpRun) handleSelectAllFeeds()
+        if (useLegacyFeedReview) handleSelectAllFeeds()
         await submitTableReviews(selectedRunId, approvedTables)
         updateRun(selectedRunId, {
             id: selectedRunId,
@@ -1596,8 +1644,8 @@ function HitlQueue({ onClose = null }) {
             status: 'RUNNING',
             next_gate: 0,
             stage_confirmation: null,
-            background_stage: 'bronze',
-          resume_message: `${gate3Name} submitted. Bronze generation is starting.`,
+            background_stage: 'metadata_ddl',
+          resume_message: `${gate3Name} submitted. Metadata DDL generation is starting.`,
         })
         setEnrichmentReview(null)
         setSemanticDecisions({})
@@ -1627,6 +1675,39 @@ function HitlQueue({ onClose = null }) {
           message: error.message || 'Backend submit did not complete. Pipeline state was not advanced locally.',
           duration: 5000
         })
+      } finally {
+        setSubmitting(false)
+      }
+      return
+    }
+
+    if (isMetadataDdlReview) {
+      setSubmitting(true)
+      try {
+        if (!metadataDdlCodeReviewItems.length) {
+          throw new Error('Metadata DDL Review is not ready yet.')
+        }
+        await submitMetadataDdlReview(selectedRunId)
+        updateRun(selectedRunId, {
+          id: selectedRunId,
+          status: 'RUNNING',
+          next_gate: 0,
+          next_review_key: null,
+          background_stage: 'bronze',
+          resume_message: 'Metadata DDL review submitted. Bronze generation is starting.',
+        })
+        setMetadataDdlReview(null)
+        setCodeReviewDraftItems([])
+        returnToMonitor(selectedRunId)
+      } catch (error) {
+        await refreshRunAfterSubmitError('Metadata DDL review submit did not complete. Waiting on backend state.')
+        addNotification({
+          type: 'error',
+          title: 'Metadata DDL Review Submit Failed',
+          message: error.message || 'Backend submit did not complete.',
+          duration: 5000,
+        })
+        returnToMonitor(selectedRunId)
       } finally {
         setSubmitting(false)
       }
@@ -2055,7 +2136,7 @@ function HitlQueue({ onClose = null }) {
     )
   }
 
-  if (selectedRunId && isReviewableRun && isGate2 && !isSftpRun) {
+  if (selectedRunId && isReviewableRun && isGate2 && !useLegacyFeedReview) {
     return (
       <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm sm:p-6">
         <div className="flex h-[85vh] w-full max-w-5xl items-stretch justify-center">
@@ -2252,7 +2333,7 @@ function HitlQueue({ onClose = null }) {
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm sm:p-6">
       <div className="relative flex h-[85vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-[#1d2940] bg-[#121a2b] shadow-[0_28px_90px_rgba(0,0,0,0.42)]">
-      <div className={`${isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview ? 'hidden' : 'shrink-0'} overflow-hidden border-b border-[#1d2940] bg-[#101726]`}>
+      <div className={`${isCodeReview ? 'hidden' : 'shrink-0'} overflow-hidden border-b border-[#1d2940] bg-[#101726]`}>
         <div className="flex flex-col gap-4 px-5 py-5 md:flex-row md:items-center md:justify-between lg:px-6">
           <div className="flex min-w-0 items-center gap-4">
             <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-[10px] border border-[#5a3d13] bg-[#3a2a16] text-[#f4a912]">
@@ -2281,7 +2362,7 @@ function HitlQueue({ onClose = null }) {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            {!isGate2 && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5 && (
+            {!isGate2 && !isGate3 && !isCodeReview && (
             <button
               type="button"
               onClick={() => setAddingKpi(true)}
@@ -2293,7 +2374,7 @@ function HitlQueue({ onClose = null }) {
             )}
 
             <button
-              onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
+              onClick={isGate3 ? handleAutoApproveSemanticItems : isCodeReview ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
               className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
             >
               <CheckCircle size={18} className="text-[#12b886]" />
@@ -2302,7 +2383,7 @@ function HitlQueue({ onClose = null }) {
           </div>
         </div>
 
-        {(reviewRuns.length > 0 || (!isGate2 && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5)) && (
+        {(reviewRuns.length > 0 || (!isGate2 && !isGate3 && !isCodeReview)) && (
           <div className="flex flex-wrap items-center gap-3 border-t border-[#1d2940] px-5 py-3 lg:px-6">
           {reviewRuns.length > 0 && (
             <select
@@ -2318,7 +2399,7 @@ function HitlQueue({ onClose = null }) {
             </select>
           )}
 
-          {!isGate2 && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5 && (
+          {!isGate2 && !isGate3 && !isCodeReview && (
             <select
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value)}
@@ -2335,10 +2416,28 @@ function HitlQueue({ onClose = null }) {
         )}
       </div>
 
-      <div className={`flex min-h-0 flex-1 flex-col overflow-hidden xl:flex-row ${isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview ? 'gap-0 p-0' : 'gap-4 p-4'}`}>
-        <div className={`${isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview ? 'h-full min-h-0' : 'space-y-4 pb-8 xl:overflow-y-auto xl:pr-1 xl:pb-20'} xl:min-h-0 xl:flex-1`}>
+      <div className={`flex min-h-0 flex-1 flex-col overflow-hidden xl:flex-row ${isCodeReview ? 'gap-0 p-0' : 'gap-4 p-4'}`}>
+        <div className={`${isCodeReview ? 'h-full min-h-0' : 'space-y-4 pb-8 xl:overflow-y-auto xl:pr-1 xl:pb-20'} xl:min-h-0 xl:flex-1`}>
           {selectedRunId && isReviewableRun ? (
-            isSilverMergeKeyReview ? (
+            isMetadataDdlReview ? (
+            <CodeReviewPanel
+              title="Metadata DDL Review"
+              description="Review the single generated target metadata schema before Bronze generation."
+              items={metadataDdlCodeReviewItems}
+              loading={hydrating}
+              reviewedCount={reviewedCodeReviewCount}
+              totalCount={metadataDdlCodeReviewItems.length}
+              gateDecision="APPROVED"
+              decisions={codeReviewDecisions}
+              sessionKey={reviewSessionKeyRef.current}
+              onDraftItemsChange={setCodeReviewDraftItems}
+              onPause={() => returnToMonitor(selectedRunId)}
+              onSubmit={handleSubmit}
+              submitting={submitting}
+              disabled={submitting || !gateReviewReady}
+              submitLabel="Submit & Generate Bronze"
+            />
+            ) : isSilverMergeKeyReview ? (
             <CodeReviewPanel
               title="Silver Merge Key Review"
               description={`Review ${silverMergeKeyReviewFeeds.length} merge key item${silverMergeKeyReviewFeeds.length !== 1 ? 's' : ''} before the pipeline continues.`}
@@ -2358,7 +2457,7 @@ function HitlQueue({ onClose = null }) {
               onPause={() => returnToMonitor(selectedRunId)}
               onSubmit={handleSubmit}
               submitting={submitting}
-              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed}
+              disabled={submitting || !gateReviewReady || !allCodeReviewItemsReviewed || !allSilverMergeKeysSelected}
               submitLabel="Submit & Continue"
               hitlGateStyle
             />
@@ -2607,7 +2706,7 @@ function HitlQueue({ onClose = null }) {
           )}
         </div>
 
-        <div className={`${isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview ? 'hidden' : 'flex'} w-full flex-shrink-0 flex-col gap-3 xl:w-72`}>
+        <div className={`${isCodeReview ? 'hidden' : 'flex'} w-full flex-shrink-0 flex-col gap-3 xl:w-72`}>
           <div className="rounded-[24px] border border-[#1d2940] bg-[#0d1729] p-4">
             <h3 className="text-xs uppercase tracking-wider text-gray-500 mb-3">Review Progress</h3>
             <div className="space-y-2">
@@ -2686,11 +2785,11 @@ function HitlQueue({ onClose = null }) {
           </div>
 
           <button
-            onClick={isGate3 ? handleAutoApproveSemanticItems : (isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview) ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
+            onClick={isGate3 ? handleAutoApproveSemanticItems : isCodeReview ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
             className="flex items-center justify-center gap-2 px-4 py-3 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/25 text-accent-green text-sm font-semibold rounded-xl transition-colors"
           >
             <CheckCircle size={15} />
-            {isGate3 ? 'Auto-Approve Pending' : isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview ? 'Auto-Approve Pending' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
+            {isGate3 ? 'Auto-Approve Pending' : isCodeReview ? 'Auto-Approve Pending' : isGate2 ? (isSftpRun ? 'Select All Feeds' : 'Select All Tables') : 'Auto-approve All'}
           </button>
 
           <div className="rounded-[20px] border border-[#22304b] bg-[#0d1729] p-3">
@@ -2716,7 +2815,7 @@ function HitlQueue({ onClose = null }) {
         </div>
       </div>
 
-      {canSubmitReview && !isGate3 && !isGate4 && !isSilverMergeKeyReview && !isGate5 && !isGoldReview && (
+      {canSubmitReview && !isGate3 && !isCodeReview && (
         <motion.div
           initial={{ y: 80, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
@@ -3173,6 +3272,10 @@ function tableReviewKey(table) {
   return qualified || String(table.id || table.key || table.full_name || table.table_id || JSON.stringify(table))
 }
 
+export function usesLegacyFeedReview(source) {
+  return source === 'sftp'
+}
+
 function sftpFeedKey(feed) {
   return [feed.vendor, feed.entity, feed.file_name || feed.feed_id].filter(Boolean).join('.')
 }
@@ -3320,7 +3423,11 @@ function CodeReviewPanel({
 }) {
   const [expandedKey, setExpandedKey] = useState(null)
   const [draftItems, setDraftItems] = useState(items)
-  const itemKeys = items.map((item) => item.key).join('|')
+  const itemKeys = items.map((item) => (
+    item.type === 'MERGE_KEY'
+      ? `${item.key}:${JSON.stringify(item.mergeKeys || item.primaryKeys || [])}`
+      : item.key
+  )).join('|')
 
   useEffect(() => {
     setDraftItems(items)
@@ -3335,8 +3442,7 @@ function CodeReviewPanel({
       return
     }
     setDraftItems((current) => {
-      const currentByKey = new Map(current.map((item) => [item.key, item]))
-      const next = items.map((item) => currentByKey.has(item.key) ? { ...item, ...currentByKey.get(item.key) } : item)
+      const next = mergeRefreshedReviewItems(current, items)
       onDraftItemsChange?.(next)
       return next
     })
@@ -3370,7 +3476,7 @@ function CodeReviewPanel({
         onSubmit={onSubmit}
         submitting={submitting}
         submitDisabled={disabled}
-        submitLabel="Submit & Run Stage"
+        submitLabel={submitLabel}
       />
     )
   }
@@ -3801,6 +3907,21 @@ function buildBronzeCodeReviewItems(feeds) {
   }))
 }
 
+function buildMetadataDdlReviewItems(review) {
+  if (!review?.script_body) return []
+  return [{
+    key: 'metadata-ddl',
+    title: review.title || 'Target Metadata Schema DDL',
+    type: 'METADATA_DDL',
+    queuedAt: formatReviewTimestamp(review.generated_at || review.created_at),
+    code: review.script_body,
+    fileName: review.file_name || 'metadata_schema.sql',
+    target: 'metadata schema',
+    strategy: 'Idempotent target bootstrap',
+    reviewPayload: review,
+  }]
+}
+
 function buildSilverMergeKeyReviewItems(feeds) {
   return feeds.map((feed, index) => ({
     key: `silver-merge-key-${feed.entity || feed.feed_name || feed.table_name || feed.vendor || 'review'}-${index}`,
@@ -3820,6 +3941,22 @@ function buildSilverMergeKeyReviewItems(feeds) {
     watermark: feed.watermark_column,
     reviewPayload: feed,
   }))
+}
+
+export function hasSilverMergeKeys(item) {
+  const keys = [item?.mergeKeys, item?.primaryKeys, item?.merge_keys, item?.primary_keys]
+    .find((value) => Array.isArray(value) && value.length > 0) || []
+  return Array.isArray(keys) && keys.some((key) => String(key || '').trim())
+}
+
+export function mergeRefreshedReviewItems(currentItems, refreshedItems) {
+  const currentByKey = new Map(currentItems.map((item) => [item.key, item]))
+  return refreshedItems.map((item) => {
+    const current = currentByKey.get(item.key)
+    if (!current) return item
+    if (item.type === 'MERGE_KEY' && !current.edited) return item
+    return { ...item, ...current }
+  })
 }
 
 function buildSilverCodeReviewItems(items) {
@@ -3865,9 +4002,16 @@ function buildGoldCodeReviewItems(items) {
 function buildCodeReviewArtifact(layer, draftItems, review, decisions = {}) {
   const items = expandMergedCodeReviewItems(Array.isArray(draftItems) ? draftItems : [])
   if (layer === 'bronze') {
+    const metadataDdl = items.find((item) => item.type === 'METADATA_DDL')
     return {
       ...(review?.bronze_review_artifact || {}),
-      feeds: items.map((item) => ({
+      ...(metadataDdl ? {
+        metadata_ddl_review: {
+          ...(metadataDdl.reviewPayload || {}),
+          review_status: decisions[metadataDdl.decisionKey || metadataDdl.key] || metadataDdl.reviewStatus || 'APPROVED',
+        },
+      } : {}),
+      feeds: items.filter((item) => item.type !== 'METADATA_DDL').map((item) => ({
         ...(item.reviewPayload || {}),
         generated_bronze_script: item.code,
         script_body: item.code,
