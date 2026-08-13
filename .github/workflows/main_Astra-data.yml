@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - apps/backend/**
+      - prereq/metadata/**
       - .github/workflows/main_Astra-data.yml
   workflow_dispatch:
 
@@ -39,6 +40,11 @@ jobs:
             --exclude 'uploads' \
             --exclude 'generated_code' \
             --exclude '*.zip'
+          mkdir -p deploy/Backend/prereq/metadata
+          rsync -a prereq/metadata/ deploy/Backend/prereq/metadata/
+          test -f deploy/Backend/prereq/metadata/databricks.sql
+          test -f deploy/Backend/prereq/metadata/snowflake.sql
+          test -f deploy/Backend/prereq/metadata/application_azure_sql.sql
           chmod +x deploy/Backend/startup.sh
           cd deploy/Backend
           zip -qr ../backend.zip .
