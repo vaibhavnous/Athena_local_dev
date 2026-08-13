@@ -341,8 +341,8 @@ def start_sftp_pipeline(
     source_value = str(source or "adls_gen2").lower()
     if source_value != "adls_gen2":
         raise ValueError("The replacement file-source pipeline supports ADLS only.")
-    if str(target_warehouse or "").strip().lower() != "databricks":
-        raise ValueError("ADLS file sources currently support the Databricks native target only.")
+    if str(target_warehouse or "").strip().lower() not in {"databricks", "snowflake"}:
+        raise ValueError("ADLS file sources support Databricks or Snowflake targets.")
     entity = "auto"
     from services.adls_source import source_catalog
 
@@ -369,7 +369,6 @@ def start_sftp_pipeline(
         "source_profile": "insurance_adls",
         "source_databases": ["insurance"],
         "report_generation_enabled": True,
-        "execution_engine": "native",
     }
     try:
         result = continue_database_pipeline(

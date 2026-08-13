@@ -81,6 +81,7 @@ def _mark_run_failed(run_id: str, exc: Exception, *, stage: str) -> None:
             "error": str(exc),
             "error_type": type(exc).__name__,
             "error_message": str(exc),
+            "background_stage": None,
             "failed_background_stage": stage,
             "failed_at": time.time(),
         }
@@ -305,13 +306,27 @@ def seed_payload_from_checkpoint(checkpoint: Dict[str, Any]) -> PipelineRunReque
 
 def clean_checkpoint_for_resume(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
     cleaned = dict(checkpoint or {})
+    migrated_adls_execution_guard = (
+        str(cleaned.get("source") or "").lower() == "adls_gen2"
+        and str(cleaned.get("database_flow_version") or "") == "generation_first_v2"
+        and "source must be database" in str(cleaned.get("error") or "")
+    )
+    if migrated_adls_execution_guard:
+        # ponytail: migrate checkpoints written by the retired database-only
+        # guard directly to their intended execution boundary.
+        cleaned["next_stage_key"] = "metadata_setup_execution"
+        cleaned["last_failed_stage_key"] = "metadata_setup_execution"
     if not api_utils.is_file_source(cleaned.get("source")):
         clear_run_abort(str(cleaned.get("run_id") or ""))
         cleaned["abort_requested"] = False
     cleaned["status"] = "RUNNING"
     cleaned["background_stage"] = None
     cleaned["failed_background_stage"] = None
-    cleaned["last_failed_stage_key"] = checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key")
+    cleaned["last_failed_stage_key"] = (
+        "metadata_setup_execution"
+        if migrated_adls_execution_guard
+        else checkpoint.get("failed_background_stage") or checkpoint.get("last_failed_stage_key")
+    )
     cleaned["error"] = None
     cleaned["resume_message"] = None
     cleaned["awaiting_stage_confirmation"] = False

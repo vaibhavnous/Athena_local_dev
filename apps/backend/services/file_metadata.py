@@ -82,7 +82,9 @@ def _object_row(state: Mapping[str, Any], table: Mapping[str, Any]) -> Dict[str,
         "schema_inference_policy": "INFER_AND_REVIEW",
         "schema_evolution_policy": "FAIL",
         "load_type": "FULL",
-        "checkpoint_type": "SOURCE_ETAG",
+        # The immutable ETag/size cache contract is enforced before queue execution;
+        # target work is therefore a stateless FULL load.
+        "checkpoint_type": None,
         "target_bronze_table": targets["bronze"],
         "target_silver_table": targets["silver"],
         "target_gold_table": targets["gold"],
@@ -321,36 +323,187 @@ def persist_file_design(state: Mapping[str, Any], tables: Iterable[Mapping[str, 
 
 
 def activate_file_bronze_artifacts(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """Bind reviewed file artifacts to their existing source objects atomically."""
+    from services.metadata_contracts import validate_execution_spec
+    from utilis.generated_code_paths import verified_execution_artifact
+
     selection = validated_metadata_selection(state)
     if not selection:
         raise ValueError("ADLS artifact activation requires application metadata.")
     repository = selection.repository
+    generated = [dict(item) for item in state.get("bronze_generation_results") or []]
     results = []
-    for result in state.get("bronze_generation_results") or []:
-        object_id = int(result.get("ingestion_object_id") or 0)
-        if object_id <= 0:
-            raise ValueError("Generated ADLS Bronze artifact is missing its source ingestion object.")
-        repository.execute(
-            f"UPDATE {repository.table('cfg_ingestion_object')} SET execution_spec_json = :spec, "
-            "updated_at = CURRENT_TIMESTAMP() WHERE ingestion_object_id = :object_id",
-            {
-                "object_id": object_id,
-                "spec": json.dumps(result.get("execution_spec") or {}, sort_keys=True, separators=(",", ":")),
-            },
-        )
-        results.append(
-            {
-                **result,
-                "active_ingestion_object_config_version": int(
-                    result.get("ingestion_object_config_version") or 1
-                ),
-                "active_ingestion_object_config_hash": str(
-                    result.get("ingestion_object_config_hash") or ""
-                ),
-                "metadata_activation_status": "ACTIVE",
+    with repository.unit_of_work():
+        for result in generated:
+            object_id = int(result.get("ingestion_object_id") or 0)
+            config_version = int(result.get("ingestion_object_config_version") or 0)
+            config_hash = str(result.get("ingestion_object_config_hash") or "")
+            mapping_version = int(result.get("mapping_version") or 0)
+            mapping_hash = str(result.get("mapping_hash") or "")
+            if object_id <= 0 or config_version <= 0 or not config_hash:
+                raise ValueError("Generated ADLS Bronze artifact is missing its source-object pin.")
+            source_object = repository.get_ingestion_object(object_id, config_version)
+            if (
+                not source_object
+                or str(source_object.get("config_hash") or "") != config_hash
+                or str(source_object.get("processing_stage") or "").upper() != "SOURCE_TO_BRONZE"
+            ):
+                raise RuntimeError("The reviewed ADLS Bronze artifact does not match its source object.")
+            target_table = str(
+                source_object.get("target_table")
+                or source_object.get("target_bronze_table")
+                or ""
+            ).strip()
+            repository.get_mapping_bundle(
+                ingestion_object_id=object_id,
+                processing_stage="SOURCE_TO_BRONZE",
+                mapping_version=mapping_version,
+                expected_hash=mapping_hash,
+                expected_target=target_table,
+                require_active=True,
+            )
+            spec = validate_execution_spec(
+                result.get("execution_spec") or {}, platform=repository.context.platform
+            )
+            verified_execution_artifact(spec, platform=repository.context.platform)
+            if int(spec["mapping_version"]) != mapping_version:
+                raise RuntimeError("The ADLS Bronze artifact uses a different mapping version.")
+            spec = {
+                **spec,
+                "design_config_version": config_version,
+                "design_config_hash": config_hash,
+                "mapping_hash": mapping_hash,
+                "processing_stage": "SOURCE_TO_BRONZE",
+                "source_file": {
+                    "path": str(source_object.get("source_path") or ""),
+                    "format": str(source_object.get("payload_format") or ""),
+                },
             }
-        )
+            repository.execute(
+                f"UPDATE {repository.table('cfg_ingestion_object')} SET execution_spec_json = :spec, "
+                "updated_at = CURRENT_TIMESTAMP() WHERE ingestion_object_id = :object_id "
+                "AND config_version = :config_version AND config_hash = :config_hash "
+                "AND active_flag = :active_flag AND is_current = :is_current",
+                {
+                    "object_id": object_id,
+                    "config_version": config_version,
+                    "config_hash": config_hash,
+                    "active_flag": True,
+                    "is_current": True,
+                    "spec": json.dumps(spec, sort_keys=True, separators=(",", ":")),
+                },
+            )
+            active = repository.get_active_ingestion_object(object_id)
+            if not active or json.loads(str(active.get("execution_spec_json") or "{}")) != spec:
+                raise RuntimeError("ADLS Bronze artifact activation postcondition failed.")
+            results.append(
+                {
+                    **result,
+                    "execution_spec": spec,
+                    "active_ingestion_object_config_version": config_version,
+                    "active_ingestion_object_config_hash": config_hash,
+                    "metadata_activation_status": "ACTIVE",
+                }
+            )
     return {**dict(state), "bronze_generation_results": results}
+
+
+def bind_file_dbt_package(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """Bind one frozen Snowflake dbt package to existing file-source objects."""
+    from pathlib import Path
+
+    from services.metadata_contracts import file_sha256
+
+    package_hash = str(state.get("snowflake_dbt_artifact_set_hash") or "").strip()
+    package_id = str(state.get("snowflake_dbt_idempotency_key") or "").strip()
+    if not package_hash or not package_id:
+        raise RuntimeError("The finalized ADLS Snowflake dbt package identity is missing.")
+    if str(state.get("snowflake_dbt_validation_status") or "").upper() != "STATIC_VALIDATED":
+        raise RuntimeError("ADLS Snowflake dbt metadata requires a statically validated package.")
+    selection = validated_metadata_selection(state)
+    if not selection:
+        raise ValueError("ADLS Snowflake dbt binding requires application metadata.")
+    repository = selection.repository
+    bronze_results = [dict(item) for item in state.get("bronze_generation_results") or []]
+    if not bronze_results:
+        raise RuntimeError("ADLS Snowflake dbt binding found no source artifacts.")
+    project_root = Path(str(state.get("snowflake_dbt_artifact_path") or "")).resolve()
+    if not project_root.is_dir():
+        raise RuntimeError("The finalized ADLS Snowflake dbt project directory is missing.")
+    package_manifest = []
+    for layer in ("bronze", "silver", "gold"):
+        artifacts = [
+            dict(item)
+            for item in state.get(f"{layer}_generation_results") or []
+            if isinstance(item, Mapping)
+        ]
+        if not artifacts:
+            raise RuntimeError(f"The finalized ADLS Snowflake dbt package has no {layer} artifacts.")
+        for artifact in artifacts:
+            path = Path(str(artifact.get("script_path") or "")).resolve()
+            if not path.is_file() or not path.is_relative_to(project_root):
+                raise RuntimeError(
+                    f"An approved ADLS {layer} artifact is outside the finalized dbt package."
+                )
+            package_manifest.append(
+                {
+                    "layer": layer,
+                    "path": path.relative_to(project_root).as_posix(),
+                    "artifact_hash": file_sha256(path),
+                }
+            )
+    manifest_hash = canonical_json_hash(package_manifest)
+    bound_bronze = []
+    with repository.unit_of_work():
+        for result in bronze_results:
+            object_id = int(result.get("ingestion_object_id") or 0)
+            active = repository.get_active_ingestion_object(object_id)
+            spec = dict(result.get("execution_spec") or {})
+            if (
+                not active
+                or str(active.get("processing_stage") or "").upper() != "SOURCE_TO_BRONZE"
+                or str(spec.get("mapping_hash") or "") != str(result.get("mapping_hash") or "")
+                or str(spec.get("engine") or "").upper() != "SNOWFLAKE_DBT"
+            ):
+                raise RuntimeError("The frozen dbt package does not match an active ADLS source object.")
+            spec.update(
+                {
+                    "dbt_package_hash": package_hash,
+                    "dbt_package_id": package_id,
+                    "dbt_package_model_count": int(state.get("snowflake_dbt_model_count") or 0),
+                    "dbt_package_manifest_hash": manifest_hash,
+                }
+            )
+            repository.execute(
+                f"UPDATE {repository.table('cfg_ingestion_object')} SET execution_spec_json = :spec, "
+                "updated_at = CURRENT_TIMESTAMP() WHERE ingestion_object_id = :object_id "
+                "AND active_flag = :active_flag AND is_current = :is_current",
+                {
+                    "object_id": object_id,
+                    "active_flag": True,
+                    "is_current": True,
+                    "spec": json.dumps(spec, sort_keys=True, separators=(",", ":")),
+                },
+            )
+            persisted = repository.get_active_ingestion_object(object_id)
+            if not persisted or json.loads(str(persisted.get("execution_spec_json") or "{}")) != spec:
+                raise RuntimeError("ADLS Snowflake dbt package binding postcondition failed.")
+            bound_bronze.append({**result, "execution_spec": spec, "metadata_activation_status": "ACTIVE"})
+    return {
+        **dict(state),
+        "bronze_generation_results": bound_bronze,
+        "silver_generation_results": [
+            {**dict(item), "metadata_activation_status": "ACTIVE"}
+            for item in state.get("silver_generation_results") or []
+            if isinstance(item, Mapping)
+        ],
+        "gold_generation_results": [
+            {**dict(item), "metadata_activation_status": "ACTIVE"}
+            for item in state.get("gold_generation_results") or []
+            if isinstance(item, Mapping)
+        ],
+        "adls_dbt_package_manifest_hash": manifest_hash,
+    }
 
 
 def prepare_file_silver_generation(
@@ -459,6 +612,7 @@ def prepare_file_silver_generation(
                     "database_name": str(table.get("database_name") or ""),
                     "schema_name": str(table.get("schema_name") or ""),
                     "table_name": table_name,
+                    "ingestion_object_id": object_id,
                     "bronze_table": source_table,
                     "silver_table": target_table,
                     "existing_script_path": None,

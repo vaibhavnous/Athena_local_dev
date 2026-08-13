@@ -532,12 +532,18 @@ def silver_merge_key_reviews(run_id: str, user: AuthUser = Depends(get_current_u
         logger.error("Failed to fetch Silver merge-key review", exc_info=True, extra={"run_id": run_id})
         raise HTTPException(status_code=503, detail="Failed to load Silver merge-key review")
 
+    artifact = _silver_merge_key_review_artifact(run)
+    if str(run.get("source") or "").lower() == "adls_gen2":
+        from sftp_nodes.silver_merge_key_resolution import apply_adls_source_contract_merge_keys
+
+        artifact = apply_adls_source_contract_merge_keys(run, artifact)
+
     return {
         "run_id": run_id,
         "next_gate": run.get("next_gate"),
         "next_review_key": run.get("next_review_key"),
         "resume_message": run.get("resume_message"),
-        "silver_merge_key_review_artifact": _silver_merge_key_review_artifact(run),
+        "silver_merge_key_review_artifact": artifact,
     }
 
 

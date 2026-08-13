@@ -42,6 +42,27 @@ test('requires an ADLS data lake selection before a project can be saved', () =>
   expect(isProjectFormValid({ ...project, connectionName: 'sftp_adls_insurance' })).toBe(true)
 })
 
+test('restores dbt for a Snowflake ADLS project', () => {
+  const form = buildInitialForm({}, null, {
+    name: 'Insurance',
+    description: 'Insurance feeds',
+    connectionType: 'data_lake',
+    integrationType: 'ADLS',
+    dataLakeType: 'ADLS',
+    dataLakeName: 'Insurance ADLS Gen2',
+    target: 'Snowflake',
+    executionEngine: 'dbt',
+    dbtDeploymentMode: 'generate_and_deploy',
+  })
+
+  expect(form).toMatchObject({
+    source: 'adls_gen2',
+    targetWarehouse: 'snowflake',
+    executionEngine: 'dbt',
+    dbtDeploymentMode: 'generate_and_deploy',
+  })
+})
+
 test('restores target metadata selection when restarting a database run', () => {
   const form = buildInitialForm(
     {},

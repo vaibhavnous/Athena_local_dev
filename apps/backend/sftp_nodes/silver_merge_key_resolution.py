@@ -13,6 +13,9 @@ from utilis.ai_store_writer import ai_store_db_writer
 from utilis.logger import logger
 
 
+_SOURCE_CONTRACT_KEYS = {"policy_transactions": ["reference_id"]}
+
+
 class MergeKeyProposal(BaseModel):
     table: str
     merge_keys: List[str] = Field(min_length=1, max_length=8)
@@ -40,6 +43,42 @@ def _feed_table(feed: Dict[str, Any]) -> str:
         or feed.get("feed_id")
         or feed.get("target_table")
     )
+
+
+def apply_adls_source_contract_merge_keys(
+    state: Stage01State, artifact: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Keep ADLS contract keys authoritative in persisted and UI review artifacts."""
+    certified_by_table = {
+        _table_name(table.get("table_name") or table.get("entity")): dict(table)
+        for table in state.get("certified_tables") or []
+        if isinstance(table, dict)
+    }
+    feeds = []
+    for raw_feed in artifact.get("feeds") or []:
+        if not isinstance(raw_feed, dict):
+            continue
+        feed = dict(raw_feed)
+        table = _feed_table(feed)
+        contract_keys = _SOURCE_CONTRACT_KEYS.get(table)
+        source = certified_by_table.get(table)
+        if contract_keys and source:
+            available = {
+                str(column.get("column_name") or "").casefold(): str(column.get("column_name") or "")
+                for column in source.get("columns") or []
+                if isinstance(column, dict) and str(column.get("column_name") or "").strip()
+            }
+            if all(key.casefold() in available for key in contract_keys):
+                keys = [available[key.casefold()] for key in contract_keys]
+                feed.update(
+                    merge_keys=keys,
+                    primary_keys=keys,
+                    merge_key_source="adls_source_contract_default",
+                    merge_key_resolution_status="RESOLVED",
+                    merge_key_reasoning="ADLS policy transaction source contract uses reference_id.",
+                )
+        feeds.append(feed)
+    return {**artifact, "feeds": feeds}
 
 
 def _strip_fences(value: str) -> str:
@@ -227,9 +266,6 @@ def adls_silver_merge_key_resolution_node(
     resolved = silver_merge_key_resolution_node(state)
     artifact = dict(resolved.get("silver_merge_key_resolution_artifact") or {})
     feeds = [dict(feed) for feed in artifact.get("feeds") or [] if isinstance(feed, dict)]
-    unresolved = [feed for feed in feeds if not (feed.get("merge_keys") or feed.get("primary_keys"))]
-    if not unresolved:
-        return resolved
     certified_by_table = {
         _table_name(table.get("table_name") or table.get("entity")): dict(table)
         for table in state.get("certified_tables") or []
@@ -238,6 +274,38 @@ def adls_silver_merge_key_resolution_node(
     proposals: Dict[str, Dict[str, Any]] = {}
     resolution_errors: Dict[str, str] = {}
     candidate_sets_by_table: Dict[str, List[Dict[str, Any]]] = {}
+    for feed in feeds:
+        table = _feed_table(feed)
+        contract_keys = _SOURCE_CONTRACT_KEYS.get(table)
+        source = certified_by_table.get(table)
+        if not contract_keys or not source:
+            continue
+        available = {
+            str(column.get("column_name") or "").casefold(): str(column.get("column_name") or "")
+            for column in source.get("columns") or []
+            if isinstance(column, dict) and str(column.get("column_name") or "").strip()
+        }
+        if all(key.casefold() in available for key in contract_keys):
+            canonical_keys = [available[key.casefold()] for key in contract_keys]
+            evidence = profile_merge_key(source, canonical_keys)
+            candidate_sets_by_table[table] = [{**evidence, "columns": canonical_keys}]
+            proposals[table] = {
+                "merge_keys": canonical_keys,
+                "confidence": 1.0,
+                "reasoning": "ADLS policy transaction source contract uses reference_id.",
+                "profile_evidence": evidence,
+                "source": "adls_source_contract_default",
+            }
+        else:
+            resolution_errors[table] = "The policy_transactions feed does not contain reference_id."
+
+    unresolved = [
+        feed for feed in feeds
+        if _feed_table(feed) not in proposals
+        and not (feed.get("merge_keys") or feed.get("primary_keys"))
+    ]
+    if not unresolved and not proposals:
+        return resolved
     for feed in unresolved:
         table = _feed_table(feed)
         source = certified_by_table.get(table)
@@ -292,19 +360,19 @@ def adls_silver_merge_key_resolution_node(
                 "primary_keys": keys,
                 "merge_key_candidates": _dedupe_candidate_columns(feed, candidate_sets),
                 "merge_key_candidate_sets": candidate_sets,
-                "merge_key_source": "adls_llm_profile_validated",
+                "merge_key_source": proposal.get("source") or "adls_llm_profile_validated",
                 "merge_key_resolution_status": "RESOLVED",
                 "merge_key_confidence": proposal["confidence"],
                 "merge_key_reasoning": proposal["reasoning"],
                 "merge_key_profile_evidence": proposal["profile_evidence"],
             }
         )
-    updated_artifact = {
+    updated_artifact = apply_adls_source_contract_merge_keys(state, {
         **artifact,
         "feeds": updated_feeds,
         "resolved_count": sum(1 for feed in updated_feeds if feed.get("merge_keys")),
         "review_required_count": sum(1 for feed in updated_feeds if not feed.get("merge_keys")),
-    }
+    })
     ai_store_db_writer(
         run_id=str(state.get("run_id") or ""),
         stage="Silver Merge Key Resolution",
@@ -350,6 +418,7 @@ def validate_adls_merge_key_review(
     """Reject incomplete or ungrounded ADLS merge-key approvals at the API boundary."""
     expected_artifact = state.get("silver_merge_key_review_artifact") or {}
     expected_feeds = [feed for feed in expected_artifact.get("feeds") or [] if isinstance(feed, dict)]
+    review_artifact = apply_adls_source_contract_merge_keys(state, review_artifact)
     submitted_feeds = [feed for feed in review_artifact.get("feeds") or [] if isinstance(feed, dict)]
     expected = {_feed_table(feed) for feed in expected_feeds}
     submitted = {_feed_table(feed): dict(feed) for feed in submitted_feeds}

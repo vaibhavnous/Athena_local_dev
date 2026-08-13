@@ -239,13 +239,19 @@ class ProjectRepository:
     @staticmethod
     def _with_execution_defaults(project: dict[str, Any]) -> dict[str, Any]:
         project = dict(project)
-        snowflake_database_target = (
+        snowflake_supported_target = (
             str(project.get("target") or "").strip().lower() == "snowflake"
-            and str(project.get("connection_type") or "").strip().lower() == "database"
+            and (
+                str(project.get("connection_type") or "").strip().lower() == "database"
+                or (
+                    str(project.get("connection_type") or "").strip().lower() == "data_lake"
+                    and str(project.get("integration_type") or "").strip().lower() == "adls"
+                )
+            )
         )
         selected_engine = str(project.get("execution_engine") or "native").strip().lower()
         project["execution_engine"] = (
-            "dbt" if snowflake_database_target and selected_engine == "dbt" else "native"
+            "dbt" if snowflake_supported_target and selected_engine == "dbt" else "native"
         )
         project["dbt_deployment_mode"] = (
             "generate_and_deploy"

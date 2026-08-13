@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 from urllib.parse import urlparse
+from xml.etree import ElementTree
 
 from services.external_execution_progress import save_external_execution_progress
 from services.metadata_contracts import validate_runtime_context
@@ -373,55 +374,83 @@ def load_azure_sql_table_to_snowflake(
     }
 
 
-def _adls_stage_database() -> str:
-    return str(os.getenv("SNOWFLAKE_ADLS_STAGE_DB") or os.getenv("BRONZE_CATALOG") or "ATHENA_DB").strip()
+def _adls_stage_database(*, adls_flow: bool = False) -> str:
+    name = "ADLS_FLOW_STAGE_DB" if adls_flow else "SNOWFLAKE_ADLS_STAGE_DB"
+    return str(os.getenv(name) or os.getenv("BRONZE_CATALOG") or "ATHENA_DB").strip()
 
 
-def _adls_stage_schema() -> str:
-    return str(os.getenv("SNOWFLAKE_ADLS_STAGE_SCHEMA") or os.getenv("BRONZE_SCHEMA") or "BRONZE").strip()
+def _adls_stage_schema(*, adls_flow: bool = False) -> str:
+    name = "ADLS_FLOW_STAGE_SCHEMA" if adls_flow else "SNOWFLAKE_ADLS_STAGE_SCHEMA"
+    return str(os.getenv(name) or os.getenv("BRONZE_SCHEMA") or "BRONZE").strip()
 
 
-def _adls_stage_name() -> str:
-    return str(os.getenv("SNOWFLAKE_ADLS_STAGE_NAME") or "ADLS_INSURANCE_STAGE").strip()
+def _adls_stage_name(*, adls_flow: bool = False) -> str:
+    name = "ADLS_FLOW_STAGE_NAME" if adls_flow else "SNOWFLAKE_ADLS_STAGE_NAME"
+    return str(os.getenv(name) or "ADLS_INSURANCE_STAGE").strip()
 
 
-def _adls_file_format_name() -> str:
-    return str(os.getenv("SNOWFLAKE_ADLS_FILE_FORMAT") or "ADLS_CSV_FORMAT").strip()
+def _adls_file_format_name(*, adls_flow: bool = False) -> str:
+    name = "ADLS_FLOW_STAGE_FORMAT" if adls_flow else "SNOWFLAKE_ADLS_FILE_FORMAT"
+    return str(os.getenv(name) or "ADLS_CSV_FORMAT").strip()
 
 
 def _adls_integration_name() -> str:
     return str(os.getenv("SNOWFLAKE_ADLS_INTEGRATION") or "ADLS_INSURANCE_INT").strip()
 
 
-def _adls_sas_token() -> str:
-    return str(os.getenv("SNOWFLAKE_ADLS_SAS_TOKEN") or "").strip().lstrip("?")
+def _adls_sas_token(*, adls_flow: bool = False) -> str:
+    name = "ADLS_FLOW_SAS_TOKEN" if adls_flow else "SNOWFLAKE_ADLS_SAS_TOKEN"
+    return str(os.getenv(name) or "").strip().lstrip("?")
 
 
-def _adls_stage_url() -> str:
+def _adls_stage_url(*, adls_flow: bool = False) -> str:
+    name = "ADLS_FLOW_STAGE_URL" if adls_flow else "SNOWFLAKE_ADLS_STAGE_URL"
     return str(
-        os.getenv("SNOWFLAKE_ADLS_STAGE_URL")
+        os.getenv(name)
         or "azure://atheastorage.blob.core.windows.net/athena/Insurance/"
     ).strip()
 
 
-def _adls_file_for_script(script: Dict[str, Any]) -> str:
-    return str(script.get("adls_file") or f"{_table_name(script)}.csv").strip().strip("/")
+def _adls_file_for_script(script: Dict[str, Any], *, adls_flow: bool = False) -> str:
+    configured = str(script.get("adls_file") or "").strip().strip("/")
+    if configured or not adls_flow:
+        return configured or f"{_table_name(script)}.csv"
+
+    def storage_path(value: Any) -> str:
+        parsed = urlparse(str(value or "").strip())
+        path = (parsed.path if parsed.scheme else str(value or "")).strip("/")
+        filesystem, _, remainder = path.partition("/")
+        return remainder if filesystem.casefold() == _adls_file_system().casefold() else path
+
+    source_path = storage_path(script.get("adls_source_path") or script.get("adls_remote_path"))
+    stage_root = storage_path(_adls_stage_url(adls_flow=True)).rstrip("/")
+    if not source_path or not stage_root or not source_path.casefold().startswith(
+        stage_root.casefold() + "/"
+    ):
+        raise ValueError("The approved ADLS source file is outside the configured Snowflake stage root.")
+    return source_path[len(stage_root) + 1 :]
 
 
-def _stage_ref(*, include_name: bool = True) -> str:
-    parts = [_adls_stage_database(), _adls_stage_schema()]
+def _stage_ref(*, include_name: bool = True, adls_flow: bool = False) -> str:
+    parts = [_adls_stage_database(adls_flow=adls_flow), _adls_stage_schema(adls_flow=adls_flow)]
     if include_name:
-        parts.append(_adls_stage_name())
+        parts.append(_adls_stage_name(adls_flow=adls_flow))
     return _snowflake_qualified_name(*parts)
 
 
-def _file_format_ref() -> str:
-    return _snowflake_qualified_name(_adls_stage_database(), _adls_stage_schema(), _adls_file_format_name())
+def _file_format_ref(*, adls_flow: bool = False) -> str:
+    return _snowflake_qualified_name(
+        _adls_stage_database(adls_flow=adls_flow),
+        _adls_stage_schema(adls_flow=adls_flow),
+        _adls_file_format_name(adls_flow=adls_flow),
+    )
 
 
-def ensure_adls_stage(snowflake_conn: Any) -> Dict[str, Any]:
-    stage_schema = _snowflake_qualified_name(_adls_stage_database(), _adls_stage_schema())
-    sas_token = _adls_sas_token()
+def ensure_adls_stage(snowflake_conn: Any, *, adls_flow: bool = False) -> Dict[str, Any]:
+    stage_schema = _snowflake_qualified_name(
+        _adls_stage_database(adls_flow=adls_flow), _adls_stage_schema(adls_flow=adls_flow)
+    )
+    sas_token = _adls_sas_token(adls_flow=adls_flow)
     create_stage = "CREATE OR REPLACE STAGE" if sas_token else "CREATE STAGE IF NOT EXISTS"
     credentials = (
         f"CREDENTIALS = (AZURE_SAS_TOKEN = {_snowflake_string_literal(sas_token)})"
@@ -430,11 +459,11 @@ def ensure_adls_stage(snowflake_conn: Any) -> Dict[str, Any]:
     )
     cursor = snowflake_conn.cursor()
     try:
-        _use_existing_database(cursor, _adls_stage_database())
+        _use_existing_database(cursor, _adls_stage_database(adls_flow=adls_flow))
         cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {stage_schema}")
         cursor.execute(
             f"""
-CREATE FILE FORMAT IF NOT EXISTS {_file_format_ref()}
+CREATE FILE FORMAT IF NOT EXISTS {_file_format_ref(adls_flow=adls_flow)}
     TYPE = CSV
     PARSE_HEADER = TRUE
     FIELD_OPTIONALLY_ENCLOSED_BY = '"'
@@ -445,19 +474,19 @@ CREATE FILE FORMAT IF NOT EXISTS {_file_format_ref()}
         )
         cursor.execute(
             f"""
-{create_stage} {_stage_ref()}
-    URL = {_snowflake_string_literal(_adls_stage_url())}
+{create_stage} {_stage_ref(adls_flow=adls_flow)}
+    URL = {_snowflake_string_literal(_adls_stage_url(adls_flow=adls_flow))}
     {credentials}
-    FILE_FORMAT = {_file_format_ref()}
+    FILE_FORMAT = {_file_format_ref(adls_flow=adls_flow)}
             """.strip()
         )
     finally:
         cursor.close()
 
     return {
-        "stage": _stage_ref(),
-        "file_format": _file_format_ref(),
-        "stage_url": _adls_stage_url(),
+        "stage": _stage_ref(adls_flow=adls_flow),
+        "file_format": _file_format_ref(adls_flow=adls_flow),
+        "stage_url": _adls_stage_url(adls_flow=adls_flow),
         "credential_type": "sas" if sas_token else "storage_integration",
     }
 
@@ -484,12 +513,14 @@ def _landing_columns(script: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(columns))
 
 
-def load_adls_table_to_snowflake(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
+def load_adls_table_to_snowflake(
+    script: Dict[str, Any], snowflake_conn: Any, *, adls_flow: bool = False
+) -> Dict[str, Any]:
     database_name, schema_name, table_name = _landing_relation(script)
     landing_table = _snowflake_qualified_name(database_name, schema_name, table_name)
     columns = _landing_columns(script)
-    adls_file = _adls_file_for_script(script)
-    stage_path = f"@{_stage_ref()}"
+    adls_file = _adls_file_for_script(script, adls_flow=adls_flow)
+    stage_path = f"@{_stage_ref(adls_flow=adls_flow)}"
 
     cursor = snowflake_conn.cursor()
     try:
@@ -508,7 +539,7 @@ USING TEMPLATE (
     FROM TABLE(
         INFER_SCHEMA(
             LOCATION => {_snowflake_string_literal(stage_path)},
-            FILE_FORMAT => {_snowflake_string_literal(_file_format_ref())}
+            FILE_FORMAT => {_snowflake_string_literal(_file_format_ref(adls_flow=adls_flow))}
         )
     )
 )
@@ -520,7 +551,7 @@ USING TEMPLATE (
 COPY INTO {landing_table}
 FROM {stage_path}
 FILES = ({_snowflake_string_literal(adls_file)})
-FILE_FORMAT = (FORMAT_NAME = {_file_format_ref()})
+FILE_FORMAT = (FORMAT_NAME = {_file_format_ref(adls_flow=adls_flow)})
 MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
             """.strip()
         )
@@ -559,7 +590,19 @@ def _adls_source_root() -> str:
 
 
 def _adls_python_folder_for_script(script: Dict[str, Any]) -> str:
-    folder = str(script.get("adls_folder") or script.get("landing_path") or _table_name(script)).strip().strip("/")
+    raw = str(
+        script.get("adls_remote_path")
+        or script.get("adls_source_path")
+        or script.get("adls_folder")
+        or script.get("landing_path")
+        or _table_name(script)
+    ).strip()
+    parsed = urlparse(raw)
+    folder = (parsed.path if parsed.scheme else raw).strip("/")
+    if parsed.scheme in {"http", "https"}:
+        filesystem, _, remainder = folder.partition("/")
+        if filesystem.casefold() == _adls_file_system().casefold() and remainder:
+            folder = remainder
     root = _adls_source_root()
     return f"{root}/{folder}".strip("/") if root and not folder.startswith(root + "/") else folder
 
@@ -592,8 +635,23 @@ def _get_adls_file_system_client():
     return service_client.get_file_system_client(file_system=_adls_file_system())
 
 
-def _adls_csv_paths(file_system_client: Any, folder: str) -> List[str]:
-    if folder.lower().endswith((".csv", ".txt")):
+def _adls_source_format(script: Dict[str, Any]) -> str:
+    declared = str(script.get("adls_source_format") or "").strip().lower().lstrip(".")
+    if declared:
+        return declared
+    return Path(str(script.get("source_file_name") or script.get("adls_source_path") or "")).suffix.lower().lstrip(".") or "csv"
+
+
+def _adls_file_paths(file_system_client: Any, folder: str, file_format: str) -> List[str]:
+    extensions = {
+        "csv": (".csv",),
+        "txt": (".txt",),
+        "json": (".json", ".jsonl", ".ndjson"),
+        "xml": (".xml",),
+    }.get(file_format)
+    if not extensions:
+        raise ValueError(f"Unsupported ADLS-to-Snowflake source format: {file_format}")
+    if folder.lower().endswith(extensions):
         return [folder]
     paths = []
     try:
@@ -601,17 +659,19 @@ def _adls_csv_paths(file_system_client: Any, folder: str) -> List[str]:
             if getattr(path, "is_directory", False):
                 continue
             name = str(getattr(path, "name", "") or "")
-            if name.lower().endswith((".csv", ".txt")):
+            if name.lower().endswith(extensions):
                 paths.append(name)
     except Exception:
-        candidate = f"{folder}.csv"
+        candidate = f"{folder}{extensions[0]}"
         try:
             file_system_client.get_file_client(candidate).get_file_properties()
             return [candidate]
         except Exception:
             raise
     if not paths:
-        raise ValueError(f"No CSV/TXT files found in ADLS folder: {_adls_file_system()}/{folder}")
+        raise ValueError(
+            f"No {file_format.upper()} files found in ADLS folder: {_adls_file_system()}/{folder}"
+        )
     return paths
 
 
@@ -646,12 +706,47 @@ def _insert_rows(cursor: Any, insert_sql: str, rows: List[tuple[Any, ...]], inse
     return inserted_rows + len(rows)
 
 
+def _json_scalar(value: Any) -> Any:
+    return json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value
+
+
+def _adls_records(payload: str, file_format: str, parser_options: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if file_format in {"csv", "txt"}:
+        return [dict(row) for row in csv.DictReader(io.StringIO(payload))]
+    if file_format == "json":
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            parsed = [json.loads(line) for line in payload.splitlines() if line.strip()]
+        if isinstance(parsed, dict):
+            list_values = [value for value in parsed.values() if isinstance(value, list)]
+            parsed = list_values[0] if len(list_values) == 1 else [parsed]
+        if not isinstance(parsed, list) or any(not isinstance(item, dict) for item in parsed):
+            raise ValueError("ADLS JSON source must contain objects or an array of objects.")
+        return [{str(key): _json_scalar(value) for key, value in item.items()} for item in parsed]
+    root = ElementTree.fromstring(payload)
+    row_tag = str(parser_options.get("rowTag") or parser_options.get("row_tag") or "").strip()
+    elements = list(root.iter(row_tag)) if row_tag else list(root)
+    if elements and elements[0] is root:
+        elements = elements[1:]
+    return [
+        {
+            str(child.tag).split("}")[-1]: child.text
+            for child in list(element)
+        }
+        for element in elements
+        if list(element)
+    ]
+
+
 def load_adls_python_table_to_snowflake(script: Dict[str, Any], snowflake_conn: Any) -> Dict[str, Any]:
     database_name, schema_name, table_name = _landing_relation(script)
     landing_table = _snowflake_qualified_name(database_name, schema_name, table_name)
     folder = _adls_python_folder_for_script(script)
     file_system_client = _get_adls_file_system_client()
-    paths = _adls_csv_paths(file_system_client, folder)
+    file_format = _adls_source_format(script)
+    paths = _adls_file_paths(file_system_client, folder, file_format)
+    parser_options = dict(script.get("adls_parser_options") or {})
     row_limit = _adls_python_row_limit()
 
     cursor = snowflake_conn.cursor()
@@ -662,21 +757,29 @@ def load_adls_python_table_to_snowflake(script: Dict[str, Any], snowflake_conn: 
         cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {_snowflake_qualified_name(database_name, schema_name)}")
 
         for path in paths:
-            reader = csv.DictReader(io.StringIO(_download_adls_text(file_system_client, path)))
-            columns = [str(column or "").strip() for column in (reader.fieldnames or []) if str(column or "").strip()]
+            records = _adls_records(
+                _download_adls_text(file_system_client, path), file_format, parser_options
+            )
+            columns = list(dict.fromkeys(
+                str(column or "").strip()
+                for record in records
+                for column in record
+                if str(column or "").strip()
+            ))
             if not columns:
                 continue
 
             if not created_table:
                 column_defs = ", ".join(f"{_snowflake_quote_identifier(column)} VARCHAR" for column in columns)
                 cursor.execute(f"CREATE TABLE IF NOT EXISTS {landing_table} ({column_defs})")
+                cursor.execute(f"TRUNCATE TABLE {landing_table}")
                 created_table = True
 
             column_list = ", ".join(_snowflake_quote_identifier(column) for column in columns)
             placeholders = ", ".join(["%s"] * len(columns))
             insert_sql = f"INSERT INTO {landing_table} ({column_list}) VALUES ({placeholders})"
             batch: List[tuple[Any, ...]] = []
-            for row in reader:
+            for row in records:
                 if row_limit and inserted_rows + len(batch) >= row_limit:
                     break
                 batch.append(tuple(row.get(column) for column in columns))
@@ -697,6 +800,7 @@ def load_adls_python_table_to_snowflake(script: Dict[str, Any], snowflake_conn: 
         "snowflake_landing_table": f"{database_name}.{schema_name}.{table_name}",
         "adls_file_system": _adls_file_system(),
         "adls_folder": folder,
+        "source_format": file_format,
         "files_loaded": len(paths),
         "rows_loaded": inserted_rows,
         "row_limit": row_limit,
@@ -906,7 +1010,23 @@ def run_snowflake_bronze_scripts(
             "Native Snowflake dbt execution requires ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE=true "
             "so source data is landed before dbt build."
         )
-    source_mode = "azure_sql" if metadata_runtime else _source_mode()
+    adls_flow = str(state.get("source") or "database").lower() == "adls_gen2"
+    configured_source_mode = (
+        str(os.getenv("ADLS_FLOW_BRONZE_SOURCE_MODE") or "adls_python").strip().lower()
+        if adls_flow
+        else _source_mode()
+    )
+    source_mode = (
+        configured_source_mode
+        if configured_source_mode in {"adls", "adls_python", "adls_service_principal"}
+        else "adls_python"
+    ) if adls_flow else (
+        "azure_sql" if metadata_runtime else configured_source_mode
+    )
+    if source_mode == "adls" and any(_adls_source_format(script) not in {"csv", "txt"} for script in scripts):
+        # ponytail: the configured Snowflake stage has one CSV file format; use the
+        # service-principal reader for mixed JSON/XML feeds until per-format stages exist.
+        source_mode = "adls_python"
     loaded_sources: List[Dict[str, Any]] = []
     executed_scripts: List[Dict[str, Any]] = []
     stage_key = str(progress_stage_key or "bronze_code_execution")
@@ -937,8 +1057,13 @@ def run_snowflake_bronze_scripts(
                 "Ensuring Snowflake ADLS stage and file format exist",
                 extra=_log_context(run_id, step_name="ensure_adls_stage"),
             )
-            ensure_adls_stage(snowflake_conn)
+            ensure_adls_stage(snowflake_conn, adls_flow=adls_flow)
         for index, script in enumerate(scripts, start=1):
+            if script.get("metadata_runtime_context"):
+                configure_snowflake_runtime_session(
+                    snowflake_conn,
+                    {"metadata_runtime_context": script["metadata_runtime_context"]},
+                )
             table_name = _table_name(script)
             source_table = f"{_database_name(script)}.{_schema_name(script)}.{table_name}"
             load_result: Dict[str, Any] = {}
@@ -966,7 +1091,9 @@ def run_snowflake_bronze_scripts(
                 )
                 load_started_at = time.monotonic()
                 if source_mode == "adls":
-                    load_result = load_adls_table_to_snowflake(script, snowflake_conn)
+                    load_result = load_adls_table_to_snowflake(
+                        script, snowflake_conn, adls_flow=adls_flow
+                    )
                 elif source_mode in {"adls_python", "adls_service_principal"}:
                     load_result = load_adls_python_table_to_snowflake(script, snowflake_conn)
                 else:

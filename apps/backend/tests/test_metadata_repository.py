@@ -21,6 +21,27 @@ from services import metadata_repository
 from utilis.logger import SecretRedactionFilter
 
 
+def test_runtime_source_binding_dispatches_by_connection_type(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "services.source_connection_validation.validate_deployment_adls_binding",
+        lambda connection: calls.append(("adls", connection["connection_type"])),
+    )
+    monkeypatch.setattr(
+        "services.source_connection_validation.validate_deployment_database_binding",
+        lambda connection, *, target_platform: calls.append(("database", target_platform)),
+    )
+
+    metadata_repository._validate_source_binding_for_target(
+        {"connection_type": "ADLS"}, target_platform="snowflake"
+    )
+    metadata_repository._validate_source_binding_for_target(
+        {"connection_type": "JDBC"}, target_platform="snowflake"
+    )
+
+    assert calls == [("adls", "ADLS"), ("database", "snowflake")]
+
+
 def test_bronze_column_normalization_uses_the_shared_canonical_name() -> None:
     assert normalize_bronze_column_name("RERERENCE_ID") == "reference_id"
 
@@ -1788,3 +1809,46 @@ def test_application_metadata_preflight_rejects_schema_drift(monkeypatch: pytest
 
     with pytest.raises(RuntimeError, match="cfg_mapping missing columns: mapping_hash"):
         repository.preflight()
+
+
+def test_source_resource_binding_validates_file_path_and_format_without_database_shape():
+    obj = {
+        "ingestion_type": "FILE",
+        "source_resource_type": "FILE",
+        "object_name": "https://account.blob.core.windows.net/container/claims/claims.csv",
+        "source_path": "https://account.blob.core.windows.net/container/claims/claims.csv",
+        "payload_format": "CSV",
+    }
+
+    metadata_repository._validate_source_resource_binding(
+        obj,
+        {"database": "insurance", "schema": "source", "table": "claims"},
+        source_file={"path": obj["source_path"], "format": "csv"},
+    )
+
+    with pytest.raises(ValueError, match="source file"):
+        metadata_repository._validate_source_resource_binding(
+            obj,
+            {"database": "insurance", "schema": "source", "table": "claims"},
+            source_file={"path": obj["source_path"] + ".other", "format": "CSV"},
+        )
+
+
+def test_source_resource_binding_keeps_database_contract_unchanged():
+    obj = {
+        "ingestion_type": "TABLE",
+        "object_name": "AdventureWorks.dbo.Customer",
+        "database_schema": "dbo",
+        "table_name": "Customer",
+    }
+
+    metadata_repository._validate_source_resource_binding(
+        obj,
+        {"database": "AdventureWorks", "schema": "dbo", "table": "Customer"},
+    )
+
+    with pytest.raises(ValueError, match="source resource"):
+        metadata_repository._validate_source_resource_binding(
+            obj,
+            {"database": "Other", "schema": "dbo", "table": "Customer"},
+        )

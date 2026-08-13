@@ -204,6 +204,29 @@ def test_project_execution_config_is_server_authoritative():
     assert dbt_payload.dbt_command_timeout_secs == 900
     assert dbt_payload.force_dbt_deploy is False
 
+    adls_dbt_payload = pipeline_router._with_project_execution_config(
+        pipeline_router.PipelineRunRequest(
+            project_id="project-adls-dbt",
+            brd_text="requirements",
+            source="adls_gen2",
+            target_warehouse="databricks",
+        ),
+        {
+            "id": "project-adls-dbt",
+            "target": "Snowflake",
+            "connection_type": "data_lake",
+            "integration_type": "ADLS",
+            "execution_engine": "dbt",
+            "dbt_project_object_name": "ADLS_DBT",
+        },
+    )
+
+    assert adls_dbt_payload.source == "adls_gen2"
+    assert adls_dbt_payload.target_warehouse == "snowflake"
+    assert adls_dbt_payload.execution_engine == "dbt"
+    assert adls_dbt_payload.dbt_deployment_mode == "generate_and_deploy"
+    assert adls_dbt_payload.dbt_project_object_name == "ADLS_DBT"
+
     native_payload = pipeline_router._with_project_execution_config(
         pipeline_router.PipelineRunRequest(
             project_id="project-native",
@@ -253,3 +276,19 @@ def test_snowflake_database_projects_preserve_selected_engine():
     assert native_project["dbt_deployment_mode"] == "generate_only"
     assert dbt_project["execution_engine"] == "dbt"
     assert dbt_project["dbt_deployment_mode"] == "generate_and_deploy"
+
+
+def test_snowflake_adls_projects_preserve_selected_engine():
+    from api.repositories.project_repository import ProjectRepository
+
+    project = ProjectRepository._with_execution_defaults(
+        {
+            "target": "Snowflake",
+            "connection_type": "data_lake",
+            "integration_type": "ADLS",
+            "execution_engine": "dbt",
+        }
+    )
+
+    assert project["execution_engine"] == "dbt"
+    assert project["dbt_deployment_mode"] == "generate_and_deploy"

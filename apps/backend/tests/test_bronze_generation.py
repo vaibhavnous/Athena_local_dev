@@ -448,10 +448,14 @@ def test_metadata_databricks_batch_uses_queue_attempt_token_and_returns_receipt(
         lambda _run_id: {"notebook_output": {"result": json.dumps({
             "status": "COMPLETED",
             "results": [{
-                "script_name": "bronze_claims",
+                "script_name": "main_bronze_claims",
                 "target_table": "main.bronze.claims",
                 "status": "SUCCESS",
                 "verification_status": "VERIFIED",
+                "execution_result": {
+                    "target_table": "main.bronze.claims",
+                    "target_commit_id": "delta:main.bronze.claims:v1",
+                },
             }],
         })}},
     )
@@ -475,9 +479,108 @@ def test_metadata_databricks_batch_uses_queue_attempt_token_and_returns_receipt(
         on_submitted=receipts.append,
     )
 
-    assert submitted["idempotency_token"] == "athena-metadata-91-2"
+    assert submitted["idempotency_token"] == "athena-metadata-91-2-bronze"
     assert receipts == ["42"]
     assert result["databricks_bronze_execution_results"][0]["databricks_run_id"] == 42
+
+
+def test_metadata_databricks_batch_rejects_results_from_another_layer():
+    from services import databricks_runtime
+
+    error = databricks_runtime._metadata_batch_contract_error(
+        [{"target_table": "main.silver.claims"}],
+        [{
+            "script_name": "main_bronze_claims",
+            "target_table": "main.bronze.claims",
+            "status": "SUCCESS",
+            "verification_status": "VERIFIED",
+            "execution_result": {
+                "target_table": "main.bronze.claims",
+                "target_commit_id": "delta:main.bronze.claims:v1",
+            },
+        }],
+    )
+
+    assert error == "Databricks metadata batch results do not match the submitted scripts and targets."
+
+
+def test_metadata_databricks_silver_batch_can_continue_after_one_script_failure():
+    from services import databricks_runtime
+
+    notebook = databricks_runtime._build_batch_driver_notebook(
+        "silver",
+        [{"target_table": "main.silver.claims", "script_body": "raise ValueError('bad key')"}],
+        workspace_dir="/Workspace/athena/run-1",
+        metadata_runtime_batch=True,
+        allow_partial_stage_success=True,
+    )
+
+    assert "_ALLOW_PARTIAL_SUCCESS = True" in notebook
+    assert "_CONTINUE_ON_ERROR = True" in notebook
+
+
+def test_metadata_databricks_silver_partial_results_complete_with_warnings(monkeypatch):
+    from services import databricks_runtime
+
+    monkeypatch.setattr(databricks_runtime, "_upload_support_files", lambda *_args: None)
+    monkeypatch.setattr(databricks_runtime, "_workspace_import_notebook", lambda *_args: {})
+    monkeypatch.setattr(databricks_runtime, "_submit_run", lambda *_args, **_kwargs: {"run_id": 42})
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_wait_for_run",
+        lambda _run_id: {"run_id": 42, "result_state": "SUCCESS", "life_cycle_state": "TERMINATED"},
+    )
+    monkeypatch.setattr(databricks_runtime, "_task_run_id", lambda _state: 42)
+    monkeypatch.setattr(
+        databricks_runtime,
+        "_get_run_output",
+        lambda _run_id: {"notebook_output": {"result": json.dumps({
+            "status": "COMPLETED_WITH_WARNINGS",
+            "results": [
+                {
+                    "script_name": "main_silver_claims",
+                    "target_table": "main.silver.claims",
+                    "runtime_run_id": "runtime-1",
+                    "status": "SUCCESS",
+                    "verification_status": "VERIFIED",
+                    "execution_result": {
+                        "runtime_run_id": "runtime-1",
+                        "target_table": "main.silver.claims",
+                        "target_commit_id": "delta:main.silver.claims:v1",
+                    },
+                },
+                {
+                    "script_name": "main_silver_policy",
+                    "target_table": "main.silver.policy",
+                    "runtime_run_id": "runtime-2",
+                    "status": "FAILED",
+                    "error": "merge key is not unique",
+                },
+            ],
+        })}},
+    )
+    monkeypatch.setattr(
+        databricks_runtime,
+        "save_external_execution_progress",
+        lambda state, **_kwargs: state,
+    )
+
+    result = databricks_runtime._execute_databricks_stage_batch(
+        {
+            "run_id": "design-1",
+            "metadata_runtime_batch": True,
+            "metadata_runtime_context": {"queue_id": 1, "attempt_number": 1},
+            "allow_partial_stage_success": True,
+        },
+        layer="silver",
+        scripts=[
+            {"target_table": "main.silver.claims", "metadata_runtime": True, "script_body": "print('ok')"},
+            {"target_table": "main.silver.policy", "metadata_runtime": True, "script_body": "print('bad')"},
+        ],
+    )
+
+    assert result["databricks_silver_execution_status"] == "COMPLETED_WITH_WARNINGS"
+    assert len(result["databricks_silver_execution_failures"]) == 1
 
 
 def test_databricks_task_run_id_expands_parent_submit_run(monkeypatch):

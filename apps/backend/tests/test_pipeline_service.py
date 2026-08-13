@@ -2494,6 +2494,33 @@ def test_run_pipeline_background_marks_failure(monkeypatch):
     assert failure == {"run_id": "run-3", "error": "boom", "stage": "pipeline"}
 
 
+def test_file_source_failure_clears_running_stage(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(
+        pipeline_service,
+        "load_checkpoint_state",
+        lambda _run_id: {
+            "run_id": "run-adls-failed",
+            "source": "adls_gen2",
+            "status": "RUNNING",
+            "background_stage": "ingestion",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_service,
+        "save_checkpoint_state",
+        lambda _run_id, state: saved.update(state),
+    )
+
+    pipeline_service._mark_run_failed(
+        "run-adls-failed", RuntimeError("startup failed"), stage="pipeline"
+    )
+
+    assert saved["status"] == "FAILED"
+    assert saved["background_stage"] is None
+    assert saved["failed_background_stage"] == "pipeline"
+
+
 def test_submit_pipeline_start_rejects_duplicate(monkeypatch):
     class PendingFuture:
         def done(self):

@@ -531,14 +531,31 @@ def test_pipeline_request_rejects_dbt_for_non_snowflake():
         )
 
 
-def test_pipeline_request_rejects_dbt_for_file_sources():
-    with pytest.raises(ValueError, match="database sources"):
-        PipelineRunRequest(
-            brd_text="brd",
-            source="adls_gen2",
-            target_warehouse="snowflake",
-            execution_engine="dbt",
-        )
+def test_pipeline_request_allows_dbt_for_adls_sources():
+    payload = PipelineRunRequest(
+        brd_text="brd",
+        source="adls_gen2",
+        target_warehouse="snowflake",
+        execution_engine="dbt",
+        dbt_deployment_mode="generate_and_deploy",
+    )
+
+    assert payload.execution_engine == "dbt"
+    assert payload.dbt_deployment_mode == "generate_and_deploy"
+
+
+def test_project_request_allows_dbt_for_adls_projects():
+    project = ProjectRequest(
+        name="ADLS Snowflake",
+        description="Insurance files",
+        target="Snowflake",
+        connection_type="data_lake",
+        integration_type="ADLS",
+        execution_engine="dbt",
+    )
+
+    assert project.execution_engine == "dbt"
+    assert project.dbt_deployment_mode == "generate_and_deploy"
 
 
 def test_dbt_target_name_respects_database_column_limit():

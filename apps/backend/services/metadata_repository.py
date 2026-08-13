@@ -37,7 +37,38 @@ def _as_bool(value: Any) -> bool:
     return value is True or str(value or "").strip().lower() in {"1", "true", "yes"}
 
 
-def _validate_source_resource_binding(obj: Mapping[str, Any], source: Any) -> None:
+def _validate_source_binding_for_target(
+    connection: Mapping[str, Any], *, target_platform: str
+) -> None:
+    from services.source_connection_validation import (
+        validate_deployment_adls_binding,
+        validate_deployment_database_binding,
+    )
+
+    if str(connection.get("connection_type") or "").upper() == "ADLS":
+        validate_deployment_adls_binding(connection)
+    else:
+        validate_deployment_database_binding(connection, target_platform=target_platform)
+
+
+def _validate_source_resource_binding(
+    obj: Mapping[str, Any], source: Any, *, source_file: Any = None
+) -> None:
+    file_object = any(
+        str(obj.get(field) or "").upper() == "FILE"
+        for field in ("ingestion_type", "source_resource_type", "object_type")
+    )
+    if file_object:
+        expected_path = str(obj.get("source_path") or obj.get("object_name") or "").strip()
+        expected_format = str(obj.get("payload_format") or "").strip().upper()
+        if (
+            not isinstance(source_file, Mapping)
+            or not expected_path
+            or str(source_file.get("path") or "").strip() != expected_path
+            or str(source_file.get("format") or "").strip().upper() != expected_format
+        ):
+            raise ValueError("The execution artifact source file does not match the ingestion object.")
+        return
     object_parts = str(obj.get("object_name") or "").split(".")
     expected = {
         "database": object_parts[-3] if len(object_parts) >= 3 else "",
@@ -2158,7 +2189,11 @@ class MetadataRepository(ABC):
             )
         spec = validate_execution_spec(execution_spec, platform=self.context.platform)
         if processing_stage == "SOURCE_TO_BRONZE":
-            _validate_source_resource_binding(draft, spec.get("source_resource"))
+            _validate_source_resource_binding(
+                draft,
+                spec.get("source_resource"),
+                source_file=spec.get("source_file"),
+            )
         if not str(os.getenv("ATHENA_GENERATED_CODE_DIR") or "").strip():
             raise RuntimeError("ATHENA_GENERATED_CODE_DIR must identify durable shared storage before metadata activation.")
         artifact_path = verified_execution_artifact(spec, platform=self.context.platform)
@@ -2359,7 +2394,11 @@ class MetadataRepository(ABC):
             bundle = bundles[bundle_key]
             spec = validate_execution_spec(item["execution_spec"], platform=self.context.platform)
             if stage == "SOURCE_TO_BRONZE":
-                _validate_source_resource_binding(draft, spec.get("source_resource"))
+                _validate_source_resource_binding(
+                    draft,
+                    spec.get("source_resource"),
+                    source_file=spec.get("source_file"),
+                )
             if not str(os.getenv("ATHENA_GENERATED_CODE_DIR") or "").strip():
                 raise RuntimeError("ATHENA_GENERATED_CODE_DIR must identify durable shared storage before metadata activation.")
             artifact_path = verified_execution_artifact(spec, platform=self.context.platform)
@@ -2535,7 +2574,11 @@ class MetadataRepository(ABC):
         ):
             raise RuntimeError("The Bronze artifact does not implement the required runtime/idempotency contract.")
         if str(obj.get("processing_stage") or "").upper() == "SOURCE_TO_BRONZE":
-            _validate_source_resource_binding(obj, spec.get("source_resource"))
+            _validate_source_resource_binding(
+                obj,
+                spec.get("source_resource"),
+                source_file=spec.get("source_file"),
+            )
         connection_pin = None
         if obj.get("connection_id") is not None:
             resolved_connection = connection or self.get_active_connection(int(obj["connection_id"]))
@@ -3121,9 +3164,7 @@ class MetadataRepository(ABC):
             ):
                 raise RuntimeError("The queued source-connection snapshot failed validation.")
             if self.context.platform == "snowflake":
-                from services.source_connection_validation import validate_deployment_database_binding
-
-                validate_deployment_database_binding(connection, target_platform="snowflake")
+                _validate_source_binding_for_target(connection, target_platform="snowflake")
         snapshot_id = self._runtime_snapshot(obj, mapping, connection=connection)["metadata_snapshot_id"]
         queued_snapshot_id = str(queue_item.get("metadata_snapshot_id") or "")
         snapshot_matches = snapshot_id == queued_snapshot_id
@@ -3363,9 +3404,7 @@ class MetadataRepository(ABC):
                 if not connection or str(connection.get("config_hash") or "") != str(connection_pin.get("config_hash") or ""):
                     raise RuntimeError("A queued source-connection snapshot failed validation.")
                 if self.context.platform == "snowflake":
-                    from services.source_connection_validation import validate_deployment_database_binding
-
-                    validate_deployment_database_binding(connection, target_platform="snowflake")
+                    _validate_source_binding_for_target(connection, target_platform="snowflake")
             snapshot_id = self._runtime_snapshot(obj, mapping, connection=connection)["metadata_snapshot_id"]
             contexts.append({
                 **item, "obj": obj, "mapping": mapping, "connection": connection,

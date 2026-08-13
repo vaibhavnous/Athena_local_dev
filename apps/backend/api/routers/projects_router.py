@@ -36,10 +36,17 @@ def _payload(
         raise HTTPException(status_code=400, detail="Unsupported project status")
     if data["connection_type"] not in {"database", "data_lake"}:
         raise HTTPException(status_code=400, detail="Source type must be database or data_lake")
-    snowflake_database_target = (
-        data["target"] == "Snowflake" and data["connection_type"] == "database"
+    snowflake_supported_target = (
+        data["target"] == "Snowflake"
+        and (
+            data["connection_type"] == "database"
+            or (
+                data["connection_type"] == "data_lake"
+                and str(data.get("integration_type") or "").strip().lower() == "adls"
+            )
+        )
     )
-    if not snowflake_database_target:
+    if not snowflake_supported_target:
         data["execution_engine"] = "native"
         data["dbt_deployment_mode"] = "generate_only"
         data["dbt_target_name"] = None

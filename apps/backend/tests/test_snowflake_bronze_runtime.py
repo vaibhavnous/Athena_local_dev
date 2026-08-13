@@ -69,6 +69,39 @@ def test_bronze_landing_reuses_existing_database():
     assert statements == ['USE DATABASE "insurance"']
 
 
+def test_adls_flow_uses_approved_stage_relative_file_path(monkeypatch):
+    monkeypatch.setenv(
+        "ADLS_FLOW_STAGE_URL",
+        "azure://atheastorage.blob.core.windows.net/athena/INSURANCE_SFTP/insurance/",
+    )
+
+    assert snowflake_bronze_runtime._adls_file_for_script(
+        {
+            "table": "indemnity_outstanding_estimates",
+            "adls_source_path": (
+                "abfss://athena@atheastorage.dfs.core.windows.net/INSURANCE_SFTP/insurance/"
+                "indemnity_outstanding_estimates/indemnity_outstanding_estimates_1_.csv"
+            ),
+        },
+        adls_flow=True,
+    ) == (
+        "indemnity_outstanding_estimates/indemnity_outstanding_estimates_1_.csv"
+    )
+
+
+def test_adls_flow_rejects_source_outside_stage_root(monkeypatch):
+    monkeypatch.setenv(
+        "ADLS_FLOW_STAGE_URL",
+        "azure://atheastorage.blob.core.windows.net/athena/INSURANCE_SFTP/insurance/",
+    )
+
+    with pytest.raises(ValueError, match="outside the configured Snowflake stage root"):
+        snowflake_bronze_runtime._adls_file_for_script(
+            {"table": "claims", "adls_remote_path": "/another/root/claims.csv"},
+            adls_flow=True,
+        )
+
+
 def test_metadata_runtime_configures_safe_snowflake_session_identity():
     calls = []
 
@@ -239,6 +272,42 @@ def test_adls_stage_uses_sas_without_logging_token(monkeypatch):
     assert result["credential_type"] == "sas"
 
 
+def test_adls_flow_stage_uses_its_own_location_and_sas(monkeypatch):
+    monkeypatch.setenv("SNOWFLAKE_ADLS_STAGE_DB", "DATABASE_FLOW_DB")
+    monkeypatch.setenv("SNOWFLAKE_ADLS_SAS_TOKEN", "database-token")
+    monkeypatch.setenv("ADLS_FLOW_STAGE_DB", "INSURANCE")
+    monkeypatch.setenv("ADLS_FLOW_STAGE_SCHEMA", "BRONZE")
+    monkeypatch.setenv("ADLS_FLOW_STAGE_NAME", "SFTP_INSURANCE_CSV")
+    monkeypatch.setenv("ADLS_FLOW_STAGE_FORMAT", "INSURANCE_CSV")
+    monkeypatch.setenv(
+        "ADLS_FLOW_STAGE_URL",
+        "azure://atheastorage.blob.core.windows.net/athena/INSURANCE_SFTP/insurance/",
+    )
+    monkeypatch.setenv("ADLS_FLOW_SAS_TOKEN", "adls-token")
+
+    class FakeCursor:
+        def __init__(self):
+            self.sql = []
+
+        def execute(self, sql):
+            self.sql.append(sql)
+
+        def close(self):
+            pass
+
+    cursor = FakeCursor()
+    result = snowflake_bronze_runtime.ensure_adls_stage(
+        type("Connection", (), {"cursor": lambda self: cursor})(), adls_flow=True
+    )
+
+    stage_sql = cursor.sql[-1]
+    assert '"INSURANCE"."BRONZE"."SFTP_INSURANCE_CSV"' in stage_sql
+    assert "INSURANCE_SFTP/insurance/" in stage_sql
+    assert "AZURE_SAS_TOKEN = 'adls-token'" in stage_sql
+    assert "database-token" not in stage_sql
+    assert result["credential_type"] == "sas"
+
+
 def test_snowflake_bronze_runtime_executes_generated_sql(monkeypatch):
     monkeypatch.setenv("BRONZE_CATALOG", "main")
     monkeypatch.setenv("BRONZE_SCHEMA", "bronze")
@@ -358,29 +427,38 @@ def test_snowflake_bronze_runtime_adls_executes_only_approved_scripts(monkeypatc
     fake_conn = FakeSnowflakeConnection()
     monkeypatch.setenv("ATHENA_EXECUTE_SNOWFLAKE_BRONZE", "true")
     monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_LOAD_SOURCE", "true")
-    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_SOURCE_MODE", "adls")
-    monkeypatch.setenv("SNOWFLAKE_ADLS_STAGE_URL", "azure://atheastorage.blob.core.windows.net/athena/Insurance/")
-    monkeypatch.delenv("SNOWFLAKE_ADLS_SAS_TOKEN", raising=False)
+    monkeypatch.setenv("ATHENA_SNOWFLAKE_BRONZE_SOURCE_MODE", "azure_sql")
+    monkeypatch.setenv("ADLS_FLOW_BRONZE_SOURCE_MODE", "adls")
+    monkeypatch.setenv(
+        "ADLS_FLOW_STAGE_URL",
+        "azure://atheastorage.blob.core.windows.net/athena/INSURANCE_SFTP/insurance/",
+    )
+    monkeypatch.setenv("ADLS_FLOW_SAS_TOKEN", "")
     monkeypatch.setattr(snowflake_bronze_runtime, "_snowflake_connect", lambda: fake_conn)
 
     result = snowflake_bronze_runtime.run_snowflake_bronze_scripts(
         {
+            "source": "adls_gen2",
             "target_warehouse": "snowflake",
             "bronze_generation_results": [
-                {
-                    "table": "claim_information",
-                    "database_name": "insurance",
-                    "schema_name": "dbo",
-                    "script_path": write_script("claim_information"),
-                    "source_columns": [{"source": "claim_id"}],
-                },
-                {
-                    "table": "policy_transactions",
-                    "database_name": "insurance",
-                    "schema_name": "dbo",
-                    "script_path": write_script("policy_transactions"),
-                    "source_columns": [{"source": "claim_id"}],
-                },
+                    {
+                        "table": "claim_information",
+                        "database_name": "insurance",
+                        "schema_name": "dbo",
+                        "adls_source_format": "csv",
+                        "adls_source_path": "abfss://athena@atheastorage.dfs.core.windows.net/INSURANCE_SFTP/insurance/claim_information/claim_information.csv",
+                        "script_path": write_script("claim_information"),
+                        "source_columns": [{"source": "claim_id"}],
+                    },
+                    {
+                        "table": "policy_transactions",
+                        "database_name": "insurance",
+                        "schema_name": "dbo",
+                        "adls_source_format": "csv",
+                        "adls_source_path": "abfss://athena@atheastorage.dfs.core.windows.net/INSURANCE_SFTP/insurance/policy_transactions/policy_transactions.csv",
+                        "script_path": write_script("policy_transactions"),
+                        "source_columns": [{"source": "claim_id"}],
+                    },
             ],
         },
         review_artifact={
@@ -408,7 +486,7 @@ def test_snowflake_bronze_runtime_adls_executes_only_approved_scripts(monkeypatc
     assert any("CREATE STAGE IF NOT EXISTS" in sql for sql in fake_conn.sql)
     assert any("TRUNCATE TABLE \"insurance\".\"dbo\".\"claim_information\"" in sql for sql in fake_conn.sql)
     assert any("COPY INTO \"insurance\".\"dbo\".\"claim_information\"" in sql for sql in fake_conn.sql)
-    assert any("FILES = ('claim_information.csv')" in sql for sql in fake_conn.sql)
+    assert any("FILES = ('claim_information/claim_information.csv')" in sql for sql in fake_conn.sql)
     assert not any("COPY INTO \"insurance\".\"dbo\".\"policy_transactions\"" in sql for sql in fake_conn.sql)
     assert fake_conn.closed is True
 

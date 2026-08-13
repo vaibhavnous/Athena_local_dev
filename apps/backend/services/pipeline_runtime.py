@@ -464,6 +464,10 @@ def _database_stage_runner(stage_key: str, state: Optional[Dict[str, Any]] = Non
 
         return ingestion_node
     if stage_key == "memory":
+        if str((state or {}).get("source") or "").lower() == "adls_gen2":
+            from sftp_nodes.memory_check import sftp_memory_check_node
+
+            return sftp_memory_check_node
         from nodes.memory_lookup import memory_lookup_node
 
         return memory_lookup_node
@@ -2557,7 +2561,7 @@ def build_pipeline_steps(
     source = str(source or "database").lower()
     artifact_types = {str(row.get("artifact_type") or "") for row in summary}
     stages = {str(row.get("stage") or "").lower() for row in summary}
-    dbt_codegen = source == "database" and snowflake_dbt_enabled(checkpoint)
+    dbt_codegen = source in {"database", "adls_gen2"} and snowflake_dbt_enabled(checkpoint)
     dbt_deploy = dbt_codegen and str(checkpoint.get("dbt_deployment_mode") or "").lower() == "generate_and_deploy"
 
     def artifact_failed(artifact_type: str) -> bool:
@@ -5901,6 +5905,13 @@ def _execute_metadata_setup(state: Dict[str, Any]) -> Dict[str, Any]:
     )
     from utilis.generated_code_paths import resolve_generated_artifact_uri
 
+    if str(state.get("source") or "database").lower() == "adls_gen2":
+        from services.file_metadata import activate_file_bronze_artifacts
+
+        # Rebind at the durable execution boundary so retries of runs created
+        # before the complete mapping pin was introduced self-heal safely.
+        state = activate_file_bronze_artifacts(state)
+
     artifact = state.get("metadata_ddl_artifact") or {}
     if not artifact:
         # ponytail: in-flight generation_first_v1 runs created before this stage
@@ -6399,8 +6410,8 @@ def _database_native_execution_validation_errors(state: Dict[str, Any]) -> List[
     errors: List[str] = []
     source = str(state.get("source") or "database").lower()
     target_warehouse = str(state.get("target_warehouse") or "").lower()
-    if source != "database":
-        errors.append("source must be database")
+    if source not in {"database", "adls_gen2"}:
+        errors.append("source must be database or ADLS Gen2")
     if not generation_first_native_database_flow(state):
         errors.append("run is not a generation-first native database flow")
     if target_warehouse not in {"databricks", "snowflake"}:
@@ -6477,7 +6488,12 @@ def execute_database_native_layers(
                     run_id, failed_state, context="metadata_setup_execution:failed"
                 )
                 raise
-        if str(working_state.get("source") or "database").lower() == "database":
+        source = str(working_state.get("source") or "database").lower()
+        if source == "adls_gen2":
+            from sftp_nodes.metadata_execution import execute_adls_metadata_native_runtime
+
+            return execute_adls_metadata_native_runtime(working_state)
+        if source == "database":
             return _execute_queued_metadata_native_runtime(
                 _enqueue_metadata_native_runtime(working_state)
             )
@@ -6661,7 +6677,9 @@ def _database_dbt_execution_validation_errors(state: Dict[str, Any]) -> List[str
         errors.append("finalized Snowflake dbt project hash is missing")
     if state.get("source_system_id") is not None:
         package_hash = str(state.get("snowflake_dbt_artifact_set_hash") or "")
-        for layer in ("bronze", "silver", "gold"):
+        source = str(state.get("source") or "database").lower()
+        layers = ("bronze",) if source == "adls_gen2" else ("bronze", "silver", "gold")
+        for layer in layers:
             artifacts = [
                 item for item in state.get(f"{layer}_generation_results") or []
                 if isinstance(item, dict)
@@ -6673,6 +6691,13 @@ def _database_dbt_execution_validation_errors(state: Dict[str, Any]) -> List[str
                 for item in artifacts
             ):
                 errors.append(f"{layer.capitalize()} dbt metadata is not active for the finalized package")
+        if source == "adls_gen2" and any(
+            item.get("metadata_activation_status") != "ACTIVE"
+            for layer in ("silver", "gold")
+            for item in state.get(f"{layer}_generation_results") or []
+            if isinstance(item, dict)
+        ):
+            errors.append("Silver and Gold dbt artifacts are not bound to the finalized ADLS package")
     return errors
 
 
@@ -6698,15 +6723,23 @@ def _start_snowflake_dbt_control_attempt(
     if _selection is None and callable(getattr(selection.repository, "unit_of_work", None)):
         with selection.repository.unit_of_work():
             return _start_snowflake_dbt_control_attempt(state, _selection=selection)
-    gold_ids = sorted({
+    file_source = str(state.get("source") or "database").lower() == "adls_gen2"
+    control_ids = sorted({
+        int(item.get("ingestion_object_id") or 0)
+        for item in state.get("bronze_generation_results") or []
+        if file_source
+        and isinstance(item, dict)
+        and item.get("metadata_activation_status") == "ACTIVE"
+        and int(item.get("ingestion_object_id") or 0) > 0
+    }) if file_source else sorted({
         int(item.get("gold_ingestion_object_id") or 0)
         for item in state.get("gold_generation_results") or []
         if isinstance(item, dict)
         and item.get("metadata_activation_status") == "ACTIVE"
         and int(item.get("gold_ingestion_object_id") or 0) > 0
     })
-    if not gold_ids:
-        raise RuntimeError("Snowflake dbt execution has no active Gold metadata object.")
+    if not control_ids:
+        raise RuntimeError("Snowflake dbt execution has no active metadata control object.")
     package_object_ids = sorted({
         int(item.get(object_key) or 0)
         for layer, object_key in (
@@ -6727,7 +6760,7 @@ def _start_snowflake_dbt_control_attempt(
         "package_hash": package_hash,
     })
     queue_item = selection.repository.enqueue_work(
-        ingestion_object_id=gold_ids[0],
+        ingestion_object_id=control_ids[0],
         trigger_type="MANUAL",
         work_scope={
             "design_run_id": str(state.get("run_id") or ""),
@@ -7324,7 +7357,11 @@ def submit_gold_review(run_id: str, action: str = "APPROVED", review_artifact: O
         save_checkpoint_state(run_id, generation_state)
         try:
             final_state = finalize_snowflake_dbt_project(generation_state)
-            if metadata_gold:
+            if str(final_state.get("source") or "database").lower() == "adls_gen2":
+                from services.file_metadata import bind_file_dbt_package
+
+                final_state = bind_file_dbt_package(final_state)
+            elif metadata_gold:
                 final_state = _attach_gold_execution_specs(final_state)
                 final_state = _activate_finalized_snowflake_dbt_metadata(final_state)
         except Exception as exc:

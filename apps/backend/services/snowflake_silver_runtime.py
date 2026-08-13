@@ -337,6 +337,11 @@ def run_snowflake_silver_scripts(
             message=f"Executing Silver scripts in Snowflake: 0/{len(scripts)} completed.",
         )
         for index, script in enumerate(scripts, start=1):
+            if script.get("metadata_runtime_context"):
+                configure_snowflake_runtime_session(
+                    snowflake_conn,
+                    {"metadata_runtime_context": script["metadata_runtime_context"]},
+                )
             table_name = _table_name(script)
             target_table = script.get("target_table") or script.get("silver_table")
             state = save_external_execution_progress(

@@ -51,7 +51,7 @@ def silver_code_generation_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     results = []
     with ThreadPoolExecutor(max_workers=shared.SILVER_MAX_WORKERS) as executor:
-        futures = [
+        futures = {
             executor.submit(
                 shared._generate_one_table,
                 table_ref,
@@ -61,11 +61,15 @@ def silver_code_generation_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 silver_schema=silver_schema,
                 target_warehouse=target_warehouse,
                 execution_engine=execution_engine,
-            )
+            ): table_ref
             for table_ref in table_refs
-        ]
+        }
         for future in as_completed(futures):
-            results.append(future.result())
+            table_ref = futures[future]
+            results.append({
+                **future.result(),
+                "ingestion_object_id": int(table_ref["ingestion_object_id"]),
+            })
 
     generated_at = datetime.now(timezone.utc).isoformat()
     bundle = {

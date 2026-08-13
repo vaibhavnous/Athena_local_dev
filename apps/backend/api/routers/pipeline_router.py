@@ -23,12 +23,19 @@ def _with_project_execution_config(
     payload: PipelineRunRequest,
     project: Dict[str, Any],
 ) -> PipelineRunRequest:
-    snowflake_database_project = (
+    connection_type = str(project.get("connection_type") or "").strip().lower()
+    snowflake_supported_project = (
         str(project.get("target") or "").strip().lower() == "snowflake"
-        and str(project.get("connection_type") or "").strip().lower() == "database"
+        and (
+            connection_type == "database"
+            or (
+                connection_type == "data_lake"
+                and str(project.get("integration_type") or "").strip().lower() == "adls"
+            )
+        )
     )
     selected_engine = str(project.get("execution_engine") or "native").strip().lower()
-    is_dbt_project = snowflake_database_project and selected_engine == "dbt"
+    is_dbt_project = snowflake_supported_project and selected_engine == "dbt"
     data = payload.model_dump()
     data.update(
         use_domain_kb=bool(project.get("use_domain_knowledge_base")),
@@ -44,13 +51,16 @@ def _with_project_execution_config(
         ),
         force_dbt_deploy=bool(project.get("force_dbt_deploy")) if is_dbt_project else False,
     )
-    if snowflake_database_project:
+    if snowflake_supported_project:
         data.update(
             target_warehouse="snowflake",
-            source="database",
-            database_name=project.get("database_name") or payload.database_name,
-            database_type=project.get("db_type") or payload.database_type,
+            source="adls_gen2" if connection_type == "data_lake" else "database",
         )
+        if connection_type == "database":
+            data.update(
+                database_name=project.get("database_name") or payload.database_name,
+                database_type=project.get("db_type") or payload.database_type,
+            )
     return PipelineRunRequest.model_validate(data)
 
 
@@ -593,6 +603,7 @@ def continue_stage(
 
     from api.services.pipeline_service import continue_database_pipeline_job
     from services.pipeline_runtime import (
+        generation_first_database_flow,
         load_checkpoint_state,
         save_checkpoint_state,
         submit_background,
@@ -607,7 +618,10 @@ def continue_stage(
             detail="No next stage is pending confirmation for this run.",
         )
 
-    if str(checkpoint.get("source") or "database").lower() in {"sftp", "adls_gen2"}:
+    source = str(checkpoint.get("source") or "database").lower()
+    if source == "sftp" or (
+        source == "adls_gen2" and not generation_first_database_flow(checkpoint)
+    ):
         raise HTTPException(
             status_code=400,
             detail="Stage-by-stage confirmation is not enabled for file-source runs yet.",
