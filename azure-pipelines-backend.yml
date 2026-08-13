@@ -5,6 +5,7 @@ trigger:
   paths:
     include:
       - apps/backend/**
+      - prereq/metadata/**
       - azure-pipelines-backend.yml
       - devops/azure/pipelines/backend.yml
 

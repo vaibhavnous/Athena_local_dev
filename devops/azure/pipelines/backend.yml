@@ -37,8 +37,14 @@ stages:
               testRunTitle: 'Backend Tests'
 
           - script: |
+              set -euo pipefail
               mkdir -p $(Build.ArtifactStagingDirectory)/backend
               cp -r $(backendFolder)/* $(Build.ArtifactStagingDirectory)/backend/
+              mkdir -p $(Build.ArtifactStagingDirectory)/backend/prereq/metadata
+              cp -r prereq/metadata/. $(Build.ArtifactStagingDirectory)/backend/prereq/metadata/
+              test -f $(Build.ArtifactStagingDirectory)/backend/prereq/metadata/databricks.sql
+              test -f $(Build.ArtifactStagingDirectory)/backend/prereq/metadata/snowflake.sql
+              test -f $(Build.ArtifactStagingDirectory)/backend/prereq/metadata/application_azure_sql.sql
               chmod +x $(Build.ArtifactStagingDirectory)/backend/startup.sh
             displayName: 'Prepare backend artifact'
 

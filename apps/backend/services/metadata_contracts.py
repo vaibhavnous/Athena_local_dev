@@ -20,7 +20,19 @@ METADATA_TABLES = (
 )
 SUPPORTED_METADATA_TARGETS = {"databricks", "snowflake"}
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
-_DDL_ROOT = Path(__file__).resolve().parents[3] / "prereq" / "metadata"
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+# ponytail: deployment is flat under the backend root; the second path preserves monorepo development.
+_DDL_ROOT = next(
+    (
+        path
+        for path in (
+            _BACKEND_ROOT / "prereq" / "metadata",
+            _BACKEND_ROOT.parents[1] / "prereq" / "metadata",
+        )
+        if path.is_dir()
+    ),
+    _BACKEND_ROOT / "prereq" / "metadata",
+)
 CANONICAL_COLUMN_NAME_CORRECTIONS = {
     "agen_t_category_name": "agent_category_name",
     "claimid": "claim_id",
