@@ -247,17 +247,10 @@ def test_snowflake_bronze_runtime_executes_generated_sql(monkeypatch):
     sql_path = workdir / "bronze_claims.sql"
     sql_path.write_text(
         'CREATE SCHEMA IF NOT EXISTS "main"."bronze";\n'
-        'CREATE TABLE IF NOT EXISTS "main"."bronze"."bronze_claims" (\n'
-        '    "claim_id" NUMBER(38,0),\n'
-        '    "run_id" VARCHAR,\n'
-        '    "ingestion_timestamp" TIMESTAMP_NTZ,\n'
-        '    "source_system" VARCHAR,\n'
-        '    "source_table" VARCHAR\n'
-        ');\n'
-        'INSERT INTO "main"."bronze"."bronze_claims" (\n'
-        '    "claim_id", "run_id", "ingestion_timestamp", "source_system", "source_table"\n'
-        ')\n'
-        'SELECT TRY_CAST(src."claim_id" AS NUMBER(38,0)), \'run-1\', CURRENT_TIMESTAMP()::TIMESTAMP_NTZ, \'insurance\', \'claims\'\n'
+        'CREATE OR REPLACE TABLE "main"."bronze"."bronze_claims" AS\n'
+        'SELECT TRY_CAST(src."claim_id" AS NUMBER(38,0)) AS "claim_id", '
+        '\'run-1\' AS "run_id", CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp", '
+        '\'insurance\' AS "source_system", \'claims\' AS "source_table"\n'
         'FROM "insurance"."dbo"."claims" AS src;',
         encoding="utf-8",
     )
@@ -309,17 +302,10 @@ def test_snowflake_bronze_runtime_adls_executes_only_approved_scripts(monkeypatc
         path = workdir / f"bronze_{table}.sql"
         path.write_text(
             f'CREATE SCHEMA IF NOT EXISTS "main"."bronze";\n'
-            f'CREATE TABLE IF NOT EXISTS "main"."bronze"."bronze_{table}" (\n'
-            f'    "claim_id" NUMBER(38,0),\n'
-            f'    "run_id" VARCHAR,\n'
-            f'    "ingestion_timestamp" TIMESTAMP_NTZ,\n'
-            f'    "source_system" VARCHAR,\n'
-            f'    "source_table" VARCHAR\n'
-            f');\n'
-            f'INSERT INTO "main"."bronze"."bronze_{table}" (\n'
-            f'    "claim_id", "run_id", "ingestion_timestamp", "source_system", "source_table"\n'
-            f')\n'
-            f'SELECT TRY_CAST(src."claim_id" AS NUMBER(38,0)), \'run-1\', CURRENT_TIMESTAMP()::TIMESTAMP_NTZ, \'insurance\', \'{table}\'\n'
+            f'CREATE OR REPLACE TABLE "main"."bronze"."bronze_{table}" AS\n'
+            f'SELECT TRY_CAST(src."claim_id" AS NUMBER(38,0)) AS "claim_id", '
+            f'\'run-1\' AS "run_id", CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp", '
+            f'\'insurance\' AS "source_system", \'{table}\' AS "source_table"\n'
             f'FROM "insurance"."dbo"."{table}" AS src;',
             encoding="utf-8",
         )
