@@ -216,6 +216,48 @@ class MetadataRepository(ABC):
         for sql, parameters in statements:
             self.execute(sql, parameters)
 
+    def bronze_target_lock_hint(self) -> str:
+        return ""
+
+    def validate_bronze_target_ownership(
+        self, ingestion_objects: Iterable[Mapping[str, Any]]
+    ) -> None:
+        """Allow one FILE and one DATABASE owner; reject every other shared target."""
+        requested: Dict[str, List[Dict[str, Any]]] = {}
+        for row in ingestion_objects:
+            target = str(row.get("target_bronze_table") or "").strip().casefold()
+            if not target:
+                continue
+            owner = {
+                "ingestion_object_id": int(row.get("ingestion_object_id") or 0),
+                "ingestion_type": str(row.get("ingestion_type") or "").strip().upper(),
+            }
+            for current in requested.get(target, []):
+                if current["ingestion_object_id"] != owner["ingestion_object_id"]:
+                    types = {current["ingestion_type"], owner["ingestion_type"]}
+                    if types != {"DATABASE", "FILE"}:
+                        raise ValueError("A derived Bronze target is already assigned to another ingestion object.")
+            requested.setdefault(target, []).append(owner)
+        if not requested:
+            return
+        parameters = {f"target_{index}": target for index, target in enumerate(requested)}
+        existing = self.query(
+            f"SELECT ingestion_object_id, ingestion_type, target_bronze_table "
+            f"FROM {self.table('cfg_ingestion_object')}{self.bronze_target_lock_hint()} "
+            "WHERE LOWER(target_bronze_table) IN ("
+            + ", ".join(f":target_{index}" for index in range(len(requested)))
+            + ")",
+            parameters,
+        )
+        for row in existing:
+            target = str(row.get("target_bronze_table") or "").strip().casefold()
+            for incoming in requested.get(target, []):
+                if incoming["ingestion_object_id"] == int(row.get("ingestion_object_id") or 0):
+                    continue
+                types = {incoming["ingestion_type"], str(row.get("ingestion_type") or "").strip().upper()}
+                if types != {"DATABASE", "FILE"}:
+                    raise ValueError("A derived Bronze target is already assigned to another ingestion object.")
+
     def deploy_configuration_snapshot(
         self,
         *,
@@ -790,17 +832,7 @@ class MetadataRepository(ABC):
             "is_current": False,
             "active_flag": False,
         }
-        target_collisions = self.query(
-            f"SELECT ingestion_object_id FROM {self.table('cfg_ingestion_object')} "
-            "WHERE LOWER(target_bronze_table) = :target_bronze_table "
-            "AND ingestion_object_id <> :ingestion_object_id",
-            {
-                "target_bronze_table": str(values["target_bronze_table"]).casefold(),
-                "ingestion_object_id": ingestion_object_id,
-            },
-        )
-        if target_collisions:
-            raise ValueError("The derived Bronze target is already assigned to another ingestion object.")
+        self.validate_bronze_target_ownership([values])
         columns = tuple(values)
         self.execute(
             f"""
@@ -923,20 +955,7 @@ class MetadataRepository(ABC):
         targets = {str(row["target_bronze_table"]).casefold(): row["ingestion_object_id"] for row in rows}
         if len(identities) != len(rows) or len(targets) != len(rows):
             raise ValueError("Approved database tables contain duplicate object or Bronze target identities.")
-        target_parameters = {f"target_{index}": target for index, target in enumerate(targets)}
-        collisions = self.query(
-            f"SELECT ingestion_object_id, target_bronze_table FROM {self.table('cfg_ingestion_object')} "
-            "WHERE LOWER(target_bronze_table) IN ("
-            + ", ".join(f":target_{index}" for index in range(len(targets)))
-            + ")",
-            target_parameters,
-        )
-        if any(
-            targets.get(str(row.get("target_bronze_table") or "").casefold())
-            != int(row.get("ingestion_object_id") or 0)
-            for row in collisions
-        ):
-            raise ValueError("A derived Bronze target is already assigned to another ingestion object.")
+        self.validate_bronze_target_ownership(rows)
         names, source, parameters = self._source_rows(rows, prefix="draft")
         self.execute(
             f"MERGE INTO {self.table('cfg_ingestion_object')} AS target USING ({source}) AS source "

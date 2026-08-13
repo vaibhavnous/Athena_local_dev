@@ -264,6 +264,7 @@ def persist_file_design(state: Mapping[str, Any], tables: Iterable[Mapping[str, 
     ]
     repository = selection.repository
     with repository.unit_of_work():
+        repository.validate_bronze_target_ownership(object_rows)
         _merge_rows(repository, "cfg_ingestion_object", object_rows, "ingestion_object_id")
         parameters = {f"object_{index}": object_id for index, object_id in enumerate(object_ids)}
         repository.execute(

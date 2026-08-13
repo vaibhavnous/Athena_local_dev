@@ -93,6 +93,7 @@ class StubMetadataRepository(MetadataRepository):
         self.saved: Optional[Dict[str, Any]] = None
         self.objects: Dict[tuple[int, int], Dict[str, Any]] = {}
         self.mappings: List[Dict[str, Any]] = []
+        self.target_owners: List[Dict[str, Any]] = []
         self.source = {"source_system_id": 7, "active_flag": True}
         self.connection = {
             "connection_id": 11,
@@ -139,6 +140,13 @@ class StubMetadataRepository(MetadataRepository):
 
     def query(self, sql: str, parameters: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
         if "cfg_ingestion_object" in sql:
+            if "LOWER(target_bronze_table) IN" in sql:
+                targets = {str(value).casefold() for value in (parameters or {}).values()}
+                return [
+                    dict(row)
+                    for row in self.target_owners
+                    if str(row.get("target_bronze_table") or "").casefold() in targets
+                ]
             object_id = int((parameters or {}).get("ingestion_object_id") or 0)
             if "config_version =" in sql:
                 row = self.objects.get((object_id, int((parameters or {})["config_version"])))
@@ -198,6 +206,42 @@ def test_gate2_database_object_is_inactive_idempotent_source_to_bronze_draft() -
     assert first["active_flag"] is False
     assert first["is_current"] is False
     assert "database_name AS database_name" not in repository.executed[0][0]
+
+
+def test_database_object_allows_file_owner_of_same_bronze_target() -> None:
+    repository = StubMetadataRepository()
+    repository.target_owners = [{
+        "ingestion_object_id": 999,
+        "ingestion_type": "FILE",
+        "target_bronze_table": "main.bronze.bronze_claims",
+    }]
+
+    draft = repository.upsert_database_ingestion_object_draft(
+        source_system_id=7,
+        connection_id=11,
+        table={"database_name": "ClaimsDB", "schema_name": "dbo", "table_name": "Claims"},
+        target_bronze_table="main.bronze.bronze_Claims",
+    )
+
+    assert draft["ingestion_type"] == "DATABASE"
+
+
+@pytest.mark.parametrize("existing_type", ["DATABASE", "", None])
+def test_database_object_rejects_same_or_unknown_owner_type(existing_type) -> None:
+    repository = StubMetadataRepository()
+    repository.target_owners = [{
+        "ingestion_object_id": 999,
+        "ingestion_type": existing_type,
+        "target_bronze_table": "main.bronze.bronze_claims",
+    }]
+
+    with pytest.raises(ValueError, match="already assigned"):
+        repository.upsert_database_ingestion_object_draft(
+            source_system_id=7,
+            connection_id=11,
+            table={"database_name": "ClaimsDB", "schema_name": "dbo", "table_name": "Claims"},
+            target_bronze_table="main.bronze.bronze_Claims",
+        )
 
 
 def test_gate2_object_rejects_cross_source_connection() -> None:

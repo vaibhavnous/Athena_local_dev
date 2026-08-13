@@ -144,6 +144,9 @@ def test_adls_design_persists_only_source_file_objects(monkeypatch):
         def table(self, name):
             return name
 
+        def bronze_target_lock_hint(self):
+            return ""
+
         def execute(self, *_args, **_kwargs):
             return None
 
@@ -156,6 +159,9 @@ def test_adls_design_persists_only_source_file_objects(monkeypatch):
                 }
                 for row in captured["objects"]
             ]
+
+        def validate_bronze_target_ownership(self, rows):
+            MetadataRepository.validate_bronze_target_ownership(self, rows)
 
     repository = Repository()
     monkeypatch.setattr(
@@ -209,6 +215,102 @@ def test_adls_design_persists_only_source_file_objects(monkeypatch):
     assert {row["ingestion_object_id"] for row in captured["mappings"]} == {
         row["ingestion_object_id"] for row in captured["objects"]
     }
+
+
+def test_adls_design_allows_database_owner_of_same_bronze_target(monkeypatch):
+    captured = []
+
+    class Repository:
+        @contextmanager
+        def unit_of_work(self):
+            yield self
+
+        def table(self, name):
+            return name
+
+        def bronze_target_lock_hint(self):
+            return ""
+
+        def validate_bronze_target_ownership(self, rows):
+            MetadataRepository.validate_bronze_target_ownership(self, rows)
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def query(self, sql, _parameters=None):
+            if "LOWER(target_bronze_table) IN" in sql:
+                return [{
+                    "ingestion_object_id": 999,
+                    "ingestion_type": "DATABASE",
+                    "target_bronze_table": "main.bronze.bronze_claims",
+                }]
+            return [{
+                "ingestion_object_id": row["ingestion_object_id"],
+                "config_version": row["config_version"],
+                "config_hash": row["config_hash"],
+            } for row in captured]
+
+    monkeypatch.setattr(
+        file_metadata,
+        "validated_metadata_selection",
+        lambda _state: SimpleNamespace(repository=Repository()),
+    )
+    monkeypatch.setattr(
+        file_metadata,
+        "_merge_rows",
+        lambda _repository, table, rows, _key: captured.extend(rows)
+        if table == "cfg_ingestion_object" else None,
+    )
+
+    result = file_metadata.persist_file_design(
+        {
+            "source": "adls_gen2",
+            "target_warehouse": "databricks",
+            "source_system_id": 11,
+            "source_connection_id": 22,
+        },
+        [{
+            "source_path": "abfss://athena@account/root/claims.csv",
+            "file_name": "claims.csv",
+            "file_format": "csv",
+            "table_name": "claims",
+            "columns": [{"column_name": "id", "data_type": "bigint", "ordinal_position": 1}],
+        }],
+    )
+
+    assert result["file_ingestion_object_count"] == 1
+
+
+def test_adls_design_rejects_another_file_owner_of_same_bronze_target():
+    ingestion_object = file_metadata._object_row(
+        {
+            "target_warehouse": "databricks",
+            "source_system_id": 11,
+            "source_connection_id": 22,
+        },
+        {
+            "source_path": "abfss://athena@account/root/claims.csv",
+            "file_format": "csv",
+            "table_name": "claims",
+        },
+    )
+
+    class Repository:
+        def table(self, name):
+            return name
+
+        def bronze_target_lock_hint(self):
+            return ""
+
+        def query(self, _sql, _parameters=None):
+            return [{
+                "ingestion_object_id": 999,
+                "ingestion_type": "FILE",
+                "target_bronze_table": ingestion_object["target_bronze_table"],
+            }]
+
+    with pytest.raises(ValueError, match="already assigned"):
+        MetadataRepository.validate_bronze_target_ownership(Repository(), [ingestion_object])
 
 
 def test_adls_source_mapping_passes_existing_content_hash_validator():

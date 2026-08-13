@@ -55,6 +55,9 @@ class ApplicationMetadataRepository(MetadataRepository):
         )
         return f"[{schema}].[{table_name}]"
 
+    def bronze_target_lock_hint(self) -> str:
+        return " WITH (UPDLOCK, HOLDLOCK)"
+
     def bootstrap(self) -> None:
         raise RuntimeError("Application metadata tables are deployment prerequisites, not runtime target DDL.")
 
@@ -183,6 +186,14 @@ class ApplicationMetadataRepository(MetadataRepository):
         with self.unit_of_work():
             for sql, parameters in statements:
                 self.execute(sql, parameters)
+
+    def upsert_database_ingestion_object_draft(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        with self.unit_of_work():
+            return super().upsert_database_ingestion_object_draft(*args, **kwargs)
+
+    def upsert_database_ingestion_object_drafts(self, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+        with self.unit_of_work():
+            return super().upsert_database_ingestion_object_drafts(*args, **kwargs)
 
     def query(self, sql: str, parameters: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
         adapted, ordered = self._adapt(sql, parameters)
