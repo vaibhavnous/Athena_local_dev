@@ -631,13 +631,17 @@ def run_scripts(run_id: str, user: AuthUser = Depends(get_current_user)) -> Dict
         load_bronze_scripts,
         load_checkpoint_state,
         load_gold_scripts,
+        load_metadata_script,
         load_silver_scripts,
     )
+    from services.adls_script_storage import adls_script_storage_configured
 
     try:
         checkpoint = assert_run_access(run_id, user, checkpoint=load_checkpoint_state(run_id) or {})
         return {
             "run_id": run_id,
+            "script_source": "adls" if adls_script_storage_configured() else "local",
+            "metadata": load_metadata_script(run_id, checkpoint),
             "bronze": load_bronze_scripts(run_id, checkpoint),
             "silver": load_silver_scripts(run_id, checkpoint),
             "gold": load_gold_scripts(run_id, checkpoint),

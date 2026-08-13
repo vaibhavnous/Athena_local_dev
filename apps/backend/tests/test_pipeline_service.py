@@ -4125,3 +4125,39 @@ def test_snowflake_dbt_uses_one_control_attempt_for_the_project(monkeypatch):
     assert [event[0] for event in events].count("run") == 1
     assert [event[0] for event in events].count("success") == 1
     assert events[0][1]["work_scope"]["ingestion_object_ids"] == [101, 201, 301]
+
+
+def test_database_generation_persists_script_after_sql_checkpoint(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_database_stage_runner",
+        lambda _stage, _state: lambda state: {
+            **state,
+            "status": "HITL_WAIT",
+            "bronze_generation_status": "COMPLETED",
+            "bronze_generation_results": [{"script_path": "claims.py", "script_body": "print(1)"}],
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "save_checkpoint_state_timed",
+        lambda run_id, state, context: events.append(("checkpoint", context)),
+    )
+    monkeypatch.setattr(
+        pipeline_runtime,
+        "_persist_generated_layer",
+        lambda run_id, state, layer: events.append(("adls", layer)),
+    )
+
+    pipeline_runtime.continue_database_pipeline(
+        "run-adls-order",
+        start_stage_key="bronze",
+        state={"run_id": "run-adls-order", "status": "RUNNING"},
+    )
+
+    assert events == [
+        ("checkpoint", "bronze:running"),
+        ("checkpoint", "bronze:complete"),
+        ("adls", "bronze"),
+    ]

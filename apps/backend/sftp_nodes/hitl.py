@@ -164,6 +164,7 @@ def submit_sftp_gate3_review(
     enriched_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from services.pipeline_runtime import (
+        _persist_generated_layer,
         _run_database_metadata_ddl_stage,
         load_checkpoint_state,
         save_checkpoint_state,
@@ -192,6 +193,7 @@ def submit_sftp_gate3_review(
     }
     generated = _run_database_metadata_ddl_stage(approved)
     save_checkpoint_state(run_id, generated)
+    _persist_generated_layer(run_id, generated, "metadata")
     return generated
 
 

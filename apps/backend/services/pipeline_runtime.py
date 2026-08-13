@@ -1334,6 +1334,14 @@ def continue_database_pipeline(
         working_state["next_stage_key"] = _database_next_stage_key(current_stage_key)
         working_state["next_stage_label"] = DATABASE_STAGE_LABELS.get(working_state["next_stage_key"], working_state["next_stage_key"]) if working_state.get("next_stage_key") else None
         save_checkpoint_state_timed(run_id, working_state, context=f"{current_stage_key}:complete")
+        generated_layer = {
+            "metadata_ddl": "metadata",
+            "bronze": "bronze",
+            "silver": "silver",
+            "gold": "gold",
+        }.get(current_stage_key)
+        if generated_layer and str(working_state.get("status") or "").upper() != "FAILED":
+            _persist_generated_layer(run_id, working_state, generated_layer)
 
         if working_state.get("status") == "FAILED":
             return working_state
@@ -1531,6 +1539,19 @@ def save_checkpoint_state(run_id: str, state: Dict[str, Any]) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _persist_generated_layer(run_id: str, state: Dict[str, Any], layer: str) -> None:
+    try:
+        from services.adls_script_storage import persist_generated_scripts
+
+        persist_generated_scripts(run_id, state, layer)
+    except Exception:
+        logger.warning(
+            "ADLS generated-script persistence failed; pipeline execution will continue",
+            exc_info=True,
+            extra={"run_id": run_id, "node": f"{layer}_generation", "stage": layer},
+        )
 
 
 def abort_background_run(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2010,8 +2031,33 @@ def _scripts_from_checkpoint(
     }
 
 
+def _load_adls_scripts(run_id: str, checkpoint: Dict[str, Any], layer: str) -> Optional[Dict[str, Any]]:
+    try:
+        from services.adls_script_storage import adls_script_storage_configured, load_generated_scripts
+
+        if adls_script_storage_configured():
+            bundle = load_generated_scripts(run_id, checkpoint, layer)
+            if bundle.get("scripts"):
+                return bundle
+    except Exception:
+        logger.warning("Failed to load %s scripts from ADLS", layer.title(), exc_info=True, extra={"run_id": run_id})
+    return None
+
+
+def load_metadata_script(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    checkpoint = checkpoint or {}
+    return _load_adls_scripts(run_id, checkpoint, "metadata") or {
+        "run_id": run_id,
+        "scripts": [checkpoint["metadata_ddl_review"]] if checkpoint.get("metadata_ddl_review") else [],
+    }
+
+
 def load_bronze_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     checkpoint = checkpoint or {}
+    adls_bundle = _load_adls_scripts(run_id, checkpoint, "bronze")
+    if adls_bundle:
+        adls_bundle["scripts"] = [_normalize_bronze_script(item) for item in adls_bundle["scripts"]]
+        return adls_bundle
     bundle_path = _script_bundle_path("bronze", run_id, checkpoint.get("target_warehouse"))
     if not bundle_path.exists():
         return _scripts_from_checkpoint(checkpoint, "bronze_generation_results", "bronze_generated_at")
@@ -2048,6 +2094,9 @@ def load_bronze_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None
 
 def load_silver_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     checkpoint = checkpoint or {}
+    adls_bundle = _load_adls_scripts(run_id, checkpoint, "silver")
+    if adls_bundle:
+        return adls_bundle
     bundle_path = _script_bundle_path("silver", run_id, checkpoint.get("target_warehouse"))
     if not bundle_path.exists():
         return _scripts_from_checkpoint(checkpoint, "silver_generation_results", "silver_generated_at")
@@ -2089,6 +2138,10 @@ def load_silver_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None
 
 def load_gold_scripts(run_id: str, checkpoint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     checkpoint = checkpoint or {}
+    adls_bundle = _load_adls_scripts(run_id, checkpoint, "gold")
+    if adls_bundle:
+        adls_bundle["scripts"] = [_without_dbt_dimension_fields(item) for item in adls_bundle["scripts"]]
+        return adls_bundle
     bundle_path = _script_bundle_path("gold", run_id, checkpoint.get("target_warehouse"))
     if not bundle_path.exists():
         return _scripts_from_checkpoint(checkpoint, "gold_generation_results", "gold_generated_at")
@@ -5638,6 +5691,8 @@ def submit_bronze_generation(run_id: str) -> Dict[str, Any]:
             }
         )
     save_checkpoint_state(run_id, final_state)
+    if str(result.get("bronze_generation_status") or "").upper() == "COMPLETED":
+        _persist_generated_layer(run_id, final_state, "bronze")
     return final_state
 
 
@@ -5668,6 +5723,8 @@ def submit_silver_generation(run_id: str) -> Dict[str, Any]:
             }
         )
     save_checkpoint_state(run_id, final_state)
+    if str(result.get("silver_generation_status") or "").upper() == "COMPLETED":
+        _persist_generated_layer(run_id, final_state, "silver")
     return final_state
 
 
@@ -5865,6 +5922,8 @@ def submit_gold_generation(run_id: str) -> Dict[str, Any]:
             }
         )
     save_checkpoint_state(run_id, final_state)
+    if str(result.get("gold_generation_status") or "").upper().startswith("COMPLETED"):
+        _persist_generated_layer(run_id, final_state, "gold")
     return final_state
 
 
