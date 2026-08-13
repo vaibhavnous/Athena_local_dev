@@ -30,14 +30,15 @@ def test_snowflake_bronze_script_uses_sql_patterns():
 
     assert "Expected runtime: Snowflake SQL" in script
     assert 'CREATE SCHEMA IF NOT EXISTS "ATHENA_DB"."BRONZE";' in script
-    assert 'CREATE TABLE IF NOT EXISTS "ATHENA_DB"."BRONZE"."bronze_Claims"' in script
-    assert 'TRY_CAST(src."ClaimID" AS NUMBER(38,0)) AS "claimid"' in script
+    assert 'CREATE OR REPLACE TABLE "ATHENA_DB"."BRONZE"."bronze_Claims" AS' in script
+    assert 'TRY_CAST(src."ClaimID" AS NUMBER(38,0)) AS "claim_id"' in script
     assert 'TRY_CAST(src."ClaimDate" AS TIMESTAMP_NTZ) AS "claimdate"' in script
     assert 'TRY_CAST(src."Amount" AS NUMBER(12,2)) AS "amount"' in script
-    assert 'INSERT INTO "ATHENA_DB"."BRONZE"."bronze_Claims"' in script
+    assert "INSERT INTO" not in script.upper()
+    assert "DELETE FROM" not in script.upper()
 
 
-def test_metadata_snowflake_bronze_replaces_one_logical_work_atomically():
+def test_metadata_snowflake_bronze_full_refresh_preserves_runtime_lineage():
     script = bronze_gen.generate_snowflake_bronze_script(
         table="Claims",
         schema="dbo",
@@ -48,12 +49,10 @@ def test_metadata_snowflake_bronze_replaces_one_logical_work_atomically():
         metadata_driven=True,
     )
 
-    assert '"_logical_work_id" VARCHAR' in script
     assert '$ATHENA_RUNTIME_RUN_ID AS "run_id"' in script
     assert '$ATHENA_LOGICAL_WORK_ID AS "_logical_work_id"' in script
-    assert 'DELETE FROM "ATHENA_DB"."BRONZE"."bronze_Claims" WHERE "_logical_work_id" = $ATHENA_LOGICAL_WORK_ID;' in script
-    assert "BEGIN TRANSACTION;" in script
-    assert script.rstrip().endswith("COMMIT;")
+    assert 'CREATE OR REPLACE TABLE "ATHENA_DB"."BRONZE"."bronze_Claims" AS' in script
+    assert "INSERT INTO" not in script.upper()
 
     bronze_gen.validate_snowflake_bronze_sql(
         script,
@@ -63,7 +62,7 @@ def test_metadata_snowflake_bronze_replaces_one_logical_work_atomically():
     )
 
 
-def test_metadata_snowflake_validator_rejects_legacy_run_scoped_artifact():
+def test_metadata_snowflake_validator_rejects_missing_runtime_lineage():
     legacy = bronze_gen.generate_snowflake_bronze_script(
         table="Claims",
         schema="dbo",
@@ -73,7 +72,7 @@ def test_metadata_snowflake_validator_rejects_legacy_run_scoped_artifact():
         table_metadata={"columns": [{"column_name": "ClaimID", "data_type": "int"}]},
     )
 
-    with pytest.raises(ValueError, match="transaction/idempotency contract"):
+    with pytest.raises(ValueError, match="runtime lineage contract"):
         bronze_gen.validate_snowflake_bronze_sql(
             legacy,
             source_table='"insurance"."dbo"."Claims"',
@@ -92,12 +91,10 @@ def test_metadata_snowflake_validator_does_not_accept_contract_tokens_in_comment
         table_metadata={"columns": [{"column_name": "ClaimID", "data_type": "int"}]},
     )
     bypass = legacy + """
--- BEGIN TRANSACTION; COMMIT; "_logical_work_id" $ATHENA_LOGICAL_WORK_ID $ATHENA_RUNTIME_RUN_ID
-/* DELETE FROM "ATHENA_DB"."BRONZE"."bronze_Claims"
-   WHERE "_logical_work_id" = $ATHENA_LOGICAL_WORK_ID; */
+-- "_logical_work_id" $ATHENA_LOGICAL_WORK_ID $ATHENA_RUNTIME_RUN_ID
 """
 
-    with pytest.raises(ValueError, match="transaction/idempotency contract"):
+    with pytest.raises(ValueError, match="runtime lineage contract"):
         bronze_gen.validate_snowflake_bronze_sql(
             bypass,
             source_table='"insurance"."dbo"."Claims"',
@@ -133,7 +130,6 @@ def test_metadata_snowflake_generation_preserves_runtime_contract_and_skips_llm(
         f'FROM "ATHENA_DB"."{result["snowflake_landing_schema"]}"."raw_claims" AS src;'
         in script
     )
-    assert '"_logical_work_id" VARCHAR' in script
     assert '$ATHENA_RUNTIME_RUN_ID AS "run_id"' in script
     assert '$ATHENA_LOGICAL_WORK_ID AS "_logical_work_id"' in script
 
@@ -939,8 +935,10 @@ def test_snowflake_validator_rejects_databricks_format():
     try:
         bronze_gen.validate_snowflake_bronze_sql(
             'CREATE SCHEMA IF NOT EXISTS "A"."B";\n'
-            'CREATE TABLE IF NOT EXISTS "A"."B"."bronze_claims" ("run_id" VARCHAR, "ingestion_timestamp" TIMESTAMP_NTZ, "source_system" VARCHAR, "source_table" VARCHAR);\n'
-            'INSERT INTO "A"."B"."bronze_claims" SELECT spark.read.format("jdbc"), CURRENT_TIMESTAMP(), \'x\', \'y\';'
+            'CREATE OR REPLACE TABLE "A"."B"."bronze_claims" AS '
+            'SELECT spark.read.format("jdbc"), CURRENT_TIMESTAMP() AS "ingestion_timestamp", '
+            '\'run-1\' AS "run_id", \'x\' AS "source_system", \'y\' AS "source_table";',
+            target_table='"A"."B"."bronze_claims"',
         )
     except ValueError as exc:
         assert "databricks/python token" in str(exc).lower()
@@ -948,26 +946,40 @@ def test_snowflake_validator_rejects_databricks_format():
         raise AssertionError("Databricks-style Snowflake SQL should be rejected")
 
 
-def test_snowflake_validator_allows_only_run_scoped_cleanup():
+def test_snowflake_validator_allows_replace_only_for_expected_target():
     target = '"A"."B"."bronze_claims"'
     sql = (
         'CREATE SCHEMA IF NOT EXISTS "A"."B";\n'
-        f'CREATE TABLE IF NOT EXISTS {target} ("run_id" VARCHAR, "ingestion_timestamp" TIMESTAMP_NTZ, "source_system" VARCHAR, "source_table" VARCHAR);\n'
-        f"DELETE FROM {target} WHERE \"run_id\" = 'run-1';\n"
-        f"INSERT INTO {target} SELECT 'run-1', CURRENT_TIMESTAMP(), 'insurance', 'claims';"
+        f'CREATE OR REPLACE TABLE {target} AS SELECT '
+        "'run-1' AS \"run_id\", CURRENT_TIMESTAMP() AS \"ingestion_timestamp\", "
+        "'insurance' AS \"source_system\", 'claims' AS \"source_table\";"
     )
 
     bronze_gen.validate_snowflake_bronze_sql(sql, target_table=target)
 
     try:
         bronze_gen.validate_snowflake_bronze_sql(
-            sql.replace('WHERE "run_id" = \'run-1\'', 'WHERE "source_system" = \'insurance\''),
+            sql.replace(target, '"A"."B"."other_table"'),
             target_table=target,
         )
     except ValueError as exc:
-        assert "delete" in str(exc).lower()
+        assert "expected target table" in str(exc).lower()
     else:
-        raise AssertionError("Non-run-scoped cleanup should be rejected")
+        raise AssertionError("Replacing a different table should be rejected")
+
+
+def test_snowflake_validator_rejects_insert_after_valid_ctas():
+    target = '"A"."B"."bronze_claims"'
+    sql = (
+        'CREATE SCHEMA IF NOT EXISTS "A"."B";\n'
+        f'CREATE OR REPLACE TABLE {target} AS SELECT '
+        "'run-1' AS \"run_id\", CURRENT_TIMESTAMP() AS \"ingestion_timestamp\", "
+        "'insurance' AS \"source_system\", 'claims' AS \"source_table\";\n"
+        f"INSERT INTO {target} SELECT * FROM {target};"
+    )
+
+    with pytest.raises(ValueError, match="cannot contain INSERT INTO"):
+        bronze_gen.validate_snowflake_bronze_sql(sql, target_table=target)
 
 
 def test_snowflake_bronze_generation_skips_llm_by_default(monkeypatch):

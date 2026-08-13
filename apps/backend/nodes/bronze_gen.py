@@ -472,8 +472,7 @@ def validate_snowflake_bronze_sql(
     upper = sql.upper()
     required = (
         "CREATE SCHEMA IF NOT EXISTS",
-        "CREATE TABLE IF NOT EXISTS",
-        "INSERT INTO",
+        "CREATE OR REPLACE TABLE",
         "CURRENT_TIMESTAMP",
         '"RUN_ID"',
         '"INGESTION_TIMESTAMP"',
@@ -487,10 +486,10 @@ def validate_snowflake_bronze_sql(
         raise ValueError(f"Snowflake bronze SQL does not read from expected source table: {source_table}")
     if target_table and target_table not in sql:
         raise ValueError(f"Snowflake bronze SQL does not write to expected target table: {target_table}")
+    if re.search(r"\bINSERT\s+INTO\b", upper):
+        raise ValueError("Snowflake bronze SQL must use CTAS and cannot contain INSERT INTO.")
     if metadata_driven:
         metadata_required = (
-            "BEGIN TRANSACTION",
-            "COMMIT;",
             '"_LOGICAL_WORK_ID"',
             "$ATHENA_LOGICAL_WORK_ID",
             "$ATHENA_RUNTIME_RUN_ID",
@@ -498,35 +497,15 @@ def validate_snowflake_bronze_sql(
         missing_metadata = [token for token in metadata_required if token not in upper]
         if missing_metadata:
             raise ValueError(
-                "Metadata Snowflake Bronze SQL is missing its transaction/idempotency contract: "
+                "Metadata Snowflake Bronze SQL is missing its runtime lineage contract: "
                 + ", ".join(missing_metadata)
             )
-        if not re.search(
-            rf'DELETE\s+FROM\s+{re.escape(str(target_table or ""))}\s+'
-            r'WHERE\s+"_logical_work_id"\s*=\s*\$ATHENA_LOGICAL_WORK_ID\s*;',
-            sql,
-            flags=re.IGNORECASE | re.DOTALL,
-        ):
-            raise ValueError("Metadata Snowflake Bronze SQL does not replace the queued logical work.")
-        statement_positions = [
-            upper.find("BEGIN TRANSACTION"),
-            upper.find("DELETE FROM"),
-            upper.find("INSERT INTO"),
-            upper.rfind("COMMIT;"),
-        ]
-        if any(position < 0 for position in statement_positions) or statement_positions != sorted(statement_positions):
-            raise ValueError("Metadata Snowflake Bronze transaction statements are not in the required order.")
-    # Bronze generation is idempotent per run. Its only permitted destructive
-    # operation is deleting that same run's rows from its expected target table.
-    # ponytail: this is intentionally narrow; widening it requires statement parsing.
-    allowed_cleanup = re.escape(str(target_table or ""))
-    cleanup_pattern = (
-        rf"DELETE\s+FROM\s+{allowed_cleanup}\s+WHERE\s+(?:"
-        rf"\"run_id\"\s*=\s*'[^']*'|"
-        rf"\"_logical_work_id\"\s*=\s*\$ATHENA_LOGICAL_WORK_ID)\s*;"
+    # CREATE OR REPLACE is allowed only for the exact Bronze target validated above.
+    allowed_replace = (
+        rf"CREATE\s+OR\s+REPLACE\s+TABLE\s+{re.escape(str(target_table))}\s+"
         if target_table else None
     )
-    safety_sql = re.sub(cleanup_pattern, "", sql, flags=re.IGNORECASE) if cleanup_pattern else sql
+    safety_sql = re.sub(allowed_replace, "CREATE TABLE ", sql, flags=re.IGNORECASE) if allowed_replace else sql
     safety_upper = safety_sql.upper()
     for keyword in DESTRUCTIVE_SNOWFLAKE_SQL_KEYWORDS:
         if re.search(rf"\b{keyword}\b", safety_upper):
@@ -650,7 +629,7 @@ Metadata:
 Requirements:
 - Return only complete Snowflake SQL.
 - Preserve the same source and target objects.
-- Preserve the INSERT INTO load pattern.
+- Preserve the CREATE OR REPLACE TABLE AS SELECT load pattern.
 - Preserve audit columns run_id, ingestion_timestamp, source_system, and source_table.
 - Keep statements idempotent where possible.
 - Use Snowflake-native safe casts and timestamp handling.
@@ -1109,63 +1088,15 @@ def generate_snowflake_bronze_script(
     target_schema = _snowflake_qualified_name(bronze_catalog, bronze_schema)
     columns = _snowflake_columns(table_metadata=table_metadata, cast_rules=cast_rules)
     run_id_expression = "$ATHENA_RUNTIME_RUN_ID" if metadata_driven else _snowflake_string_literal(run_id)
-    logical_column_definition = ',\n    "_logical_work_id" VARCHAR' if metadata_driven else ""
-    logical_insert_column = ',\n    "_logical_work_id"' if metadata_driven else ""
     logical_select_value = ',\n    $ATHENA_LOGICAL_WORK_ID AS "_logical_work_id"' if metadata_driven else ""
-    delete_predicate = (
-        '"_logical_work_id" = $ATHENA_LOGICAL_WORK_ID'
-        if metadata_driven
-        else f'"run_id" = {_snowflake_string_literal(run_id)}'
-    )
 
-    if columns:
-        table_columns = ",\n    ".join(
-            f"{_snowflake_quote_identifier(column['target'])} {column['type']}" for column in columns
-        )
-        insert_columns = ",\n    ".join(_snowflake_quote_identifier(column["target"]) for column in columns)
-        select_columns = ",\n    ".join(
+    select_columns = (
+        ",\n    ".join(
             f"TRY_CAST(src.{_snowflake_quote_identifier(column['source'])} AS {column['type']}) AS {_snowflake_quote_identifier(column['target'])}"
             for column in columns
         )
-        create_table = f"""CREATE TABLE IF NOT EXISTS {target_table} (
-    {table_columns},
-    "run_id" VARCHAR,
-    "ingestion_timestamp" TIMESTAMP_NTZ,
-    "source_system" VARCHAR,
-    "source_table" VARCHAR{logical_column_definition}
-);"""
-        insert_sql = f"""INSERT INTO {target_table} (
-    {insert_columns},
-    "run_id",
-    "ingestion_timestamp",
-    "source_system",
-    "source_table"{logical_insert_column}
-)
-SELECT
-    {select_columns},
-    {run_id_expression} AS "run_id",
-    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
-    {_snowflake_string_literal(database)} AS "source_system",
-    {_snowflake_string_literal(table)} AS "source_table"{logical_select_value}
-FROM {source_table} AS src;"""
-    else:
-        create_table = f"""CREATE TABLE IF NOT EXISTS {target_table} AS
-SELECT
-    src.*,
-    {run_id_expression} AS "run_id",
-    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
-    {_snowflake_string_literal(database)} AS "source_system",
-    {_snowflake_string_literal(table)} AS "source_table"{logical_select_value}
-FROM {source_table} AS src
-WHERE 1 = 0;"""
-        insert_sql = f"""INSERT INTO {target_table}
-SELECT
-    src.*,
-    {run_id_expression} AS "run_id",
-    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
-    {_snowflake_string_literal(database)} AS "source_system",
-    {_snowflake_string_literal(table)} AS "source_table"{logical_select_value}
-FROM {source_table} AS src;"""
+        if columns else "src.*"
+    )
 
     return f"""-- AUTO-GENERATED BRONZE INGESTION SCRIPT
 -- Source: {database}.{schema}.{table}
@@ -1175,15 +1106,14 @@ FROM {source_table} AS src;"""
 
 CREATE SCHEMA IF NOT EXISTS {target_schema};
 
-{create_table}
-
-BEGIN TRANSACTION;
-
-DELETE FROM {target_table} WHERE {delete_predicate};
-
-{insert_sql}
-
-COMMIT;
+CREATE OR REPLACE TABLE {target_table} AS
+SELECT
+    {select_columns},
+    {run_id_expression} AS "run_id",
+    CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS "ingestion_timestamp",
+    {_snowflake_string_literal(database)} AS "source_system",
+    {_snowflake_string_literal(table)} AS "source_table"{logical_select_value}
+FROM {source_table} AS src;
 """
 
 
