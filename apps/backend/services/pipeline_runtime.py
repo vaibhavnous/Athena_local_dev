@@ -3946,7 +3946,12 @@ def _materialize_gate2_ingestion_objects(
     bronze_schema = validate_identifier(bronze_schema, label="Bronze schema")
     requests = []
     for table in approved:
-        bronze_table = validate_identifier(f"bronze_{table.get('table_name') or ''}", label="Bronze table")
+        database = validate_identifier(table.get("database_name"), label="source database")
+        schema = validate_identifier(table.get("schema_name"), label="source schema")
+        source_table = validate_identifier(table.get("table_name"), label="source table")
+        bronze_table = validate_identifier(
+            f"bronze_{database}_{schema}_{source_table}", label="Bronze table"
+        )
         target_bronze_table = f"{bronze_catalog}.{bronze_schema}.{bronze_table}"
         requests.append({"table": table, "target_bronze_table": target_bronze_table})
     bulk_upsert = getattr(selection.repository, "upsert_database_ingestion_object_drafts", None)

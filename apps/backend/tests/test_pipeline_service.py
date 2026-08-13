@@ -716,11 +716,25 @@ def test_gate2_submission_recovers_nominations_from_run_checkpoint(monkeypatch):
     assert result["status"] == "GATE2_COMPLETE"
 
 
-def test_gate2_materializes_one_inactive_object_per_approved_table(monkeypatch):
+@pytest.mark.parametrize(
+    ("target_warehouse", "execution_engine", "expected_namespace"),
+    (
+        ("databricks", "native", "workspace.bronze_schema"),
+        ("snowflake", "native", "INSURANCE.BRONZE"),
+        ("snowflake", "dbt", "INSURANCE.BRONZE"),
+    ),
+)
+def test_gate2_materializes_one_inactive_object_per_approved_table(
+    monkeypatch, target_warehouse, execution_engine, expected_namespace
+):
     from types import SimpleNamespace
     from services import metadata_selection
 
     calls = []
+    monkeypatch.setenv("BRONZE_CATALOG", "workspace")
+    monkeypatch.setenv("BRONZE_SCHEMA", "bronze_schema")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_CATALOG", "INSURANCE")
+    monkeypatch.setenv("SNOWFLAKE_BRONZE_SCHEMA", "BRONZE")
 
     class Repository:
         def upsert_database_ingestion_object_draft(self, **kwargs):
@@ -742,17 +756,26 @@ def test_gate2_materializes_one_inactive_object_per_approved_table(monkeypatch):
     )
     approved = [
         {"database_name": "insurance", "schema_name": "dbo", "table_name": "claims"},
-        {"database_name": "insurance", "schema_name": "dbo", "table_name": "policy"},
+        {"database_name": "insurance", "schema_name": "sales", "table_name": "claims"},
     ]
 
     materialized = pipeline_runtime._materialize_gate2_ingestion_objects(
-        {"source_system_id": 7, "source_connection_id": 11},
+        {
+            "source_system_id": 7,
+            "source_connection_id": 11,
+            "target_warehouse": target_warehouse,
+            "execution_engine": execution_engine,
+        },
         approved,
     )
 
     assert [item["ingestion_object_id"] for item in materialized] == [101, 102]
     assert all(item["ingestion_object_config_version"] == 1 for item in materialized)
-    assert [call["table"]["table_name"] for call in calls] == ["claims", "policy"]
+    assert [call["table"]["table_name"] for call in calls] == ["claims", "claims"]
+    assert [call["target_bronze_table"] for call in calls] == [
+        f"{expected_namespace}.bronze_insurance_dbo_claims",
+        f"{expected_namespace}.bronze_insurance_sales_claims",
+    ]
     assert all(call["expected_connection_version"] == 3 for call in calls)
     assert all(call["allow_inactive_connection"] is True for call in calls)
 

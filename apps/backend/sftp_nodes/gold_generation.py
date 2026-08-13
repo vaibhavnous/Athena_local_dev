@@ -39,7 +39,7 @@ def _dedupe(values: Iterable[Any]) -> List[str]:
 
 def _factless_script(
     *, run_id: str, kpi_name: str, source_table: str, target_table: str,
-    grain_columns: List[str], blocking_reason: str,
+    grain_columns: List[str],
 ) -> str:
     return f'''# Generated ADLS Gold KPI fact.
 from delta.tables import DeltaTable
@@ -50,7 +50,6 @@ KPI_NAME = {kpi_name!r}
 SOURCE_TABLE = {source_table!r}
 TARGET_TABLE = {target_table!r}
 GRAIN_COLUMNS = {grain_columns!r}
-BLOCKING_REASON = {blocking_reason!r}
 
 source_columns = set(spark.table(SOURCE_TABLE).columns)
 missing = [column for column in GRAIN_COLUMNS if column not in source_columns]
@@ -63,22 +62,19 @@ factless = (
     .dropna(subset=GRAIN_COLUMNS)
     .dropDuplicates(GRAIN_COLUMNS)
     .withColumn("kpi_name", F.lit(KPI_NAME))
-    .withColumn("computability_status", F.lit("NOT_COMPUTABLE"))
-    .withColumn("blocking_reason", F.lit(BLOCKING_REASON))
-    .withColumn("source_table", F.lit(SOURCE_TABLE))
-    .withColumn("source_record_keys", F.to_json(F.struct(*[F.col(column) for column in GRAIN_COLUMNS])))
-    .withColumn(
-        "factless_event_key",
-        F.sha2(F.concat_ws("||", F.lit(KPI_NAME), *[F.col(column).cast("string") for column in GRAIN_COLUMNS]), 256),
-    )
     .withColumn("pipeline_run_id", F.lit(RUN_ID))
     .withColumn("gold_processed_timestamp", F.current_timestamp())
+)
+
+merge_condition = " AND ".join(
+    [f"target.`{{column}}` = source.`{{column}}`" for column in GRAIN_COLUMNS]
+    + ["target.kpi_name = source.kpi_name", "target.pipeline_run_id = source.pipeline_run_id"]
 )
 
 if spark.catalog.tableExists(TARGET_TABLE):
     (
         DeltaTable.forName(spark, TARGET_TABLE).alias("target")
-        .merge(factless.alias("source"), "target.factless_event_key = source.factless_event_key")
+        .merge(factless.alias("source"), merge_condition)
         .whenMatchedUpdateAll()
         .whenNotMatchedInsertAll()
         .execute()
@@ -264,7 +260,6 @@ def _snowflake_gold_fallbacks(
             "dbt_alias": model_name if dbt_codegen else None,
             "artifact_kind": "FACT", "fact_type": "FACTLESS_KPI_EVENT",
             "generation_mode": "ADLS_KPI_FACT_DETERMINISTIC", "grain_columns": grain,
-            "computability_status": "NOT_COMPUTABLE",
         })
         fact_count += 1
 
@@ -383,14 +378,12 @@ def gold_code_generation_node(state: Dict[str, Any]) -> Dict[str, Any]:
         source_table = _validated_identifier(source_table, "source table")
         kpi_id = _safe_identifier(kpi_name, "kpi")
         target_table = _validated_identifier(f"{gold_schema}.fact_{kpi_id}", "target table")
-        reason = str(result.get("reason") or "KPI formula is not certified.")
         code = _factless_script(
             run_id=run_id,
             kpi_name=kpi_name,
             source_table=source_table,
             target_table=target_table,
             grain_columns=grain,
-            blocking_reason=reason,
         )
         compile(code, f"fact_{kpi_id}.py", "exec")
         path = os.path.join(output_dir, f"gold_fact_{shared._run_slug(run_id)}_{kpi_id}.py")
@@ -409,7 +402,6 @@ def gold_code_generation_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "fact_type": "FACTLESS_KPI_EVENT",
             "generation_mode": "ADLS_KPI_FACT_DETERMINISTIC",
             "grain_columns": grain,
-            "computability_status": "NOT_COMPUTABLE",
         })
         fallback_count += 1
 

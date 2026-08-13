@@ -972,9 +972,13 @@ def test_adls_gold_adds_contract_driven_factless_facts_and_dimensions(monkeypatc
     fact = next(item for item in result["gold_generation_results"] if item["artifact_kind"] == "FACT")
     dimension = next(item for item in result["gold_generation_results"] if item["artifact_kind"] == "DIMENSION")
     assert fact["target_table"] == "gold.fact_claim_count"
-    assert fact["computability_status"] == "NOT_COMPUTABLE"
+    assert "computability_status" not in fact
     assert "fallback_reason" not in fact
     assert "KPI_NAME = 'Claim Count'" in fact["script_body"]
+    for unwanted in (
+        "computability_status", "blocking_reason", "source_record_keys", "factless_event_key"
+    ):
+        assert unwanted not in fact["script_body"]
     assert dimension["target_table"] == "gold.dim_claims"
     assert all("ingestion_object_id" not in item for item in result["gold_generation_results"])
 
@@ -1051,6 +1055,12 @@ def test_adls_snowflake_gold_generates_contract_facts_and_dimensions(monkeypatch
     }
     assert all(item["status"] == "APPROVED" for item in result["gold_generation_results"])
     assert all("ingestion_object_id" not in item for item in result["gold_generation_results"])
+    fact = next(
+        item for item in result["gold_generation_results"] if item["artifact_kind"] == "FACT"
+    )
+    for unwanted in ("computability_status", "blocking_reason", "non_computable"):
+        assert unwanted not in fact["script_body"].casefold()
+        assert unwanted not in fact
     if execution_engine == "dbt":
         assert result["snowflake_dbt_validation_status"] == "STATIC_VALIDATED"
         assert all(item["code_generation_format"] == "dbt" for item in result["gold_generation_results"])
