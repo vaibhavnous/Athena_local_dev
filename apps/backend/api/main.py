@@ -8,6 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from utilis.env import load_backend_env
+
+load_backend_env()
+
 from api.routers.analytics_router import router as analytics_router
 from api.routers.auth_router import router as auth_router
 from api.routers.config_router import router as config_router
