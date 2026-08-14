@@ -6,7 +6,7 @@ import re
 import xml.etree.ElementTree as ET
 from itertools import combinations
 from io import BytesIO
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Mapping
 
 import pandas as pd
@@ -156,6 +156,39 @@ def _download_sample(path: str) -> bytes:
         length=maximum,
     )
     return downloader.readall()
+
+
+def download_file_to_path(
+    source_path: str,
+    destination: Path,
+    *,
+    expected_etag: str = "",
+    expected_size: int = 0,
+) -> Dict[str, Any]:
+    """Stream one immutable ADLS source file to a local staging path."""
+    file_client = file_system_client().get_file_client(_canonical_path(source_path))
+    before = file_client.get_file_properties()
+    actual_etag = str(getattr(before, "etag", "") or "").strip('"')
+    actual_size = int(getattr(before, "size", 0) or 0)
+    certified_etag = str(expected_etag or "").strip('"')
+    if certified_etag and actual_etag and certified_etag != actual_etag:
+        raise RuntimeError(f"Approved ADLS source changed after review: {source_path}")
+    if expected_size and actual_size != int(expected_size):
+        raise RuntimeError(f"Approved ADLS source size changed after review: {source_path}")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as target:
+        file_client.download_file().readinto(target)
+    downloaded_size = destination.stat().st_size
+    after = file_client.get_file_properties()
+    final_etag = str(getattr(after, "etag", "") or "").strip('"')
+    if actual_etag and final_etag != actual_etag:
+        raise RuntimeError(f"ADLS source changed while it was being staged: {source_path}")
+    if downloaded_size != actual_size:
+        raise RuntimeError(
+            f"ADLS download size mismatch for {source_path}: expected {actual_size}, got {downloaded_size}."
+        )
+    return {"size": downloaded_size, "etag": final_etag or actual_etag}
 
 
 def _dataframe(content: bytes, file_format: str) -> tuple[pd.DataFrame, Dict[str, Any]]:

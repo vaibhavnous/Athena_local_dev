@@ -37,7 +37,55 @@ def _as_bool(value: Any) -> bool:
     return value is True or str(value or "").strip().lower() in {"1", "true", "yes"}
 
 
-def _validate_source_resource_binding(obj: Mapping[str, Any], source: Any) -> None:
+def _is_file_ingestion_object(obj: Mapping[str, Any]) -> bool:
+    return any(
+        str(obj.get(field) or "").strip().upper() == "FILE"
+        for field in ("ingestion_type", "source_resource_type", "object_type")
+    )
+
+
+def _validate_queue_load_contract(obj: Mapping[str, Any]) -> None:
+    load_type = str(obj.get("load_type") or "FULL").strip().upper()
+    watermark = str(obj.get("watermark_column") or "").strip()
+    checkpoint = str(obj.get("checkpoint_type") or "").strip().upper()
+    if _is_file_ingestion_object(obj):
+        if load_type != "FULL" or watermark or checkpoint not in {"", "SOURCE_ETAG"}:
+            raise ValueError(
+                "The file-source runtime accepts FULL objects with SOURCE_ETAG checkpointing only."
+            )
+        return
+    if load_type != "FULL" or watermark or checkpoint:
+        raise ValueError("The database-source runtime currently accepts FULL/stateless objects only.")
+
+
+def _validate_source_binding_for_target(
+    connection: Mapping[str, Any], *, target_platform: str
+) -> None:
+    from services.source_connection_validation import (
+        validate_deployment_adls_binding,
+        validate_deployment_database_binding,
+    )
+
+    if str(connection.get("connection_type") or "").upper() == "ADLS":
+        validate_deployment_adls_binding(connection)
+    else:
+        validate_deployment_database_binding(connection, target_platform=target_platform)
+
+
+def _validate_source_resource_binding(
+    obj: Mapping[str, Any], source: Any, *, source_file: Any = None
+) -> None:
+    if _is_file_ingestion_object(obj):
+        expected_path = str(obj.get("source_path") or obj.get("object_name") or "").strip()
+        expected_format = str(obj.get("payload_format") or "").strip().upper()
+        if (
+            not isinstance(source_file, Mapping)
+            or not expected_path
+            or str(source_file.get("path") or "").strip() != expected_path
+            or str(source_file.get("format") or "").strip().upper() != expected_format
+        ):
+            raise ValueError("The execution artifact source file does not match the ingestion object.")
+        return
     object_parts = str(obj.get("object_name") or "").split(".")
     expected = {
         "database": object_parts[-3] if len(object_parts) >= 3 else "",
@@ -2177,7 +2225,11 @@ class MetadataRepository(ABC):
             )
         spec = validate_execution_spec(execution_spec, platform=self.context.platform)
         if processing_stage == "SOURCE_TO_BRONZE":
-            _validate_source_resource_binding(draft, spec.get("source_resource"))
+            _validate_source_resource_binding(
+                draft,
+                spec.get("source_resource"),
+                source_file=spec.get("source_file"),
+            )
         if not str(os.getenv("ATHENA_GENERATED_CODE_DIR") or "").strip():
             raise RuntimeError("ATHENA_GENERATED_CODE_DIR must identify durable shared storage before metadata activation.")
         artifact_path = verified_execution_artifact(spec, platform=self.context.platform)
@@ -2378,7 +2430,11 @@ class MetadataRepository(ABC):
             bundle = bundles[bundle_key]
             spec = validate_execution_spec(item["execution_spec"], platform=self.context.platform)
             if stage == "SOURCE_TO_BRONZE":
-                _validate_source_resource_binding(draft, spec.get("source_resource"))
+                _validate_source_resource_binding(
+                    draft,
+                    spec.get("source_resource"),
+                    source_file=spec.get("source_file"),
+                )
             if not str(os.getenv("ATHENA_GENERATED_CODE_DIR") or "").strip():
                 raise RuntimeError("ATHENA_GENERATED_CODE_DIR must identify durable shared storage before metadata activation.")
             artifact_path = verified_execution_artifact(spec, platform=self.context.platform)
@@ -2554,7 +2610,11 @@ class MetadataRepository(ABC):
         ):
             raise RuntimeError("The Bronze artifact does not implement the required runtime/idempotency contract.")
         if str(obj.get("processing_stage") or "").upper() == "SOURCE_TO_BRONZE":
-            _validate_source_resource_binding(obj, spec.get("source_resource"))
+            _validate_source_resource_binding(
+                obj,
+                spec.get("source_resource"),
+                source_file=spec.get("source_file"),
+            )
         connection_pin = None
         if obj.get("connection_id") is not None:
             resolved_connection = connection or self.get_active_connection(int(obj["connection_id"]))
@@ -2602,12 +2662,7 @@ class MetadataRepository(ABC):
         obj = self.get_active_ingestion_object(int(ingestion_object_id))
         if not obj or not str(obj.get("execution_spec_json") or "").strip():
             raise ValueError("Queue work requires an active executable ingestion object.")
-        if (
-            str(obj.get("load_type") or "FULL").upper() != "FULL"
-            or str(obj.get("watermark_column") or "").strip()
-            or str(obj.get("checkpoint_type") or "").strip()
-        ):
-            raise ValueError("The database-source runtime currently accepts FULL/stateless objects only.")
+        _validate_queue_load_contract(obj)
         stage = str(obj.get("processing_stage") or "").upper()
         mapping = self.get_active_mapping_reference(int(ingestion_object_id), stage)
         scope = dict(work_scope or {})
@@ -2703,12 +2758,7 @@ class MetadataRepository(ABC):
             obj = objects[object_id]
             if not str(obj.get("execution_spec_json") or "").strip():
                 raise ValueError("Queue work requires an active executable ingestion object.")
-            if (
-                str(obj.get("load_type") or "FULL").upper() != "FULL"
-                or str(obj.get("watermark_column") or "").strip()
-                or str(obj.get("checkpoint_type") or "").strip()
-            ):
-                raise ValueError("The database-source runtime currently accepts FULL/stateless objects only.")
+            _validate_queue_load_contract(obj)
             try:
                 spec = json.loads(str(obj["execution_spec_json"]))
             except json.JSONDecodeError as exc:
@@ -3140,9 +3190,7 @@ class MetadataRepository(ABC):
             ):
                 raise RuntimeError("The queued source-connection snapshot failed validation.")
             if self.context.platform == "snowflake":
-                from services.source_connection_validation import validate_deployment_database_binding
-
-                validate_deployment_database_binding(connection, target_platform="snowflake")
+                _validate_source_binding_for_target(connection, target_platform="snowflake")
         snapshot_id = self._runtime_snapshot(obj, mapping, connection=connection)["metadata_snapshot_id"]
         queued_snapshot_id = str(queue_item.get("metadata_snapshot_id") or "")
         snapshot_matches = snapshot_id == queued_snapshot_id
@@ -3382,9 +3430,7 @@ class MetadataRepository(ABC):
                 if not connection or str(connection.get("config_hash") or "") != str(connection_pin.get("config_hash") or ""):
                     raise RuntimeError("A queued source-connection snapshot failed validation.")
                 if self.context.platform == "snowflake":
-                    from services.source_connection_validation import validate_deployment_database_binding
-
-                    validate_deployment_database_binding(connection, target_platform="snowflake")
+                    _validate_source_binding_for_target(connection, target_platform="snowflake")
             snapshot_id = self._runtime_snapshot(obj, mapping, connection=connection)["metadata_snapshot_id"]
             contexts.append({
                 **item, "obj": obj, "mapping": mapping, "connection": connection,

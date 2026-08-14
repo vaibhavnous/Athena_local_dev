@@ -89,6 +89,39 @@ def test_silver_merge_key_review_get_returns_checkpoint_artifact(monkeypatch):
     assert response["silver_merge_key_review_artifact"]["feeds"][0]["merge_keys"] == ["claim_id"]
 
 
+def test_adls_silver_merge_key_review_get_enforces_policy_reference_id(monkeypatch):
+    from api.routers import reviews_router
+
+    monkeypatch.setattr(
+        "services.pipeline_runtime.load_checkpoint_state",
+        lambda run_id: {
+            "run_id": run_id,
+            "source": "adls_gen2",
+            "status": "HITL_WAIT",
+            "next_review_key": "silver_merge_key_review",
+            "certified_tables": [{
+                "table_name": "policy_transactions",
+                "columns": [
+                    {"column_name": "RERERENCE_ID"},
+                    {"column_name": "policy_transaction_id"},
+                ],
+            }],
+            "silver_merge_key_review_artifact": {
+                "feeds": [{
+                    "table": "policy_transactions",
+                    "merge_keys": ["policy_transaction_id"],
+                }]
+            },
+        },
+    )
+
+    response = reviews_router.silver_merge_key_reviews("run-adls-policy")
+
+    feed = response["silver_merge_key_review_artifact"]["feeds"][0]
+    assert feed["merge_keys"] == ["reference_id"]
+    assert feed["primary_keys"] == ["reference_id"]
+
+
 def test_silver_merge_key_review_submit_uses_authorized_metadata_checkpoint(monkeypatch):
     from api.routers import reviews_router
 
@@ -820,6 +853,56 @@ def test_continue_stage_rejects_file_source(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Stage-by-stage confirmation is not enabled for file-source runs yet."
+
+
+def test_continue_stage_allows_generation_first_adls(monkeypatch):
+    recorded = {}
+    checkpoint = {
+        "run_id": "run-adls",
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "next_stage_key": "bronze_code_execution",
+        "source": "adls_gen2",
+        "database_flow_version": "generation_first_v2",
+        "target_warehouse": "databricks",
+        "execution_engine": "native",
+    }
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda _run_id: checkpoint)
+    monkeypatch.setattr("services.pipeline_runtime.save_checkpoint_state", lambda _run_id, state: recorded.update(saved=state))
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda _run_id, stage, _fn, *_args: recorded.update(stage=stage),
+    )
+
+    response = client.post("/pipeline/run-adls/continue-stage", json={"auto_advance": False})
+
+    assert response.status_code == 200
+    assert response.json()["next_stage_key"] == "bronze_code_execution"
+    assert recorded["stage"] == "bronze_code_execution"
+
+
+def test_continue_stage_allows_generation_first_adls_snowflake_dbt(monkeypatch):
+    recorded = {}
+    checkpoint = {
+        "run_id": "run-adls-dbt",
+        "status": "PAUSED_FOR_STAGE_CONFIRMATION",
+        "next_stage_key": "bronze_code_execution",
+        "source": "adls_gen2",
+        "database_flow_version": "generation_first_v2",
+        "target_warehouse": "snowflake",
+        "execution_engine": "dbt",
+    }
+    monkeypatch.setattr("services.pipeline_runtime.load_checkpoint_state", lambda _run_id: checkpoint)
+    monkeypatch.setattr("services.pipeline_runtime.save_checkpoint_state", lambda _run_id, state: recorded.update(saved=state))
+    monkeypatch.setattr(
+        "services.pipeline_runtime.submit_background",
+        lambda _run_id, stage, _fn, *_args: recorded.update(stage=stage),
+    )
+
+    response = client.post("/pipeline/run-adls-dbt/continue-stage", json={"auto_advance": False})
+
+    assert response.status_code == 200
+    assert response.json()["next_stage_key"] == "bronze_code_execution"
+    assert recorded["stage"] == "bronze_code_execution"
 
 
 def test_continue_stage_submits_background_job(monkeypatch):

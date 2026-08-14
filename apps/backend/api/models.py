@@ -68,8 +68,8 @@ class PipelineRunRequest(BaseModel):
             return self
         if self.target_warehouse != "snowflake":
             raise ValueError("dbt code generation is only supported when target_warehouse='snowflake'")
-        if self.source not in {"database", "rdbms"}:
-            raise ValueError("Snowflake dbt code generation is only supported for database sources in this branch")
+        if self.source not in {"database", "rdbms", "adls_gen2"}:
+            raise ValueError("Snowflake dbt code generation is only supported for database or ADLS sources")
         if self.dbt_deployment_mode != "generate_and_deploy":
             self.force_dbt_deploy = False
         return self
@@ -120,8 +120,12 @@ class ProjectRequest(BaseModel):
             return self
         if str(self.target or "").strip().lower() != "snowflake":
             raise ValueError("dbt code generation is only supported when target='Snowflake'")
-        if str(self.connection_type or "").strip().lower() != "database":
-            raise ValueError("Snowflake dbt code generation is only supported for database projects")
+        connection_type = str(self.connection_type or "").strip().lower()
+        if connection_type != "database" and not (
+            connection_type == "data_lake"
+            and str(self.integration_type or "").strip().lower() == "adls"
+        ):
+            raise ValueError("Snowflake dbt code generation is only supported for database or ADLS projects")
         self.dbt_deployment_mode = "generate_and_deploy"
         return self
 

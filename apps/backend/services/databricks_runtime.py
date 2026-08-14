@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import base64
 import json
+import mmap
 import os
 import re
+import tempfile
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib import error, request
+from urllib.parse import quote
 
 from services.external_execution_progress import save_external_execution_progress
 from utilis.logger import logger
@@ -158,6 +163,236 @@ def _request_json(method: str, path: str, payload: Optional[Dict[str, Any]] = No
         ) from exc
     except Exception as exc:
         raise RuntimeError(f"Databricks API request failed ({method} {path}): {exc}") from exc
+
+
+def _files_api_path(kind: str, volume_path: str) -> str:
+    normalized = str(PurePosixPath(str(volume_path or "")))
+    if not normalized.startswith("/Volumes/"):
+        raise ValueError(f"Databricks Volume path must start with /Volumes/: {volume_path!r}")
+    return f"/api/2.0/fs/{kind}{quote(normalized, safe='/')}"
+
+
+def _adls_bronze_volume_root() -> PurePosixPath:
+    root = PurePosixPath(
+        str(
+            os.getenv("DATABRICKS_ADLS_BRONZE_VOLUME")
+            or "/Volumes/workspace/bronze_schema/vol_bronze"
+        ).rstrip("/")
+    )
+    if root.parts[:2] != ("/", "Volumes") or len(root.parts) != 5:
+        raise ValueError(
+            "DATABRICKS_ADLS_BRONZE_VOLUME must be /Volumes/<catalog>/<schema>/<volume>."
+        )
+    return root
+
+
+def _validated_staging_path(volume_path: str) -> PurePosixPath:
+    path = PurePosixPath(str(volume_path or ""))
+    root = _adls_bronze_volume_root()
+    if path.parent.parent != root:
+        raise ValueError(
+            f"ADLS Bronze staging path must be <configured-volume>/<format>/<file>: {volume_path!r}"
+        )
+    return path
+
+
+def _files_api_request(
+    method: str,
+    path: str,
+    *,
+    data: Any = None,
+    content_length: Optional[int] = None,
+    ignore_not_found: bool = False,
+) -> Dict[str, str]:
+    headers = {"Authorization": f"Bearer {_auth_token()}"}
+    if data is not None:
+        headers["Content-Type"] = "application/octet-stream"
+    if content_length is not None:
+        headers["Content-Length"] = str(content_length)
+    req = request.Request(
+        f"{_api_base()}{path}",
+        data=data,
+        method=method.upper(),
+        headers=headers,
+    )
+    try:
+        with request.urlopen(req, timeout=_databricks_timeout_seconds()) as response:
+            response.read()
+            return {str(key).lower(): str(value) for key, value in response.headers.items()}
+    except error.HTTPError as exc:
+        if ignore_not_found and exc.code == 404:
+            return {}
+        message = exc.read().decode("utf-8", "ignore").strip()
+        exception_type = DatabricksTransientError if exc.code == 429 or exc.code >= 500 else RuntimeError
+        raise exception_type(
+            f"Databricks Files API request failed ({method} {path}): {message or exc.reason}"
+        ) from exc
+    except (error.URLError, TimeoutError) as exc:
+        raise DatabricksTransientError(f"Databricks Files API request failed ({method} {path}): {exc}") from exc
+
+
+def _volume_upload_file(local_path: Path, volume_path: str) -> Dict[str, Any]:
+    parent = str(_validated_staging_path(volume_path).parent)
+    _files_api_request("PUT", _files_api_path("directories", parent))
+    size = local_path.stat().st_size
+    with local_path.open("rb") as source:
+        if size:
+            with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as content:
+                _files_api_request(
+                    "PUT",
+                    _files_api_path("files", volume_path) + "?overwrite=true",
+                    data=content,
+                    content_length=size,
+                )
+        else:
+            _files_api_request(
+                "PUT",
+                _files_api_path("files", volume_path) + "?overwrite=true",
+                data=b"",
+                content_length=0,
+            )
+    headers = _files_api_request("HEAD", _files_api_path("files", volume_path))
+    remote_size = int(headers.get("content-length") or -1)
+    if remote_size != size:
+        raise RuntimeError(
+            f"Databricks Volume upload size mismatch for {volume_path}: expected {size}, got {remote_size}."
+        )
+    return {"volume_path": volume_path, "size": size}
+
+
+def _volume_cache_manifest_path(volume_path: str) -> str:
+    path = _validated_staging_path(volume_path)
+    root = _adls_bronze_volume_root()
+    return str(root / "_athena_cache" / path.parent.name / f"{path.name}.json")
+
+
+def _volume_read_json(volume_path: str) -> Optional[Dict[str, Any]]:
+    req = request.Request(
+        f"{_api_base()}{_files_api_path('files', volume_path)}",
+        method="GET",
+        headers={"Authorization": f"Bearer {_auth_token()}"},
+    )
+    try:
+        with request.urlopen(req, timeout=_databricks_timeout_seconds()) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        message = exc.read().decode("utf-8", "ignore").strip()
+        raise RuntimeError(
+            f"Databricks cache-manifest read failed for {volume_path}: {message or exc.reason}"
+        ) from exc
+
+
+def _volume_write_json(volume_path: str, payload: Dict[str, Any]) -> None:
+    parent = str(PurePosixPath(volume_path).parent)
+    content = json.dumps(payload, sort_keys=True).encode("utf-8")
+    _files_api_request("PUT", _files_api_path("directories", parent))
+    _files_api_request(
+        "PUT",
+        _files_api_path("files", volume_path) + "?overwrite=true",
+        data=content,
+        content_length=len(content),
+    )
+
+
+def _volume_cache_hit(script: Dict[str, Any]) -> bool:
+    volume_path = str(script.get("volume_source_path") or "").strip()
+    source_path = str(script.get("adls_remote_path") or script.get("adls_source_path") or "").strip()
+    expected_size = int(script.get("adls_source_size") or 0)
+    expected_etag = str(script.get("adls_source_etag") or "").strip('"')
+    headers = _files_api_request(
+        "HEAD", _files_api_path("files", volume_path), ignore_not_found=True
+    )
+    if not headers:
+        return False
+    manifest = _volume_read_json(_volume_cache_manifest_path(volume_path))
+    if not manifest:
+        return False
+    cached_source = str(manifest.get("source_path") or "")
+    if cached_source and cached_source.casefold() != source_path.casefold():
+        raise RuntimeError(
+            f"ADLS Volume cache filename collision: {volume_path} already belongs to {cached_source}."
+        )
+    return (
+        int(headers.get("content-length") or -1) == expected_size
+        and int(manifest.get("size") or 0) == expected_size
+        and str(manifest.get("etag") or "").strip('"') == expected_etag
+    )
+
+
+def _stage_adls_bronze_sources(
+    state: Dict[str, Any], scripts: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    if str(state.get("source") or "").strip().lower() != "adls_gen2":
+        return []
+    from services.adls_source import download_file_to_path
+
+    paths = [str(script.get("volume_source_path") or "").casefold() for script in scripts]
+    if len(paths) != len(set(paths)):
+        raise RuntimeError("Approved ADLS files contain duplicate Volume cache filenames.")
+
+    def stage_one(index: int, script: Dict[str, Any], temp_dir: str) -> Dict[str, Any]:
+        source_path = str(script.get("adls_remote_path") or script.get("adls_source_path") or "").strip()
+        volume_path = str(script.get("volume_source_path") or "").strip()
+        file_name = str(script.get("source_file_name") or PurePosixPath(volume_path).name).strip()
+        if not source_path or not volume_path or not file_name:
+            raise RuntimeError(
+                f"ADLS Bronze artifact is missing its staging contract: {_script_name(script)}"
+            )
+        _validated_staging_path(volume_path)
+        if _volume_cache_hit(script):
+            return {
+                "source_path": source_path,
+                "volume_path": volume_path,
+                "size": int(script.get("adls_source_size") or 0),
+                "etag": str(script.get("adls_source_etag") or "").strip('"'),
+                "cache_hit": True,
+            }
+        local_path = Path(temp_dir) / f"{index:05d}_{file_name}"
+        downloaded = download_file_to_path(
+            source_path,
+            local_path,
+            expected_etag=str(script.get("adls_source_etag") or ""),
+            expected_size=int(script.get("adls_source_size") or 0),
+        )
+        uploaded = _volume_upload_file(local_path, volume_path)
+        if uploaded["size"] != downloaded["size"]:
+            raise RuntimeError(f"ADLS-to-Volume staging size mismatch for {source_path}")
+        _volume_write_json(
+            _volume_cache_manifest_path(volume_path),
+            {
+                "source_path": source_path,
+                "etag": downloaded.get("etag"),
+                "size": uploaded["size"],
+            },
+        )
+        return {
+            "source_path": source_path,
+            "volume_path": volume_path,
+            "size": uploaded["size"],
+            "etag": downloaded.get("etag"),
+            "cache_hit": False,
+        }
+
+    staged: List[Dict[str, Any]] = []
+    worker_count = max(1, min(int(os.getenv("ATHENA_ADLS_VOLUME_UPLOAD_WORKERS") or "4"), len(scripts) or 1))
+    with tempfile.TemporaryDirectory(prefix="athena-adls-bronze-") as temp_dir:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(stage_one, index, script, temp_dir): index
+                for index, script in enumerate(scripts, start=1)
+            }
+            for future in as_completed(futures):
+                staged.append(future.result())
+    staged.sort(key=lambda item: item["volume_path"].casefold())
+    logger.info(
+        "Prepared %d approved ADLS file(s) in the managed Bronze Volume (%d cached)",
+        len(staged),
+        sum(1 for item in staged if item["cache_hit"]),
+        extra={"run_id": state.get("run_id"), "node": "adls_volume_staging", "stage": "bronze_code_execution"},
+    )
+    return staged
 
 
 def _workspace_import_notebook(notebook_path: str, content: str) -> Dict[str, Any]:
@@ -649,6 +884,7 @@ def _build_batch_driver_notebook(
     workspace_dir: str,
     runtime_context: Optional[Dict[str, Any]] = None,
     metadata_runtime_batch: bool = False,
+    allow_partial_stage_success: bool = False,
 ) -> str:
     script_items = [
         {
@@ -672,7 +908,9 @@ def _build_batch_driver_notebook(
         script.get("metadata_runtime") or script.get("gold_ingestion_object_id") is not None
         for script in scripts
     )
-    allow_partial_success = _gold_partial_success_enabled(layer) and not metadata_driven
+    allow_partial_success = allow_partial_stage_success or (
+        _gold_partial_success_enabled(layer) and not metadata_driven
+    )
     continue_on_error = metadata_runtime_batch or allow_partial_success or _env_flag(
         f"ATHENA_DATABRICKS_{str(layer or '').upper()}_CONTINUE_ON_ERROR",
         "ATHENA_DATABRICKS_CONTINUE_ON_ERROR",
@@ -962,6 +1200,40 @@ def _successful_batch_results_from_scripts(
     ]
 
 
+def _metadata_batch_contract_error(
+    scripts: List[Dict[str, Any]], results: List[Dict[str, Any]]
+) -> Optional[str]:
+    if not results:
+        return "Databricks metadata batch returned no per-script execution evidence."
+
+    expected = Counter(
+        (_script_name(script).casefold(), _script_target_table(script).casefold())
+        for script in scripts
+    )
+    actual = Counter(
+        (
+            str(result.get("script_name") or "").strip().casefold(),
+            str(result.get("target_table") or "").strip().casefold(),
+        )
+        for result in results
+    )
+    if actual != expected:
+        return "Databricks metadata batch results do not match the submitted scripts and targets."
+
+    for result in results:
+        if str(result.get("status") or "").upper() != "SUCCESS":
+            continue
+        evidence = result.get("execution_result") or {}
+        if (
+            str(result.get("verification_status") or "").upper() != "VERIFIED"
+            or not evidence.get("target_commit_id")
+            or str(evidence.get("target_table") or "").strip().casefold()
+            != str(result.get("target_table") or "").strip().casefold()
+        ):
+            return "Databricks metadata batch returned unverified target commit evidence."
+    return None
+
+
 def _run_failure_detail(run_state: Dict[str, Any]) -> str:
     detail = str(run_state.get("state_message") or run_state.get("result_state") or "unknown error")
     try:
@@ -992,6 +1264,7 @@ def _execute_databricks_stage_batch(
             workspace_dir=workspace_dir,
             runtime_context=runtime_context,
             metadata_runtime_batch=bool(state.get("metadata_runtime_batch")),
+            allow_partial_stage_success=bool(state.get("allow_partial_stage_success")),
         ),
     )
 
@@ -1012,7 +1285,7 @@ def _execute_databricks_stage_batch(
         notebook_path,
         run_name=f"Athena {layer} batch {run_id}",
         idempotency_token=(
-            f"athena-metadata-{runtime_context['queue_id']}-{runtime_context.get('attempt_number', 0)}"
+            f"athena-metadata-{runtime_context['queue_id']}-{runtime_context.get('attempt_number', 0)}-{layer}"
             if runtime_context else ""
         ),
     )
@@ -1084,16 +1357,31 @@ def _execute_databricks_stage_batch(
         )
         summary = {}
     results = [item for item in (summary.get("results") or []) if isinstance(item, dict)]
-    executed_scripts = (
-        _annotate_batch_results(results, notebook_path=notebook_path, run_state=run_state)
-        if results
-        else _successful_batch_results_from_scripts(
-            scripts,
-            notebook_path=notebook_path,
-            run_state=run_state,
-            warning=output_warning or "Databricks run succeeded, but notebook output did not include per-script results.",
-        )
+    contract_error = (
+        _metadata_batch_contract_error(scripts, results)
+        if state.get("metadata_runtime_batch")
+        and str(state.get("source") or "").lower() == "adls_gen2"
+        else None
     )
+    if contract_error:
+        executed_scripts = [{
+            "script_name": f"__athena_{layer}_batch_contract",
+            "target_table": None,
+            "status": "FAILED",
+            "verification_status": "FAILED",
+            "error": contract_error,
+        }]
+    else:
+        executed_scripts = (
+            _annotate_batch_results(results, notebook_path=notebook_path, run_state=run_state)
+            if results
+            else _successful_batch_results_from_scripts(
+                scripts,
+                notebook_path=notebook_path,
+                run_state=run_state,
+                warning=output_warning or "Databricks run succeeded, but notebook output did not include per-script results.",
+            )
+        )
     failed = [item for item in executed_scripts if str(item.get("status") or "").upper() == "FAILED"]
     succeeded_count = sum(1 for item in executed_scripts if str(item.get("status") or "").upper() == "SUCCESS")
     metadata_driven = any(
@@ -1101,8 +1389,9 @@ def _execute_databricks_stage_batch(
         for script in scripts
     )
     partial_success = (
-        _gold_partial_success_enabled(layer)
-        and not metadata_driven
+        (bool(state.get("allow_partial_stage_success")) or (
+            _gold_partial_success_enabled(layer) and not metadata_driven
+        ))
         and bool(failed)
         and succeeded_count >= len(failed)
     )
@@ -1139,7 +1428,7 @@ def _execute_databricks_stage_batch(
     execution_status = "COMPLETED_WITH_WARNINGS" if partial_success else "COMPLETED"
     failed_names = [str(item.get("script_name") or item.get("target_table") or "unknown script") for item in failed]
     message = (
-        f"Databricks Gold completed with warnings: {succeeded_count}/{len(scripts)} scripts succeeded; "
+        f"Databricks {layer.capitalize()} completed with warnings: {succeeded_count}/{len(scripts)} scripts succeeded; "
         f"failed scripts: {', '.join(failed_names)}."
         if partial_success
         else f"Databricks {layer.capitalize()} batch execution completed: "
@@ -1152,6 +1441,11 @@ def _execute_databricks_stage_batch(
         f"databricks_{layer}_execution_failures": failed,
         f"databricks_{layer}_executed_at": datetime.now(timezone.utc).isoformat(),
     }
+    if partial_success:
+        logger.warning(
+            message,
+            extra={"run_id": run_id, "node": f"{layer}_partial_success", "stage": f"{layer}_code_execution"},
+        )
     return save_external_execution_progress(
         final_state,
         run_id=run_id,
@@ -1229,6 +1523,8 @@ def _execute_databricks_stage(
             f"matched_count={identity_matched_count})."
         )
 
+    if layer == "bronze":
+        _stage_adls_bronze_sources(state, scripts)
     metadata_runtime = bool(state.get("metadata_runtime_context"))
     if metadata_runtime or _databricks_execution_mode(layer) == "batch":
         return _execute_databricks_stage_batch(

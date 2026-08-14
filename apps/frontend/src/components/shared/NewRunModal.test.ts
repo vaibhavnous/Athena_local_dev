@@ -3,7 +3,7 @@ jest.mock('react-router-dom', () => ({
 }), { virtual: true })
 
 import { buildInitialForm } from './NewRunModal'
-import { isProjectFormValid } from '../../pages/ProjectInitiation'
+import { isProjectFormValid, supportsSnowflakeEngine } from '../../pages/ProjectInitiation'
 
 test('loads the saved ADLS project connection instead of showing the transactions default', () => {
   const form = buildInitialForm(
@@ -40,6 +40,41 @@ test('requires an ADLS data lake selection before a project can be saved', () =>
 
   expect(isProjectFormValid(project)).toBe(false)
   expect(isProjectFormValid({ ...project, connectionName: 'sftp_adls_insurance' })).toBe(true)
+})
+
+test('restores dbt for a Snowflake ADLS project', () => {
+  const form = buildInitialForm({}, null, {
+    name: 'Insurance',
+    description: 'Insurance feeds',
+    connectionType: 'data_lake',
+    integrationType: 'ADLS',
+    dataLakeType: 'ADLS',
+    dataLakeName: 'Insurance ADLS Gen2',
+    target: 'Snowflake',
+    executionEngine: 'dbt',
+    dbtDeploymentMode: 'generate_and_deploy',
+  })
+
+  expect(form).toMatchObject({
+    source: 'adls_gen2',
+    targetWarehouse: 'snowflake',
+    executionEngine: 'dbt',
+    dbtDeploymentMode: 'generate_and_deploy',
+  })
+})
+
+test('shows the Snowflake engine selector for an ADLS project', () => {
+  expect(supportsSnowflakeEngine({
+    target: 'Snowflake',
+    connectionType: 'data_lake',
+    integrationType: ' ADLS ',
+  })).toBe(true)
+
+  expect(supportsSnowflakeEngine({
+    target: 'Snowflake',
+    connectionType: 'data_lake',
+    integrationType: 'API',
+  })).toBe(false)
 })
 
 test('restores target metadata selection when restarting a database run', () => {

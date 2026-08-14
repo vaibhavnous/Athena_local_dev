@@ -57,10 +57,11 @@ const fromApi = (raw: any): AthenaProject => ({
 })
 
 const toApi = (project: ProjectInput) => {
-  const snowflakeDatabaseTarget =
+  const snowflakeSupportedTarget =
     String(project.target || '').toLowerCase() === 'snowflake' &&
-    project.connectionType === 'database'
-  const executionEngine = snowflakeDatabaseTarget && project.executionEngine === 'dbt' ? 'dbt' : 'native'
+    (project.connectionType === 'database' ||
+      (project.connectionType === 'data_lake' && String(project.integrationType || '').toLowerCase() === 'adls'))
+  const executionEngine = snowflakeSupportedTarget && project.executionEngine === 'dbt' ? 'dbt' : 'native'
   return ({
   name: project.name,
   description: project.description,

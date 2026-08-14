@@ -95,7 +95,8 @@ export function buildInitialForm(settings, seedRun, project) {
       targetWarehouse: String(project.target || 'Databricks').toLowerCase(),
       executionEngine:
         String(project.target || '').toLowerCase() === 'snowflake' &&
-        project.connectionType === 'database' &&
+        (project.connectionType === 'database' ||
+          (project.connectionType === 'data_lake' && String(project.integrationType || '').toLowerCase() === 'adls')) &&
         project.executionEngine === 'dbt'
           ? 'dbt'
           : 'native',
@@ -162,8 +163,8 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
   const [metadataError, setMetadataError] = useState(null)
   const sourceValue = String(form.source || DEFAULT_FORM.source).trim().toLowerCase()
   const targetWarehouseValue = String(form.targetWarehouse || DEFAULT_FORM.targetWarehouse).trim().toLowerCase()
-  const snowflakeDatabaseTarget = targetWarehouseValue === 'snowflake' && sourceValue === 'database'
-  const executionEngineValue = snowflakeDatabaseTarget && form.executionEngine === 'dbt' ? 'dbt' : 'native'
+  const snowflakeSupportedTarget = targetWarehouseValue === 'snowflake' && ['database', 'adls_gen2'].includes(sourceValue)
+  const executionEngineValue = snowflakeSupportedTarget && form.executionEngine === 'dbt' ? 'dbt' : 'native'
   const dbtDeploymentModeValue = executionEngineValue === 'dbt' ? 'generate_and_deploy' : 'generate_only'
   const selectedMetadataSource = metadataSources.find(
     (item) => String(item.source_system_id) === String(form.sourceSystemId),
@@ -683,7 +684,7 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                 <Field label="Database Name" compact>
                                   <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.databaseName || '-'} readOnly />
                                 </Field>
-                                {snowflakeDatabaseTarget && (
+                                {snowflakeSupportedTarget && (
                                   <>
                                     <Field label="Snowflake Engine" compact>
                                       <input
@@ -736,6 +737,15 @@ function NewRunModal({ isOpen, onClose, initialSeedRun = null, pageMode = false,
                                 <Field label="Discovery Scope" compact>
                                   <input className="input-field h-11 cursor-not-allowed opacity-80" value={form.source === 'adls_gen2' ? 'Auto-discover configured path' : form.sftpEntity || '-'} readOnly />
                                 </Field>
+                                {snowflakeSupportedTarget && (
+                                  <Field label="Snowflake Engine" compact>
+                                    <input
+                                      className="input-field h-11 cursor-not-allowed opacity-80"
+                                      value={executionEngineValue === 'dbt' ? 'dbt' : 'Native'}
+                                      readOnly
+                                    />
+                                  </Field>
+                                )}
                               </>
                             )}
                           </div>

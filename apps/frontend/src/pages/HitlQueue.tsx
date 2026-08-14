@@ -786,9 +786,9 @@ function HitlQueue({ onClose = null }) {
             setTableReview(fallbackPatch)
             setSelectedTables((prev) => {
               const next = { ...prev }
-              const items = useLegacyFeedReview ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
+              const items = gate2SelectionItems(fallbackPatch, runSource)
               for (const table of items) {
-                const key = useLegacyFeedReview ? sftpFeedKey(table) : tableReviewKey(table)
+                const key = gate2SelectionKey(runSource, table)
                 next[key] = true
               }
               return next
@@ -939,9 +939,9 @@ function HitlQueue({ onClose = null }) {
           setTableReview(review)
           setSelectedTables((prev) => {
             const next = { ...prev }
-            const items = useLegacyFeedReview ? getSftpFeeds(review) : (review.nominated_tables || [])
+            const items = gate2SelectionItems(review, runSource)
             for (const table of items) {
-              const key = useLegacyFeedReview ? sftpFeedKey(table) : tableReviewKey(table)
+              const key = gate2SelectionKey(runSource, table)
               if (!(key in next)) next[key] = true
             }
             return next
@@ -1028,9 +1028,9 @@ function HitlQueue({ onClose = null }) {
             setTableReview(fallbackPatch)
             setSelectedTables((prev) => {
               const next = { ...prev }
-              const items = useLegacyFeedReview ? getSftpFeeds(fallbackPatch) : (fallbackPatch.nominated_tables || [])
+              const items = gate2SelectionItems(fallbackPatch, runSource)
               for (const table of items) {
-                const key = useLegacyFeedReview ? sftpFeedKey(table) : tableReviewKey(table)
+                const key = gate2SelectionKey(runSource, table)
                 next[key] = true
               }
               return next
@@ -2374,7 +2374,7 @@ function HitlQueue({ onClose = null }) {
             )}
 
             <button
-              onClick={isGate3 ? handleAutoApproveSemanticItems : isCodeReview ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
+              onClick={isGate3 ? handleAutoApproveSemanticItems : isCodeReview ? handleAutoApproveCodeReviewItems : isGate2 ? (useLegacyFeedReview ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
               className="inline-flex h-11 items-center gap-2 rounded-[10px] bg-[#202b3a] px-4 text-sm font-semibold text-[#b9c1cf] transition-colors hover:bg-[#263449] hover:text-white"
             >
               <CheckCircle size={18} className="text-[#12b886]" />
@@ -2626,14 +2626,14 @@ function HitlQueue({ onClose = null }) {
               <div className="flex min-h-[180px] items-center justify-center rounded-2xl border border-[#22304b] bg-[#0b1424] p-6 text-sm text-[#9fb0ca]">
                 <span className="inline-flex items-center gap-2"><Loader2 size={16} className="animate-spin text-[#4fa3ff]" /> Loading {isSftpRun ? 'feed' : 'table'} review artifacts...</span>
               </div>
-            ) : (isSftpRun
+            ) : (useLegacyFeedReview
               ? (availableSftpFeeds.length === 0)
               : (tableReview?.nominated_tables || []).length === 0) ? (
               <div className="flex items-center justify-center h-40 text-gray-600 text-sm">
                 {isSftpRun ? 'No discovered feeds found for this run.' : 'No nominated tables found for this run.'}
               </div>
             ) : (
-              isSftpRun
+              useLegacyFeedReview
                 ? (availableSftpFeeds.map((feed) => {
                     const key = sftpFeedKey(feed)
                     return (
@@ -2713,9 +2713,9 @@ function HitlQueue({ onClose = null }) {
               {selectedRunId && isReviewableRun ? (
                 isGate2 ? (
                 <>
-                  <CountRow label={isSftpRun ? 'Total Feeds' : 'Total Tables'} value={isSftpRun ? totalFeedCount : (tableReview?.nominated_tables || []).length} color="text-gray-300" />
-                  <CountRow label="Selected" value={isSftpRun ? selectedFeedCount : selectedTableCount} color="text-accent-green" pulse={(isSftpRun ? selectedFeedCount : selectedTableCount) > 0} />
-                  <CountRow label="Unselected" value={Math.max(0, (isSftpRun ? (totalFeedCount - selectedFeedCount) : ((tableReview?.nominated_tables || []).length - selectedTableCount)))} color="text-accent-amber" />
+                  <CountRow label={isSftpRun ? 'Total Feeds' : 'Total Tables'} value={useLegacyFeedReview ? totalFeedCount : (tableReview?.nominated_tables || []).length} color="text-gray-300" />
+                  <CountRow label="Selected" value={useLegacyFeedReview ? selectedFeedCount : selectedTableCount} color="text-accent-green" pulse={(useLegacyFeedReview ? selectedFeedCount : selectedTableCount) > 0} />
+                  <CountRow label="Unselected" value={Math.max(0, (useLegacyFeedReview ? (totalFeedCount - selectedFeedCount) : ((tableReview?.nominated_tables || []).length - selectedTableCount)))} color="text-accent-amber" />
                 </>
                 ) : isGate3 ? (
                 <>
@@ -2765,7 +2765,7 @@ function HitlQueue({ onClose = null }) {
                       : isGate4 || isSilverMergeKeyReview || isGate5 || isGoldReview
                       ? (activeCodeReviewItems.length > 0 ? (reviewedCodeReviewCount / activeCodeReviewItems.length) * 100 : (gateReviewReady ? 100 : 0))
                       : isGate2
-                      ? (isSftpRun
+                      ? (useLegacyFeedReview
                           ? (totalFeedCount > 0 ? (selectedFeedCount / totalFeedCount) * 100 : 0)
                           : ((tableReview?.nominated_tables || []).length > 0 ? (selectedTableCount / (tableReview?.nominated_tables || []).length) * 100 : 0))
                       : (kpiCounts.total > 0 ? ((kpiCounts.approved + kpiCounts.edited + kpiCounts.rejected) / kpiCounts.total) * 100 : 0)}%`
@@ -2785,7 +2785,7 @@ function HitlQueue({ onClose = null }) {
           </div>
 
           <button
-            onClick={isGate3 ? handleAutoApproveSemanticItems : isCodeReview ? handleAutoApproveCodeReviewItems : isGate2 ? (isSftpRun ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
+            onClick={isGate3 ? handleAutoApproveSemanticItems : isCodeReview ? handleAutoApproveCodeReviewItems : isGate2 ? (useLegacyFeedReview ? handleSelectAllFeeds : handleAutoApproveTables) : handleAutoApproveAll}
             className="flex items-center justify-center gap-2 px-4 py-3 bg-accent-green/10 hover:bg-accent-green/20 border border-accent-green/25 text-accent-green text-sm font-semibold rounded-xl transition-colors"
           >
             <CheckCircle size={15} />
@@ -2840,8 +2840,8 @@ function HitlQueue({ onClose = null }) {
               </>
             ) : isGate2 ? (
               <>
-                <span className="text-accent-green font-semibold">{isSftpRun ? selectedFeedCount : selectedTableCount} selected</span>
-                <span className="text-gray-500">{Math.max(0, (isSftpRun ? (totalFeedCount - selectedFeedCount) : ((tableReview?.nominated_tables || []).length - selectedTableCount)))} unselected</span>
+                <span className="text-accent-green font-semibold">{useLegacyFeedReview ? selectedFeedCount : selectedTableCount} selected</span>
+                <span className="text-gray-500">{Math.max(0, (useLegacyFeedReview ? (totalFeedCount - selectedFeedCount) : ((tableReview?.nominated_tables || []).length - selectedTableCount)))} unselected</span>
               </>
             ) : (
               <>
@@ -3274,6 +3274,16 @@ function tableReviewKey(table) {
 
 export function usesLegacyFeedReview(source) {
   return source === 'sftp'
+}
+
+export function gate2SelectionItems(review, source) {
+  return usesLegacyFeedReview(source)
+    ? getSftpFeeds(review)
+    : (review?.nominated_tables || [])
+}
+
+export function gate2SelectionKey(source, item) {
+  return usesLegacyFeedReview(source) ? sftpFeedKey(item) : tableReviewKey(item)
 }
 
 function sftpFeedKey(feed) {
@@ -3838,7 +3848,7 @@ function CodeReviewSummary({ item, onMergeKeysChange, hitlGateStyle = false, edi
                 onChange={(event) => onMergeKeysChange?.(
                   event.target.value.split(',').map((value) => value.trim()).filter(Boolean)
                 )}
-                className="h-10 w-full rounded-lg border border-[#31415f] bg-[#0a1220] px-3 font-mono text-xs text-[#d7e2f2] outline-none focus:border-[#78a9ff]"
+                className={`h-10 w-full rounded-lg border border-[#31415f] bg-[#0a1220] px-3 font-mono text-xs text-[#d7e2f2] outline-none focus:border-[#78a9ff] ${item.type === 'MERGE_KEY' ? 'uppercase' : ''}`}
                 placeholder={candidates.length ? candidates.join(', ') : 'ClaimID, PaymentID'}
               />
               <div className="mt-2 text-[11px] text-[#91a4cb]">
@@ -3848,7 +3858,7 @@ function CodeReviewSummary({ item, onMergeKeysChange, hitlGateStyle = false, edi
           ) : (
             <div className="flex flex-wrap gap-2">
               {keys.map((key) => (
-                <span key={`${item.key}:${key}`} className="rounded-md border border-[#2d64c3] bg-[#122a52] px-2 py-1 text-[10px] font-bold text-[#69a0ff]">
+                <span key={`${item.key}:${key}`} className={`rounded-md border border-[#2d64c3] bg-[#122a52] px-2 py-1 text-[10px] font-bold text-[#69a0ff] ${item.type === 'MERGE_KEY' ? 'uppercase' : ''}`}>
                   {key}
                 </span>
               ))}
@@ -3867,7 +3877,7 @@ function CodeReviewSummary({ item, onMergeKeysChange, hitlGateStyle = false, edi
                 key={`${item.key}:candidate:${candidate}`}
                 type="button"
                 onClick={() => onMergeKeysChange?.([...keys, candidate])}
-                className="rounded-md border border-[#31415f] bg-[#101827] px-2 py-1 font-mono text-[10px] text-[#aab8d0] hover:border-[#69a0ff] hover:text-white"
+                className={`rounded-md border border-[#31415f] bg-[#101827] px-2 py-1 font-mono text-[10px] text-[#aab8d0] hover:border-[#69a0ff] hover:text-white ${item.type === 'MERGE_KEY' ? 'uppercase' : ''}`}
               >
                 + {candidate}
               </button>

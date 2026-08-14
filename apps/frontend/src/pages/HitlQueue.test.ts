@@ -3,7 +3,7 @@ jest.mock('react-router-dom', () => ({
   useSearchParams: () => [new URLSearchParams(), jest.fn()],
 }), { virtual: true })
 
-import { hasGate2ReviewItems, hasRenderableReviewData, hasSilverMergeKeys, mergeRefreshedReviewItems, usesLegacyFeedReview } from './HitlQueue'
+import { gate2SelectionItems, gate2SelectionKey, hasGate2ReviewItems, hasRenderableReviewData, hasSilverMergeKeys, mergeRefreshedReviewItems, usesLegacyFeedReview } from './HitlQueue'
 import { semanticReviewValidationError } from '../utils/reviewReadiness'
 
 test('treats loaded SFTP feeds as ready while a background review refresh continues', () => {
@@ -24,6 +24,22 @@ test('uses shared Table Review for ADLS and keeps Feed Review legacy-only', () =
   expect(usesLegacyFeedReview('adls_gen2')).toBe(false)
   expect(usesLegacyFeedReview('database')).toBe(false)
   expect(usesLegacyFeedReview('sftp')).toBe(true)
+})
+
+test('uses the same nominated-table identity for ADLS hydration and submission', () => {
+  const nominated = {
+    database_name: 'insurance',
+    schema_name: 'adls',
+    table_name: 'measure_tables',
+    source_path: 'INSURANCE_SFTP/insurance/measure_tables.csv',
+  }
+  const review = {
+    nominated_tables: [nominated],
+    candidate_feeds: [{ vendor: 'Insurance', entity: 'measure_tables', file_name: 'measure_tables.csv' }],
+  }
+
+  expect(gate2SelectionItems(review, 'adls_gen2')).toEqual([nominated])
+  expect(gate2SelectionKey('adls_gen2', nominated)).toBe('insurance.adls.measure_tables')
 })
 
 test('requires a selected key before approving a Silver merge-key item', () => {
@@ -52,6 +68,13 @@ test('refreshes untouched merge keys without overwriting user edits', () => {
     [{ key: 'claims', type: 'MERGE_KEY', mergeKeys: ['ManualID'], edited: true }],
     refreshed,
   )[0].mergeKeys).toEqual(['ManualID'])
+})
+
+test('refreshes the ADLS policy transaction review with the authoritative reference key', () => {
+  const current = [{ key: 'policy_transactions', type: 'MERGE_KEY', mergeKeys: ['policy_transaction_id'] }]
+  const backend = [{ key: 'policy_transactions', type: 'MERGE_KEY', mergeKeys: ['reference_id'] }]
+
+  expect(mergeRefreshedReviewItems(current, backend)[0].mergeKeys).toEqual(['reference_id'])
 })
 
 test('treats persisted Gate 3 table reviews as renderable content', () => {
